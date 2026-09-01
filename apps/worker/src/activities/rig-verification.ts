@@ -57,6 +57,7 @@ import {
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
   establishSandboxSessionFromEnvelope,
+  inspectProviderTrustedRigPlatformRuntime,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
@@ -67,6 +68,7 @@ import {
   verifySandboxExecReadiness,
   type EstablishedSandboxSession,
   type BrowserControlPlacementSession,
+  type TrustedRigPlatformRuntimeManifest,
   type TurnSandboxCommandArgs,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime/sandbox";
@@ -431,6 +433,7 @@ export type RigVerificationOwnershipDependencies = {
   tag: typeof tagModalSandbox;
   terminate: typeof terminateThrowaway;
   attachTrustedSurface: typeof attachProviderTrustedRigPlatformSurface;
+  inspectTrustedRuntime: typeof inspectProviderTrustedRigPlatformRuntime;
   reconcileProviderImageBuilds: typeof reconcileRigProviderImageCleanupObligationsForSource;
   createCancellationController: typeof createTurnToolCancellationController;
 };
@@ -448,6 +451,7 @@ const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
   tag: tagModalSandbox,
   terminate: terminateThrowaway,
   attachTrustedSurface: attachProviderTrustedRigPlatformSurface,
+  inspectTrustedRuntime: inspectProviderTrustedRigPlatformRuntime,
   reconcileProviderImageBuilds: reconcileRigProviderImageCleanupObligationsForSource,
   createCancellationController: createTurnToolCancellationController,
 };
@@ -471,6 +475,7 @@ export function rigVerificationLeaseHolderId(input: {
 export type RigVerificationSandboxRunContext = {
   signal: AbortSignal;
   commandRunner: SandboxLifecycleCommandRunner;
+  trustedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
   ownership: {
     leaseId: string;
     leaseEpoch: number;
@@ -518,6 +523,9 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     /** Assertion-only immutable image identity. Provider-owned validation
      * still discovers its authority from the exact live sandbox instance. */
     expectedProviderImageId?: string;
+    /** Pristine deployment helper/runtime bytes. A derived provider image must
+     * match this exact manifest before any candidate command is invoked. */
+    expectedRuntimeManifest?: TrustedRigPlatformRuntimeManifest;
     lifecycle?: RigVerificationActivityLifecycle;
   },
   run: (
@@ -734,6 +742,40 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     void establishmentPromise.catch(() => undefined);
     const established = await waitForAbortable(establishmentPromise, signal);
     cleanupTarget = established;
+    const providerImage = requiredRigVerificationProviderImage(input.settings);
+    const remainingInspectionMs =
+      input.lifecycle?.workDeadlineAtMs == null
+        ? input.settings.sandboxSnapshotTimeoutMs
+        : Math.floor(input.lifecycle.workDeadlineAtMs - Date.now());
+    if (remainingInspectionMs <= 0) {
+      throw new Error("Rig verification runtime integrity inspection exceeded its work deadline");
+    }
+    const trustedRuntimeManifest = await dependencies.inspectTrustedRuntime({
+      backend: established.backendId as SandboxBackend,
+      settings: input.settings,
+      session: established.session,
+      instanceId: established.instanceId,
+      providerImage,
+      ...(input.expectedProviderImageId
+        ? { expectedProviderImageId: input.expectedProviderImageId }
+        : {}),
+      ...(input.expectedRuntimeManifest
+        ? { expectedRuntimeManifest: input.expectedRuntimeManifest }
+        : {}),
+      timeoutMs: Math.max(
+        1,
+        Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingInspectionMs),
+      ),
+      ...(input.lifecycle?.workDeadlineAtMs == null
+        ? {}
+        : { deadlineAtMs: input.lifecycle.workDeadlineAtMs }),
+      signal,
+    });
+    if (!trustedRuntimeManifest) {
+      throw new Error(
+        `sandbox backend ${established.backendId} has no deployment-owned Rig platform runtime inspection authority`,
+      );
+    }
     await waitForAbortable(verifySandboxExecReadiness(established), signal);
     const resumeState =
       established.backendId === "modal" ? null : await dependencies.serialize(established);
@@ -752,7 +794,6 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
     }
     committedLeaseId = committed.lease.id;
-    const providerImage = requiredRigVerificationProviderImage(input.settings);
     const trustedSurfaceAttached = await dependencies.attachTrustedSurface({
       backend: established.backendId as SandboxBackend,
       settings: input.settings,
@@ -767,6 +808,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       workspaceGeneration: committed.lease.workspaceGeneration,
       sandboxGroupId: input.sandboxGroupId,
       rigVersionId: input.rigVersionId,
+      runtimeManifest: trustedRuntimeManifest,
     });
     if (!trustedSurfaceAttached) {
       throw new Error(
@@ -776,6 +818,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     const result = await run(established, {
       signal,
       commandRunner,
+      trustedRuntimeManifest,
       ownership: {
         leaseId: committed.lease.id,
         leaseEpoch: committed.lease.leaseEpoch,
@@ -1065,6 +1108,7 @@ export async function verifyRigProviderImageColdBoot(
     verificationExecutionGeneration: number;
     sessionIdPrefix: string;
     imageId: string;
+    expectedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
     contentHash: string;
     checks: RigProviderImageDefinition["checks"];
     lifecycle: RigVerificationActivityLifecycle;
@@ -1098,6 +1142,7 @@ export async function verifyRigProviderImageColdBoot(
         executionGeneration: input.verificationExecutionGeneration,
       }),
       expectedProviderImageId: input.imageId,
+      expectedRuntimeManifest: input.expectedRuntimeManifest,
       lifecycle: input.lifecycle,
     },
     async (established, runContext) => {
@@ -1176,6 +1221,7 @@ export async function buildVerifiedRigProviderImage(
     verificationExecutionGeneration: number;
     established: EstablishedSandboxSession;
     ownership: RigVerificationSandboxRunContext["ownership"];
+    runtimeManifest: TrustedRigPlatformRuntimeManifest;
     lifecycle: RigVerificationActivityLifecycle;
     signal: AbortSignal;
   },
@@ -1259,6 +1305,7 @@ export async function buildVerifiedRigProviderImage(
         verificationExecutionGeneration: input.verificationExecutionGeneration,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: claim.image.imageId,
+        expectedRuntimeManifest: input.runtimeManifest,
         contentHash,
         checks: input.definition.checks,
         lifecycle: input.lifecycle,
@@ -1505,6 +1552,7 @@ export async function buildVerifiedRigProviderImage(
         verificationExecutionGeneration: input.verificationExecutionGeneration,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: built.imageId,
+        expectedRuntimeManifest: input.runtimeManifest,
         contentHash,
         checks: input.definition.checks,
         lifecycle: input.lifecycle,
@@ -1859,6 +1907,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     verificationExecutionGeneration: input.executionGeneration,
                     established,
                     ownership: runContext.ownership,
+                    runtimeManifest: runContext.trustedRuntimeManifest,
                     lifecycle,
                     signal: runContext.signal,
                   })
@@ -2095,6 +2144,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     verificationExecutionGeneration: input.executionGeneration,
                     established,
                     ownership: runContext.ownership,
+                    runtimeManifest: runContext.trustedRuntimeManifest,
                     lifecycle,
                     signal: runContext.signal,
                   })

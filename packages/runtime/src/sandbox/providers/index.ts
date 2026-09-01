@@ -27,9 +27,15 @@ import { selfhostedProvider } from "./selfhosted";
 import type {
   ProviderImmutableImageBuildResult,
   ProviderRegistration,
+  ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
   ProviderWorkspaceCapturePolicy,
 } from "./types";
+import {
+  assertTrustedRigPlatformRuntimeManifest,
+  assertTrustedRigPlatformRuntimeMatches,
+  type TrustedRigPlatformRuntimeManifest,
+} from "./trusted-rig-platform-runtime-integrity";
 import { vercelProvider } from "./vercel";
 
 export const PROVIDER_REGISTRY: Record<SandboxBackend, ProviderRegistration> = {
@@ -157,7 +163,12 @@ export function assertProviderRegistryInvariants(): void {
     }
     const trustedRigSurfaceSupported =
       typeof registration.createTrustedRigPlatformSurface === "function";
-    if (trustedRigSurfaceSupported !== (backend === "modal" || backend === "docker")) {
+    const trustedRigRuntimeInspectionSupported =
+      typeof registration.inspectTrustedRigPlatformRuntime === "function";
+    if (
+      trustedRigSurfaceSupported !== (backend === "modal" || backend === "docker") ||
+      trustedRigRuntimeInspectionSupported !== trustedRigSurfaceSupported
+    ) {
       throw new Error(
         `Provider "${backend}" has an unexpected trusted Rig platform surface posture`,
       );
@@ -257,6 +268,10 @@ export async function attachProviderTrustedRigPlatformSurface(
 ): Promise<boolean> {
   const create = PROVIDER_REGISTRY[input.backend].createTrustedRigPlatformSurface;
   if (!create) return false;
+  if (!input.runtimeManifest) {
+    throw new Error("trusted Rig platform surface requires a provider-inspected runtime manifest");
+  }
+  assertTrustedRigPlatformRuntimeManifest(input.runtimeManifest);
   if (!input.session || typeof input.session !== "object") {
     throw new Error("trusted Rig platform surface requires a provider session object");
   }
@@ -291,6 +306,26 @@ export async function attachProviderTrustedRigPlatformSurface(
   return true;
 }
 
+export async function inspectProviderTrustedRigPlatformRuntime(
+  input: ProviderTrustedRigPlatformRuntimeInspectionInput & { backend: SandboxBackend },
+): Promise<TrustedRigPlatformRuntimeManifest | null> {
+  const inspect = PROVIDER_REGISTRY[input.backend].inspectTrustedRigPlatformRuntime;
+  if (!inspect) return null;
+  if (!input.session || typeof input.session !== "object") {
+    throw new Error("trusted Rig platform runtime inspection requires a provider session object");
+  }
+  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1) {
+    throw new Error("trusted Rig platform runtime inspection requires a finite timeout");
+  }
+  input.signal?.throwIfAborted();
+  const manifest = await inspect(input);
+  assertTrustedRigPlatformRuntimeManifest(manifest);
+  if (input.expectedRuntimeManifest) {
+    assertTrustedRigPlatformRuntimeMatches(input.expectedRuntimeManifest, manifest);
+  }
+  return manifest;
+}
+
 // Boot-validate the registry once at module load: the descriptor-table self-
 // test PLUS the descriptor.backendId === SDK client.backendId assertion (the
 // deferred-from-P0.1 invariant). The SDK client constructors are pure option-
@@ -305,8 +340,17 @@ export type {
   ProviderExactResumeMode,
   ProviderImmutableImageBuildInput,
   ProviderImmutableImageBuildResult,
+  ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
   ProviderExpirationRenewalInput,
   ProviderWorkspaceCapturePolicy,
   ProviderWorkspaceCaptureTakeover,
 } from "./types";
+export {
+  TRUSTED_RIG_PLATFORM_RUNTIME_MANIFEST_VERSION,
+  assertTrustedRigPlatformRuntimeManifest,
+  assertTrustedRigPlatformRuntimeMatches,
+  captureTrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifestEntry,
+} from "./trusted-rig-platform-runtime-integrity";

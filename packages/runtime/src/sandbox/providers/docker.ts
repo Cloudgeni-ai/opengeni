@@ -9,7 +9,10 @@ import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
-import { createDockerTrustedRigPlatformSurface } from "./docker-trusted-rig-platform-surface";
+import {
+  createDockerTrustedRigPlatformSurface,
+  inspectDockerTrustedRigPlatformRuntime,
+} from "./docker-trusted-rig-platform-surface";
 import { REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE, type ProviderRegistration } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -148,6 +151,7 @@ export const dockerProvider: ProviderRegistration = {
     preserveWorkspaceForDiscard: preserveDockerWorkspaceForDiscard,
   },
   createTrustedRigPlatformSurface: createDockerTrustedRigPlatformSurface,
+  inspectTrustedRigPlatformRuntime: inspectDockerTrustedRigPlatformRuntime,
   descriptor: CAPABILITY_DESCRIPTORS.docker,
   // Local dev container — no credentials. (The dockerNetwork decoration is
   // applied by the factory, not here: it wraps the constructed client.)

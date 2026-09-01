@@ -128,7 +128,7 @@ describe("browser control server placement lifecycle", () => {
     });
     expect(commands).toHaveLength(1);
     expect(commands[0]).toMatchObject({
-      cmd: "/usr/local/bin/opengeni-browserd-down",
+      cmd: "/bin/bash /usr/local/bin/opengeni-browserd-down",
       workdir: "/workspace",
     });
   });

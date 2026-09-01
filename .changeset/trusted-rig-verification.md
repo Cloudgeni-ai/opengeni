@@ -7,4 +7,4 @@
 "@opengeni/sdk": patch
 ---
 
-Harden Rig verification provenance, deadline enforcement, dispatch recovery, actor attribution, and exact-version client recovery.
+Harden Rig verification provenance with provider-read platform runtime manifests, deadline enforcement, dispatch recovery, actor attribution, and exact-version client recovery.

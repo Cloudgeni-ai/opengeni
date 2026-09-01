@@ -86,14 +86,16 @@ export function buildBrowserControlServerScript(
   const tokenFile = absolutePath(options.adminTokenFile, "browser controller admin token file");
   const allowedOrigins = normalizeOrigins(options.allowedOrigins ?? []);
   return [
-    "mkdir -p /tmp/opengeni-browserd &&",
+    "export PATH=/usr/bin:/bin:/usr/local/bin &&",
+    "/usr/bin/mkdir -p /tmp/opengeni-browserd &&",
     `if ! test -x ${BROWSER_CONTROL_SERVER_BIN}; then echo 'opengeni-browserd-up is not installed on this sandbox image' >&2; exit 16; fi &&`,
-    "flock -w 30 --close /tmp/opengeni-browserd/up.outer.lock",
-    `env OPENGENI_BROWSERD_PORT=${port}`,
+    "/usr/bin/flock -w 30 --close /tmp/opengeni-browserd/up.outer.lock",
+    `/usr/bin/env PATH=/usr/bin:/bin:/usr/local/bin OPENGENI_BROWSERD_PORT=${port}`,
     `OPENGENI_BROWSERD_ROOT=${shellQuote(BROWSER_CONTROL_STATE_DIRECTORY)}`,
     `OPENGENI_BROWSERD_ADMIN_TOKEN_FILE=${shellQuote(tokenFile)}`,
     `OPENGENI_BROWSERD_ALLOWED_ORIGINS=${shellQuote(allowedOrigins.join(","))}`,
     "OPENGENI_CODEMODE_TOKEN_FILE=/dev/null",
+    "/bin/bash",
     BROWSER_CONTROL_SERVER_BIN,
   ].join(" ");
 }
@@ -158,14 +160,14 @@ export async function tearDownBrowserControlServer(
   const timeoutMs = boundedTimeout(options.timeoutMs ?? 15_000);
   if (target?.exec) {
     await target.exec({
-      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      cmd: `/bin/bash ${BROWSER_CONTROL_SERVER_DOWN_BIN}`,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,
     });
   } else if (target?.execCommand) {
     await target.execCommand({
-      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      cmd: `/bin/bash ${BROWSER_CONTROL_SERVER_DOWN_BIN}`,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
       yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,

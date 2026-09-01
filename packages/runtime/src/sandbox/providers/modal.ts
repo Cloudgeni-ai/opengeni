@@ -14,7 +14,10 @@ import {
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxChannelAService, type ChannelASession } from "../channel-a";
 import { SandboxConfigError } from "../errors";
-import { createModalTrustedRigPlatformSurface } from "./modal-trusted-rig-platform-surface";
+import {
+  createModalTrustedRigPlatformSurface,
+  inspectModalTrustedRigPlatformRuntime,
+} from "./modal-trusted-rig-platform-surface";
 import {
   REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE,
   providerWorkspacePersistence,
@@ -848,6 +851,7 @@ export const modalProvider: ProviderRegistration = {
     return result!;
   },
   createTrustedRigPlatformSurface: createModalTrustedRigPlatformSurface,
+  inspectTrustedRigPlatformRuntime: inspectModalTrustedRigPlatformRuntime,
   descriptor: CAPABILITY_DESCRIPTORS.modal,
   validateCredentials(settings) {
     // both-or-neither (preserves existing validation at config validateSettings).

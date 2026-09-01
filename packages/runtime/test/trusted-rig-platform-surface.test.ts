@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
   attachProviderTrustedRigPlatformSurface,
+  captureTrustedRigPlatformRuntimeManifest,
+  inspectProviderTrustedRigPlatformRuntime,
   type BrowserControlPlacementSession,
+  type TrustedRigPlatformRuntimeManifest,
   type TrustedRigPlatformSurfaceOperation,
 } from "../src/sandbox";
 import {
@@ -44,6 +47,23 @@ function textStream(value: string): ReadableStream<string> {
   });
 }
 
+const BROWSER_ENGINE = "/usr/lib/chromium/chromium";
+
+function pristineRuntimeBytes(path: string): Uint8Array {
+  return new TextEncoder().encode(
+    path === "/etc/opengeni/browser-engine" ? `${BROWSER_ENGINE}\n` : `pristine:${path}`,
+  );
+}
+
+async function runtimeManifest(
+  settings = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false }),
+): Promise<TrustedRigPlatformRuntimeManifest> {
+  return await captureTrustedRigPlatformRuntimeManifest({
+    settings,
+    readBytes: async (path) => pristineRuntimeBytes(path),
+  });
+}
+
 describe("provider-owned trusted Rig platform surfaces", () => {
   test("the Docker adapter isolates controller traffic from the root-owned verifier container", async () => {
     const source = await Bun.file(
@@ -56,6 +76,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     expect(source).toContain('child.kill("SIGKILL")');
     expect(source).toContain("if (stopPromise) await stopPromise;");
     expect(source).toContain("options?.signal,\n        terminate,");
+    expect(source).toContain('args: ["cp", "--follow-link"');
   });
 
   test("the production Modal adapter uses the exact immutable sidecar and ignores root session exec", async () => {
@@ -65,6 +86,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     let createdName = "";
     let imageTimeoutMs = 0;
     let createTimeoutMs = 0;
+    const settings = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false });
     const sidecar = {
       containerId: "container-trusted",
       containerName: "",
@@ -72,7 +94,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         sidecarExecCalls += 1;
         expect(command).toEqual([
           "/bin/sh",
-          "-lc",
+          "-c",
           expect.stringContaining("OPENGENI_TRUSTED_TERMINAL_OK"),
         ]);
         expect(options?.pty).toBe(true);
@@ -102,6 +124,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         },
       },
       sandbox: {
+        filesystem: { readBytes: async (path: string) => pristineRuntimeBytes(path) },
         experimentalSidecars: {
           create: async (_name: string, _image: unknown, options?: { timeoutMs?: number }) => {
             const name = _name;
@@ -119,10 +142,23 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       }),
     };
 
+    const inspected = await inspectProviderTrustedRigPlatformRuntime({
+      backend: "modal",
+      settings,
+      session,
+      instanceId: INSTANCE_ID,
+      providerImage: PROVIDER_IMAGE,
+      expectedProviderImageId: IMAGE_ID,
+      timeoutMs: 5_000,
+    });
+    expect(inspected).toEqual(await runtimeManifest(settings));
+    expect(rootExecCalls).toBe(0);
+    expect(sidecarExecCalls).toBe(0);
+
     await expect(
       attachProviderTrustedRigPlatformSurface({
         backend: "modal",
-        settings: testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false }),
+        settings,
         session,
         instanceId: INSTANCE_ID,
         providerImage: PROVIDER_IMAGE,
@@ -132,6 +168,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 3,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifest: inspected!,
       }),
     ).resolves.toBe(true);
 
@@ -172,6 +209,59 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     ).toThrow();
   });
 
+  for (const replacedPath of [
+    "/usr/local/bin/bun",
+    "/usr/local/bin/opengeni-desktop-up",
+    "/usr/local/bin/opengeni-browserd-up",
+  ]) {
+    test(`provider-owned inspection rejects a root replacement of ${replacedPath} before sidecar creation`, async () => {
+      const settings = testSettings({
+        sandboxBackend: "modal",
+        sandboxDesktopEnabled: true,
+        sandboxTerminalEnabled: true,
+      });
+      const expectedRuntimeManifest = await runtimeManifest(settings);
+      let rootExecCalls = 0;
+      let sidecarCreateCalls = 0;
+      const session = {
+        state: { sandboxId: INSTANCE_ID, imageId: IMAGE_ID },
+        exec: async () => {
+          rootExecCalls += 1;
+          throw new Error("candidate root exec must not run before integrity rejection");
+        },
+        sandbox: {
+          filesystem: {
+            readBytes: async (path: string) =>
+              path === replacedPath
+                ? new TextEncoder().encode("#!/bin/sh\nprintf forged-evidence\\n")
+                : pristineRuntimeBytes(path),
+          },
+          experimentalSidecars: {
+            create: async () => {
+              sidecarCreateCalls += 1;
+              throw new Error("sidecar creation must not run before integrity rejection");
+            },
+          },
+        },
+      };
+
+      await expect(
+        inspectProviderTrustedRigPlatformRuntime({
+          backend: "modal",
+          settings,
+          session,
+          instanceId: INSTANCE_ID,
+          providerImage: PROVIDER_IMAGE,
+          expectedProviderImageId: IMAGE_ID,
+          expectedRuntimeManifest,
+          timeoutMs: 5_000,
+        }),
+      ).rejects.toThrow(`runtime integrity mismatch at ${replacedPath}`);
+      expect(rootExecCalls).toBe(0);
+      expect(sidecarCreateCalls).toBe(0);
+    });
+  }
+
   test("unsupported providers remain explicit and fail closed", async () => {
     const session = {};
     await expect(
@@ -186,6 +276,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 0,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifest: await runtimeManifest(),
       }),
     ).resolves.toBe(false);
     expect(Object.hasOwn(session, "trustedRigPlatformSurface")).toBe(false);
@@ -331,6 +422,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 3,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifest: await runtimeManifest(),
       }),
     ).resolves.toBe(true);
     const controller = new AbortController();

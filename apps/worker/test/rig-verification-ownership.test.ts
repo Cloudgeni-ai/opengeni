@@ -4,7 +4,10 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { Database, LeaseSnapshot } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
-import type { EstablishedSandboxSession } from "@opengeni/runtime";
+import type {
+  EstablishedSandboxSession,
+  TrustedRigPlatformRuntimeManifest,
+} from "@opengeni/runtime";
 import {
   RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE,
   rigVerificationLeaseHolderId,
@@ -26,6 +29,17 @@ const HOLDER_ID = rigVerificationLeaseHolderId({
   executionGeneration: 3,
 });
 const db = {} as Database;
+const runtimeManifest = {
+  version: 1,
+  digest: `sha256:${"a".repeat(64)}`,
+  entries: [
+    {
+      path: "/usr/local/bin/opengeni-browserd-up",
+      sizeBytes: 1,
+      sha256: `sha256:${"b".repeat(64)}`,
+    },
+  ],
+} as TrustedRigPlatformRuntimeManifest;
 
 const settings = testSettings({
   sandboxBackend: "modal",
@@ -80,6 +94,7 @@ type HarnessOptions = {
   commitError?: Error;
   commitResult?: boolean;
   terminateResult?: boolean;
+  inspectionError?: Error;
   readinessResult?: unknown;
   markError?: Error;
   failError?: Error;
@@ -199,6 +214,16 @@ function harness(options: HarnessOptions = {}) {
       expect(target?.instanceId).toBe("sb-verifier");
       return options.terminateResult ?? true;
     },
+    inspectTrustedRuntime: async (input) => {
+      events.push("inspect-runtime");
+      expect(input).toMatchObject({
+        backend: "modal",
+        instanceId: "sb-verifier",
+        providerImage: settings.modalImageRef,
+      });
+      if (options.inspectionError) throw options.inspectionError;
+      return runtimeManifest;
+    },
     attachTrustedSurface: async (input) => {
       events.push("attach-surface");
       expect(input).toMatchObject({
@@ -209,6 +234,7 @@ function harness(options: HarnessOptions = {}) {
         leaseEpoch: 8,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifest,
       });
       Object.defineProperty(input.session as object, "trustedRigPlatformSurface", {
         value: {
@@ -304,12 +330,13 @@ describe("rig verification canonical lease ownership", () => {
         return "passed";
       }),
     ).resolves.toBe("passed");
-    expect(state.events.slice(0, 9)).toEqual([
+    expect(state.events.slice(0, 10)).toEqual([
       "acquire",
       "establish:start",
       "record",
       "tag",
       "establish:return",
+      "inspect-runtime",
       "readiness",
       "commit",
       "attach-surface",
@@ -344,6 +371,16 @@ describe("rig verification canonical lease ownership", () => {
     expect(state.events).not.toContain("commit");
     expect(state.events).toContain("terminate");
     expect(state.events.at(-1)).toBe("release");
+  });
+
+  test("provider runtime integrity is proven before any candidate command", async () => {
+    const state = harness({ inspectionError: new Error("runtime integrity mismatch") });
+    await expect(state.run(async () => true)).rejects.toThrow("runtime integrity mismatch");
+    expect(state.events).toContain("inspect-runtime");
+    expect(state.events).not.toContain("readiness");
+    expect(state.events).not.toContain("commit");
+    expect(state.events).not.toContain("attach-surface");
+    expect(state.events).toContain("terminate");
   });
 
   test("provider creation failure rolls back the exact warming epoch without waiting for TTL", async () => {

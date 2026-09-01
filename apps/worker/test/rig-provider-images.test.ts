@@ -12,6 +12,7 @@ import {
   resolveRigProviderImageForRun,
 } from "@opengeni/core";
 import { rigSetupScriptCommand } from "@opengeni/runtime";
+import type { TrustedRigPlatformRuntimeManifest } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   resolveRigProviderImageSelection,
@@ -35,6 +36,17 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
   environment: "main",
 });
 const PLATFORM_IMAGE = "registry.example.com/opengeni-desktop@sha256:platform";
+const RUNTIME_MANIFEST = {
+  version: 1,
+  digest: `sha256:${"a".repeat(64)}`,
+  entries: [
+    {
+      path: "/usr/local/bin/opengeni-browserd-up",
+      sizeBytes: 1,
+      sha256: `sha256:${"b".repeat(64)}`,
+    },
+  ],
+} as TrustedRigPlatformRuntimeManifest;
 
 function platformSettings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
@@ -155,6 +167,7 @@ describe("build-once rig provider image runtime", () => {
             workspaceGeneration: 0,
             instanceId: "sandbox-build",
           },
+          runtimeManifest: RUNTIME_MANIFEST,
           lifecycle: {
             signal: new AbortController().signal,
             workDeadlineAtMs: Date.now() + 40,
@@ -286,6 +299,7 @@ describe("build-once rig provider image runtime", () => {
             workspaceGeneration: 0,
             instanceId: "sandbox-build",
           },
+          runtimeManifest: RUNTIME_MANIFEST,
           lifecycle: {
             signal: new AbortController().signal,
             workDeadlineAtMs: Date.now() + 5_000,
@@ -360,6 +374,7 @@ describe("build-once rig provider image runtime", () => {
       expect(input.settings.modalWorkspacePersistence).toBe("snapshot_directory");
       expect(input.sandboxGroupId).toBe("33333333-3333-4333-8333-333333333333");
       expect(input.expectedProviderImageId).toBe("im-built-rig-image");
+      expect(input.expectedRuntimeManifest).toBe(RUNTIME_MANIFEST);
       return await run(
         {
           backendId: "modal",
@@ -374,6 +389,7 @@ describe("build-once rig provider image runtime", () => {
             commands.push(args.cmd);
             return { exitCode: 0, output: "ok" };
           },
+          trustedRuntimeManifest: RUNTIME_MANIFEST,
           ownership: {
             leaseId: "lease-cold-boot",
             leaseEpoch: 2,
@@ -423,6 +439,7 @@ describe("build-once rig provider image runtime", () => {
         verificationExecutionGeneration: 2,
         sessionIdPrefix: "rig-provider-image-test",
         imageId: "im-built-rig-image",
+        expectedRuntimeManifest: RUNTIME_MANIFEST,
         contentHash: `sha256:${"a".repeat(64)}`,
         checks: [
           { name: "bash", command: "bash --version" },
@@ -505,6 +522,7 @@ describe("build-once rig provider image runtime", () => {
                   }
                 : { exitCode: 0, output: "ok" };
             },
+            trustedRuntimeManifest: RUNTIME_MANIFEST,
             ownership: {
               leaseId: "lease-replaced-platform-binary",
               leaseEpoch: 2,
@@ -528,6 +546,7 @@ describe("build-once rig provider image runtime", () => {
             verificationExecutionGeneration: 2,
             sessionIdPrefix: "rig-provider-image-replaced-platform-binary",
             imageId: "im-derived-with-replaced-platform-binary",
+            expectedRuntimeManifest: RUNTIME_MANIFEST,
             contentHash: `sha256:${"a".repeat(64)}`,
             checks: [],
             lifecycle: {

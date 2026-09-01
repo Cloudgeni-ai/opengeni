@@ -9,7 +9,11 @@ import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
 } from "./trusted-rig-platform-surface";
-import type { ProviderTrustedRigPlatformSurfaceInput } from "./types";
+import { captureTrustedRigPlatformRuntimeManifest } from "./trusted-rig-platform-runtime-integrity";
+import type {
+  ProviderTrustedRigPlatformRuntimeInspectionInput,
+  ProviderTrustedRigPlatformSurfaceInput,
+} from "./types";
 
 type ModalProcess = {
   stdout: ReadableStream<string>;
@@ -51,6 +55,9 @@ type ModalRigSession = BrowserControlPlacementSession & {
     };
   };
   sandbox?: {
+    filesystem?: {
+      readBytes(path: string): Promise<Uint8Array>;
+    };
     experimentalSidecars?: {
       create(
         name: string,
@@ -114,6 +121,50 @@ async function modalOperation<T>(input: {
     ]);
     if (winner.kind === "completed") return winner.value;
     await input.terminate().catch(() => undefined);
+    void operation.catch(() => undefined);
+    throw winner.reason;
+  } finally {
+    if (timer) clearTimeout(timer);
+    removeAbort();
+  }
+}
+
+async function modalFilesystemOperation<T>(input: {
+  operation: () => Promise<T>;
+  signal?: AbortSignal;
+  deadlineAtMs: number;
+}): Promise<T> {
+  input.signal?.throwIfAborted();
+  const operation = input.operation();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let removeAbort = (): void => undefined;
+  const aborted = new Promise<{ reason: unknown }>((resolve) => {
+    const finish = (reason: unknown): void => resolve({ reason });
+    let timeoutMs: number;
+    try {
+      timeoutMs = remainingMs(input.deadlineAtMs);
+    } catch (error) {
+      finish(error);
+      return;
+    }
+    timer = setTimeout(
+      () => finish(new Error("Modal trusted Rig runtime inspection deadline was reached")),
+      timeoutMs,
+    );
+    if (input.signal?.aborted) {
+      finish(abortReason(input.signal));
+    } else if (input.signal) {
+      const onAbort = (): void => finish(abortReason(input.signal!));
+      input.signal.addEventListener("abort", onAbort, { once: true });
+      removeAbort = () => input.signal?.removeEventListener("abort", onAbort);
+    }
+  });
+  try {
+    const winner = await Promise.race([
+      operation.then((value) => ({ kind: "completed" as const, value })),
+      aborted.then(({ reason }) => ({ kind: "aborted" as const, reason })),
+    ]);
+    if (winner.kind === "completed") return winner.value;
     void operation.catch(() => undefined);
     throw winner.reason;
   } finally {
@@ -210,7 +261,7 @@ async function createModalSidecar(
     let container: ModalSidecar;
     try {
       container = await sidecars.create(name, image, {
-        command: ["/bin/sh", "-lc", "exec sleep infinity"],
+        command: ["/bin/sh", "-c", "exec sleep infinity"],
         workdir: "/workspace",
         ...deadlineOptions(deadlineAtMs, operation.signal),
       });
@@ -263,7 +314,7 @@ async function createModalSidecar(
         deadlineAtMs: deadline,
         terminate,
         operation: async () => {
-          const process = await container.exec(["/bin/sh", "-lc", args.cmd], {
+          const process = await container.exec(["/bin/sh", "-c", args.cmd], {
             mode: "text",
             stdout: "pipe",
             stderr: "pipe",
@@ -312,6 +363,39 @@ async function createModalSidecar(
     await cleanupModalSidecarByName(sidecars, name, operation).catch(() => undefined);
     throw error;
   }
+}
+
+export async function inspectModalTrustedRigPlatformRuntime(
+  input: ProviderTrustedRigPlatformRuntimeInspectionInput,
+) {
+  const session = input.session as ModalRigSession;
+  const providerImageId = session.state?.imageId;
+  const filesystem = session.sandbox?.filesystem;
+  if (
+    session.state?.sandboxId !== input.instanceId ||
+    !providerImageId ||
+    (input.expectedProviderImageId !== undefined &&
+      input.expectedProviderImageId !== providerImageId) ||
+    typeof filesystem?.readBytes !== "function"
+  ) {
+    throw new Error(
+      "Modal trusted Rig runtime inspection requires the exact live provider filesystem",
+    );
+  }
+  const deadlineAtMs = Math.min(
+    Date.now() + input.timeoutMs,
+    input.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+  );
+  return await captureTrustedRigPlatformRuntimeManifest({
+    settings: input.settings,
+    ...(input.signal ? { signal: input.signal } : {}),
+    readBytes: async (path) =>
+      await modalFilesystemOperation({
+        operation: async () => await filesystem.readBytes(path),
+        deadlineAtMs,
+        ...(input.signal ? { signal: input.signal } : {}),
+      }),
+  });
 }
 
 export async function createModalTrustedRigPlatformSurface(

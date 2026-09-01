@@ -137,9 +137,10 @@ function commandExitCode(result: unknown): number | null {
 function terminalProbeCommand(): string {
   return [
     "set -eu",
+    "export PATH=/usr/bin:/bin:/usr/local/bin",
     'test "$PWD" = /workspace',
-    'test "$(id -u)" = 0',
-    'test "$(bun --version)" = 1.4.0',
+    'test "$(/usr/bin/id -u)" = 0',
+    'test "$(/usr/local/bin/bun --version)" = 1.4.0',
     "test -t 1",
     "printf '%s\\n' OPENGENI_TRUSTED_TERMINAL_OK",
   ].join("\n");
@@ -152,9 +153,10 @@ function desktopStartupCommand(binding: TrustedRigPlatformSurfaceBinding): strin
     .slice(0, 16);
   return [
     "set -eu",
+    "export PATH=/usr/bin:/bin:/usr/local/bin",
     `export HOME=/tmp/opengeni-rig-surface-home-${suffix}`,
-    'install -d -m 0700 "$HOME"',
-    "STREAM_PORT=6080 DESKTOP_W=1280 DESKTOP_H=800 opengeni-desktop-up",
+    '/usr/bin/install -d -m 0700 "$HOME"',
+    "STREAM_PORT=6080 DESKTOP_W=1280 DESKTOP_H=800 /bin/bash /usr/local/bin/opengeni-desktop-up",
   ].join("\n");
 }
 

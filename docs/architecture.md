@@ -1097,7 +1097,13 @@ Initial and manager-authored direct versions are inserted inactive. Their
 verification worker uses one exact leased provider session to prove the
 interactive root Terminal, a real headed BrowserSession, and, when deployment
 policy enables it, a real ComputerSession with native image evidence and a
-benign action. The receipt is fenced to lease epoch, workspace generation,
+benign action. Before the worker invokes any candidate shell command, the
+Docker or Modal adapter reads a bounded manifest of the exact platform helper,
+runtime, shell, and browser-engine bytes through its provider-owned filesystem
+boundary. A derived provider image must match the pristine deployment manifest
+before readiness or native validation can run, so root setup cannot replace an
+in-box launcher and manufacture deployment-control-plane evidence. The receipt
+is fenced to lease epoch, workspace generation,
 provider instance, and Rig version. Activation persists that receipt and flips
 the version in one active-version-CAS transaction; deferred dispatch, enabled
 surface `unsupported`, binding drift, invalid evidence, and cleanup failure all

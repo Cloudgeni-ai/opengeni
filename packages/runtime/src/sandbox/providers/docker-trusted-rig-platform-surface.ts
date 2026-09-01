@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExposedPortEndpoint } from "@openai/agents/sandbox";
 import type {
   BrowserControlPlacementSession,
@@ -10,7 +13,11 @@ import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
 } from "./trusted-rig-platform-surface";
-import type { ProviderTrustedRigPlatformSurfaceInput } from "./types";
+import { captureTrustedRigPlatformRuntimeManifest } from "./trusted-rig-platform-runtime-integrity";
+import type {
+  ProviderTrustedRigPlatformRuntimeInspectionInput,
+  ProviderTrustedRigPlatformSurfaceInput,
+} from "./types";
 
 const DOCKER_IMAGE_ID = /^sha256:[0-9a-f]{64}$/u;
 const DOCKER_NOT_FOUND = /No such (?:object|container|network):|network .* not found/iu;
@@ -21,6 +28,18 @@ type DockerRigSession = BrowserControlPlacementSession & {
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function inspectionDeadlineAt(input: ProviderTrustedRigPlatformRuntimeInspectionInput): number {
+  return Math.min(Date.now() + input.timeoutMs, input.deadlineAtMs ?? Number.POSITIVE_INFINITY);
+}
+
+function inspectionRemainingMs(deadlineAtMs: number): number {
+  const remaining = Math.floor(deadlineAtMs - Date.now());
+  if (remaining <= 0) {
+    throw new Error("Docker trusted Rig runtime inspection deadline was reached");
+  }
+  return Math.max(1, Math.min(10 * 60_000, remaining));
 }
 
 function dockerSidecarIdentity(input: ProviderTrustedRigPlatformSurfaceInput): {
@@ -281,7 +300,7 @@ async function createDockerSidecar(
         "/workspace",
         providerImageId,
         "/bin/sh",
-        "-lc",
+        "-c",
         "exec sleep infinity",
       ],
       timeoutMs: operation.timeoutMs,
@@ -317,7 +336,7 @@ async function createDockerSidecar(
         args.workdir ?? "/workspace",
         identity.name,
         "/bin/sh",
-        "-lc",
+        "-c",
         args.cmd,
       ],
       timeoutMs,
@@ -345,8 +364,8 @@ async function createDockerSidecar(
         "--interactive",
         identity.name,
         "/bin/sh",
-        "-lc",
-        `umask 077; install -d -m 0700 -- ${shellQuote(parent)}; cat > ${shellQuote(args.path)}; chmod 0600 -- ${shellQuote(args.path)}`,
+        "-c",
+        `umask 077; /usr/bin/install -d -m 0700 -- ${shellQuote(parent)}; /usr/bin/cat > ${shellQuote(args.path)}; /usr/bin/chmod 0600 -- ${shellQuote(args.path)}`,
       ],
       stdin: content,
       timeoutMs,
@@ -383,6 +402,49 @@ async function createDockerSidecar(
     finalizeOpStreamOps: async () => undefined,
     terminate: async () => await terminate(),
   };
+}
+
+export async function inspectDockerTrustedRigPlatformRuntime(
+  input: ProviderTrustedRigPlatformRuntimeInspectionInput,
+) {
+  const session = input.session as DockerRigSession;
+  if (session.state?.containerId !== input.instanceId) {
+    throw new Error("Docker trusted Rig runtime inspection requires the exact live container");
+  }
+  const deadlineAtMs = inspectionDeadlineAt(input);
+  const inspected = await dockerCommand({
+    args: ["inspect", "--type", "container", "--format", "{{.Image}}", input.instanceId],
+    timeoutMs: Math.min(inspectionRemainingMs(deadlineAtMs), 10_000),
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const providerImageId = inspected.stdout.trim();
+  if (
+    !DOCKER_IMAGE_ID.test(providerImageId) ||
+    (input.expectedProviderImageId !== undefined &&
+      input.expectedProviderImageId !== providerImageId)
+  ) {
+    throw new Error("Docker trusted Rig runtime inspection resolved another immutable image id");
+  }
+
+  const directory = await mkdtemp(join(tmpdir(), "opengeni-rig-runtime-"));
+  let nextFile = 0;
+  try {
+    return await captureTrustedRigPlatformRuntimeManifest({
+      settings: input.settings,
+      ...(input.signal ? { signal: input.signal } : {}),
+      readBytes: async (path) => {
+        const localPath = join(directory, String(nextFile++).padStart(3, "0"));
+        await dockerCommand({
+          args: ["cp", "--follow-link", `${input.instanceId}:${path}`, localPath],
+          timeoutMs: inspectionRemainingMs(deadlineAtMs),
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        return await readFile(localPath);
+      },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 export async function createDockerTrustedRigPlatformSurface(
