@@ -136,7 +136,9 @@ async function publishAuthNeeded(
       ...(result.provider ? { provider: result.provider } : {}),
       reason: result.reason,
       ...(result.connectionId ? { connectionId: result.connectionId } : {}),
-      ...(connectionRef.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+      ...(result.authoritySource === "host" || connectionRef.authoritySource === "host"
+        ? { authoritySource: "host" as const }
+        : {}),
       ...(result.scopes ? { scopes: result.scopes } : {}),
       ...(result.resource ? { resource: result.resource } : {}),
       ...(result.selectedResources ? { selectedResources: result.selectedResources } : {}),

@@ -140,7 +140,7 @@ describe("workspace connection lane", () => {
     expect(hostCalls).toBe(0);
   });
 
-  test("opaque host bindings bypass native UUID authority and reach the host", async () => {
+  test("legacy opaque and explicit UUID host bindings bypass native authority", async () => {
     let authorizeCalls = 0;
     let hostCalls = 0;
     const resolver = workspaceResolver({
@@ -161,7 +161,6 @@ describe("workspace connection lane", () => {
       connectionRef: {
         providerDomain: "api.example.test",
         connectionId: "cloudgeni-capability",
-        authoritySource: "host" as const,
         kind: "delegated" as const,
         subjectScope: "workspace" as const,
       },

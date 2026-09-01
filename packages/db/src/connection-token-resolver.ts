@@ -133,6 +133,8 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: McpCredentialAuthNeededReason;
       providerDomain: string;
+      /** Credential authority is owned by the embedding host, not the native connection store. */
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -306,6 +308,7 @@ export function buildHostConnectionTokenResolver(
         status: "auth_needed",
         reason: result.reason,
         providerDomain: result.providerDomain,
+        authoritySource: "host",
         ...(result.provider ? { provider: result.provider } : {}),
         ...(result.connectionId ? { connectionId: result.connectionId } : {}),
         ...(result.scopes ? { scopes: [...result.scopes] } : {}),

@@ -40,6 +40,7 @@ type ResolveCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -713,7 +714,8 @@ export class GmailRestMcpServer implements LocalMcpBridgeServer {
           ...(result.provider ? { provider: result.provider } : {}),
           reason: result.reason,
           ...(result.connectionId ? { connectionId: result.connectionId } : {}),
-          ...(this.options.connectionRef.authoritySource === "host"
+          ...(result.authoritySource === "host" ||
+          this.options.connectionRef.authoritySource === "host"
             ? { authoritySource: "host" as const }
             : {}),
           ...(result.scopes ? { scopes: result.scopes } : {}),

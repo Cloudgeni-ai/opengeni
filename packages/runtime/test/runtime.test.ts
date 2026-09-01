@@ -9436,7 +9436,6 @@ describe("runtime event normalization", () => {
             url: capMcp.url,
             connectionRef: {
               connectionId,
-              authoritySource: "host",
               providerDomain: "api.integrations-example.com",
               kind: "oauth2",
               subjectScope: "workspace",
@@ -9459,6 +9458,7 @@ describe("runtime event normalization", () => {
                 status: "auth_needed",
                 reason: "expired",
                 providerDomain: "api.integrations-example.com",
+                authoritySource: "host",
                 connectionId,
                 authorizationUrl: "https://api.integrations-example.com/oauth/start",
               }

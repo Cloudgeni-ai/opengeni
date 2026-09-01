@@ -1273,6 +1273,7 @@ describe("buildHostConnectionTokenResolver", () => {
       status: "auth_needed",
       reason: "expired",
       providerDomain: "gitlab.com",
+      authoritySource: "host",
       connectionId: "gitlab-connection",
       scopes: ["api"],
       authorizationUrl: "https://host.example/reconnect/gitlab-connection",

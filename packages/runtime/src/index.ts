@@ -630,6 +630,7 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -4449,6 +4450,9 @@ function buildConnectorAttachmentAuthority(
             : connectionRef.connectionId
               ? { connectionId: connectionRef.connectionId }
               : {}),
+          ...(revalidated.authoritySource === "host" || connectionRef.authoritySource === "host"
+            ? { authoritySource: "host" as const }
+            : {}),
           ...(revalidated.scopes
             ? { scopes: revalidated.scopes }
             : connectionRef.scopes
@@ -4565,7 +4569,9 @@ async function publishAuthNeededForRequest(
         : {}),
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
-    ...(connectionRef.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
+    ...(auth.authoritySource === "host" || connectionRef.authoritySource === "host"
+      ? { authoritySource: "host" as const }
+      : {}),
     ...(auth.scopes
       ? { scopes: auth.scopes }
       : connectionRef.scopes

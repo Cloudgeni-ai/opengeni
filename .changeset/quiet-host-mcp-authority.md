@@ -9,4 +9,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, or reconnect flows reinterpreting it.
+Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades when the host credential resolver is bound.

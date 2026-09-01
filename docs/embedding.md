@@ -589,6 +589,9 @@ non-empty shape, including a UUID. With `mcpCredentials` bound, that explicit
 provenance routes directly to the host resolver with the immutable turn lineage.
 Without the host credential port, a host-owned ref fails closed as
 `unsupported_auth` rather than falling through to OpenGeni's connection store.
+For rolling upgrade compatibility, a bound host resolver also accepts legacy
+refs that omit `authoritySource` only when their connection id is unambiguously
+non-UUID. New host refs must set the marker, and UUID-shaped host ids require it.
 
 Successful results must echo account/workspace/immediate-session plus the exact
 provider, provider domain, requested connection id, OAuth scopes/resource, and

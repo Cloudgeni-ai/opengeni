@@ -585,6 +585,77 @@ describe("connector attachment MCP projection", () => {
     }
   });
 
+  test("preserves host provenance when attachment revalidation needs authorization", async () => {
+    let materializerCalls = 0;
+    const authEvents: unknown[] = [];
+    const authorizationUrl = "https://host.example.test/connections/authorize";
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "connector",
+            name: "Connector",
+            url: "https://mcp.example.test/rpc",
+            connectionRef: {
+              connectionId,
+              authoritySource: "host",
+              provider: "example",
+              providerDomain: "example.test",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "connector" }],
+      {
+        workspaceId: "33333333-3333-4333-8333-333333333333",
+        localMcpServers: [
+          {
+            id: "connector",
+            server: transferServer(transferResult()),
+            resolvedConnectionId: connectionId,
+          },
+        ],
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "auth_needed",
+          reason: "revoked",
+          providerDomain: "example.test",
+          connectionId,
+          authorizationUrl,
+        }),
+        onAuthNeeded: (event) => authEvents.push(event),
+        materializeConnectorAttachments: async (request) => {
+          materializerCalls += 1;
+          return matchingReceipt(request);
+        },
+      },
+    );
+    try {
+      const result = await (prepared.mcpServers[0] as PrefixedMcpServer).executeCatalogTool(
+        "download_attachment",
+        {},
+        { opengeniOperationId: operationId },
+      );
+      expect(materializerCalls).toBe(0);
+      expect(result).toMatchObject({ isError: true });
+      expect(authEvents).toEqual([
+        {
+          serverId: "connector",
+          toolName: "download_attachment",
+          providerDomain: "example.test",
+          provider: "example",
+          reason: "revoked",
+          connectionId,
+          authoritySource: "host",
+          authorizationUrl,
+        },
+      ]);
+    } finally {
+      await prepared.close();
+    }
+  });
+
   test("requires an explicit provider binding on the authorized connection", async () => {
     let materializerCalls = 0;
     const prepared = await prepareAgentTools(
