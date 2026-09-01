@@ -4,6 +4,8 @@ import type { ManagedAuthSessionSetProjection } from "@opengeni/sdk/accounts";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
+import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
+
 import { AccountAuthRoute } from "./account-auth";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000001";
@@ -61,6 +63,37 @@ async function flush(): Promise<void> {
 }
 
 describe("isolated browser account authentication", () => {
+  test("prefills and locks the invited email from the same-origin opener", async () => {
+    const originalOpener = Object.getOwnPropertyDescriptor(window, "opener");
+    sessionStorage.clear();
+    storeOrganizationInvitationContinuation({
+      organizationId: "00000000-0000-4000-8000-000000000010",
+      organizationName: "Northwind Research",
+      targetEmail: "invited@example.test",
+      expiresAt: "2026-09-08T12:00:00.000Z",
+    });
+    Object.defineProperty(window, "opener", { configurable: true, value: window });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<AccountAuthRoute transactionId={TRANSACTION_ID} />));
+      const email = container.querySelector<HTMLInputElement>("#account-auth-email")!;
+      expect(email.value).toBe("invited@example.test");
+      expect(email.readOnly).toBeTrue();
+      expect(container.textContent).toContain(
+        "Sign in as invited@example.test to continue joining Northwind Research",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+      if (originalOpener) Object.defineProperty(window, "opener", originalOpener);
+      else Reflect.deleteProperty(window, "opener");
+    }
+  });
+
   test("replays an outcome-unknown completion with its original command generation", async () => {
     const originalFetch = globalThis.fetch;
     const mutationBodies: Array<Record<string, unknown>> = [];

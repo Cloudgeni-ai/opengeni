@@ -58,6 +58,12 @@ export function RailFooter() {
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
     enabled: managed && !browserAccounts,
+    activeEmail: context.authSession?.user.email ?? null,
+    onUseInvitedAccount: () => {
+      void context
+        .handleManagedSignOut()
+        .catch((error) => toast.error("Sign out failed", { description: String(error) }));
+    },
     onAccepted: context.revalidatePrincipalAccess,
   });
 

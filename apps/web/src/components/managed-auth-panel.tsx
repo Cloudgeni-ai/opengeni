@@ -24,6 +24,8 @@ export function ManagedAuthPanel(props: {
   allowedModes?: readonly ManagedAuthMode[];
   emailVerificationRequired?: boolean;
   presentation?: "card" | "embedded";
+  invitation?: { organizationName: string; targetEmail: string } | null;
+  onDismissInvitation?: () => void;
   socialProviders?: readonly ManagedSocialProvider[];
   onSocialSubmit?: (provider: ManagedSocialProvider) => Promise<void>;
   onSubmit: (
@@ -39,8 +41,10 @@ export function ManagedAuthPanel(props: {
       : (allowedModes[0] ?? "signin"),
   );
   const emailVerificationRequired = props.emailVerificationRequired ?? true;
+  const [invitationDismissed, setInvitationDismissed] = useState(false);
+  const invitation = invitationDismissed ? null : (props.invitation ?? null);
   const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(props.invitation?.targetEmail ?? "");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<ManagedSocialProvider | null>(null);
@@ -58,6 +62,12 @@ export function ManagedAuthPanel(props: {
     setFormActionMode(null);
     setSuccessMessage(null);
     setVerificationEmail(null);
+  }
+
+  function dismissInvitation() {
+    setInvitationDismissed(true);
+    setEmail("");
+    props.onDismissInvitation?.();
   }
 
   function updateField(field: ManagedAuthField, value: string) {
@@ -203,10 +213,26 @@ export function ManagedAuthPanel(props: {
               {mode === "signup" ? "Create account" : "Sign in"}
             </h1>
             <p className="text-sm text-fg-subtle">
-              Use your preferred account to access the managed console.
+              {invitation
+                ? mode === "signup"
+                  ? `Create an account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                  : `Sign in as ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                : "Use your preferred account to access the managed console."}
             </p>
           </div>
         </div>
+        {invitation ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="mb-3 px-0"
+            disabled={formInteractionBusy}
+            onClick={dismissInvitation}
+          >
+            Use another account without this invitation
+          </Button>
+        ) : null}
         {allowedModes.length > 1 ? (
           <div className="mb-4 grid grid-cols-2 rounded-md border border-border bg-bg p-1">
             <Button
@@ -271,6 +297,7 @@ export function ManagedAuthPanel(props: {
             type="email"
             value={email}
             disabled={formInteractionBusy}
+            readOnly={invitation !== null}
             onChange={(event) => updateField("email", event.target.value)}
             autoComplete="email"
             className="mt-2"

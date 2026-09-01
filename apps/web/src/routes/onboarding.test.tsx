@@ -128,6 +128,48 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("anchors invitation sign-in to the invited email until the user dismisses it", async () => {
+    const onDismissInvitation = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            invitation={{
+              organizationName: "Northwind Research",
+              targetEmail: "invited@example.test",
+            }}
+            onDismissInvitation={onDismissInvitation}
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      const email = container.querySelector<HTMLInputElement>("#managed-auth-email")!;
+      expect(email.value).toBe("invited@example.test");
+      expect(email.readOnly).toBeTrue();
+      expect(container.textContent).toContain(
+        "Sign in as invited@example.test to continue joining Northwind Research",
+      );
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find(
+            (button) =>
+              button.textContent?.trim() === "Use another account without this invitation",
+          )!
+          .click(),
+      );
+      expect(onDismissInvitation).toHaveBeenCalledTimes(1);
+      expect(email.value).toBe("");
+      expect(email.readOnly).toBeFalse();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("broker registration reveals resend only after signup succeeds", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
@@ -388,9 +430,10 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(container.textContent).toContain("Join Test Organization");
       expect(container.textContent).toContain("create an account to accept this invitation");
-      expect(container.textContent).toContain("take you directly back to this invitation");
+      expect(container.textContent).toContain("This invitation is for invitee@example.test");
+      expect(container.textContent).toContain("you don't need to enter the email again");
       const existingAccountLink = Array.from(container.querySelectorAll("a")).find(
-        (link) => link.textContent?.trim() === "Sign in and continue",
+        (link) => link.textContent?.trim() === "Sign in as invitee@example.test",
       )!;
       await act(async () => existingAccountLink.click());
       expect(sessionStorage.getItem("opengeni:organization-invitation-continuation:v1")).toContain(

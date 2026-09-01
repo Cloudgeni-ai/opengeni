@@ -82,6 +82,8 @@ export function BrowserAccountMenu() {
   const organizationInvitations = useOrganizationInvitations({
     client: context.client,
     enabled: true,
+    activeEmail: selected?.verifiedClaim.value ?? context.authSession?.user.email ?? null,
+    onUseInvitedAccount: continueInvitation,
     onAccepted: context.revalidatePrincipalAccess,
   });
   const replacementSlots = useMemo(
@@ -127,6 +129,17 @@ export function BrowserAccountMenu() {
         if (settled) restoreFocus();
       })
       .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+  }
+
+  function continueInvitation(targetEmail: string) {
+    const targetSlot = projection?.slots.find(
+      (slot) => slot.verifiedClaim.value.trim().toLowerCase() === targetEmail.trim().toLowerCase(),
+    );
+    if (!targetSlot) {
+      authenticate("add");
+      return;
+    }
+    chooseSlot(targetSlot);
   }
 
   function requestLogout(slot: ManagedAuthLoginSlot) {

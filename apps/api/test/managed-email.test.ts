@@ -86,7 +86,7 @@ describe("managed email transport", () => {
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
     expect(rendered.html).toContain(">Accept invitation to R&amp;D &lt;Labs&gt;</a>");
-    expect(rendered.html).toContain("<strong>Sign in and continue</strong>");
+    expect(rendered.html).toContain("<strong>Sign in as invited@example.test</strong>");
     expect(rendered.html).toContain("show the invitation immediately");
     expect(rendered.html).not.toContain("Ada <Admin>");
     const digestInput = {

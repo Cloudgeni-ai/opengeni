@@ -183,9 +183,15 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
               <p className="text-sm font-medium">Already have an OpenGeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
-                Sign in and we&apos;ll take you directly back to this invitation.
+                This invitation is for {preview.targetEmail}. Sign in with that account and
+                we&apos;ll bring you directly back here.
               </p>
-              <Button asChild variant="secondary" size="sm" className="mt-3 w-full">
+              <Button
+                asChild
+                variant="secondary"
+                size="sm"
+                className="mt-3 h-auto min-h-9 w-full whitespace-normal"
+              >
                 <Link
                   to="/"
                   onClick={() =>
@@ -197,7 +203,7 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
                     })
                   }
                 >
-                  Sign in and continue
+                  Sign in as {preview.targetEmail}
                 </Link>
               </Button>
             </div>
@@ -206,6 +212,10 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
               New to OpenGeni?
               <span className="h-px flex-1 bg-border" />
             </div>
+            <p className="mb-4 text-xs leading-5 text-fg-subtle">
+              We&apos;ll create the account for {preview.targetEmail}. Choose your name and password
+              below; you don&apos;t need to enter the email again.
+            </p>
             <div className="mb-3">
               <Label htmlFor="setup-account-name">Your name</Label>
               <Input

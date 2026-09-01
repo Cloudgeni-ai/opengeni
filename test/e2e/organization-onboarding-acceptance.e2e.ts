@@ -232,6 +232,35 @@ async function expectNoAxeViolations(page: Page, include = "body"): Promise<void
   ).toEqual([]);
 }
 
+async function settleDocumentAnimations(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    const nextFrame = async () =>
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    for (let pass = 0; pass < 8; pass += 1) {
+      await nextFrame();
+      const running = document
+        .getAnimations()
+        .filter((animation) => animation.playState === "running");
+      if (running.length > 0) {
+        await Promise.all(
+          running.map(async (animation) => {
+            try {
+              await animation.finished;
+            } catch {
+              // A replaced animation is already settled for this visual gate.
+            }
+          }),
+        );
+        continue;
+      }
+      await nextFrame();
+      await nextFrame();
+      if (document.getAnimations().every((animation) => animation.playState !== "running")) return;
+    }
+    throw new Error("document animations did not settle");
+  });
+}
+
 async function cookieHeader(context: BrowserContext): Promise<string> {
   return (await context.cookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
@@ -1054,40 +1083,35 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       organizationId: alternateOrganizationId,
       status: "pending",
     });
-    await registeredPage.setViewportSize({ width: 1024, height: 768 });
-    await registeredContext.clearCookies();
-    await registeredPage.goto(firstUrl(alternateSetupEmail), { waitUntil: "domcontentloaded" });
-    await registeredPage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
-    await registeredPage.getByRole("link", { name: "Sign in and continue" }).click();
-    await registeredPage.getByLabel("Email").fill(registeredEmail);
-    await registeredPage.getByLabel("Password").fill(PASSWORD);
-    await registeredPage.getByRole("button", { name: "Sign in", exact: true }).last().click();
-    await registeredPage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
-    await registeredPage
+    await alternatePage.goto(firstUrl(alternateSetupEmail), { waitUntil: "domcontentloaded" });
+    await alternatePage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await alternatePage.getByRole("link", { name: `Sign in as ${registeredEmail}` }).click();
+    await alternatePage
+      .getByRole("heading", { name: `This invitation is for ${registeredEmail}` })
+      .waitFor();
+    await alternatePage.getByText(`You're signed in as ${alternateOwnerEmail}`).waitFor();
+    await alternatePage.getByRole("button", { name: "Switch account" }).click();
+    await alternatePage.getByRole("heading", { name: "Sign in" }).waitFor();
+    const invitedEmailInput = alternatePage.getByLabel("Email");
+    expect(await invitedEmailInput.inputValue()).toBe(registeredEmail);
+    expect(await invitedEmailInput.isEditable()).toBe(false);
+    await alternatePage.getByLabel("Password").fill(PASSWORD);
+    await alternatePage.getByRole("button", { name: "Sign in", exact: true }).last().click();
+    await alternatePage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await alternatePage
       .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
       .waitFor();
-    await registeredPage.evaluate(
-      async () =>
-        await Promise.all(
-          document.getAnimations().map(async (animation) => {
-            try {
-              await animation.finished;
-            } catch {
-              // A replaced animation is already settled for this visual gate.
-            }
-          }),
-        ),
-    );
-    await expectNoAxeViolations(registeredPage, "body");
-    await registeredPage.screenshot({
+    await settleDocumentAnimations(alternatePage);
+    await expectNoAxeViolations(alternatePage, "body");
+    await alternatePage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
     });
-    await registeredPage
+    await alternatePage
       .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
       .click();
-    await registeredPage.getByRole("button", { name: "Account menu" }).waitFor();
-    const resignedCookie = await cookieHeader(registeredContext);
+    await alternatePage.getByRole("button", { name: "Account menu" }).waitFor();
+    const resignedCookie = await cookieHeader(alternateContext);
     const joinedMemberships = await sdk(resignedCookie).listOrganizationMemberships();
     expect(joinedMemberships.memberships).toHaveLength(2);
     expect(joinedMemberships.memberships.map((membership) => membership.organizationId)).toEqual(

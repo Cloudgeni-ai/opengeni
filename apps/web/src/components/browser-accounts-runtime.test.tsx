@@ -58,6 +58,16 @@ function emptyBrokerProjection(): ManagedAuthSessionSetProjection {
   };
 }
 
+function invitation(targetEmail: string) {
+  return {
+    organizationId: "00000000-0000-4000-8000-000000000010",
+    organizationName: "Northwind Research",
+    targetEmail,
+    expiresAt: "2026-09-08T12:00:00.000Z",
+    createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+  };
+}
+
 async function flush(): Promise<void> {
   await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
 }
@@ -177,6 +187,59 @@ describe("signed-out browser account recovery", () => {
       const selectionTransition = transitions.at(-1);
       expect(selectionTransition?.from).toBeNull();
       expect(selectionTransition?.to?.selectedSlotId).toBe(SLOT_ID);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("offers only the invited account until the invitation context is dismissed", async () => {
+    const current = projection(false);
+    const client: BrowserAccountsClientLike = {
+      getSessionSet: async () => current,
+      reconcileSessionSetAuthority: async () => current,
+      bootstrapSessionSet: async () => current,
+      beginLoginTransaction: async () => {
+        throw new Error("not used");
+      },
+      completeEmailPasswordTransaction: async () => {
+        throw new Error("not used");
+      },
+      cancelLoginTransaction: async () => current,
+      selectLoginSlot: async () => current,
+      logoutLoginSlot: async () => current,
+      logoutSessionSet: async () => ({ generation: "4", actorEpoch: "3", state: "logged_out" }),
+      resolveDeepLink: async () => ({ kind: "unavailable" }),
+    };
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <BrowserAccountsProvider
+            client={client}
+            broadcastChannelName={null}
+            onActorTransition={async () => undefined}
+          >
+            <BrowserAccountsSignedOutPanel invitation={invitation("invited@example.test")} />
+          </BrowserAccountsProvider>,
+        ),
+      );
+      await flush();
+
+      expect(container.textContent).toContain("Continue your invitation");
+      expect(container.textContent).toContain("Sign in as invited@example.test");
+      expect(container.textContent).not.toContain("beta@example.test");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Continue without this invitation")!
+          .click(),
+      );
+      expect(container.textContent).toContain("Choose an account");
+      expect(container.textContent).toContain("beta@example.test");
     } finally {
       await act(async () => root.unmount());
       container.remove();

@@ -18,6 +18,7 @@ import { isOrganizationConflict } from "@/lib/organization-admin";
 import {
   clearOrganizationInvitationContinuation,
   readOrganizationInvitationContinuation,
+  storeOrganizationInvitationContinuation,
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
 import { cn } from "@/lib/utils";
@@ -32,9 +33,17 @@ export type OrganizationInvitationsController = {
   error: Error | null;
   acceptingInvitationId: string | null;
   announcement: string;
-  continuation: (OrganizationInvitationContinuation & { invitationId: string | null }) | null;
+  continuation:
+    | (OrganizationInvitationContinuation & {
+        invitationId: string | null;
+        resolution: "matched" | "wrong_account" | "unavailable";
+        activeEmail: string | null;
+      })
+    | null;
+  canUseInvitedAccount: boolean;
   openDialog: () => void;
   setOpen: (open: boolean) => void;
+  useInvitedAccount: () => void;
   reload: () => Promise<void>;
   accept: (invitation: OrganizationInvitation) => Promise<void>;
 };
@@ -42,9 +51,11 @@ export type OrganizationInvitationsController = {
 export function useOrganizationInvitations(input: {
   client: OpenGeniBrowserClient;
   enabled: boolean;
+  activeEmail?: string | null;
+  onUseInvitedAccount?: (targetEmail: string) => void;
   onAccepted: () => void;
 }): OrganizationInvitationsController {
-  const { client, enabled, onAccepted } = input;
+  const { activeEmail = null, client, enabled, onAccepted, onUseInvitedAccount } = input;
   const [open, setOpen] = useState(false);
   const [invitations, setInvitations] = useState<OrganizationInvitation[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -53,7 +64,12 @@ export function useOrganizationInvitations(input: {
   const [acceptingInvitationId, setAcceptingInvitationId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [continuation, setContinuation] = useState<
-    (OrganizationInvitationContinuation & { invitationId: string | null }) | null
+    | (OrganizationInvitationContinuation & {
+        invitationId: string | null;
+        resolution: "matched" | "wrong_account" | "unavailable";
+        activeEmail: string | null;
+      })
+    | null
   >(null);
   const readSequence = useRef(0);
   const activeClient = useRef(client);
@@ -98,11 +114,20 @@ export function useOrganizationInvitations(input: {
             normalizeInvitationEmail(invitation.targetEmail) ===
               normalizeInvitationEmail(requestedContinuation.targetEmail),
         );
+        const normalizedActiveEmail = activeEmail ? normalizeInvitationEmail(activeEmail) : null;
+        const resolution = matchingInvitation
+          ? "matched"
+          : normalizedActiveEmail &&
+              normalizedActiveEmail !== normalizeInvitationEmail(requestedContinuation.targetEmail)
+            ? "wrong_account"
+            : "unavailable";
         setContinuation({
           ...requestedContinuation,
           invitationId: matchingInvitation?.id ?? null,
+          resolution,
+          activeEmail,
         });
-        clearOrganizationInvitationContinuation();
+        if (resolution !== "wrong_account") clearOrganizationInvitationContinuation();
         setOpen(true);
       }
       setLoaded(true);
@@ -115,7 +140,7 @@ export function useOrganizationInvitations(input: {
         setLoading(false);
       }
     }
-  }, [client, enabled]);
+  }, [activeEmail, client, enabled]);
 
   useEffect(() => {
     operationIds.current.clear();
@@ -144,8 +169,18 @@ export function useOrganizationInvitations(input: {
 
   const changeOpen = useCallback((nextOpen: boolean) => {
     setOpen(nextOpen);
-    if (!nextOpen) setContinuation(null);
+    if (!nextOpen) {
+      pendingContinuation.current = null;
+      clearOrganizationInvitationContinuation();
+      setContinuation(null);
+    }
   }, []);
+
+  const useInvitedAccount = useCallback(() => {
+    if (!continuation || !onUseInvitedAccount) return;
+    storeContinuation(continuation);
+    onUseInvitedAccount(continuation.targetEmail);
+  }, [continuation, onUseInvitedAccount]);
 
   const accept = useCallback(
     async (invitation: OrganizationInvitation) => {
@@ -175,6 +210,9 @@ export function useOrganizationInvitations(input: {
         if (activeClient.current !== acceptedClient) return;
         if (isOrganizationConflict(caught)) {
           operationIds.current.delete(invitation.id);
+          if (continuation?.invitationId === invitation.id) {
+            pendingContinuation.current = continuation;
+          }
           toast.error("Invitation state changed", {
             description: "Your invitations were refreshed. Review them before trying again.",
           });
@@ -186,7 +224,7 @@ export function useOrganizationInvitations(input: {
         if (activeClient.current === acceptedClient) setAcceptingInvitationId(null);
       }
     },
-    [acceptingInvitationId, client, continuation?.invitationId, enabled, onAccepted, reload],
+    [acceptingInvitationId, client, continuation, enabled, onAccepted, reload],
   );
 
   return {
@@ -199,8 +237,10 @@ export function useOrganizationInvitations(input: {
     acceptingInvitationId,
     announcement,
     continuation,
+    canUseInvitedAccount: onUseInvitedAccount !== undefined,
     openDialog,
     setOpen: changeOpen,
+    useInvitedAccount,
     reload,
     accept,
   };
@@ -256,6 +296,8 @@ export function OrganizationInvitationsDialog(props: {
       ? [focusedInvitation]
       : []
     : controller.invitations;
+  const wrongAccount = controller.continuation?.resolution === "wrong_account";
+  const unavailable = controller.continuation?.resolution === "unavailable";
   return (
     <Dialog open={controller.open} onOpenChange={controller.setOpen}>
       <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-xl">
@@ -263,16 +305,20 @@ export function OrganizationInvitationsDialog(props: {
           <DialogTitle>
             {focusedInvitation
               ? `Join ${focusedInvitation.organizationName ?? "organization"}`
-              : controller.continuation
-                ? `Invitation to ${controller.continuation.organizationName}`
-                : "Organization invitations"}
+              : wrongAccount
+                ? `This invitation is for ${controller.continuation?.targetEmail}`
+                : unavailable
+                  ? "This invitation is no longer available"
+                  : "Organization invitations"}
           </DialogTitle>
           <DialogDescription>
             {focusedInvitation
               ? "You're signed in. Accept the invitation below to finish joining."
-              : controller.continuation
-                ? "You're signed in, but this invitation isn't available for this account."
-                : "Review invitations for this signed-in account. Joining adds the listed organization and shared workspace access; it never shares anyone's Personal workspace."}
+              : wrongAccount
+                ? `You're signed in as ${controller.continuation?.activeEmail}. Switch accounts to join ${controller.continuation?.organizationName}.`
+                : unavailable
+                  ? `The invitation to ${controller.continuation?.organizationName} may already have been accepted, expired, or revoked.`
+                  : "Review invitations for this signed-in account. Joining adds the listed organization and shared workspace access; it never shares anyone's Personal workspace."}
           </DialogDescription>
         </DialogHeader>
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -300,10 +346,25 @@ export function OrganizationInvitationsDialog(props: {
             </Notice>
           ) : null}
 
-          {controller.continuation && !focusedInvitation && controller.loaded ? (
-            <Notice tone="info" title="This invitation is no longer pending" className="mb-3">
-              The invitation to {controller.continuation.organizationName} may already have been
-              accepted, revoked, or opened with a different account.
+          {wrongAccount && controller.loaded ? (
+            <Notice
+              tone="info"
+              title="Switch accounts to continue"
+              className="mb-3"
+              action={
+                controller.canUseInvitedAccount ? (
+                  <Button type="button" size="sm" onClick={controller.useInvitedAccount}>
+                    Switch account
+                  </Button>
+                ) : undefined
+              }
+            >
+              Use the account for {controller.continuation?.targetEmail}. The invitation remains
+              available while you switch.
+            </Notice>
+          ) : unavailable && controller.loaded ? (
+            <Notice tone="info" title="No action is required" className="mb-3">
+              Ask the organization administrator for a new invitation if you still need access.
             </Notice>
           ) : null}
 
@@ -376,6 +437,17 @@ function titleCase(value: string): string {
 
 function normalizeInvitationEmail(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function storeContinuation(
+  continuation: OrganizationInvitationContinuation & { invitationId: string | null },
+): void {
+  storeOrganizationInvitationContinuation({
+    organizationId: continuation.organizationId,
+    organizationName: continuation.organizationName,
+    targetEmail: continuation.targetEmail,
+    expiresAt: continuation.expiresAt,
+  });
 }
 
 function formatInvitationDate(value: string): string {

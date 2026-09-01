@@ -59,6 +59,10 @@ import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import {
+  clearOrganizationInvitationContinuation,
+  readOrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
+import {
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
   type ManagedSelfContext,
@@ -2544,6 +2548,9 @@ export function RootRouteComponent() {
     workspaces,
   ]);
 
+  const organizationInvitationContinuation =
+    managedAuthRequired && !authSession ? readOrganizationInvitationContinuation() : null;
+
   const applicationSurface = isPublicAuthRoute ? (
     // Self-contained public pages render before config/auth gates and outside
     // AppContext. The isolated account-auth popup is intentionally included.
@@ -2565,6 +2572,7 @@ export function RootRouteComponent() {
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
       {browserAccountsEnabled ? (
         <BrowserAccountsSignedOutPanel
+          invitation={organizationInvitationContinuation}
           emptySetRegistrationPanel={
             clientConfig?.managedAuthSessionSetMode === "broker" ||
             clientConfig?.managedAuthSessionSetMode === "dual" ? (
@@ -2580,6 +2588,8 @@ export function RootRouteComponent() {
         />
       ) : (
         <ManagedAuthPanel
+          invitation={organizationInvitationContinuation}
+          onDismissInvitation={clearOrganizationInvitationContinuation}
           onSubmit={handleManagedAuth}
           emailVerificationRequired={managedEmailVerificationRequired}
           socialProviders={managedSocialProviders}

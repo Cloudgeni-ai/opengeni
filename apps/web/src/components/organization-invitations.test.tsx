@@ -110,6 +110,7 @@ describe("global organization invitations", () => {
       const controller = useOrganizationInvitations({
         client,
         enabled: true,
+        activeEmail: pending.targetEmail,
         onAccepted,
       });
       return <OrganizationInvitationsDialog controller={controller} />;
@@ -185,6 +186,7 @@ describe("global organization invitations", () => {
       const controller = useOrganizationInvitations({
         client,
         enabled: true,
+        activeEmail: unrelated.targetEmail,
         onAccepted: () => undefined,
       });
       return <OrganizationInvitationsDialog controller={controller} />;
@@ -196,10 +198,71 @@ describe("global organization invitations", () => {
     try {
       await act(async () => root.render(<Harness />));
       await flush();
-      expect(container.textContent).toContain("Invitation to Requested Organization");
-      expect(container.textContent).toContain("This invitation is no longer pending");
+      expect(container.textContent).toContain("This invitation is no longer available");
+      expect(container.textContent).toContain("accepted, expired, or revoked");
       expect(container.textContent).not.toContain("Unrelated Organization");
       expect(container.querySelector('button[aria-label^="Accept invitation to"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("names the invited and active accounts separately before switching", async () => {
+    sessionStorage.clear();
+    const pending = invitation({
+      id: crypto.randomUUID(),
+      organizationId: crypto.randomUUID(),
+      organizationName: "Invited Organization",
+      status: "pending",
+      revision: 1,
+    });
+    storeOrganizationInvitationContinuation({
+      organizationId: pending.organizationId,
+      organizationName: pending.organizationName,
+      targetEmail: pending.targetEmail,
+      expiresAt: pending.expiresAt,
+    });
+    const onUseInvitedAccount = mock(() => undefined);
+    const client = {
+      listOrganizationInvitations: mock(async () => ({
+        invitations: [],
+        nextCursor: null,
+      })),
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    } as unknown as OpenGeniBrowserClient;
+
+    function Harness() {
+      const controller = useOrganizationInvitations({
+        client,
+        enabled: true,
+        activeEmail: "other@example.test",
+        onUseInvitedAccount,
+        onAccepted: () => undefined,
+      });
+      return <OrganizationInvitationsDialog controller={controller} />;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      await flush();
+      expect(container.textContent).toContain(`This invitation is for ${pending.targetEmail}`);
+      expect(container.textContent).toContain("You're signed in as other@example.test");
+      expect(container.textContent).toContain("The invitation remains available while you switch");
+      expect(
+        sessionStorage.getItem("opengeni:organization-invitation-continuation:v1"),
+      ).not.toBeNull();
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Switch account")!
+          .click(),
+      );
+      expect(onUseInvitedAccount).toHaveBeenCalledWith(pending.targetEmail);
     } finally {
       await act(async () => root.unmount());
       container.remove();
