@@ -103,6 +103,9 @@
   composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
   const controllers: SessionSurfaceControllers = {
     ...managed,
+    acquire() {
+      return () => undefined;
+    },
     destroy() {
       unsubscribeSharedEvents();
       unsubscribeComposerQueue();

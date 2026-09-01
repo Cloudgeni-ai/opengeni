@@ -61,6 +61,11 @@ connection opens or reconnects. Subscribing to any composed public store lazily
 starts that shared feed; construction and SSR remain transport-free. Call the
 composition's `destroy()` method from `onDestroy` when the host owns it.
 
+MCP approval policy is scoped to one server as well as one session. Construct
+it from context with
+`createContextMcpApprovalPolicy({ sessionId, serverId })`; the helper uses the
+explicit `mcpApprovalPolicyClient` or detects the capability on a full client.
+
 `OpenGeniProvider` treats each client and workspace field as authority. Replacing
 one remounts the provided subtree so old reads, streams, and controllers retire;
 recreating an otherwise identical context wrapper does not. Descendants that

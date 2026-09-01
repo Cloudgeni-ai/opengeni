@@ -1,6 +1,7 @@
 <script lang="ts">
   import { projectPendingApprovals } from "@opengeni/sdk/session";
   import type { SessionSurfaceControllers } from "../controllers";
+  import { editQueuedTurnIntoComposer } from "../queue-edit";
   import type { AuthReconnectHandler } from "../renderers";
   import { readableFromController } from "../store";
   import ApprovalSurface from "./ApprovalSurface.svelte";
@@ -37,6 +38,8 @@
   let approvals = $derived(projectPendingApprovals([...$events.events]));
   let status = $derived($events.sessionStatus ?? $session.value?.status ?? "queued");
 
+  $effect(() => controllers.acquire());
+
   function pause() {
     controllers.control.controller.clearError();
     return controllers.control.controller.pause();
@@ -45,6 +48,22 @@
   function resume() {
     controllers.control.controller.clearError();
     return controllers.control.controller.resume();
+  }
+
+  async function editQueuedTurn(turnId: string) {
+    const edited = await editQueuedTurnIntoComposer({
+      queue: controllers.queue.controller,
+      composer: controllers.composer.controller,
+      turnId,
+      confirmReplace: () =>
+        window.confirm(
+          "Your composer already has a draft. Replace it with this queued prompt? The current draft will be permanently discarded.",
+        ),
+    });
+    if (!edited) return;
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.focus();
+    });
   }
 </script>
 
@@ -67,7 +86,7 @@
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} showError={false} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
-    {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} />{/if}
+    {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} onEdit={editQueuedTurn} />{/if}
   </div>
   <SessionComposer
     controller={controllers.composer.controller}

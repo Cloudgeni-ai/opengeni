@@ -38,8 +38,9 @@
     event.preventDefault();
     void submit(event.metaKey || event.ctrlKey ? "steer" : "send");
   }
-  function addFiles(files: FileList | null) {
-    if (files && attachments) attachments.addFiles(files);
+  function addFiles(input: HTMLInputElement) {
+    if (input.files && attachments) attachments.addFiles(input.files);
+    input.value = "";
   }
   function toggleTool(id: string) {
     const next = selectedTools.includes(id)
@@ -63,7 +64,7 @@
   <footer class="og-composer__footer og-composer-footer" data-og-part="footer">
     <div class="og-composer__controls og-composer-controls" data-og-part="controls">
       {#if attachments}
-        <input class="og-visually-hidden" bind:this={fileInput} type="file" multiple aria-label="Attach files" onchange={(event) => addFiles(event.currentTarget.files)} />
+        <input class="og-visually-hidden" bind:this={fileInput} type="file" multiple aria-label="Attach files" onchange={(event) => addFiles(event.currentTarget)} />
         <button class="og-icon-button" type="button" aria-label="Attach files" onclick={() => fileInput?.click()}>＋</button>
       {/if}
       {#if models.length > 0}

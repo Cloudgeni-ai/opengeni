@@ -34,6 +34,7 @@ test("native composer submission and owning examples close their lifecycle", () 
   const frameworkGuide = readFileSync(resolve(packageRoot, "../../docs/framework-ui.md"), "utf8");
 
   expect(composer).toContain("submitSessionComposer(controller, attachments, delivery)");
+  expect(composer).toContain('input.value = ""');
   expect(composer).not.toContain("void controller.submit(delivery");
   expect(readme).toContain("onDestroy(() => events.destroy())");
   expect(frameworkGuide).toContain("onDestroy(() => events.destroy())");
@@ -76,9 +77,23 @@ test("composed control and demo tool-policy failures remain visible and authorit
   expect(sessionSurface).toContain('data-og-part="control-error" role="alert"');
   expect(sessionSurface).toContain("controllers.control.controller.clearError()");
   expect(sessionSurface).toContain("showError={false}");
+  expect(sessionSurface).toContain("$effect(() => controllers.acquire())");
+  expect(sessionSurface).toContain("onEdit={editQueuedTurn}");
   expect(demo).toContain("client.updateSessionToolPolicy(workspaceId, sessionId");
   expect(demo).toContain("expectedVersion: toolPolicyVersion");
   expect(demo).toContain("adoptSessionPolicy(await client.getSession(workspaceId, sessionId))");
+});
+
+test("context refinements and optional queue actions have executable consumers", () => {
+  const packageRoot = resolve(import.meta.dir, "..");
+  const controllers = readFileSync(join(packageRoot, "src/controllers.ts"), "utf8");
+  const queue = readFileSync(join(packageRoot, "src/components/QueueSurface.svelte"), "utf8");
+
+  expect(controllers).toContain("export function createContextMcpApprovalPolicy");
+  expect(controllers).toContain("context.mcpApprovalPolicyClient ??");
+  expect(controllers).toContain('"updateSessionMcpApprovalPolicy"');
+  expect(queue).toContain("{#if onEdit}<button");
+  expect(queue).not.toContain("onEdit?.(turn.id)");
 });
 
 test("native auth-needed recovery stays host-owned and works without a pre-minted URL", () => {
