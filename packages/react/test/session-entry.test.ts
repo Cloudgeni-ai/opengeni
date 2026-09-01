@@ -53,7 +53,7 @@ describe("session-only entry", () => {
     expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
-    expect([...thirdParty].sort()).toEqual(["@opengeni/sdk", "react"]);
+    expect([...thirdParty].sort()).toEqual(["@opengeni/sdk", "@opengeni/sdk/session", "react"]);
     expect(visited.size).toBeGreaterThan(5);
   });
 
@@ -77,7 +77,7 @@ describe("session-only entry", () => {
         minify: true,
         rollupOptions: {
           input: join(import.meta.dir, "fixtures/session-consumer.ts"),
-          external: ["react", "react/jsx-runtime", "@opengeni/sdk"],
+          external: ["react", "react/jsx-runtime", "@opengeni/sdk", "@opengeni/sdk/session"],
         },
       },
     });
@@ -94,9 +94,11 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/older-history.ts"))).toBe(true);
     expect(reactSources.some((id) => id.includes("/src/components/"))).toBe(false);
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
+    expect([...transformed].some((id) => id.includes("/packages/sdk/src/"))).toBe(false);
     // Keep the session-only closure explicit: adding a source requires reviewing
-    // whether it belongs to this provider-neutral public subpath.
-    expect(reactSources.length).toBe(21);
+    // whether it belongs to this provider-neutral public subpath. Pure session
+    // behavior now lives behind the external @opengeni/sdk/session boundary.
+    expect(reactSources.length).toBe(18);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

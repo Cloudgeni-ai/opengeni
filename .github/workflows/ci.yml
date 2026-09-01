@@ -522,7 +522,7 @@ jobs:
     needs: [automation-admission, plan]
     if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.e2e_count != '0' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 65
     strategy:
       fail-fast: true
       matrix:
@@ -576,9 +576,11 @@ jobs:
 
       # Firefox is included because the impact plan can select the artifact
       # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
-      # included because multi-engine product E2E files such as the Gateway
-      # settings acceptance launch it directly. A Chromium-only install makes
-      # either class fail before exercising application behavior.
+      # included because framework-ui-parity.browser.e2e.ts launches all three
+      # critical engines and multi-engine product E2E files such as the Gateway
+      # settings acceptance launch it directly. Installing only browser binaries
+      # is insufficient: every selected engine also needs its pinned host
+      # dependencies.
       - name: Install pinned browser runtimes
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17
@@ -586,12 +588,12 @@ jobs:
           browsers: chromium firefox webkit
 
       - name: Run exactly the impacted E2E tests
-        timeout-minutes: 13
+        timeout-minutes: 41
         run: >-
           bun scripts/ci/profile-command.ts
           --name e2e-${{ matrix.number }}
           --output ci-profile/e2e-${{ matrix.number }}.json
-          --timeout-seconds 720
+          --timeout-seconds 2400
           -- bun scripts/ci/run-test-shard.ts --plan impact-plan.json --tier e2e
           --shard ${{ matrix.index }} --shards ${{ matrix.total }}
           --file-profile ci-profile/e2e-${{ matrix.number }}-files.json

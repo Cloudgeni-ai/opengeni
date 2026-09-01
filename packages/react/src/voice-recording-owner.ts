@@ -75,27 +75,44 @@ async function createUnderlyingOwnerLease(): Promise<UnderlyingOwnerLease> {
     );
     if (retained) {
       writeSessionOwnerId(candidate);
-      return retained;
+      return bindOwnerLeaseToDocument(retained);
     }
 
     const rotated = crypto.randomUUID();
     writeSessionOwnerId(rotated);
     const acquired = await tryAcquireWebLock(rotated, OWNER_LOCK_RELOAD_GRACE_MILLISECONDS);
-    if (acquired) return acquired;
+    if (acquired) return bindOwnerLeaseToDocument(acquired);
   }
 
   const broadcastLease = await tryAcquireBroadcastLease(
     readSessionOwnerId() ?? candidate,
     reloadNavigation ? OWNER_BROADCAST_RELOAD_ATTEMPTS : 0,
   );
-  if (broadcastLease) return broadcastLease;
+  if (broadcastLease) return bindOwnerLeaseToDocument(broadcastLease);
 
   // Without a cross-document coordination primitive, prefer a fresh
   // per-document identity over copied session state. Recovery then waits only
   // for the ordinary stale-owner timeout instead of risking cross-tab access.
   const ownerId = crypto.randomUUID();
   writeSessionOwnerId(ownerId);
-  return { ownerId, release: () => undefined };
+  return bindOwnerLeaseToDocument({ ownerId, release: () => undefined });
+}
+
+function bindOwnerLeaseToDocument(lease: UnderlyingOwnerLease): UnderlyingOwnerLease {
+  if (typeof window === "undefined") return lease;
+
+  let released = false;
+  const onPageHide = (event: PageTransitionEvent) => {
+    if (!event.persisted) release();
+  };
+  const release = () => {
+    if (released) return;
+    released = true;
+    window.removeEventListener("pagehide", onPageHide);
+    lease.release();
+  };
+  window.addEventListener("pagehide", onPageHide);
+  return { ownerId: lease.ownerId, release };
 }
 
 function hasWebLocks(): boolean {

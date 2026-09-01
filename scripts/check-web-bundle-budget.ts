@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  FRAMEWORK_NEUTRAL_UI_CURRENT_MAIN_BROWSER_FILE_COUNT,
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -385,6 +386,11 @@ const budgets = {
   // existing Codex/settings chunks. Linux/x64 Bun 1.4 measures 2,271,792 raw
   // bytes across the same 33 files. Advance only the raw whole-KiB envelope;
   // gzip, file count, initial, per-file, lazy, and CSS caps remain fixed.
+  // Framework-neutral React compatibility plus the current-main graph measures
+  // 2,252,718 raw / 634,772 gzip bytes across 34 files on Linux/x64 Bun 1.4.
+  // Both aggregate size envelopes remain sufficient; advance only the exact
+  // request-count guard by one while every initial, per-file, lazy, and CSS cap
+  // stays fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -410,7 +416,7 @@ const effectiveBudgets = {
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
-    33,
+    FRAMEWORK_NEUTRAL_UI_CURRENT_MAIN_BROWSER_FILE_COUNT,
   ),
 } as const;
 

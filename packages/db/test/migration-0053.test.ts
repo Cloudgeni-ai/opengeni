@@ -241,6 +241,15 @@ describe("migration 0053 (Codex credential leases)", () => {
         select count(*)::int as count from codex_credential_leases`;
       expect(inert!.count).toBe(0);
 
+      // Keep the historical 0053 rollout shape while adding the one later
+      // rolling column set the current allocator reads. Applying the complete
+      // modern chain here would also normalize the stored rotation strategy,
+      // erasing the old-worker rollback state this fixture exists to prove.
+      await applyFile(admin, "0383_codex_cooldown_reconciliation.sql");
+      await admin`
+        insert into schema_migrations (name)
+        values ('0383_codex_cooldown_reconciliation.sql') on conflict do nothing`;
+
       const appUrl = new URL(databaseUrl);
       appUrl.username = "opengeni_app";
       appUrl.password = "apppw";

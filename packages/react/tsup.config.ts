@@ -27,7 +27,7 @@ const external = [
 export default defineConfig({
   entry: [
     "src/index.ts",
-    "src/accounts.tsx",
+    "src/accounts.ts",
     "src/composer.ts",
     "src/session.ts",
     "src/session-ui.ts",

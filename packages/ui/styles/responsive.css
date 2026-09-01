@@ -1,0 +1,55 @@
+@container og-composer (max-width: 48rem) {
+  .og-root .og-composer__input,
+  .og-root .og-composer-input {
+    font-size: var(--og-font-size-composer);
+    line-height: var(--og-line-height-composer);
+  }
+}
+
+@container og-composer (max-width: 40rem) {
+  .og-root .og-composer__footer,
+  .og-root .og-composer-footer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: var(--og-space-1);
+  }
+  .og-root .og-composer__controls,
+  .og-root .og-composer-controls {
+    flex-wrap: wrap;
+    overflow-x: visible;
+    scrollbar-width: none;
+  }
+  .og-root .og-composer__controls::-webkit-scrollbar,
+  .og-root .og-composer-controls::-webkit-scrollbar { display: none; }
+  .og-root [data-og-collapse="narrow"] { display: none; }
+}
+
+@media (max-width: 40rem) {
+  .og-root.og-session, .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
+  .og-root .og-chrome { padding-inline: var(--og-space-3); }
+  .og-root .og-timeline { padding: var(--og-space-3); }
+  .og-root .og-composer { margin-inline: var(--og-space-2); margin-bottom: max(var(--og-space-2), env(safe-area-inset-bottom)); }
+  .og-root .og-timeline-row[data-og-kind="user-message"] .og-timeline-row__body { max-width: 94%; }
+  .og-root .og-queue-item { grid-template-columns: minmax(0, 1fr); }
+  .og-root .og-queue-item__actions { justify-content: flex-end; }
+}
+
+@media (pointer: coarse) {
+  .og-root :where(.og-button, .og-icon-button, .og-fold__trigger) { min-height: var(--og-touch-target); }
+  .og-root .og-icon-button { width: var(--og-touch-target); }
+}
+
+@media (forced-colors: active) {
+  .og-root :where(.og-button, .og-icon-button, .og-composer, .og-queue, .og-approval, .og-human-input, .og-goal, .og-mcp-policy) { border-color: CanvasText; }
+  .og-root .og-status::before { forced-color-adjust: none; background: currentColor; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .og-root *, .og-root *::before, .og-root *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+  }
+}

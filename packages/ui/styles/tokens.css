@@ -1,0 +1,121 @@
+/* Framework-neutral OpenGeni session tokens. Scoped consumers may override any --og-* token. */
+:root {
+  --og-font-sans: "Inter Variable", "Inter", "Noto Sans JP Variable", "Noto Sans Arabic Variable", ui-sans-serif, system-ui, sans-serif;
+  --og-font-mono: "JetBrains Mono Variable", "JetBrains Mono", "Noto Sans JP Variable", "Noto Sans Arabic Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --og-font-features: "cv11", "ss01", "ss03";
+  --og-font-size-xs: 11px;
+  --og-line-height-xs: 1.45;
+  --og-font-size-sm: 12px;
+  --og-line-height-sm: 1.5;
+  --og-font-size-base: 13px;
+  --og-line-height-base: 1.55;
+  --og-font-size-md: 15px;
+  --og-line-height-md: 1.6;
+  --og-font-size-control: 12px;
+  --og-line-height-control: 16px;
+  --og-font-size-composer: 16px;
+  --og-line-height-composer: 24px;
+  --og-font-size-composer-wide: 15px;
+  --og-line-height-composer-wide: 24px;
+  --og-code-font-size: 12px;
+  --og-code-line-height: 18px;
+  --og-space-1: 0.25rem;
+  --og-space-2: 0.5rem;
+  --og-space-3: 0.75rem;
+  --og-space-4: 1rem;
+  --og-space-5: 1.25rem;
+  --og-space-6: 1.5rem;
+  --og-radius-xs: 4px;
+  --og-radius-sm: 6px;
+  --og-radius-md: 10px;
+  --og-radius-lg: 14px;
+  --og-radius-xl: 20px;
+  --og-radius-full: 9999px;
+  --og-duration-fast: 120ms;
+  --og-duration-base: 180ms;
+  --og-duration-slow: 320ms;
+  --og-duration-disclose: 120ms;
+  --og-duration-disclose-settle: 820ms;
+  --og-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --og-ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --og-color-bg: oklch(0.155 0.012 260);
+  --og-color-surface-1: oklch(0.19 0.014 260);
+  --og-color-surface-2: oklch(0.225 0.015 260);
+  --og-color-surface-3: oklch(0.265 0.016 260);
+  --og-color-border: oklch(0.3 0.014 260);
+  --og-color-border-strong: oklch(0.42 0.016 260);
+  --og-color-fg: oklch(0.955 0.005 260);
+  --og-color-fg-muted: oklch(0.73 0.012 260);
+  --og-color-fg-subtle: oklch(0.62 0.013 260);
+  --og-color-accent: oklch(0.72 0.15 255);
+  --og-color-accent-strong: oklch(0.78 0.14 255);
+  --og-color-accent-deep: oklch(0.54 0.18 255);
+  --og-color-accent-fg: oklch(0.985 0.005 260);
+  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
+  --og-color-status-queued: oklch(0.62 0.03 260);
+  --og-color-status-running: oklch(0.78 0.11 80);
+  --og-color-status-idle: oklch(0.78 0.12 155);
+  --og-color-status-waiting: oklch(0.74 0.12 305);
+  --og-color-status-failed: oklch(0.7 0.16 22);
+  --og-color-status-cancelled: oklch(0.6 0.035 260);
+  --og-color-danger: oklch(0.66 0.18 22);
+  --og-shadow-sm: 0 1px 2px oklch(0 0 0 / 0.28);
+  --og-shadow-md: 0 2px 8px oklch(0 0 0 / 0.32), 0 1px 2px oklch(0 0 0 / 0.24);
+  --og-shadow-lg: 0 8px 28px oklch(0 0 0 / 0.42), 0 2px 8px oklch(0 0 0 / 0.28);
+  --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
+  --og-focus-ring: 0 0 0 2px var(--og-color-bg), 0 0 0 4px var(--og-color-accent);
+  --og-composer-max-height: min(18rem, 42dvh);
+  --og-timeline-max-width: 56rem;
+  --og-touch-target: 2.75rem;
+  --og-model-picker-menu-width: 18rem;
+}
+
+.og-root {
+  color-scheme: dark;
+}
+
+[data-og-density="compact"],
+.og-density-compact {
+  --og-font-size-xs: 10px;
+  --og-font-size-sm: 11px;
+  --og-font-size-base: 12px;
+  --og-font-size-md: 13px;
+  --og-font-size-control: 11px;
+  --og-font-size-composer: 13px;
+  --og-line-height-composer: 20px;
+  --og-font-size-composer-wide: 13px;
+  --og-line-height-composer-wide: 20px;
+  --og-model-picker-menu-width: 15rem;
+}
+
+[data-og-theme="light"],
+.og-light {
+  --og-color-bg: oklch(0.978 0.003 260);
+  --og-color-surface-1: oklch(1 0 0);
+  --og-color-surface-2: oklch(0.962 0.004 260);
+  --og-color-surface-3: oklch(0.935 0.006 260);
+  --og-color-border: oklch(0.9 0.006 260);
+  --og-color-border-strong: oklch(0.8 0.01 260);
+  --og-color-fg: oklch(0.21 0.015 260);
+  --og-color-fg-muted: oklch(0.46 0.014 260);
+  --og-color-fg-subtle: oklch(0.5 0.012 260);
+  --og-color-accent: oklch(0.55 0.18 255);
+  --og-color-accent-strong: oklch(0.48 0.19 255);
+  --og-color-accent-deep: oklch(0.44 0.19 255);
+  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 11%, transparent);
+  --og-color-status-running: oklch(0.48 0.13 80);
+  --og-color-status-idle: oklch(0.49 0.13 155);
+  --og-color-status-waiting: oklch(0.54 0.15 305);
+  --og-color-status-failed: oklch(0.5 0.19 22);
+  --og-color-danger: oklch(0.54 0.2 22);
+  --og-shadow-sm: 0 1px 2px oklch(0.2 0.02 260 / 0.07);
+  --og-shadow-md: 0 2px 8px oklch(0.2 0.02 260 / 0.09), 0 1px 2px oklch(0.2 0.02 260 / 0.06);
+  --og-shadow-lg: 0 8px 28px oklch(0.2 0.02 260 / 0.13), 0 2px 8px oklch(0.2 0.02 260 / 0.07);
+}
+
+.og-root[data-og-theme="light"],
+.og-root.og-light,
+[data-og-theme="light"] .og-root,
+.og-light .og-root {
+  color-scheme: light;
+}

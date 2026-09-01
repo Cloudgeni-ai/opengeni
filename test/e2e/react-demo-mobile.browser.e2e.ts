@@ -107,7 +107,7 @@ describe("public React demo mobile product acceptance", () => {
         expect(
           await page.getByRole("tab", { name: "Files", exact: true }).getAttribute("aria-selected"),
         ).toBe("true");
-        await page.getByRole("button", { name: "Close workspace" }).click();
+        await page.getByRole("button", { name: "Hide workspace" }).click();
         await visibleWorkspaceDialog(page).waitFor({ state: "hidden" });
       } else {
         expect(await page.getByRole("navigation", { name: "Demo views" }).count()).toBe(0);
@@ -179,7 +179,7 @@ describe("public React demo mobile product acceptance", () => {
     const workspace = visibleWorkspaceDialog(page);
     await workspace.waitFor();
     expect(await page.evaluate(() => document.activeElement?.getAttribute("role"))).toBe("tab");
-    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("ArrowDown");
     expect(
       await page.getByRole("tab", { name: "Terminal", exact: true }).getAttribute("aria-selected"),
     ).toBe("true");

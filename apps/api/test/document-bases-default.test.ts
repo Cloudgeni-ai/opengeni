@@ -26,6 +26,17 @@ const defaultBase = {
 
 const realDocuments = await import("@opengeni/documents");
 const realListDocumentBasesEnsuringDefault = realDocuments.listDocumentBasesEnsuringDefault;
+const realGetDocument = realDocuments.getDocument;
+const realReclassifyDocumentAuthority = realDocuments.reclassifyDocumentAuthority;
+const realListDocumentAuthorityReclassifications =
+  realDocuments.listDocumentAuthorityReclassifications;
+const realRunDocumentDefaultCollectionBackfill = realDocuments.runDocumentDefaultCollectionBackfill;
+const realListDocumentDefaultCollectionBackfillRuns =
+  realDocuments.listDocumentDefaultCollectionBackfillRuns;
+const realGetDocumentDefaultCollectionBackfillAudit =
+  realDocuments.getDocumentDefaultCollectionBackfillAudit;
+const realListOrganizationDocumentAuthorityReclassifications =
+  realDocuments.listOrganizationDocumentAuthorityReclassifications;
 const authorityReceipt = {
   operationId: "55555555-5555-4555-8555-555555555555",
   documentId: DOCUMENT_ID,
@@ -105,35 +116,32 @@ mock.module("@opengeni/documents", () => ({
   ),
   getDocument: mock(async (...args: Parameters<typeof realDocuments.getDocument>) => {
     if (args[0] !== fakeDb) {
-      return await realDocuments.getDocument(...args);
+      return await realGetDocument(...args);
     }
     return { id: DOCUMENT_ID, authorityKind: "workspace" };
   }),
   reclassifyDocumentAuthority: mock(async (db: unknown, input: unknown) => {
-    if (db !== fakeDb)
-      return await realDocuments.reclassifyDocumentAuthority(db as never, input as never);
+    if (db !== fakeDb) return await realReclassifyDocumentAuthority(db as never, input as never);
     reclassificationInputs.push(input);
     return authorityReceipt;
   }),
   listDocumentAuthorityReclassifications: mock(async (db: unknown, input: unknown) => {
-    if (db === fakeDb) reclassificationListInputs.push(input);
-    return db === fakeDb
-      ? { receipts: [authorityReceipt], hasMore: false, nextCursor: null }
-      : { receipts: [], hasMore: false, nextCursor: null };
+    if (db !== fakeDb) {
+      return await realListDocumentAuthorityReclassifications(db as never, input as never);
+    }
+    reclassificationListInputs.push(input);
+    return { receipts: [authorityReceipt], hasMore: false, nextCursor: null };
   }),
   runDocumentDefaultCollectionBackfill: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {
-      return await realDocuments.runDocumentDefaultCollectionBackfill(db as never, input as never);
+      return await realRunDocumentDefaultCollectionBackfill(db as never, input as never);
     }
     backfillInputs.push(input);
     return backfillResult;
   }),
   listDocumentDefaultCollectionBackfillRuns: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {
-      return await realDocuments.listDocumentDefaultCollectionBackfillRuns(
-        db as never,
-        input as never,
-      );
+      return await realListDocumentDefaultCollectionBackfillRuns(db as never, input as never);
     }
     backfillRunListInputs.push(input);
     if ((input as { cursor?: string }).cursor === "domain-error") {
@@ -145,10 +153,7 @@ mock.module("@opengeni/documents", () => ({
   }),
   getDocumentDefaultCollectionBackfillAudit: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {
-      return await realDocuments.getDocumentDefaultCollectionBackfillAudit(
-        db as never,
-        input as never,
-      );
+      return await realGetDocumentDefaultCollectionBackfillAudit(db as never, input as never);
     }
     backfillAuditInputs.push(input);
     if ((input as { runId: string }).runId === "99999999-9999-4999-8999-999999999999") {
@@ -158,7 +163,7 @@ mock.module("@opengeni/documents", () => ({
   }),
   listOrganizationDocumentAuthorityReclassifications: mock(async (db: unknown, input: unknown) => {
     if (db !== fakeDb) {
-      return await realDocuments.listOrganizationDocumentAuthorityReclassifications(
+      return await realListOrganizationDocumentAuthorityReclassifications(
         db as never,
         input as never,
       );

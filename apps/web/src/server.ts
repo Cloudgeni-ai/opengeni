@@ -7,6 +7,7 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+const DEMO_ROOTS = ["react-demo", "svelte-demo"] as const;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -56,8 +57,9 @@ export function createWebHandler(
       return new Response("Bad Request", { status: 400 });
     }
 
-    if (pathname === "/react-demo") {
-      return Response.redirect(new URL("/react-demo/", url), 308);
+    const demoRoot = DEMO_ROOTS.find((candidate) => pathname === `/${candidate}`);
+    if (demoRoot) {
+      return Response.redirect(new URL(`/${demoRoot}/`, url), 308);
     }
     const staticPath = pathname.endsWith("/") ? `${pathname}index.html` : pathname;
     const requestedPath = safePath(distRoot, staticPath);
@@ -69,7 +71,10 @@ export function createWebHandler(
     if (await requestedFile.exists()) {
       return serveFile(request, requestedPath, cacheControlFor(staticPath));
     }
-    if (pathname.startsWith("/assets/") || pathname.startsWith("/react-demo/")) {
+    if (
+      pathname.startsWith("/assets/") ||
+      DEMO_ROOTS.some((candidate) => pathname.startsWith(`/${candidate}/`))
+    ) {
       return new Response("Not Found", { status: 404 });
     }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
@@ -219,7 +224,12 @@ function safePath(root: string, pathname: string): string | null {
 }
 
 function cacheControlFor(pathname: string): string {
-  if (pathname.startsWith("/assets/")) return IMMUTABLE_CACHE_CONTROL;
+  if (
+    pathname.startsWith("/assets/") ||
+    DEMO_ROOTS.some((candidate) => pathname.startsWith(`/${candidate}/assets/`))
+  ) {
+    return IMMUTABLE_CACHE_CONTROL;
+  }
   if (extname(pathname) === ".html" || pathname === "/") return REVALIDATE_CACHE_CONTROL;
   return SHORT_CACHE_CONTROL;
 }

@@ -131,6 +131,10 @@ function startBuilder(root: string, environment: Record<string, string> = {}): B
   const child = spawn(process.execPath, ["scripts/build-publishable-packages.ts"], {
     cwd: root,
     env: { ...process.env, ...environment },
+    // The fixture creates its own detached build supervisor. Keep the fixture
+    // process group independent so supervisor teardown cannot propagate a HUP
+    // into the root Bun test runner after this file's assertions complete.
+    detached: process.platform !== "win32",
     stdio: ["ignore", "pipe", "pipe"],
   });
   const result = new Promise<BuilderResult>((resolve, reject) => {
@@ -276,6 +280,22 @@ test("ignores Cargo target output in package input hashes", async () => {
   const target = join(kernel, "target", "debug", "incremental");
   mkdirSync(target, { recursive: true });
   const generated = join(target, "compiler-state.bin");
+  writeFileSync(generated, "generation one\n");
+
+  const cold = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(cold.code).toBe(0);
+  expect(cold.stdout).not.toContain("cached");
+
+  writeFileSync(generated, "generation two\n");
+  const warm = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });
+  expect(warm.code).toBe(0);
+  expect(warm.stdout).toContain("cached @opengeni/demo");
+});
+
+test("ignores SvelteKit package scratch output in package input hashes", async () => {
+  const root = createFixture();
+  const generated = join(root, "packages", "demo", ".svelte-kit", "__package__", "index.js");
+  mkdirSync(dirname(generated), { recursive: true });
   writeFileSync(generated, "generation one\n");
 
   const cold = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "BASE" });

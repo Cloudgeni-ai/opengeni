@@ -40,7 +40,7 @@ describe("production web handler", () => {
     expect((await handler(new Request("https://example.test/%2e%2e%2fsecret"))).status).toBe(400);
   });
 
-  test("serves the deployed public React demo without falling through to the app shell", async () => {
+  test("serves deployed framework demos without falling through to the app shell", async () => {
     const root = await fixture();
     await mkdir(join(root, "react-demo", "assets"), { recursive: true });
     await Bun.write(
@@ -51,6 +51,12 @@ describe("production web handler", () => {
       join(root, "react-demo", "realtime.html"),
       "<!doctype html><title>Realtime demo</title>",
     );
+    await mkdir(join(root, "svelte-demo", "assets"), { recursive: true });
+    await Bun.write(
+      join(root, "svelte-demo", "index.html"),
+      "<!doctype html><title>Svelte demo</title>",
+    );
+    await Bun.write(join(root, "svelte-demo", "assets", "demo.js"), "console.log('svelte')");
     const handler = createWebHandler(root);
 
     const redirect = await handler(new Request("https://example.test/react-demo"));
@@ -64,6 +70,21 @@ describe("production web handler", () => {
     ).toContain("Realtime demo");
     expect(
       (await handler(new Request("https://example.test/react-demo/assets/missing.js"))).status,
+    ).toBe(404);
+
+    const svelteRedirect = await handler(new Request("https://example.test/svelte-demo"));
+    expect(svelteRedirect.status).toBe(308);
+    expect(svelteRedirect.headers.get("location")).toBe("https://example.test/svelte-demo/");
+    expect(
+      await (await handler(new Request("https://example.test/svelte-demo/"))).text(),
+    ).toContain("Svelte demo");
+    const svelteAsset = await handler(
+      new Request("https://example.test/svelte-demo/assets/demo.js"),
+    );
+    expect(svelteAsset.status).toBe(200);
+    expect(svelteAsset.headers.get("cache-control")).toContain("immutable");
+    expect(
+      (await handler(new Request("https://example.test/svelte-demo/assets/missing.js"))).status,
     ).toBe(404);
   });
 

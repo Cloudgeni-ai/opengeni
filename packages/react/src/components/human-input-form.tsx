@@ -4,6 +4,7 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
+import { answersFromHumanInputDrafts } from "@opengeni/sdk/session";
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
@@ -715,48 +716,8 @@ export function answersFromDrafts(
   drafts: Record<string, HumanInputAnswerDraft>,
   messageOverrides: Partial<HumanInputFormMessages> = {},
 ): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const answers: HumanInputAnswer[] = [];
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const draft = drafts[question.id] ?? emptyDraft();
-    const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other : "";
-    const hasOther = Boolean(other.trim());
-    const supplied = values.length + (hasOther ? 1 : 0);
-
-    // Other-selected-but-empty must win over generic "required" — otherwise the
-    // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
-      errors[question.id] = messages.otherRequired;
-      continue;
-    }
-
-    if (question.required && supplied === 0) {
-      errors[question.id] = messages.required;
-      continue;
-    }
-    if (question.kind !== "text") {
-      const min = question.validation?.minSelections;
-      const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
-      if (min != null && supplied < min) {
-        errors[question.id] = messages.minSelections(min);
-        continue;
-      }
-      if (max != null && supplied > max) {
-        errors[question.id] = messages.maxSelections(max);
-        continue;
-      }
-    }
-    if (supplied > 0) {
-      answers.push({
-        questionId: question.id,
-        values,
-        ...(hasOther ? { other } : {}),
-      });
-    }
-  }
-  return { answers, errors };
+  const result = answersFromHumanInputDrafts(questions, drafts, messageOverrides);
+  return { answers: result.answers, errors: { ...result.errors } };
 }
 
 function initialDrafts(questions: HumanInputQuestion[]): Record<string, HumanInputAnswerDraft> {

@@ -1,34 +1,21 @@
-import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
+import type { SessionEvent, SessionGoal } from "@opengeni/sdk";
 import {
-  useDebouncedCallback,
-  useMutationRunner,
-  usePageLiveActivity,
-  useSessionEventTrigger,
-  type SessionEventFeedOptions,
-} from "./internal";
+  createGoalStore,
+  isGoalEvent as isSdkGoalEvent,
+  isGoalRefreshEvent as isSdkGoalRefreshEvent,
+} from "@opengeni/sdk/session";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useEmbeddedGoal, type EmbeddedGoalClientOverride } from "../session-context";
+import { useOwnedExternalStore, type SessionEventFeedOptions } from "./internal";
 
 /** Event types that change the session goal (set/updated/completed/paused/...). */
 export function isGoalEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type.startsWith("goal.");
+  return isSdkGoalEvent(event);
 }
 
-/**
- * Events that can change the server-authoritative continuation projection.
- * The projection is derived from durable turn, session, control, and system
- * update state, so those events refresh the goal without model polling.
- */
+/** Events that can change the server-authoritative continuation projection. */
 export function isGoalRefreshEvent(event: Pick<SessionEvent, "type">): boolean {
-  const type = event.type;
-  return (
-    isGoalEvent(event) ||
-    type.startsWith("turn.") ||
-    type.startsWith("session.") ||
-    type.startsWith("system.update.") ||
-    type.startsWith("workspace.inference.") ||
-    type.startsWith("user.")
-  );
+  return isSdkGoalRefreshEvent(event);
 }
 
 export type UseGoalOptions = EmbeddedGoalClientOverride &
@@ -61,192 +48,49 @@ export type UseGoalResult = {
   clearMutationError: () => void;
 };
 
-/**
- * The session's goal: state, the autonomy counters (`autoContinuations`,
- * `noProgressStreak`), and pause/resume control. A goal-less session yields
- * `goal: null` (the 404 is absorbed). Live-updates on goal, turn, session,
- * control, and system-update events — pass `options.events` from
- * `useSessionEvents` to reuse its stream.
- */
+/** React compatibility adapter over the framework-neutral goal controller. */
 export function useGoal(
   sessionId: string | null | undefined,
   options: UseGoalOptions = {},
 ): UseGoalResult {
   const { client, workspaceId } = useEmbeddedGoal(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const sharedEvents = options.events;
-  const sharedFeed = sharedEvents !== undefined;
-  const pageLive = usePageLiveActivity();
-  const [goal, setGoal] = useState<SessionGoal | null>(null);
-  const [loading, setLoading] = useState(enabled);
-  const [error, setError] = useState<Error | null>(null);
-  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
-  const generation = useRef(0);
-  const targetKeyRef = useRef<string | null>(null);
-  const loadAbort = useRef<AbortController | null>(null);
-
-  const retireLoads = useCallback(() => {
-    generation.current += 1;
-    loadAbort.current?.abort();
-    loadAbort.current = null;
-  }, []);
-
-  const load = useCallback(async (): Promise<void> => {
-    if (!sessionId) {
-      return;
-    }
-    const ticket = ++generation.current;
-    loadAbort.current?.abort();
-    const controller = new AbortController();
-    loadAbort.current = controller;
-    try {
-      const fetched = await client.getGoal(workspaceId, sessionId, {
-        signal: controller.signal,
-      });
-      if (ticket === generation.current) {
-        setGoal(fetched);
-        setError(null);
-        setLoading(false);
-      }
-    } catch (cause) {
-      if (ticket !== generation.current) {
-        return;
-      }
-      if (cause instanceof OpenGeniApiError && cause.status === 404) {
-        // No goal is a normal state, not an error.
-        setGoal(null);
-        setError(null);
-      } else {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
-      }
-      setLoading(false);
-    } finally {
-      if (loadAbort.current === controller) loadAbort.current = null;
-    }
-  }, [client, workspaceId, sessionId]);
+  const sharedFeed = options.events !== undefined;
+  const latestEvents = useRef(options.events);
+  latestEvents.current = options.events;
+  const store = useMemo(
+    () =>
+      createGoalStore({
+        client,
+        workspaceId,
+        sessionId,
+        enabled,
+        ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+        ...(sharedFeed ? { events: latestEvents.current ?? [] } : {}),
+      }),
+    [client, enabled, options.pollIntervalMs, sessionId, sharedFeed, workspaceId],
+  );
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
+  useOwnedExternalStore(store);
 
   useEffect(() => {
-    const targetKey = `${workspaceId} ${sessionId ?? ""}`;
-    if (targetKeyRef.current !== targetKey) {
-      targetKeyRef.current = targetKey;
-      setGoal(null);
-      setError(null);
-    }
-    if (!enabled || !pageLive) {
-      retireLoads();
-      setLoading(false);
-      return;
-    }
-    if (sharedFeed) {
-      setLoading(false);
-      return () => {
-        retireLoads();
-      };
-    }
-    setLoading(true);
-    const pollIntervalMs = options.pollIntervalMs;
-    if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
-      void load();
-      return () => {
-        retireLoads();
-      };
-    }
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
-      if (cancelled) return;
-      timer = setTimeout(() => {
-        timer = null;
-        void load().finally(schedule);
-      }, pollIntervalMs);
-    };
-    void load().finally(schedule);
-    return () => {
-      cancelled = true;
-      if (timer !== null) clearTimeout(timer);
-      retireLoads();
-    };
-  }, [
-    load,
-    enabled,
-    pageLive,
-    workspaceId,
-    sessionId,
-    options.pollIntervalMs,
-    retireLoads,
-    sharedFeed,
-  ]);
-
-  const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isGoalRefreshEvent, scheduleRefresh, {
-    enabled,
-    ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
-  });
-
-  const pause = useCallback(
-    async (rationale?: string): Promise<SessionGoal | null> => {
-      if (!sessionId) {
-        return null;
-      }
-      const result = await run(() =>
-        client.updateGoal(workspaceId, sessionId, {
-          status: "paused",
-          ...(rationale !== undefined ? { rationale } : {}),
-        }),
-      );
-      if (result) {
-        setGoal(result);
-      }
-      return result;
-    },
-    [client, workspaceId, sessionId, run],
-  );
-
-  const resume = useCallback(async (): Promise<SessionGoal | null> => {
-    if (!sessionId) {
-      return null;
-    }
-    const result = await run(() => client.updateGoal(workspaceId, sessionId, { status: "active" }));
-    if (result) {
-      setGoal(result);
-    }
-    return result;
-  }, [client, workspaceId, sessionId, run]);
-
-  const clearGoal = useCallback(async (): Promise<void> => {
-    if (!sessionId) {
-      return;
-    }
-    // deleteGoal resolves void, so distinguish success (a truthy sentinel) from
-    // mutation.run's null-on-failure. Only a SUCCESSFUL delete hides the goal:
-    // a failed one leaves the pill up so its mutationError renders. And invalidate
-    // any in-flight load first so a slower getGoal started before the delete can't
-    // commit and repopulate the just-cleared goal.
-    const ok = await run(async () => {
-      await client.deleteGoal(workspaceId, sessionId);
-      return true as const;
-    });
-    if (ok) {
-      retireLoads();
-      setGoal(null);
-      setError(null);
-    }
-  }, [client, workspaceId, sessionId, run, retireLoads]);
+    if (options.events !== undefined) store.applyEvents(options.events);
+  }, [options.events, store]);
 
   return {
-    goal,
-    isActive: goal?.status === "active",
-    isPaused: goal?.status === "paused",
-    isCompleted: goal?.status === "completed",
-    loading,
-    error,
-    refresh: load,
-    pause,
-    resume,
-    clearGoal,
-    deleteGoal: clearGoal,
-    updating: mutating,
-    mutationError,
-    clearMutationError,
+    goal: snapshot.value,
+    isActive: snapshot.isActive,
+    isPaused: snapshot.isPaused,
+    isCompleted: snapshot.isCompleted,
+    loading: snapshot.loading,
+    error: snapshot.error,
+    refresh: store.refresh,
+    pause: store.pause,
+    resume: store.resume,
+    clearGoal: store.clearGoal,
+    deleteGoal: store.clearGoal,
+    updating: snapshot.updating,
+    mutationError: snapshot.mutationError,
+    clearMutationError: store.clearMutationError,
   };
 }

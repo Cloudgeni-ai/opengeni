@@ -1,7 +1,7 @@
 # @opengeni/react
 
-React hooks and styled components for OpenGeni, built on
-[`@opengeni/sdk`](../sdk): live session streaming, a chat composer, a message
+React hooks and styled components for OpenGeni, built on the framework-neutral
+[`@opengeni/sdk/session`](../sdk) runtime and [`@opengeni/ui`](../ui): live session streaming, a chat composer, a message
 timeline that renders streaming deltas / tool calls / spawned-worker status,
 session status badges, and fleet tiles for workspace overviews. Two opt-in
 surfaces layer on top: a **sandbox workspace** workbench (files, terminal, diff,
@@ -23,6 +23,14 @@ the first-class default; light is an opt-in via `data-og-theme="light"` on any
 ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
+
+Session hooks preserve their existing public names and result shapes while
+subscribing to framework-neutral controllers with `useSyncExternalStore`.
+React context still owns provider composition, workspace reconciliation, and
+React-specific lifecycle; focus, measurement, portals, drag/drop, and optional
+workbench islands remain React concerns. See
+[`docs/framework-ui.md`](../../docs/framework-ui.md) for the package and
+ownership contract shared with native Svelte.
 
 ## Editable Office artifacts
 
@@ -134,6 +142,14 @@ requiring the full SDK client: `SessionReadClientLike`, `GoalClientLike`,
 can therefore implement only the methods used by each hook. A shared event feed
 also avoids requiring a client-owned event stream at runtime. Workspace-level
 Resume is an optional authority.
+
+The headless session hooks are compatibility adapters over
+`@opengeni/sdk/session`; applications should continue importing the React
+surface rather than managing a controller directly unless they intentionally
+need framework-independent ownership. `@opengeni/react/session-ui` contains the
+styled embeddable session components. Optional accounts, realtime, interaction,
+artifacts/editors, machines, terminal/files/desktop, and workbench surfaces are
+React-only and are not part of the native Svelte parity boundary.
 
 Use `createEmbeddedSessionClient(base, options)` to bind that narrow surface
 from a full SDK client or host proxy. Delegated methods preserve their SDK

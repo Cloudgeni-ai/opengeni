@@ -9,6 +9,7 @@ describe("release entry-point rewriting", () => {
       main: "./src/index.ts",
       module: "./src/index.ts",
       types: "./src/index.ts",
+      svelte: "./src/index.ts",
       bin: {
         "opengeni-fixture": "./src/cli.ts",
       },
@@ -18,6 +19,11 @@ describe("release entry-point rewriting", () => {
           types: "./src/dual.ts",
           import: "./src/dual.ts",
           default: "./src/dual.ts",
+        },
+        "./svelte": {
+          types: "./src/svelte.ts",
+          svelte: "./src/svelte.ts",
+          default: "./src/svelte.ts",
         },
         "./compiled.css": {
           types: "./styles/compiled.d.ts",
@@ -36,9 +42,15 @@ describe("release entry-point rewriting", () => {
         import: "./dist/dual.js",
         default: "./dist/dual.js",
       },
+      "./svelte": {
+        types: "./dist/svelte.d.ts",
+        svelte: "./dist/svelte.js",
+        import: "./dist/svelte.js",
+      },
       "./compiled.css": source.exports["./compiled.css"],
     });
     expect(manifest.bin).toEqual({ "opengeni-fixture": "./dist/cli.js" });
+    expect(manifest.svelte).toBe("./dist/index.js");
     expect(rewriteEntryPointsToDist(manifest)).toBe(false);
 
     expect(rewriteEntryPointsToSrc(manifest)).toBe(true);

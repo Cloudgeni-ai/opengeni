@@ -15,7 +15,9 @@ import {
   deterministicFileBatches,
   deterministicShards,
   discoverTestFiles,
+  e2eShardWeights,
   fileUsesProcessGlobalTestState,
+  FRAMEWORK_UI_SOAK_E2E_TEST,
   integrationShardWeights,
   OPT_IN_TESTS,
   typecheckProjects,
@@ -98,6 +100,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/framework-ui-parity.browser.e2e.ts",
+      "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -107,6 +111,7 @@ describe("fail-closed change impact", () => {
       SESSION_RAIL_ROW_METADATA_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      "test/e2e/svelte-demo.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual([
@@ -117,11 +122,43 @@ describe("fail-closed change impact", () => {
       "workbench",
     ]);
     expect(sdk.artifactRuntimeRequired).toBe(false);
-    expect(sdk.buildPackages).toEqual(expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]));
+    expect(sdk.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
 
     const react = createImpactPlan(["packages/react/src/index.ts"]);
     expect(react.buildPackages).toEqual(
-      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
+
+    const ui = createImpactPlan(["packages/ui/src/index.ts"]);
+    expect(ui.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
+    );
+
+    const svelte = createImpactPlan(["packages/svelte/src/index.ts"]);
+    expect(svelte.buildPackages).toEqual(
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
     );
   });
 
@@ -262,7 +299,7 @@ describe("fail-closed change impact", () => {
     ]) {
       expect(createImpactPlan([path]).browserAcceptanceLanes).toContain("accounts");
     }
-  });
+  }, 30_000);
 
   test("artifact browser dependency rules do not widen unrelated leaf package plans", () => {
     const plan = createImpactPlan(["packages/ogtool/src/index.ts"]);
@@ -325,6 +362,8 @@ describe("fail-closed change impact", () => {
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/framework-ui-parity.browser.e2e.ts",
+      "test/e2e/framework-ui-soak.browser.e2e.ts",
       ORGANIZATION_RECOVERY_E2E,
       ORGANIZATION_WORKSPACE_ADMINISTRATION_E2E,
       PERSONAL_GITHUB_IDENTITY_E2E,
@@ -334,6 +373,7 @@ describe("fail-closed change impact", () => {
       SESSION_RAIL_ROW_METADATA_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
+      "test/e2e/svelte-demo.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");
@@ -381,7 +421,12 @@ describe("fail-closed change impact", () => {
       expect.arrayContaining(["scripts/ci", "scripts/operator", "scripts/release"]),
     );
     expect(plan.buildPackages).toEqual(
-      expect.arrayContaining(["@opengeni/sdk", "@opengeni/react"]),
+      expect.arrayContaining([
+        "@opengeni/sdk",
+        "@opengeni/ui",
+        "@opengeni/react",
+        "@opengeni/svelte",
+      ]),
     );
   });
 
@@ -421,6 +466,19 @@ describe("deterministic bounded execution", () => {
     expect(second).toEqual(first);
     expect(first.flat().sort()).toEqual([...files].sort());
     expect(new Set(first.flat()).size).toBe(files.length);
+  });
+
+  test("the required framework UI soak is isolated from ordinary E2E files", () => {
+    const files = createImpactPlan(["scripts/ci/workspace.ts"]).e2eTests;
+    const planning = e2eShardWeights(process.cwd(), files);
+    expect(planning.mode).toBe("policy");
+    expect(planning.reason).toContain("isolated E2E shard");
+    const shards = deterministicShards(process.cwd(), files, 4, planning.weights ?? undefined);
+    const soakShard = shards.find((shard) => shard.includes(FRAMEWORK_UI_SOAK_E2E_TEST));
+    expect(soakShard).toEqual([FRAMEWORK_UI_SOAK_E2E_TEST]);
+
+    const ordinary = e2eShardWeights(process.cwd(), ["test/e2e/code-editor.browser.e2e.ts"]);
+    expect(ordinary).toMatchObject({ mode: "source-bytes", weights: null });
   });
 
   test("batching rejects unsafe sizes and preserves order", () => {

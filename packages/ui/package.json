@@ -1,0 +1,69 @@
+{
+  "name": "@opengeni/ui",
+  "version": "3.2.1",
+  "description": "Framework-neutral UI anatomy, copy, tokens, and semantic session styles for OpenGeni embeds.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/ui"
+  },
+  "files": [
+    "dist",
+    "src",
+    "styles",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./compiled.css": {
+      "types": "./styles/compiled.d.ts",
+      "style": "./styles/compiled.css",
+      "default": "./styles/compiled.css"
+    },
+    "./tokens.css": {
+      "types": "./styles/tokens.d.ts",
+      "style": "./styles/tokens.css",
+      "default": "./styles/tokens.css"
+    },
+    "./components.css": {
+      "types": "./styles/components.d.ts",
+      "style": "./styles/components.css",
+      "default": "./styles/components.css"
+    },
+    "./responsive.css": {
+      "types": "./styles/responsive.d.ts",
+      "style": "./styles/responsive.css",
+      "default": "./styles/responsive.css"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "bun run build:css && bun ../../scripts/build-typescript-package.ts",
+    "build:css": "bun scripts/build-css.ts",
+    "check:css": "bun scripts/build-css.ts --check",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.0",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

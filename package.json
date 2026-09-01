@@ -55,6 +55,9 @@
     "test:unit": "bun test --max-concurrency=8 --timeout=30000",
     "test:unit:shard": "bun test --max-concurrency=1 --timeout=30000",
     "test:react:clean": "bun scripts/test-react-clean.ts",
+    "test:framework-ui-differential": "bun scripts/framework-ui-differential.ts",
+    "test:framework-ui-soak": "bun --no-env-file test --max-concurrency=1 ./test/e2e/framework-ui-soak.browser.e2e.ts",
+    "test:framework-ui-adversarial": "bun scripts/framework-session-adversarial.ts",
     "test:react-native-hermes-bundle": "bun scripts/test-react-native-hermes-bundle.ts",
     "test:control-algebra": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/session-control-algebra.test.ts packages/db/test/session-control-plane.test.ts packages/db/test/session-control-mega-migration.test.ts",
     "test:control-concurrency": "OPENGENI_REQUIRE_REAL_DB=1 bun test --timeout 120000 packages/db/test/session-control-plane.test.ts packages/db/test/queue-mutations.test.ts packages/db/test/agent-session-commands.test.ts packages/db/test/session-workflow-wake-outbox.test.ts",
@@ -125,7 +128,7 @@
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",
     "release:publish": "bash scripts/release-publish.sh",
-    "check": "bun run check:bun-version && bun run check:public-hygiene && bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../react && bun run build && bun run demo:build && cd ../../apps/web && bun run build && cd ../../examples/northstar-support && bun run build",
+    "check": "bun run check:bun-version && bun run check:public-hygiene && bun run typecheck && bun run test:unit && cd packages/sdk && bun run build && cd ../ui && bun run build && cd ../react && bun run build && bun run demo:build && cd ../svelte && bun run build && bun run demo:build && cd ../../apps/web && bun run build && cd ../../examples/northstar-support && bun run build",
     "check:full": "bun run check && bun run test:integration && bun run test:e2e",
     "check:docs-refs": "bun scripts/check-docs-refs.ts",
     "check:model-pricing": "bun scripts/check-model-pricing.ts",
@@ -175,7 +178,9 @@
     "@opengeni/runtime": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "@opengeni/storage": "workspace:*",
+    "@opengeni/svelte": "workspace:*",
     "@opengeni/testing": "workspace:*",
+    "@opengeni/ui": "workspace:*",
     "@opengeni/worker-bundle": "workspace:*",
     "@react-native/metro-babel-transformer": "0.80.2",
     "@temporalio/activity": "^1.20.2",
@@ -219,6 +224,8 @@
     "@openai/agents-extensions@0.14.3": "patches/@openai%2Fagents-extensions@0.14.3.patch",
     "@openai/agents-openai@0.14.3": "patches/@openai%2Fagents-openai@0.14.3.patch",
     "@openai/agents-core@0.14.3": "patches/@openai%2Fagents-core@0.14.3.patch",
-    "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch"
+    "@temporalio/worker@1.22.0": "patches/@temporalio%2Fworker@1.22.0.patch",
+    "@sveltejs/package@2.5.8": "patches/@sveltejs%2Fpackage@2.5.8.patch",
+    "svelte2tsx@0.7.61": "patches/svelte2tsx@0.7.61.patch"
   }
 }

@@ -1,0 +1,7 @@
+diff --git a/index.js b/index.js
+index e057a73b144ffd050a5f6e84faf8c7bb2989f8b7..fb1848aa5e5fffdcfa4c4da610c23a3154592524 100644
+--- a/index.js
++++ b/index.js
+@@ -4 +4 @@
+-var ts = require('typescript');
++var ts = require(require.resolve('typescript', { paths: [process.cwd()] }));

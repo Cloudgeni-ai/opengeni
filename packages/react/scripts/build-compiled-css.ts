@@ -7,11 +7,49 @@ import selectorParser, { type Selector } from "postcss-selector-parser";
 
 const packageRoot = resolve(import.meta.dir, "..");
 const stylesRoot = join(packageRoot, "styles");
+const uiStylesRoot = resolve(packageRoot, "../ui/styles");
 const inputPath = join(stylesRoot, "compiled.input.css");
 const outputPath = join(stylesRoot, "compiled.css");
 const tokensPath = join(stylesRoot, "tokens.css");
 const effectiveTokensPath = join(stylesRoot, "effective-tokens.css");
 const checkOnly = process.argv.includes("--check");
+
+const compatibilityCss = [
+  {
+    source: join(uiStylesRoot, "react-compat-tokens.css"),
+    destination: tokensPath,
+    label: "tokens.css",
+  },
+  {
+    source: join(uiStylesRoot, "react-compat-responsive.css"),
+    destination: join(stylesRoot, "responsive.css"),
+    label: "responsive.css",
+  },
+] as const;
+
+export function assertUiCompatibilityCssEqual(
+  label: string,
+  canonical: string,
+  compatibility: string,
+): void {
+  if (compatibility === canonical) return;
+  throw new Error(
+    `styles/${label} diverged from @opengeni/ui; run \`bun run build:css\` in packages/react`,
+  );
+}
+
+/** Keep public React CSS subpaths as exact generated copies of UI-owned sources. */
+export async function syncUiCompatibilityCss(check: boolean): Promise<void> {
+  for (const artifact of compatibilityCss) {
+    const canonical = await readFile(artifact.source, "utf8");
+    const current = await readFile(artifact.destination, "utf8").catch(() => null);
+    if (current === canonical) continue;
+    if (check) {
+      assertUiCompatibilityCssEqual(artifact.label, canonical, current ?? "");
+    }
+    await writeFile(artifact.destination, canonical, "utf8");
+  }
+}
 
 const input = `@import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
@@ -425,6 +463,7 @@ export async function buildCompiledCss(): Promise<string> {
 }
 
 if (import.meta.main) {
+  await syncUiCompatibilityCss(checkOnly);
   const effectiveTokens = await buildEffectiveTokensCss();
   const currentEffectiveTokens = await readFile(effectiveTokensPath, "utf8").catch(() => null);
   if (checkOnly && currentEffectiveTokens !== effectiveTokens) {

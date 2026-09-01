@@ -38,8 +38,8 @@
       "default": "./src/session-ui.ts"
     },
     "./accounts": {
-      "types": "./src/accounts.tsx",
-      "default": "./src/accounts.tsx"
+      "types": "./src/accounts.ts",
+      "default": "./src/accounts.ts"
     },
     "./machines": {
       "types": "./src/machines.ts",
@@ -121,6 +121,7 @@
     "@fontsource-variable/noto-sans-arabic": "5.2.10",
     "@fontsource-variable/noto-sans-jp": "5.2.10",
     "@opengeni/sdk": "workspace:*",
+    "@opengeni/ui": "workspace:*",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
     "lucide-react": "^1.8.0",

@@ -6,6 +6,7 @@ import type {
 } from "@opengeni/sdk/accounts";
 import {
   createContext,
+  createElement,
   useCallback,
   useContext,
   useEffect,
@@ -1026,9 +1027,7 @@ export function BrowserAccountsProvider({
     ],
   );
 
-  return (
-    <BrowserAccountsContext.Provider value={value}>{children}</BrowserAccountsContext.Provider>
-  );
+  return createElement(BrowserAccountsContext.Provider, { value }, children);
 }
 
 export function useBrowserAccounts(): BrowserAccountsContextValue {

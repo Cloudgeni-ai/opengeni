@@ -1,0 +1,8 @@
+diff --git a/src/typescript.js b/src/typescript.js
+index 1105f935aa9827e990bf3aa53a26c7f3193420ec..b92488447a6139a1bf1b44465137b2819d055b2f 100644
+--- a/src/typescript.js
++++ b/src/typescript.js
+@@ -116 +116,2 @@
+-		return (await import('typescript')).default;
++		const project_require = createRequire(path.join(process.cwd(), 'package.json'));
++		return project_require('typescript');

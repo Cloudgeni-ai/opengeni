@@ -24,6 +24,7 @@
  * The src->dist mapping per package (mirrors what tsup emits):
  *   main    ./src/index.ts        -> ./dist/index.js
  *   module  ./src/index.ts        -> ./dist/index.js
+ *   svelte  ./src/index.ts        -> ./dist/index.js
  *   types   ./src/index.ts        -> ./dist/index.d.ts
  *   exports["."]                   -> { types: ./dist/index.d.ts, import: ./dist/index.js }
  *
@@ -46,7 +47,7 @@ import { join } from "node:path";
 import { publishableWorkspacePackages, repoRoot, type PackageJson } from "./publishable-workspaces";
 
 export type ExportsEntry =
-  | { types?: string; style?: string; import?: string; default?: string }
+  | { types?: string; style?: string; svelte?: string; import?: string; default?: string }
   | string;
 
 export function srcToDist(value: string, kind: "runtime" | "types"): string {
@@ -81,6 +82,9 @@ function entryToDist(entry: ExportsEntry): ExportsEntry {
   if (entry.import?.startsWith("./src/")) {
     next.import = srcToDist(entry.import, "runtime");
   }
+  if (entry.svelte?.startsWith("./src/")) {
+    next.svelte = srcToDist(entry.svelte, "runtime");
+  }
   if (entry.default?.startsWith("./src/")) {
     const runtime = srcToDist(entry.default, "runtime");
     if (entry.import === undefined) {
@@ -110,6 +114,9 @@ function entryToSrc(entry: ExportsEntry): ExportsEntry {
       next.import = runtime;
     }
   }
+  if (entry.svelte?.startsWith("./dist/")) {
+    next.svelte = distToSrc(entry.svelte);
+  }
   if (entry.default?.startsWith("./dist/")) {
     next.default = distToSrc(entry.default);
   }
@@ -129,6 +136,10 @@ export function rewriteEntryPointsToDist(pkg: PackageJson): boolean {
   }
   if (typeof pkg.types === "string" && pkg.types !== srcToDist(pkg.types, "types")) {
     pkg.types = srcToDist(pkg.types, "types");
+    changed = true;
+  }
+  if (typeof pkg.svelte === "string" && pkg.svelte !== srcToDist(pkg.svelte, "runtime")) {
+    pkg.svelte = srcToDist(pkg.svelte, "runtime");
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {
@@ -171,6 +182,10 @@ export function rewriteEntryPointsToSrc(pkg: PackageJson): boolean {
   }
   if (typeof pkg.types === "string" && pkg.types !== distToSrc(pkg.types)) {
     pkg.types = distToSrc(pkg.types);
+    changed = true;
+  }
+  if (typeof pkg.svelte === "string" && pkg.svelte !== distToSrc(pkg.svelte)) {
+    pkg.svelte = distToSrc(pkg.svelte);
     changed = true;
   }
   if (pkg.exports && typeof pkg.exports === "object") {

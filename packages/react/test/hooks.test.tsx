@@ -15,6 +15,7 @@ import type {
   SessionCommandReceipt,
   SessionEvent,
   SessionControlResponse,
+  SessionHumanInputRequest,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionListResponse,
@@ -39,6 +40,7 @@ import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
 import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
+import { useHumanInputRequests } from "../src/hooks/use-human-input";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
@@ -98,6 +100,31 @@ const INITIAL_COMPOSER_POLICY = {
   reasoningEffort: "medium" as const,
   latencyMode: "standard" as const,
 };
+
+function pendingHumanInput(
+  id: string,
+  createdAt: string,
+  expiresAt: string | null = null,
+): SessionHumanInputRequest {
+  return {
+    id,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    turnId: "turn-1",
+    turnGeneration: 1,
+    creationAttemptId: "attempt-1",
+    toolCallId: `tool-${id}`,
+    status: "pending",
+    questions: [],
+    allowSkip: true,
+    response: null,
+    respondedBy: null,
+    respondedAt: null,
+    expiresAt,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
 
 function gatewayError(status = 502): OpenGeniApiError {
   return new OpenGeniApiError(status, "", {
@@ -1365,6 +1392,119 @@ describe("useSessionLineage", () => {
     await flush(2700);
     expect(reads).toBe(3);
     expect(hook.result.current.lineage?.children[0]?.session.id).toBe("child-3");
+    await hook.unmount();
+  });
+});
+
+describe("useHumanInputRequests", () => {
+  test("sorts actionable requests and reconciles matching shared events", async () => {
+    const first = pendingHumanInput("input-a", "2026-08-29T10:00:00.000Z");
+    const second = pendingHumanInput("input-b", "2026-08-29T11:00:00.000Z");
+    const expired = pendingHumanInput(
+      "input-expired",
+      "2026-08-29T09:00:00.000Z",
+      "2026-08-29T09:30:00.000Z",
+    );
+    let reads = 0;
+    let current = [second, expired, first];
+    const client = fakeClient({
+      listHumanInputRequests: async () => {
+        reads += 1;
+        return current;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useHumanInputRequests(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+
+    expect(hook.result.current.requests.map((request) => request.id)).toEqual([
+      "input-a",
+      "input-b",
+    ]);
+    current = [pendingHumanInput("input-c", "2026-08-29T12:00:00.000Z")];
+    await hook.rerender([makeEvent(1, "session.humanInput.requested")]);
+    await flush(250);
+    expect(reads).toBe(2);
+    expect(hook.result.current.requests.map((request) => request.id)).toEqual(["input-c"]);
+    await hook.unmount();
+  });
+
+  test("a terminal response race reconciles without resurrecting a mutation error", async () => {
+    const request = pendingHumanInput("input-terminal", "2026-08-29T12:00:00.000Z");
+    let reads = 0;
+    const client = fakeClient({
+      listHumanInputRequests: async () => (++reads === 1 ? [request] : []),
+      submitHumanInputResponse: async () => {
+        throw new OpenGeniApiError(409, "request already terminal");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useHumanInputRequests(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => {
+      expect(
+        await hook.result.current.respond(request.id, { outcome: "answered", answers: [] }),
+      ).toBeNull();
+    });
+    expect(reads).toBe(2);
+    expect(hook.result.current.requests).toEqual([]);
+    expect(hook.result.current.mutationError).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a target switch drops settlement from the previous response", async () => {
+    const sessionA: string = SESSION_ID;
+    const sessionB: string = "33333333-3333-4333-8333-333333333333";
+    let settlePrevious!: (event: SessionEvent) => void;
+    const previousResponse = new Promise<SessionEvent>((resolve) => {
+      settlePrevious = resolve;
+    });
+    const client = fakeClient({
+      listHumanInputRequests: async (_workspaceId, sessionId) => [
+        {
+          ...pendingHumanInput(`input-${sessionId}`, "2026-08-29T12:00:00.000Z"),
+          sessionId,
+        },
+      ],
+      submitHumanInputResponse: async () => await previousResponse,
+    });
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useHumanInputRequests(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      sessionA,
+    );
+    await flush();
+
+    let pending!: Promise<SessionEvent | null>;
+    await flushing(() => {
+      pending = hook.result.current.respond(`input-${sessionA}`, {
+        outcome: "answered",
+        answers: [],
+      });
+    });
+    await hook.rerender(sessionB);
+    await flush();
+    expect(hook.result.current.requests[0]?.sessionId).toBe(sessionB);
+
+    settlePrevious(makeEvent(2, "user.humanInputResponse"));
+    expect(await pending).toBeNull();
+    expect(hook.result.current.requests[0]?.sessionId).toBe(sessionB);
+    expect(hook.result.current.mutationError).toBeNull();
     await hook.unmount();
   });
 });
@@ -4196,30 +4336,111 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
-  test("retryable draft hydrate failures stay bounded across client identity churn", async () => {
+  test("retryable draft hydrate failures stay bounded across same-client callback churn", async () => {
     let reads = 0;
-    const failingClient = () =>
-      fakeClient({
-        getComposerDraft: async () => {
-          reads += 1;
-          throw gatewayError(503);
-        },
-      });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        throw gatewayError(503);
+      },
+    });
     const hook = await renderHook(
-      (client: ReturnType<typeof failingClient>) =>
-        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
-      failingClient(),
+      (onSubmitted: (text: string, input: SendMessageInput) => void) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, onSubmitted }),
+      () => undefined,
     );
     await flush();
     expect(reads).toBe(1);
 
     for (let index = 0; index < 10; index += 1) {
-      await hook.rerender(failingClient());
+      await hook.rerender(() => undefined);
     }
     await flush();
 
     expect(reads).toBe(1);
     expect(hook.result.current.error).toMatchObject({ status: 503, retryable: true });
+    await hook.unmount();
+  });
+
+  test("client replacement fences an old-authority draft hydrate", async () => {
+    let resolveOldRead!: (draft: ComposerDraft) => void;
+    let oldSignal: AbortSignal | undefined;
+    const oldRead = new Promise<ComposerDraft>((resolve) => {
+      resolveOldRead = resolve;
+    });
+    const oldClient = fakeClient({
+      getComposerDraft: async (_workspaceId, _sessionId, options) => {
+        oldSignal = options?.signal;
+        return await oldRead;
+      },
+    });
+    const newDraft: ComposerDraft = {
+      revision: 8,
+      text: "new authority",
+      resources: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const newClient = fakeClient({ getComposerDraft: async () => newDraft });
+    const hook = await renderHook(
+      (client: typeof oldClient) => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      oldClient,
+    );
+    await flush();
+    expect(oldSignal?.aborted).toBe(false);
+
+    await hook.rerender(newClient);
+    await flush();
+
+    expect(oldSignal?.aborted).toBe(true);
+    expect(hook.result.current.value).toBe("new authority");
+
+    resolveOldRead({ ...newDraft, revision: 99, text: "stale old authority" });
+    await flush();
+    expect(hook.result.current.value).toBe("new authority");
+    await hook.unmount();
+  });
+
+  test("client replacement closes the old-authority composer stream", async () => {
+    function streamingClient() {
+      const observations = { streams: 0, signal: undefined as AbortSignal | undefined };
+      const client = fakeClient({
+        getSession: async () => ({ lastSequence: 0 }) as never,
+        streamEvents: (_workspaceId, _sessionId, options) => {
+          observations.streams += 1;
+          observations.signal = options?.signal;
+          return (async function* () {
+            if (!options?.signal?.aborted) {
+              await new Promise<void>((resolve) => {
+                options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+              });
+            }
+            yield* [] as SessionEvent[];
+          })();
+        },
+      });
+      return { client, observations };
+    }
+
+    const oldAuthority = streamingClient();
+    const nextAuthority = streamingClient();
+    const hook = await renderHook(
+      (client: typeof oldAuthority.client) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      oldAuthority.client,
+    );
+    await flush();
+    expect(oldAuthority.observations.streams).toBe(1);
+
+    await hook.rerender(nextAuthority.client);
+    await flush();
+
+    expect(oldAuthority.observations.signal?.aborted).toBe(true);
+    expect(nextAuthority.observations.streams).toBe(1);
     await hook.unmount();
   });
 

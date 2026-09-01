@@ -1,8 +1,10 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
+import * as RouterPackage from "@tanstack/react-router";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
+import * as DialogPackage from "@/components/ui/dialog";
 import type {
   SlackUserLinkAccessRequest,
   WorkspaceMember,
@@ -89,8 +91,23 @@ const context = {
 
 mock.module("@/context", () => ({ useAppContext: () => context }));
 mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
   useNavigate: () => () => undefined,
+}));
+// Radix portals do not mount under happy-dom. Render the dialog frame inline
+// so this test exercises the real member selection and submission body.
+mock.module("@/components/ui/dialog", () => ({
+  ...DialogPackage,
+  Dialog: ({ open, children }: { open?: boolean; children?: ReactNode }) =>
+    open ? <div data-slot="dialog">{children}</div> : null,
+  DialogContent: ({ children }: { children?: ReactNode }) => (
+    <div data-slot="dialog-content">{children}</div>
+  ),
+  DialogDescription: ({ children }: { children?: ReactNode }) => <p>{children}</p>,
+  DialogFooter: ({ children }: { children?: ReactNode }) => <footer>{children}</footer>,
+  DialogHeader: ({ children }: { children?: ReactNode }) => <header>{children}</header>,
+  DialogTitle: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
 }));
 
 GlobalRegistrator.register();
@@ -137,6 +154,21 @@ async function renderMembers(canManage: boolean, workspaceId = workspaceA) {
   };
 }
 
+async function waitFor(predicate: () => boolean, timeoutMilliseconds = 2_000): Promise<void> {
+  const deadline = performance.now() + timeoutMilliseconds;
+  while (performance.now() < deadline) {
+    if (predicate()) return;
+    await act(async () => await Bun.sleep(10));
+  }
+  if (predicate()) return;
+  throw new Error(
+    `Timed out waiting for workspace member settings state: ${document.body.textContent
+      ?.replace(/\s+/gu, " ")
+      .trim()
+      .slice(0, 500)}`,
+  );
+}
+
 describe("workspace access settings convergence", () => {
   test("shows the workspace-scoped member manager", async () => {
     const rendered = await renderMembers(true);
@@ -165,10 +197,13 @@ describe("workspace access settings convergence", () => {
       const addButton = Array.from(rendered.container.querySelectorAll("button")).find(
         (candidate) => candidate.textContent?.trim() === "Add member",
       );
+      expect(addButton).toBeDefined();
       await act(async () => {
-        addButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        addButton!.click();
       });
+      await waitFor(() => listWorkspaceMemberCandidates.mock.calls.length > 0);
+      await waitFor(() => document.body.querySelector('[data-slot="dialog-content"]') !== null);
+      await waitFor(() => document.body.textContent?.includes("Grace Hopper") === true);
 
       expect(listWorkspaceMemberCandidates).toHaveBeenCalledWith(workspaceA);
       expect(document.body.textContent).toContain("Grace Hopper");
@@ -178,13 +213,14 @@ describe("workspace access settings convergence", () => {
       expect(document.body.querySelector('input[type="search"]')).not.toBeNull();
 
       const option = document.body.querySelector<HTMLButtonElement>('[role="option"]');
-      await act(async () => option?.click());
+      expect(option).not.toBeNull();
+      await act(async () => option!.click());
       const submit = Array.from(document.body.querySelectorAll("button")).find(
         (candidate) => candidate.textContent?.trim() === "Add to workspace",
       );
       expect(submit?.disabled).toBe(false);
       await act(async () => {
-        submit?.click();
+        submit!.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 

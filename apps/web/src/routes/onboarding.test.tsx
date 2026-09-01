@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
+import * as RouterPackage from "@tanstack/react-router";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -54,6 +55,7 @@ mock.module("@/api", () => ({
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));
 mock.module("@tanstack/react-router", () => ({
+  ...RouterPackage,
   Link: ({ children }: { children: ReactNode }) => <a href="#signin">{children}</a>,
 }));
 
@@ -298,7 +300,9 @@ describe("organization onboarding UI", () => {
     const firstOrganizationId = crypto.randomUUID();
     const secondOrganizationId = crypto.randomUUID();
     const now = new Date().toISOString();
-    const acceptOrganizationInvitation = mock(async () => ({ status: "complete" }));
+    const acceptOrganizationInvitation = mock(async () => ({
+      status: "complete",
+    }));
     const client = {
       listOrganizationInvitations: mock(async () => ({
         invitations: [

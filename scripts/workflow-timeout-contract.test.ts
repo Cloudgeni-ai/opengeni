@@ -2,6 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS,
+  FRAMEWORK_UI_SOAK_PROFILE_HEADROOM_MILLISECONDS,
+  FRAMEWORK_UI_SOAK_STEP_HEADROOM_MILLISECONDS,
+  FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS,
+} from "./framework-ui-soak-contract";
 
 const root = resolve(import.meta.dir, "..");
 const workflowDir = resolve(root, ".github/workflows");
@@ -35,7 +41,7 @@ const EXPECTED_CAPS = [
     31,
     "run",
   ],
-  ["ci.yml", "e2e-shards", "Run exactly the impacted E2E tests", 13, "run"],
+  ["ci.yml", "e2e-shards", "Run exactly the impacted E2E tests", 41, "run"],
   ["ci.yml", "package-contracts", "Build client packages (contracts + SDK + React)", 21, "run"],
   ["ci.yml", "test-suite", "Real workspace capture acceptance", 13, "run"],
   ["ci.yml", "test-suite", "Recovery integration regressions", 5, "run"],
@@ -55,7 +61,7 @@ const EXPECTED_JOB_BUDGETS = {
   "ci.yml:source-contracts": { stepCaps: 27, needed: 28, jobCap: 35 },
   "ci.yml:unit-shards": { stepCaps: 21, needed: 22, jobCap: 30 },
   "ci.yml:integration-shards": { stepCaps: 31, needed: 32, jobCap: 40 },
-  "ci.yml:e2e-shards": { stepCaps: 30, needed: 31, jobCap: 35 },
+  "ci.yml:e2e-shards": { stepCaps: 58, needed: 59, jobCap: 65 },
   "ci.yml:test-suite": { stepCaps: 18, needed: 19, jobCap: 30 },
   "ci.yml:browser-acceptance": { stepCaps: 53, needed: 54, jobCap: 60 },
   "ci.yml:package-contracts": { stepCaps: 38, needed: 39, jobCap: 55 },
@@ -159,6 +165,47 @@ describe("workflow timeout contract", () => {
     const duration = Number(action.inputs["attempt-timeout-seconds"]?.default);
     const attempts = Number(action.inputs.attempts?.default);
     expect(((duration + 15) * attempts) / 60).toBeLessThanOrEqual(17);
+  });
+
+  test("the required framework UI soak fits inside every enclosing timeout", async () => {
+    const workflows = await loadWorkflows();
+    const e2eJob = workflows["ci.yml"]?.jobs?.["e2e-shards"];
+    const runStep = e2eJob?.steps?.find(
+      (step) => step.name === "Run exactly the impacted E2E tests",
+    );
+    const command = String(runStep?.run ?? "").replace(/\s+/gu, " ");
+    const profileTimeoutSeconds = Number(command.match(/--timeout-seconds (\d+)/u)?.[1]);
+    const stepTimeoutMinutes = numericCap(runStep?.["timeout-minutes"]);
+    const jobTimeoutMinutes = numericCap(e2eJob?.["timeout-minutes"]);
+    const installStep = e2eJob?.steps?.find(
+      (step) => step.name === "Install pinned browser runtimes",
+    );
+    const installTimeoutMinutes = numericCap(installStep?.["timeout-minutes"]);
+
+    expect(Number.isSafeInteger(profileTimeoutSeconds)).toBe(true);
+    expect(stepTimeoutMinutes).not.toBeNull();
+    expect(jobTimeoutMinutes).not.toBeNull();
+    expect(installTimeoutMinutes).not.toBeNull();
+    expect(profileTimeoutSeconds * 1_000).toBeGreaterThanOrEqual(
+      FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS +
+        FRAMEWORK_UI_SOAK_PROFILE_HEADROOM_MILLISECONDS,
+    );
+    expect(stepTimeoutMinutes! * 60_000).toBeGreaterThanOrEqual(
+      profileTimeoutSeconds * 1_000 + FRAMEWORK_UI_SOAK_STEP_HEADROOM_MILLISECONDS,
+    );
+    expect(jobTimeoutMinutes!).toBeGreaterThanOrEqual(
+      installTimeoutMinutes! + stepTimeoutMinutes! + 1,
+    );
+
+    const soakSource = await readFile(
+      resolve(root, "test/e2e/framework-ui-soak.browser.e2e.ts"),
+      "utf8",
+    );
+    expect(soakSource).toContain("FRAMEWORK_UI_SOAK_DEFAULT_DURATION_MILLISECONDS");
+    expect(soakSource).toContain("FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS");
+    expect(FRAMEWORK_UI_SOAK_TEST_HEADROOM_MILLISECONDS).toBe(5 * 60_000);
+    const shardRunner = await readFile(resolve(root, "scripts/ci/run-test-shard.ts"), "utf8");
+    expect(shardRunner).toContain("e2eShardWeights(process.cwd(), files)");
   });
 
   test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {

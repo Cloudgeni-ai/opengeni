@@ -4,6 +4,7 @@ import {
   DIRECT_SESSION_RAW_BUDGET,
   DIRECT_SESSION_RAW_MEASUREMENT,
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  FRAMEWORK_NEUTRAL_UI_CURRENT_MAIN_BROWSER_FILE_COUNT,
   HTTP1_BROWSER_STREAMS_RAW_BUDGET,
   HTTP1_BROWSER_STREAMS_RAW_MEASUREMENT,
   KIB,
@@ -206,6 +207,10 @@ describe("web bundle budget policy", () => {
     expect(
       ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET - ORGANIZATION_CODEX_INHERITANCE_RAW_MEASUREMENT,
     ).toBe(1_488);
+  });
+
+  test("retains the exact framework-neutral UI current-main request envelope", () => {
+    expect(FRAMEWORK_NEUTRAL_UI_CURRENT_MAIN_BROWSER_FILE_COUNT).toBe(34);
   });
 
   test("retains the exact model-catalog, Gateway, and OpenRouter envelope", () => {

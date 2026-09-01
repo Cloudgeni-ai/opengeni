@@ -4981,11 +4981,13 @@ describe("runtime event normalization", () => {
   test("CODEMODE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
     const home = mkdtempSync(join(tmpdir(), "opengeni-codemode-refresh-"));
     try {
+      const environment = { ...process.env, HOME: home };
+      delete environment.OPENGENI_CODEMODE_TOKEN_FILE;
       const session = {
         exec: async (args: { cmd: string }) => {
           const proc = Bun.spawn(["sh", "-lc", args.cmd], {
             cwd: home,
-            env: { ...process.env, HOME: home },
+            env: environment,
             stdout: "pipe",
             stderr: "pipe",
           });

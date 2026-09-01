@@ -56,6 +56,42 @@ describe("SSR safety (no DOM / no window)", () => {
     expect(html).toContain("server draft");
   });
 
+  test("the lazy voice fallback keeps browser capability unknown during SSR", () => {
+    function ServerVoiceComposer() {
+      const controller = Composer.useChatComposerController({
+        delivery: {
+          value: "server draft",
+          setValue: () => {},
+          send: async () => true,
+          steer: async () => true,
+          sending: false,
+          canSend: true,
+          error: null,
+          clearError: () => {},
+        },
+      });
+      return (
+        <Composer.Root controller={controller}>
+          <Composer.ComposerTranscriptionControl
+            capability={{
+              available: true,
+              maxDurationSeconds: 60,
+              maxSizeBytes: 1024,
+              acceptedMimeTypes: ["audio/webm"],
+            }}
+            workspaceEnabled
+          />
+        </Composer.Root>
+      );
+    }
+
+    expect(typeof indexedDB).toBe("undefined");
+    const html = renderToString(<ServerVoiceComposer />);
+    expect(html).toContain('aria-label="Start voice input"');
+    expect(html).toContain('aria-disabled="false"');
+    expect(html).not.toContain("audio could not be saved safely");
+  });
+
   test("SandboxTerminal renders to a string on the server (placeholder, no xterm import)", () => {
     const html = renderToString(
       <SandboxTerminal

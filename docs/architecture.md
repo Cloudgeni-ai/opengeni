@@ -570,7 +570,9 @@ core / runtime
           ↓
 apps/api and apps/worker
 
-contracts → sdk → react → apps/web
+contracts → sdk/session ─┬→ react ─→ apps/web
+                        └→ svelte
+             ui ────────┴→ react / svelte
 ```
 
 The client closure remains server-free. `apps/web` consumes the SDK and React
@@ -844,7 +846,7 @@ metadata.
 | --- | --- | --- |
 | `apps/api` | `@opengeni/api-router` | Hono HTTP composition, middleware, routes, MCP transport, SSE, and API-side control adapters over core |
 | `apps/worker` | `@opengeni/worker-bundle` | Temporal workflows, control/turn activities, agent execution, maintenance pumps, and worker lifecycle |
-| `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK and React packages |
+| `apps/web` | `opengeni-web` | Stock React/Vite operator console consuming the public SDK/React packages and serving isolated React/Svelte reference demos |
 | `apps/browser-extension` | `@opengeni/browser-extension` | Browser attachment extension and its control-plane protocol; a leaf client, not session authority |
 
 The standalone `apps/api` entrypoint installs a one-shot fatal process
@@ -882,8 +884,10 @@ handlers because its host owns process lifecycle.
 | `packages/artifact-kernel-wasm-presentation` | `@opengeni/artifact-kernel-wasm-presentation` | Lazy presentation WASM kernel distribution |
 | `packages/artifact-kernel-wasm-spreadsheet` | `@opengeni/artifact-kernel-wasm-spreadsheet` | Lazy spreadsheet WASM kernel distribution |
 | `packages/agent-proto` | `@opengeni/agent-proto` | Generated TypeScript side of the Connected Machine wire protocol |
-| `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, event streaming, and transport helpers |
-| `packages/react` | `@opengeni/react` | React hooks and styled session, composer, artifact, and machine surfaces |
+| `packages/sdk` | `@opengeni/sdk` | Framework-neutral API client, transport helpers, and focused session controllers/projections |
+| `packages/ui` | `@opengeni/ui` | Framework-neutral session anatomy, copy, icon roles, tokens, and scoped semantic CSS |
+| `packages/react` | `@opengeni/react` | React compatibility adapters plus styled session, composer, artifact, interaction, and machine surfaces |
+| `packages/svelte` | `@opengeni/svelte` | Native Svelte stores, context, semantic session components, and reference demo |
 | `packages/observability` | `@opengeni/observability` | Structured logs, traces, metrics, and Prometheus exposition |
 | `packages/deployment` | `@opengeni/deployment` | Typed deployment profiles, preflight, plans, and generated runtime artifacts |
 | `packages/testing` | `@opengeni/testing` | Shared test services, fixtures, scripted models, and sandbox helpers |
@@ -1020,11 +1024,15 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
 [`connected-machines.md`](connected-machines.md).
 
-### 7.6 SDK, React, web, and embedding
+### 7.6 SDK, shared UI, framework adapters, web, and embedding
 
-`@opengeni/sdk` is the framework-neutral client contract. `@opengeni/react`
-adds hooks and UI. `apps/web` is a consumer of those packages and should not
-become a hidden source of domain semantics.
+`@opengeni/sdk` is the framework-neutral client contract, and its focused
+`session` subpath owns durable browser-side session controllers and pure
+projections. `@opengeni/ui` owns framework-neutral semantic UI contracts and
+scoped CSS. `@opengeni/react` preserves the existing React API over those
+controllers; `@opengeni/svelte` provides native Svelte stores and session UI
+without importing React. `apps/web` consumes the React packages and serves both
+framework demos, but must not become a hidden source of session semantics.
 
 The stock web console imports the browser-focused `@opengeni/sdk/browser`
 entry. Operator-only Document-authority and tenancy-backfill methods live in
@@ -1035,12 +1043,14 @@ direct-session browser graph; bundle-boundary and browser-surface tests pin that
 separation.
 
 Most product integrations use the standalone service through a server-side SDK
-proxy and optional React surfaces. Advanced in-process embedding may bind host
-identity, persistence, event, billing, credential, and worker ports, but must
-preserve the same core boundaries.
+proxy and optional React or Svelte session surfaces. Advanced in-process
+embedding may bind host identity, persistence, event, billing, credential, and
+worker ports, but must preserve the same core boundaries.
 
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
 [`../packages/react/README.md`](../packages/react/README.md),
+[`../packages/svelte/README.md`](../packages/svelte/README.md),
+[`framework-ui.md`](framework-ui.md),
 [`embedding-workbench.md`](embedding-workbench.md), and
 [`embedding.md`](embedding.md).
 
@@ -1291,9 +1301,9 @@ This index intentionally routes at subsystem granularity. Use
 | Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
-| SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
+| SDK, shared UI, React/Svelte adapter, or browser bundle surface | `packages/sdk/src/`, `packages/ui/`, `packages/react/src/`, `packages/svelte/src/` | [`framework-ui.md`](framework-ui.md), package READMEs, §3.10, and §7.6 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
-| Standalone product integration | `packages/sdk/`, `packages/react/` | [`embedding-workbench.md`](embedding-workbench.md) |
+| Standalone product integration | `packages/sdk/`, `packages/ui/`, `packages/react/`, `packages/svelte/` | [`framework-ui.md`](framework-ui.md), [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

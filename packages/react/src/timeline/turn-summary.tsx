@@ -406,6 +406,8 @@ export function TurnSummary({
           className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
         >
           <Collapsible.Trigger
+            aria-label={open ? "Hide turn steps" : "Show turn steps"}
+            data-og-turn-summary-trigger=""
             className={cn(
               settling && "animate-og-settle-chip",
               // Top-level turn fold and (when used) nested cluster folds render as

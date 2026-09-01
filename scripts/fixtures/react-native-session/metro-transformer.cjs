@@ -1,7 +1,7 @@
 const path = require("node:path");
 const upstream = require("@react-native/metro-babel-transformer");
 
-const projectionSuffix = path.normalize("packages/react/src/timeline/projection.ts");
+const projectionSuffix = path.normalize("packages/sdk/src/session/timeline/projection.ts");
 const correctedImport = 'import fleetDecisionItem from "./fleet-decision-projection";';
 const oldTopLevelImport =
   'const { default: fleetDecisionItem } = await import("./fleet-decision-projection");';

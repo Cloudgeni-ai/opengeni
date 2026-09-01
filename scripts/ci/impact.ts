@@ -99,6 +99,12 @@ const TEMPORAL_WORKFLOW_DEPENDENCIES = [
 ];
 
 const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
+  "test/framework-session-state-manifest.test.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/svelte",
+    "@opengeni/ui",
+  ],
   "test/integration/api.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/core",
@@ -229,6 +235,21 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/framework-ui-parity.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/svelte",
+    "@opengeni/testing",
+    "@opengeni/ui",
+  ],
+  "test/e2e/framework-ui-soak.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/svelte",
+    "@opengeni/testing",
+    "@opengeni/ui",
+  ],
+  "test/e2e/svelte-demo.browser.e2e.ts": ["@opengeni/sdk", "@opengeni/svelte", "@opengeni/ui"],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -708,8 +729,18 @@ export function createImpactPlan(
     )
     .map((pkg) => pkg.name)
     .sort();
-  if (buildPackages.some((name) => name === "@opengeni/sdk" || name === "@opengeni/react")) {
-    for (const linked of ["@opengeni/sdk", "@opengeni/react"]) {
+  const linkedClientPackages = [
+    "@opengeni/sdk",
+    "@opengeni/ui",
+    "@opengeni/react",
+    "@opengeni/svelte",
+  ] as const;
+  if (
+    buildPackages.some((name) =>
+      linkedClientPackages.includes(name as (typeof linkedClientPackages)[number]),
+    )
+  ) {
+    for (const linked of linkedClientPackages) {
       if (!buildPackages.includes(linked)) buildPackages.push(linked);
     }
     buildPackages.sort();

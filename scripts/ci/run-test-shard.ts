@@ -8,6 +8,7 @@ import { describeTestConcurrencyBudget, testConcurrencyBudget } from "./resource
 import {
   deterministicShards,
   discoverTestFiles,
+  e2eShardWeights,
   integrationShardWeights,
   usesBrowserRunner,
   type ShardWeightResolution,
@@ -98,12 +99,7 @@ async function main(): Promise<void> {
   const planning: ShardWeightResolution =
     tier === "integration"
       ? integrationShardWeights(process.cwd())
-      : {
-          mode: "source-bytes",
-          weights: null,
-          reason: "E2E tier uses deterministic source-byte weights",
-          profileSha256: null,
-        };
+      : e2eShardWeights(process.cwd(), files);
   const selected =
     deterministicShards(process.cwd(), files, count, planning.weights ?? undefined)[index] ?? [];
   if (args.includes("--list-json")) {

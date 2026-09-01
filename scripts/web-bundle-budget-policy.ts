@@ -107,6 +107,9 @@ export const ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET = wholeKibEnvelope(
   ORGANIZATION_CODEX_INHERITANCE_RAW_MEASUREMENT,
 );
 
+/** Exact framework-neutral UI plus current-main Linux/x64 Bun 1.4 file count. */
+export const FRAMEWORK_NEUTRAL_UI_CURRENT_MAIN_BROWSER_FILE_COUNT = 34;
+
 /** Exact model-catalog, Gateway, OpenRouter, and current-main Linux/x64 Bun 1.4 measurement. */
 export const MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_MEASUREMENT = 2_274_951;
 export const MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET = wholeKibEnvelope(
