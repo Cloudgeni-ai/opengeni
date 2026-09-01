@@ -45302,7 +45302,11 @@ export async function reapStaleLeaseHoldersGlobal(
   // A separate lifecycle-aware function settles only stale starting/restoring/
   // suspending/ending transitions. API controller mutations pulse their holder
   // while in flight, so the transition TTL detects an abandoned caller rather
-  // than imposing a maximum duration on profile capture or restore.
+  // than imposing a maximum duration on profile capture or restore. The same
+  // lifecycle function is also the hard provider-deadline override: once a
+  // requested finite-lifetime Modal lease is due, its controller resources are
+  // lost and their holders are released without turning timestamp age into a
+  // general active-session expiry policy.
   const rows = await db.transaction(async (txRaw) => {
     const tx = txRaw as unknown as Database;
     await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
@@ -49833,6 +49837,7 @@ export type SandboxRotationBacklog = {
   turnBlocked: number;
   directBlocked: number;
   processBlocked: number;
+  interactionBlocked: number;
 };
 
 export async function readSandboxRotationBacklog(db: Database): Promise<SandboxRotationBacklog> {
@@ -49842,7 +49847,13 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
     turn_blocked: number | string;
     direct_blocked: number | string;
     process_blocked: number | string;
-  }>(db, sql`select * from opengeni_private.sandbox_rotation_backlog()`);
+    interaction_blocked: number | string;
+  }>(
+    db,
+    sql`select backlog.*,
+          opengeni_private.sandbox_rotation_interaction_blocked() as interaction_blocked
+        from opengeni_private.sandbox_rotation_backlog() backlog`,
+  );
   const row = rows[0];
   return {
     requested: Number(row?.requested ?? 0),
@@ -49850,6 +49861,7 @@ export async function readSandboxRotationBacklog(db: Database): Promise<SandboxR
     turnBlocked: Number(row?.turn_blocked ?? 0),
     directBlocked: Number(row?.direct_blocked ?? 0),
     processBlocked: Number(row?.process_blocked ?? 0),
+    interactionBlocked: Number(row?.interaction_blocked ?? 0),
   };
 }
 

@@ -1,10 +1,10 @@
 -- deployment-mode: maintenance
--- Migration 0388: deployment-owned model catalog authority, provider-scoped
+-- Migration 0389: deployment-owned model catalog authority, provider-scoped
 -- workspace Vercel AI Gateway/OpenRouter slugs, and indexed pre-catalog prompt
 -- receipt replay.
 -- This changes the exact runtime-posture table/grant contract. Stop every API,
 -- control worker, and turn worker before applying it, and never restart a
--- pre-0388 image after commit.
+-- pre-0389 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -18,14 +18,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0388 model catalog activation requires an explicit application database role list'
+      '0389 model catalog activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0388 model catalog activation received a malformed application database role list'
+      '0389 model catalog activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -44,7 +44,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0388 model catalog activation received an invalid application database role list'
+      '0389 model catalog activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -56,7 +56,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0388 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
+      '0389 model catalog activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -234,7 +234,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0388 model catalog activation observed a configured OpenGeni application database session after schema installation'
+      '0389 model catalog activation observed a configured OpenGeni application database session after schema installation'
       USING ERRCODE = '55000';
   END IF;
 END

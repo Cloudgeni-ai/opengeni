@@ -254,8 +254,8 @@ Generated Kubernetes deployment plans default to one rolling `helm upgrade
 add the disabled-application revision only when the Helm release does not yet
 exist, so bootstrap can create Postgres/Temporal/NATS/object storage before the
 migration hook without turning every later release into an outage. A reviewed
-maintenance migration must be selected explicitly; migration 0388 uses
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0388_model_catalog_and_gateway_custom_models`
+maintenance migration must be selected explicitly; migration 0389 uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
 plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
 operator completes the documented database-role, image-digest, and application
 drain preflight. Postgres and Garage PVCs remain attached. Database migrations
@@ -1814,9 +1814,9 @@ Do not commit real secret values.
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
-operator-owned singleton, not a boot-time reconciliation loop. Migration 0388
+operator-owned singleton, not a boot-time reconciliation loop. Migration 0389
 changes the exact runtime-posture table/grant contract, so this is a drained
-maintenance cutover rather than a rolling migration. A mixed pre/post-0388
+maintenance cutover rather than a rolling migration. A mixed pre/post-0389
 fleet is unsupported even while every process still uses `code`:
 
 1. Bind and verify the exact database, schema, new application image, and every
@@ -1845,7 +1845,7 @@ fleet is unsupported even while every process still uses `code`:
    operator acknowledgements are present:
 
    ```bash
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0388_model_catalog_and_gateway_custom_models
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models
    export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
    ```
 
@@ -1881,14 +1881,14 @@ fleet is unsupported even while every process still uses `code`:
    0387 before Helm recreates the application. If the second upgrade fails,
    remain drained and fix forward.
 
-3. Apply `0388_model_catalog_and_gateway_custom_models.sql`, provision roles,
+3. Apply `0389_model_catalog_and_gateway_custom_models.sql`, provision roles,
    and assert runtime posture using the catalog-aware release artifacts. The
    migration repeats the configured-login drain check before and after schema
    installation and aborts with SQLSTATE `55000` if a listed session is live.
    The migration strips inherited non-owner ACLs from the new tables and grants
    none of the listed drain identities; the following `db:provision-roles` step
    grants only the exact current application role.
-   After commit, never restart a pre-0388 image or use it as an application
+   After commit, never restart a pre-0389 image or use it as an application
    rollback target; remain on the new schema and fix forward.
 4. Start the catalog-aware API and workers with
    `OPENGENI_MODEL_CATALOG_SOURCE=code`, then verify startup and readiness.

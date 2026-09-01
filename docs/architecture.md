@@ -1084,6 +1084,17 @@ not terminal success authority: the worker must await SDK completion and route
 its rejection through `sandbox_deadline_rotation` recovery before settling
 `turn.completed`.
 
+BrowserSession and ComputerSession interaction holders are durable placement
+authority, not UI-presence leases, so an active controller never expires merely
+because its heartbeat timestamp is old. A requested finite-lifetime Modal lease
+that has reached its absolute provider deadline is the narrow exception: the
+global lifecycle reaper marks each exact controller resource `lost`, settles a
+prepared operation as a deterministic deadline failure or a dispatched operation
+as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
+then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
+This deadline override is batch-bounded and does not impose a maximum duration on
+healthy interaction sessions before the provider identity itself expires.
+
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
 process, admission, PTY, and holder remain capture blockers. Quarantine never
