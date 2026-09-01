@@ -319,8 +319,8 @@
     {
       "id": 8,
       "type": "stat",
-      "title": "Startup SLO misses",
-      "description": "Successful turns above the default queue (5s), provider-dispatch (60s), and first-byte (120s) latency SLOs over the selected range. Pre-byte failures and timeouts are availability misses in the panel below, not latency samples.",
+      "title": "Startup SLI threshold observations",
+      "description": "Successful turns above the reference queue (5s), provider-dispatch (60s), and first-byte (120s) latency thresholds over the selected range. These cumulative SLI observations include intentional per-session FIFO wait and do not page operators. Pre-byte failures and timeouts are availability misses in the panel below, not latency samples.",
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
       "fieldConfig": {
         "defaults": {
@@ -345,21 +345,21 @@
         {
           "refId": "A",
           "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"queue\",outcome=\"completed\",le=\"5\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
-          "legendFormat": "queue >5s",
+          "legendFormat": "queue SLI >5s",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "B",
           "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"provider_dispatch\",outcome=\"completed\",le=\"60\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
-          "legendFormat": "dispatch >60s",
+          "legendFormat": "dispatch SLI >60s",
           "editorMode": "code",
           "range": true
         },
         {
           "refId": "C",
           "expr": "sum(increase(opengeni_turn_startup_milestone_duration_seconds_count{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",provider=~\"$provider\",backend=~\"$backend\"}[$__range])) - sum(increase(opengeni_turn_startup_milestone_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",milestone=\"first_byte\",outcome=\"completed\",le=\"120\",provider=~\"$provider\",backend=~\"$backend\"}[$__range]))",
-          "legendFormat": "first byte >120s",
+          "legendFormat": "first byte SLI >120s",
           "editorMode": "code",
           "range": true
         }
