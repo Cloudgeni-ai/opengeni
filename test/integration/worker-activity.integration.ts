@@ -25,6 +25,7 @@ import {
   createSessionGoal,
   createVariableSet,
   dbSql,
+  setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
   enablePackInstallation,
   loadVariableSetForRun,
@@ -3573,6 +3574,125 @@ describe("worker activities integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
+  });
+
+  test("skips reusable scheduled occurrences until the session returns idle", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-reusable-skip",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "maintain the reusable session",
+        resources: [],
+        tools: [],
+        metadata: {},
+        goal: {
+          text: "Keep the reusable session healthy",
+          successCriteria: "The scheduled maintenance turn completes",
+        },
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "maintenance complete" }]),
+      }),
+    });
+
+    const producerKey = `worker-activity-${crypto.randomUUID()}`;
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    if (first.action !== "start") {
+      throw new Error(`first reusable occurrence was not admitted: ${first.action}`);
+    }
+    const goalAfterFirst = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    if (!goalAfterFirst) throw new Error("reusable scheduled goal was not created");
+
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(retry).toMatchObject({
+      sessionId: first.sessionId,
+      triggerEventId: first.triggerEventId,
+    });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: goalAfterFirst.status,
+      version: goalAfterFirst.version,
+      objectiveRevision: goalAfterFirst.objectiveRevision,
+      updatedAt: goalAfterFirst.updatedAt,
+    });
+    const runsAfterSkip = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runsAfterSkip).toHaveLength(2);
+    expect(runsAfterSkip).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "dispatched" }),
+        expect.objectContaining({ status: "skipped", error: "scheduled_session_not_idle" }),
+      ]),
+    );
+
+    await setSessionGoalStatusWithEvent(dbClient.db, grant.workspaceId, first.sessionId, {
+      status: "completed",
+      evidence: "scheduled maintenance fixture completed",
+      event: {
+        type: "goal.completed",
+        evidence: "scheduled maintenance fixture completed",
+      },
+    });
+    const turn = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: first.sessionId,
+      trigger: { kind: "next" },
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(turn.status).toBe("idle");
+
+    const third = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    expect(third).toMatchObject({ action: "signal", sessionId: first.sessionId });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: "active",
+      version: expect.any(Number),
+    });
+    const goalAfterThird = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    expect(goalAfterThird!.version).toBeGreaterThan(goalAfterFirst.version);
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
