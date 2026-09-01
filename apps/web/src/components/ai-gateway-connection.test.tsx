@@ -1375,6 +1375,79 @@ describe("AiGatewayConnectionCard custom models", () => {
     }
   });
 
+  test("reconciles two lost create responses and mints a new operation after remove and re-add", async () => {
+    const created = customModel("anthropic/claude-sonnet-4.6");
+    const replacement = customModel(created.upstreamModelId);
+    let activeModels: WorkspaceGatewayCustomModel[] = [];
+    const operationIds: string[] = [];
+    listWorkspaceGatewayCustomModels.mockImplementation(async () => ({ models: activeModels }));
+    createWorkspaceGatewayCustomModel.mockImplementation(async (_workspaceId, request) => {
+      operationIds.push(request.operationId);
+      if (operationIds.length <= 2) {
+        activeModels = [created];
+        throw new Error("response lost after create commit");
+      }
+      activeModels = [replacement];
+      return replacement;
+    });
+    deleteWorkspaceGatewayCustomModel.mockImplementation(async () => {
+      activeModels = [];
+    });
+    const { container, root } = await renderCard();
+
+    try {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Vercel AI Gateway model slug"]',
+      )!;
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(operationIds).toHaveLength(2);
+      expect(operationIds[0]).toBe(operationIds[1]);
+      expect(input.value).toBe("");
+      expect(container.textContent).toContain(created.upstreamModelId);
+      expect(toastSuccess).toHaveBeenCalledWith("Gateway model added", expect.any(Object));
+      expect(toastError).not.toHaveBeenCalled();
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `button[aria-label="Remove ${created.upstreamModelId}"]`,
+          )!
+          .click();
+        await flush();
+      });
+      const confirm = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent?.trim() === "Remove model",
+      )!;
+      await act(async () => {
+        confirm.click();
+        await flush();
+      });
+
+      await setInputValue(input, created.upstreamModelId);
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.includes("Add model"))
+          ?.click();
+        await flush();
+      });
+
+      expect(operationIds).toHaveLength(3);
+      expect(operationIds[2]).not.toBe(operationIds[0]);
+      expect(container.textContent).toContain(replacement.upstreamModelId);
+      expect(input.value).toBe("");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("blocks Enter and disables the slug input while an add is pending", async () => {
     const created = customModel("anthropic/claude-sonnet-4.6");
     let resolveCreate: ((model: WorkspaceGatewayCustomModel) => void) | undefined;

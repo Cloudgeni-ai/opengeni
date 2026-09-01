@@ -47,6 +47,13 @@ describe("model picker shared ordering", () => {
     ).toBe("external");
     expect(
       modelPickerBillingClassFor({
+        cost: "credits",
+        source: "openrouter",
+        billing: { upstreamPayer: "deployment", metering: "external" },
+      }),
+    ).toBe("opengeni_credits");
+    expect(
+      modelPickerBillingClassFor({
         credentialSource: { kind: "connected_subscription", provider: "xai" },
       }),
     ).toBe("supergrok_subscription");

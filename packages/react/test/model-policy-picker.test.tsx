@@ -415,7 +415,7 @@ describe("ModelPolicyPicker", () => {
     expect(container.querySelector('[aria-label="Workspace provider account"]')).toBeTruthy();
   });
 
-  test("preserves the External billing rail for a removed OpenRouter selection", async () => {
+  test("uses the credits-safe rail when a removed OpenRouter selection has no cost row", async () => {
     const container = await mount(
       <ModelPolicyPicker
         rows={[]}
@@ -428,10 +428,10 @@ describe("ModelPolicyPicker", () => {
       />,
     );
 
-    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
     expect(
       container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
-    ).toBeNull();
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
   });
 
   test("renders the External rail mark for an anonymous provider", async () => {

@@ -499,19 +499,7 @@ function ModelProviderConnectionCardWithClient(
     customModelsRequestGenerationRef.current += 1;
     restoreModelInputFocusRef.current = true;
     setModelBusy(true);
-    try {
-      const create = () =>
-        config.createCustomModel(client, props.workspaceId, {
-          operationId,
-          upstreamModelId: submittedSlug,
-        });
-      let saved: WorkspaceProviderCustomModel;
-      try {
-        saved = await create();
-      } catch {
-        saved = await create();
-      }
-      if (!activeRef.current) return;
+    const confirmAdded = (saved: WorkspaceProviderCustomModel) => {
       pendingModelCreateRef.current = null;
       setCustomModels((current) => [
         ...current.filter(
@@ -529,10 +517,32 @@ function ModelProviderConnectionCardWithClient(
           ? "It can now appear in this workspace's model picker."
           : `It will become selectable after ${config.credentialLabel} is connected.`,
       });
+    };
+    try {
+      const create = () =>
+        config.createCustomModel(client, props.workspaceId, {
+          operationId,
+          upstreamModelId: submittedSlug,
+        });
+      let saved: WorkspaceProviderCustomModel;
+      try {
+        saved = await create();
+      } catch {
+        saved = await create();
+      }
+      if (!activeRef.current) return;
+      confirmAdded(saved);
     } catch (caught) {
       if (!activeRef.current) return;
-      await refreshCustomModels();
+      const reconciled = await refreshCustomModels();
       if (!activeRef.current) return;
+      const committed = reconciled?.find(
+        (candidate) => candidate.upstreamModelId === submittedSlug,
+      );
+      if (committed) {
+        confirmAdded(committed);
+        return;
+      }
       toast.error(`Couldn't confirm ${config.modelToastName} add`, {
         description: caught instanceof Error ? caught.message : String(caught),
       });

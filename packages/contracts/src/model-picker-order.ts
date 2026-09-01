@@ -11,6 +11,7 @@ const MODEL_PICKER_BILLING_CLASS_INITIAL_ORDER = "oecsb";
 
 export type ModelPickerBillingCandidate = {
   source?: string | undefined;
+  cost?: "free" | "credits" | "subscription" | "workspace" | undefined;
   billing?:
     | {
         upstreamPayer?: string | undefined;
@@ -28,6 +29,8 @@ export type ModelPickerBillingCandidate = {
 export function modelPickerBillingClassFor(
   model: ModelPickerBillingCandidate,
 ): ModelPickerBillingClass {
+  if (model.cost === "credits") return "opengeni_credits";
+  if (model.cost === "workspace") return "byok";
   const source = model.source;
   const credential = model.credentialSource;
   const payer = model.billing?.upstreamPayer;

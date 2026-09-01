@@ -199,7 +199,10 @@ function isCodexModel(model: ClientModel): boolean {
 function billingClassForMissingSelection(modelId: string): PickerBillingClass {
   if (modelId.startsWith("workspace-gateway/")) return "byok";
   if (modelId.startsWith("workspace-openrouter/")) return "byok";
-  if (modelId.startsWith("openrouter/")) return "external";
+  // A deployment OpenRouter ID does not encode its workspace-facing cost.
+  // Missing rows therefore use the credits-safe rail instead of falsely
+  // claiming that an unknown former selection was externally funded.
+  if (modelId.startsWith("openrouter/")) return "opengeni_credits";
   if (modelId.startsWith("codex/")) return "codex_subscription";
   if (modelId.startsWith("supergrok/")) return "supergrok_subscription";
   return "opengeni_credits";
