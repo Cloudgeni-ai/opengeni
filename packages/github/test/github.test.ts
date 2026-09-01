@@ -14,6 +14,7 @@ import {
   githubAppBotIdentityWarnings,
   GITHUB_APP_BOT_IDENTITY_UNAVAILABLE_WARNING,
   githubOAuthAuthorizeUrl,
+  listGitHubAppRepositoryBranches,
   normalizeGitHubAppPrivateKey,
   openPersonalGitHubGitBrokerClaims,
   personalGitHubGitBrokerRouteId,
@@ -756,6 +757,130 @@ describe("GitHub App installation repository lookup", () => {
           .filter((request) => request.method === "GET")
           .map((request) => request.authorization),
       ).toEqual(["Bearer ghs_lookup", "Bearer ghs_lookup", "Bearer ghs_lookup"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("lists a bounded branch page with one exact repository-scoped token", async () => {
+    const requests: Array<{
+      method: string;
+      url: string;
+      authorization: string | null;
+      body: string | null;
+      redirect: RequestRedirect | undefined;
+    }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}));
+      requests.push({
+        method: init?.method ?? "GET",
+        url,
+        authorization: headers.get("authorization"),
+        body: typeof init?.body === "string" ? init.body : null,
+        redirect: init?.redirect,
+      });
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_branches", expires_at: "2026-09-01T13:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/repositories/456")) {
+        return Response.json({
+          id: 456,
+          full_name: "acme/app",
+          default_branch: "main",
+        });
+      }
+      if (url.startsWith("https://api.github.com/repos/acme/app/branches?")) {
+        return Response.json([{ name: "feature/picker" }, { name: "main" }]);
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 2,
+          limit: 2,
+        }),
+      ).resolves.toEqual({
+        installationId: 123,
+        repositoryId: 456,
+        defaultBranch: "main",
+        branches: ["feature/picker", "main"],
+        nextPage: 3,
+      });
+      expect(JSON.parse(requests[0]!.body ?? "{}")).toEqual({
+        repository_ids: [456],
+        permissions: { contents: "read", metadata: "read" },
+      });
+      expect(requests.slice(1).map((request) => request.authorization)).toEqual([
+        "Bearer ghs_branches",
+        "Bearer ghs_branches",
+      ]);
+      expect(requests.every((request) => request.redirect === "manual")).toBe(true);
+      const branchUrl = new URL(requests[2]!.url);
+      expect(branchUrl.searchParams.get("page")).toBe("2");
+      expect(branchUrl.searchParams.get("per_page")).toBe("2");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("bounds branch-provider error bodies before surfacing a stable failure", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json(
+          { token: "ghs_branches", expires_at: "2026-09-01T13:00:00Z" },
+          { status: 201 },
+        );
+      }
+      if (url.endsWith("/repositories/456")) {
+        return new Response("provider detail ".repeat(8_000), { status: 502 });
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 1,
+          limit: 100,
+        }),
+      ).rejects.toMatchObject({ message: "GitHub API 502", status: 502 });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("bounds the branch flow's installation-token success body", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.endsWith("/app/installations/123/access_tokens")) {
+        return Response.json({
+          token: "ghs_branches",
+          padding: "x".repeat(70 * 1024),
+        });
+      }
+      return Response.json({ message: "unexpected request" }, { status: 500 });
+    }) as typeof fetch;
+    try {
+      await expect(
+        listGitHubAppRepositoryBranches(signingSettings(), {
+          installationId: 123,
+          repositoryId: 456,
+          page: 1,
+          limit: 100,
+        }),
+      ).rejects.toThrow("GitHub returned an invalid installation token payload");
     } finally {
       globalThis.fetch = originalFetch;
     }

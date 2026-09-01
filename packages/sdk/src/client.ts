@@ -249,6 +249,7 @@ import type {
   FileDownloadUrlResponse,
   GetPackResponse,
   GitHubAppInfo,
+  GitHubRepositoryBranchesResponse,
   GitHubRepositoriesResponse,
   GoogleDriveBrowseResponse,
   GoogleDriveDisconnectRequest,
@@ -258,6 +259,7 @@ import type {
   KnowledgeMemorySearchRequest,
   ListApiKeysResponse,
   ListManagedOrganizationMembershipsResponse,
+  ListGitHubRepositoryBranchesOptions,
   ListUserResourceAuthoritiesOptions,
   ListUserResourceAuthoritiesResponse,
   IssueUserResourceGrantRequest,
@@ -6738,6 +6740,24 @@ export class OpenGeniClient {
     );
   }
 
+  /** List one bounded page of branch suggestions for one currently selected personal repository. */
+  async listPersonalGitHubRepositoryBranches(
+    workspaceId: string,
+    connectionId: string,
+    repositoryId: string,
+    options: ListGitHubRepositoryBranchesOptions = {},
+  ): Promise<GitHubRepositoryBranchesResponse> {
+    return await this.requestJson<GitHubRepositoryBranchesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/connections/${connectionId}/github/repositories/${encodeURIComponent(repositoryId)}/branches`,
+      undefined,
+      {
+        ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
+    );
+  }
+
   /** Atomically replace the exact owner connection's selected repository set. */
   async replacePersonalGitHubRepositorySelections(
     workspaceId: string,
@@ -6986,6 +7006,24 @@ export class OpenGeniClient {
     return await this.requestJson<GitHubRepositoriesResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/github/repositories`,
+    );
+  }
+
+  /** List one bounded page of branch suggestions for one exact workspace App repository. */
+  async listGitHubRepositoryBranches(
+    workspaceId: string,
+    installationId: number,
+    repositoryId: number,
+    options: ListGitHubRepositoryBranchesOptions = {},
+  ): Promise<GitHubRepositoryBranchesResponse> {
+    return await this.requestJson<GitHubRepositoryBranchesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/github/installations/${installationId}/repositories/${repositoryId}/branches`,
+      undefined,
+      {
+        ...(options.cursor !== undefined ? { cursor: String(options.cursor) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
     );
   }
 

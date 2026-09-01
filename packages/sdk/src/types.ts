@@ -7183,6 +7183,21 @@ export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
 };
 
+export type GitHubRepositoryBranch = {
+  name: string;
+  isDefault: boolean;
+};
+
+export type ListGitHubRepositoryBranchesOptions = {
+  cursor?: number | undefined;
+  limit?: number | undefined;
+};
+
+export type GitHubRepositoryBranchesResponse = {
+  branches: GitHubRepositoryBranch[];
+  nextCursor: number | null;
+};
+
 export type CreateGitHubAppManifestRequest = {
   appName?: string | undefined;
   organization?: string | undefined;
