@@ -48,6 +48,10 @@ function textFile(name = "notes.txt"): File {
   return new File([new Uint8Array([1, 2, 3])], name, { type: "text/plain" });
 }
 
+function restoredAttachmentId(fileId: string, mountPath?: string): string {
+  return `restored:file:${fileId}\u0000${mountPath ?? `.opengeni/files/${fileId}`}`;
+}
+
 // Spy on the object-URL lifecycle. happy-dom may or may not provide these; we
 // fully replace them so create/revoke calls are deterministically counted.
 let created: string[] = [];
@@ -534,7 +538,7 @@ describe("useFileAttachments", () => {
       status: "uploading",
     });
     expect(hook.result.current.attachments[1]).toEqual({
-      id: "restored:restored-ready:default",
+      id: restoredAttachmentId("restored-ready"),
       name: "restored.png",
       contentType: ready.contentType,
       sizeBytes: ready.sizeBytes,
@@ -584,7 +588,7 @@ describe("useFileAttachments", () => {
 
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]).toMatchObject({
-      id: "restored:durable-image:default",
+      id: restoredAttachmentId(asset.id),
       name: "durable.png",
       contentType: "image/png",
       sizeBytes: 4096,
@@ -599,10 +603,10 @@ describe("useFileAttachments", () => {
     expect(getFileCalls).toEqual([asset.id]);
     expect(downloadCalls).toEqual([{ fileId: asset.id, disposition: "inline" }]);
 
-    expect(await hook.result.current.createDownloadUrl!("restored:durable-image:default")).toBe(
+    expect(await hook.result.current.createDownloadUrl!(restoredAttachmentId(asset.id))).toBe(
       "https://files.example.test/durable-image/attachment",
     );
-    expect(await hook.result.current.createDownloadUrl!("restored:durable-image:default")).toBe(
+    expect(await hook.result.current.createDownloadUrl!(restoredAttachmentId(asset.id))).toBe(
       "https://files.example.test/durable-image/attachment",
     );
     expect(downloadCalls).toEqual([
@@ -685,6 +689,45 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.attachments).toHaveLength(1);
     expect(hook.result.current.attachments[0]?.resource).toEqual(later);
     expect(hook.result.current.readyResources).toEqual([later]);
+    await hook.unmount();
+  });
+
+  test("uses distinct React-key IDs for omitted and explicit default mounts", async () => {
+    const asset = fakeAsset({ id: "same-file", contentType: "text/plain" });
+    const client = fakeClient({ uploadFile: async () => asset });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    const omittedMount = { kind: "file", fileId: asset.id } as const;
+    const explicitDefaultMount = {
+      kind: "file",
+      fileId: asset.id,
+      mountPath: "default",
+    } as const;
+
+    await flushing(() =>
+      hook.result.current.restoreReadyFiles([asset], [omittedMount, explicitDefaultMount]),
+    );
+
+    const [omittedAttachment, explicitDefaultAttachment] = hook.result.current.attachments;
+    expect(omittedAttachment?.id).toBe(restoredAttachmentId(asset.id));
+    expect(explicitDefaultAttachment?.id).toBe(restoredAttachmentId(asset.id, "default"));
+    expect(new Set(hook.result.current.attachments.map((attachment) => attachment.id)).size).toBe(2);
+
+    await flushing(() => hook.result.current.failPreview?.(omittedAttachment!.id));
+
+    expect(hook.result.current.attachments[0]?.previewFailed).toBe(true);
+    expect(hook.result.current.attachments[1]?.previewFailed).toBeUndefined();
+
+    await flushing(() => hook.result.current.removeReadyFiles([omittedMount]));
+
+    expect(hook.result.current.attachments).toHaveLength(1);
+    expect(hook.result.current.attachments[0]).toMatchObject({
+      id: explicitDefaultAttachment!.id,
+      resource: explicitDefaultMount,
+    });
+    expect(hook.result.current.attachments[0]?.previewFailed).toBeUndefined();
     await hook.unmount();
   });
 
@@ -783,7 +826,7 @@ describe("useFileAttachments", () => {
 
     expect(hook.result.current.attachments).toEqual([
       {
-        id: "restored:fallback-file:default",
+        id: restoredAttachmentId("fallback-file"),
         name: "fallback-file",
         contentType: "application/octet-stream",
         sizeBytes: 0,

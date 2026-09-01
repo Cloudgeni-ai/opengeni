@@ -100,7 +100,7 @@ export type UseFileAttachmentsResult = {
   failPreview?: ((id: string) => void) | undefined;
   /**
    * Remove finalized attachments accepted by a send. A `FileResourceRef`
-   * removes only that exact resource identity, while a legacy string durable
+   * removes only that exact resource mount, while a legacy string durable
    * file ID removes every finalized mount of that file. Attachments added
    * while the request was in flight remain queued for the next message.
    */
