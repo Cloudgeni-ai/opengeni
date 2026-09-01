@@ -22,6 +22,7 @@ import {
   XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
+  type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -69,6 +70,7 @@ import {
   completedToolCallFromSdkEvent,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
+  createSessionTitleModelUsageEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   releaseTurnSandboxAfterWriterDrain,
@@ -99,11 +101,14 @@ import {
   PostCompactionContinuationEmptyError,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
+  processSessionTitleModelUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
+  sessionTitleCodexRequestContext,
+  sessionTitleXaiRequestContext,
   providerRetryAfterMs,
   providerRecoveryResult,
   providerRecoveryExhaustedFailure,
@@ -1416,6 +1421,37 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+
+  test("keeps title usage distinct from compaction when a provider omits responseId", async () => {
+    const expectedSourceKey = "act-A:session-title-1";
+    const state = createSessionTitleModelUsageEventState(new Set([expectedSourceKey]));
+    const result = await processSessionTitleModelUsageEvent({
+      usage: { usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
+      state,
+      dispatchId: "act-A",
+      settings: testSettings(),
+      db: {} as any,
+      observability: createObservability(testSettings(), { component: "worker" }),
+      publish: null,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      turnAttemptId: "attempt-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5",
+      externallyBilled: true,
+      servingCredentialId: null,
+      priorSessionCredentialId: null,
+      emittedSourceKeys: new Set(),
+      renewLease: async () => undefined,
+      leaseLost: () => false,
+      leaseLostMessage: "lease lost",
+    });
+
+    expect(result).toEqual({ status: "duplicate", sourceKey: expectedSourceKey });
   });
 });
 
@@ -5410,6 +5446,68 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "failed")).toBe(4);
     expect(providerRecoveryCountAfterModelRequestPhase(4, "first_byte")).toBe(4);
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
+  });
+
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+    const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
+    const refreshCodexToken = mock(async () => ({
+      accessToken: "codex-token-2",
+      accountId: "acct",
+    }));
+    const codexContext: CodexRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      getToken: getCodexToken,
+      refresh: refreshCodexToken,
+      resolveModel: (model) => model,
+      onUsageHeaders: () => undefined,
+      onRequestPreparationDiagnostic: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      onRequestOpaqueArtifacts: () => undefined,
+      nextRequestId: () => "main-request",
+      betaFeatures: ["main-only"],
+      turnMetadata: { request_kind: "agent_turn" },
+    };
+    const titleCodexContext = sessionTitleCodexRequestContext(codexContext, () => "title-request");
+
+    expect(titleCodexContext.getToken).toBe(getCodexToken);
+    expect(titleCodexContext.refresh).toBe(refreshCodexToken);
+    expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
+    expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
+    expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
+    expect(titleCodexContext.onRequestOpaqueArtifacts).toBeUndefined();
+    expect(titleCodexContext.betaFeatures).toBeUndefined();
+
+    const getXaiToken = mock(async () => ({ accessToken: "xai-token", userId: "user" }));
+    const refreshXaiToken = mock(async () => ({ accessToken: "xai-token-2", userId: "user" }));
+    const xaiContext: XaiSubscriptionRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      turnId: "turn-id",
+      getToken: getXaiToken,
+      refresh: refreshXaiToken,
+      resolveModel: (model) => model,
+      hostedSearch: { webSearch: true, xSearch: true },
+      onFinalContextUsage: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      nextRequestId: () => "main-xai-request",
+      streamIdleTimeoutMs: 30_000,
+    };
+    const titleXaiContext = sessionTitleXaiRequestContext(xaiContext, () => "title-xai-request");
+
+    expect(titleXaiContext.getToken).toBe(getXaiToken);
+    expect(titleXaiContext.refresh).toBe(refreshXaiToken);
+    expect(titleXaiContext.nextRequestId?.()).toBe("title-xai-request");
+    expect(titleXaiContext.streamIdleTimeoutMs).toBe(30_000);
+    expect(titleXaiContext.hostedSearch).toBeUndefined();
+    expect(titleXaiContext.onFinalContextUsage).toBeUndefined();
+    expect(titleXaiContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
   });
 
   test("classifies only definitive marked SuperGrok account refusals for rotation", () => {

@@ -507,6 +507,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       firstPartyMcpTools: selectedFirstPartyMcpTools,
       firstPartyMcpPermissions: session.firstPartyMcpPermissions,
     }),
+    parallelGenerationAvailable: typeof runtime.generateSessionTitle === "function",
   });
   const googleDrivePublicationAllowed =
     selectedFirstPartyMcpTools.includes("editable_artifact_export") &&
@@ -823,17 +824,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   } else {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
-  // Genesis turn = the first user turn (no assistant history reconciled
-  // yet). Durable Postgres state (countSessionHistoryItems includes
-  // superseded rows after compaction), NOT a workflow counter (turnsThisRun
-  // resets on continueAsNew). Drives the one-shot title hint appended to the
-  // agent's instructions; later attempts and goal continuations never match.
   return {
     attemptConnectorActionBindings: [
       ...googleDriveConnectorBindings,
       ...githubRestMcp.connectorBindings,
     ],
     connectorActionIdentity,
+    generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,
   };

@@ -72,9 +72,12 @@ import {
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   elideSupersededViewImagePairs,
+  generateSessionTitle,
   materializeSandboxFileDownloads,
   repositoryCloneCommand,
   repositoryUsesSandboxClone,
+  SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS,
+  SESSION_TITLE_GENERATION_INSTRUCTIONS,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
   normalizeModelCallUsage,
@@ -3602,6 +3605,53 @@ describe("runtime event normalization", () => {
     });
     expect(first.instructions?.endsWith(GENESIS_TITLE_DIRECTIVE)).toBe(true);
     expect(followUp.instructions).toBe(agent.instructions);
+  });
+
+  test("the auxiliary title request is bounded, tool-less, and normalized", async () => {
+    const requests: any[] = [];
+    const model = {
+      getResponse: async (request: any) => {
+        requests.push(request);
+        return {
+          responseId: "resp-title-1",
+          usage: Usage.fromJSON({
+            inputTokens: 20,
+            outputTokens: 4,
+            totalTokens: 24,
+          }),
+          output: [
+            {
+              type: "message",
+              role: "assistant",
+              status: "completed",
+              content: [
+                {
+                  type: "output_text",
+                  text: "Title: Parallel session titles\nThis line must be ignored",
+                },
+              ],
+            },
+          ],
+        };
+      },
+      getStreamedResponse: () => {
+        throw new Error("not used");
+      },
+    };
+    const result = await generateSessionTitle(
+      testSettings({ sandboxBackend: "none" }),
+      `  ${"x".repeat(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS + 100)}  `,
+      { model: model as any, modelName: "test-model" },
+    );
+
+    expect(result.title).toBe("Parallel session titles");
+    expect(result.usage?.responseId).toBe("resp-title-1");
+    expect(requests).toHaveLength(1);
+    expect(requests[0].systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);
+    expect(requests[0].input).toHaveLength(SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS);
+    expect(requests[0].tools).toEqual([]);
+    expect(requests[0].toolsExplicitlyProvided).toBe(true);
+    expect(requests[0].signal).toBeUndefined();
   });
 
   test("persistent display metadata never changes system instructions", () => {
