@@ -15,6 +15,11 @@ import {
 import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Notice } from "@/components/ui/notice";
 import { isOrganizationConflict } from "@/lib/organization-admin";
+import {
+  clearOrganizationInvitationContinuation,
+  readOrganizationInvitationContinuation,
+  type OrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
 import { cn } from "@/lib/utils";
 import type { OrganizationInvitation } from "@/types";
 
@@ -27,6 +32,7 @@ export type OrganizationInvitationsController = {
   error: Error | null;
   acceptingInvitationId: string | null;
   announcement: string;
+  continuation: (OrganizationInvitationContinuation & { invitationId: string | null }) | null;
   openDialog: () => void;
   setOpen: (open: boolean) => void;
   reload: () => Promise<void>;
@@ -46,9 +52,13 @@ export function useOrganizationInvitations(input: {
   const [error, setError] = useState<Error | null>(null);
   const [acceptingInvitationId, setAcceptingInvitationId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [continuation, setContinuation] = useState<
+    (OrganizationInvitationContinuation & { invitationId: string | null }) | null
+  >(null);
   const readSequence = useRef(0);
   const activeClient = useRef(client);
   const operationIds = useRef(new Map<string, string>());
+  const pendingContinuation = useRef<OrganizationInvitationContinuation | null>(null);
   activeClient.current = client;
 
   const reload = useCallback(async () => {
@@ -75,7 +85,26 @@ export function useOrganizationInvitations(input: {
         if (nextCursor !== undefined) seenCursors.add(nextCursor);
         cursor = nextCursor;
       } while (cursor !== undefined);
-      setInvitations(listedInvitations.filter((invitation) => invitation.status === "pending"));
+      const pendingInvitations = listedInvitations.filter(
+        (invitation) => invitation.status === "pending",
+      );
+      setInvitations(pendingInvitations);
+      const requestedContinuation = pendingContinuation.current;
+      if (requestedContinuation) {
+        pendingContinuation.current = null;
+        const matchingInvitation = pendingInvitations.find(
+          (invitation) =>
+            invitation.organizationId === requestedContinuation.organizationId &&
+            normalizeInvitationEmail(invitation.targetEmail) ===
+              normalizeInvitationEmail(requestedContinuation.targetEmail),
+        );
+        setContinuation({
+          ...requestedContinuation,
+          invitationId: matchingInvitation?.id ?? null,
+        });
+        clearOrganizationInvitationContinuation();
+        setOpen(true);
+      }
       setLoaded(true);
     } catch (caught) {
       if (activeClient.current !== acceptedClient || readSequence.current !== sequence) return;
@@ -97,6 +126,8 @@ export function useOrganizationInvitations(input: {
     setError(null);
     setAcceptingInvitationId(null);
     setAnnouncement("");
+    setContinuation(null);
+    pendingContinuation.current = enabled ? readOrganizationInvitationContinuation() : null;
     if (enabled) void reload();
     return () => {
       readSequence.current += 1;
@@ -104,9 +135,17 @@ export function useOrganizationInvitations(input: {
   }, [client, enabled, reload]);
 
   const openDialog = useCallback(() => {
+    pendingContinuation.current = null;
+    clearOrganizationInvitationContinuation();
+    setContinuation(null);
     setOpen(true);
     void reload();
   }, [reload]);
+
+  const changeOpen = useCallback((nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) setContinuation(null);
+  }, []);
 
   const accept = useCallback(
     async (invitation: OrganizationInvitation) => {
@@ -127,6 +166,10 @@ export function useOrganizationInvitations(input: {
         const organizationName = invitation.organizationName ?? "the organization";
         setAnnouncement(`Joined ${organizationName}.`);
         toast.success(`Joined ${organizationName}`);
+        if (continuation?.invitationId === invitation.id) {
+          setContinuation(null);
+          setOpen(false);
+        }
         onAccepted();
       } catch (caught) {
         if (activeClient.current !== acceptedClient) return;
@@ -143,7 +186,7 @@ export function useOrganizationInvitations(input: {
         if (activeClient.current === acceptedClient) setAcceptingInvitationId(null);
       }
     },
-    [acceptingInvitationId, client, enabled, onAccepted, reload],
+    [acceptingInvitationId, client, continuation?.invitationId, enabled, onAccepted, reload],
   );
 
   return {
@@ -155,8 +198,9 @@ export function useOrganizationInvitations(input: {
     error,
     acceptingInvitationId,
     announcement,
+    continuation,
     openDialog,
-    setOpen,
+    setOpen: changeOpen,
     reload,
     accept,
   };
@@ -202,14 +246,33 @@ export function OrganizationInvitationsDialog(props: {
   controller: OrganizationInvitationsController;
 }) {
   const { controller } = props;
+  const focusedInvitation = controller.continuation?.invitationId
+    ? (controller.invitations.find(
+        (invitation) => invitation.id === controller.continuation?.invitationId,
+      ) ?? null)
+    : null;
+  const displayedInvitations = controller.continuation
+    ? focusedInvitation
+      ? [focusedInvitation]
+      : []
+    : controller.invitations;
   return (
     <Dialog open={controller.open} onOpenChange={controller.setOpen}>
       <DialogContent className="max-h-[90dvh] grid-rows-[auto_minmax(0,1fr)] overflow-hidden sm:max-w-xl">
         <DialogHeader>
-          <DialogTitle>Organization invitations</DialogTitle>
+          <DialogTitle>
+            {focusedInvitation
+              ? `Join ${focusedInvitation.organizationName ?? "organization"}`
+              : controller.continuation
+                ? `Invitation to ${controller.continuation.organizationName}`
+                : "Organization invitations"}
+          </DialogTitle>
           <DialogDescription>
-            Review invitations for this signed-in account. Joining adds the listed organization and
-            shared workspace access; it never shares anyone&apos;s Personal workspace.
+            {focusedInvitation
+              ? "You're signed in. Accept the invitation below to finish joining."
+              : controller.continuation
+                ? "You're signed in, but this invitation isn't available for this account."
+                : "Review invitations for this signed-in account. Joining adds the listed organization and shared workspace access; it never shares anyone's Personal workspace."}
           </DialogDescription>
         </DialogHeader>
         <span className="sr-only" aria-live="polite" aria-atomic="true">
@@ -237,12 +300,20 @@ export function OrganizationInvitationsDialog(props: {
             </Notice>
           ) : null}
 
+          {controller.continuation && !focusedInvitation && controller.loaded ? (
+            <Notice tone="info" title="This invitation is no longer pending" className="mb-3">
+              The invitation to {controller.continuation.organizationName} may already have been
+              accepted, revoked, or opened with a different account.
+            </Notice>
+          ) : null}
+
           {controller.loading && !controller.loaded ? (
             <p role="status" className="flex items-center gap-2 py-6 text-sm text-fg-muted">
               <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
               Loading invitations…
             </p>
-          ) : controller.loaded && controller.invitations.length === 0 ? (
+          ) : controller.continuation && !focusedInvitation ? null : controller.loaded &&
+            displayedInvitations.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center">
               <p className="text-sm font-medium text-fg">No pending invitations</p>
               <p className="mt-1 text-xs text-fg-muted">
@@ -251,7 +322,7 @@ export function OrganizationInvitationsDialog(props: {
             </div>
           ) : (
             <div className="grid gap-2">
-              {controller.invitations.map((invitation) => {
+              {displayedInvitations.map((invitation) => {
                 const organizationName = invitation.organizationName ?? "Inviting organization";
                 const sharedWorkspaceCount = invitation.initialWorkspaceIds.length;
                 return (
@@ -279,14 +350,14 @@ export function OrganizationInvitationsDialog(props: {
                       variant="secondary"
                       size="sm"
                       className="w-full sm:w-auto"
-                      aria-label={`Join ${organizationName}`}
+                      aria-label={`Accept invitation to ${organizationName}`}
                       disabled={controller.acceptingInvitationId !== null || controller.loading}
                       onClick={() => void controller.accept(invitation)}
                     >
                       {controller.acceptingInvitationId === invitation.id ? (
                         <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
                       ) : null}
-                      Join organization
+                      Accept invitation
                     </Button>
                   </article>
                 );
@@ -301,6 +372,10 @@ export function OrganizationInvitationsDialog(props: {
 
 function titleCase(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
+}
+
+function normalizeInvitationEmail(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 function formatInvitationDate(value: string): string {

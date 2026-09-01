@@ -729,12 +729,15 @@ a skipped green result.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
-and Billing sections. The global account menu at the bottom of the sidebar also
-lists incoming Organization invitations with a pending count and an acceptance
-dialog, so a human who already belongs to one or more organizations never has
-to discover an invitation through the inviting organization first. Invitation
-emails and the signed-out setup page direct existing users to that same control
-before presenting new-account setup. Overview projects the canonical
+and Billing sections. An invitation email opens the signed-out setup page. An
+existing user can choose **Sign in and continue** there; the browser retains only
+the invitation's non-secret organization, target-email, and expiry metadata in
+same-tab session storage, never the setup bearer. After authentication, the
+console lists the signed-in account's pending invitations, matches the exact
+organization and normalized target email, and opens that invitation directly in
+a focused acceptance dialog. The global account menu at the bottom of the
+sidebar remains a fallback that lists all incoming Organization invitations with
+a pending count. Overview projects the canonical
 organization name plus every shared workspace and its direct human/service
 access roster; the database excludes all Personal workspaces before JSON
 projection. Owners and

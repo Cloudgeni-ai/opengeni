@@ -1014,6 +1014,14 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       },
     );
     expect(alternateInvite.targetEmail).toBe(registeredEmail);
+    const registeredInvitationEmails = [
+      await takeEmail("organization_user_setup", registeredEmail),
+      await takeEmail("organization_user_setup", registeredEmail),
+    ];
+    const alternateSetupEmail = registeredInvitationEmails.find((message) =>
+      message.text.includes("Onboarding Alternate Org"),
+    );
+    if (!alternateSetupEmail) throw new Error("alternate invitation email was not captured");
     await registeredPage.reload({ waitUntil: "domcontentloaded" });
     await registeredPage.getByRole("heading", { name: "Invitation pending" }).waitFor();
     await registeredPage.getByText("Onboarding Greenfield Org").waitFor();
@@ -1047,23 +1055,45 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
       status: "pending",
     });
     await registeredPage.setViewportSize({ width: 1024, height: 768 });
-    await registeredPage.getByRole("button", { name: "Account menu" }).click();
-    await registeredPage.getByRole("menuitem", { name: /Organization invitations/ }).click();
-    await registeredPage.getByRole("heading", { name: "Organization invitations" }).waitFor();
-    await registeredPage.getByText("Onboarding Alternate Org").waitFor();
+    await registeredContext.clearCookies();
+    await registeredPage.goto(firstUrl(alternateSetupEmail), { waitUntil: "domcontentloaded" });
+    await registeredPage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await registeredPage.getByRole("link", { name: "Sign in and continue" }).click();
+    await registeredPage.getByLabel("Email").fill(registeredEmail);
+    await registeredPage.getByLabel("Password").fill(PASSWORD);
+    await registeredPage.getByRole("button", { name: "Sign in", exact: true }).last().click();
+    await registeredPage.getByRole("heading", { name: "Join Onboarding Alternate Org" }).waitFor();
+    await registeredPage
+      .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
+      .waitFor();
+    await registeredPage.evaluate(
+      async () =>
+        await Promise.all(
+          document.getAnimations().map(async (animation) => {
+            try {
+              await animation.finished;
+            } catch {
+              // A replaced animation is already settled for this visual gate.
+            }
+          }),
+        ),
+    );
     await expectNoAxeViolations(registeredPage, "body");
     await registeredPage.screenshot({
       path: `${EVIDENCE_DIR}/onboarding-existing-account-invitations-desktop-1024.png`,
       fullPage: true,
     });
-    await registeredPage.getByRole("button", { name: "Join Onboarding Alternate Org" }).click();
+    await registeredPage
+      .getByRole("button", { name: "Accept invitation to Onboarding Alternate Org" })
+      .click();
     await registeredPage.getByRole("button", { name: "Account menu" }).waitFor();
-    const joinedMemberships = await sdk(registeredCookie).listOrganizationMemberships();
+    const resignedCookie = await cookieHeader(registeredContext);
+    const joinedMemberships = await sdk(resignedCookie).listOrganizationMemberships();
     expect(joinedMemberships.memberships).toHaveLength(2);
     expect(joinedMemberships.memberships.map((membership) => membership.organizationId)).toEqual(
       expect.arrayContaining([organizationId, alternateOrganizationId]),
     );
-    const acceptedInvitationHistory = await sdk(registeredCookie).listOrganizationInvitations({
+    const acceptedInvitationHistory = await sdk(resignedCookie).listOrganizationInvitations({
       limit: 20,
     });
     expect(

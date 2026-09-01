@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
 
 const MIN_PASSWORD_LENGTH = 8;
 const SETUP_TOKEN_REMOUNT_HANDOFF_MS = 30_000;
@@ -182,11 +183,22 @@ export function SetupAccountRoute({ token }: { token?: string | undefined }) {
             <div className="mb-4 rounded-md border border-border bg-surface-subtle p-3">
               <p className="text-sm font-medium">Already have an OpenGeni account?</p>
               <p className="mt-1 text-xs leading-5 text-fg-subtle">
-                Sign in, then open Organization invitations from the account menu at the bottom of
-                the sidebar.
+                Sign in and we&apos;ll take you directly back to this invitation.
               </p>
               <Button asChild variant="secondary" size="sm" className="mt-3 w-full">
-                <Link to="/">Sign in to accept invitation</Link>
+                <Link
+                  to="/"
+                  onClick={() =>
+                    storeOrganizationInvitationContinuation({
+                      organizationId: preview.organizationId,
+                      organizationName: preview.organizationName,
+                      targetEmail: preview.targetEmail,
+                      expiresAt: preview.expiresAt,
+                    })
+                  }
+                >
+                  Sign in and continue
+                </Link>
               </Button>
             </div>
             <div className="mb-4 flex items-center gap-3 text-xs text-fg-subtle">

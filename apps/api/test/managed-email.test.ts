@@ -81,13 +81,13 @@ describe("managed email transport", () => {
     expect(rendered.text).toContain("never shares anyone's Personal workspace");
     expect(rendered.text).toContain("Accept invitation to R&D <Labs>:");
     expect(rendered.text).toContain("You'll sign in or create an account before joining.");
-    expect(rendered.text).toContain("Organization invitations");
+    expect(rendered.text).toContain("OpenGeni will show the invitation immediately");
     expect(rendered.html).toContain("Ada &lt;Admin&gt;");
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
     expect(rendered.html).toContain(">Accept invitation to R&amp;D &lt;Labs&gt;</a>");
-    expect(rendered.html).toContain("<strong>Organization invitations</strong>");
-    expect(rendered.html).toContain("<strong>Join organization</strong>");
+    expect(rendered.html).toContain("<strong>Sign in and continue</strong>");
+    expect(rendered.html).toContain("show the invitation immediately");
     expect(rendered.html).not.toContain("Ada <Admin>");
     const digestInput = {
       ...rendered,

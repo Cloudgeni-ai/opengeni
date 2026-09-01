@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { act, type ReactNode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
 const toastSuccess = mock(() => undefined);
@@ -39,6 +39,8 @@ const {
   OrganizationInvitationsMenuItem,
   useOrganizationInvitations,
 } = await import("./organization-invitations");
+const { storeOrganizationInvitationContinuation } =
+  await import("@/lib/organization-invitation-continuation");
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -79,6 +81,132 @@ function invitation(input: {
 }
 
 describe("global organization invitations", () => {
+  test("opens the exact invitation automatically after an invitation-link sign-in", async () => {
+    sessionStorage.clear();
+    const pending = invitation({
+      id: crypto.randomUUID(),
+      organizationId: crypto.randomUUID(),
+      organizationName: "Direct Invitation Organization",
+      status: "pending",
+      revision: 2,
+    });
+    storeOrganizationInvitationContinuation({
+      organizationId: pending.organizationId,
+      organizationName: pending.organizationName,
+      targetEmail: pending.targetEmail,
+      expiresAt: pending.expiresAt,
+    });
+    const acceptOrganizationInvitation = mock(async () => ({ status: "complete" as const }));
+    const onAccepted = mock(() => undefined);
+    const client = {
+      listOrganizationInvitations: mock(async () => ({
+        invitations: [pending],
+        nextCursor: null,
+      })),
+      acceptOrganizationInvitation,
+    } as unknown as OpenGeniBrowserClient;
+
+    function Harness() {
+      const controller = useOrganizationInvitations({
+        client,
+        enabled: true,
+        onAccepted,
+      });
+      return <OrganizationInvitationsDialog controller={controller} />;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <StrictMode>
+            <Harness />
+          </StrictMode>,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("Join Direct Invitation Organization");
+      expect(container.textContent).toContain("You're signed in");
+      expect(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Accept invitation to Direct Invitation Organization"]',
+        ),
+      ).not.toBeNull();
+      expect(sessionStorage.getItem("opengeni:organization-invitation-continuation:v1")).toBeNull();
+
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Accept invitation to Direct Invitation Organization"]',
+          )!
+          .click(),
+      );
+      await flush();
+      expect(acceptOrganizationInvitation).toHaveBeenCalledWith(pending.id, {
+        expectedRevision: pending.revision,
+        operationId: expect.any(String),
+      });
+      expect(onAccepted).toHaveBeenCalledTimes(1);
+      expect(container.textContent).not.toContain("Join Direct Invitation Organization");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("does not substitute another pending invitation when the linked one is unavailable", async () => {
+    sessionStorage.clear();
+    const requestedOrganizationId = crypto.randomUUID();
+    const unrelated = invitation({
+      id: crypto.randomUUID(),
+      organizationId: crypto.randomUUID(),
+      organizationName: "Unrelated Organization",
+      status: "pending",
+      revision: 1,
+    });
+    storeOrganizationInvitationContinuation({
+      organizationId: requestedOrganizationId,
+      organizationName: "Requested Organization",
+      targetEmail: unrelated.targetEmail,
+      expiresAt: unrelated.expiresAt,
+    });
+    const client = {
+      listOrganizationInvitations: mock(async () => ({
+        invitations: [unrelated],
+        nextCursor: null,
+      })),
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    } as unknown as OpenGeniBrowserClient;
+
+    function Harness() {
+      const controller = useOrganizationInvitations({
+        client,
+        enabled: true,
+        onAccepted: () => undefined,
+      });
+      return <OrganizationInvitationsDialog controller={controller} />;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      await flush();
+      expect(container.textContent).toContain("Invitation to Requested Organization");
+      expect(container.textContent).toContain("This invitation is no longer pending");
+      expect(container.textContent).not.toContain("Unrelated Organization");
+      expect(container.querySelector('button[aria-label^="Accept invitation to"]')).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
   test("continues through historical pages to find every pending invitation", async () => {
     const pending = invitation({
       id: crypto.randomUUID(),
@@ -204,7 +332,9 @@ describe("global organization invitations", () => {
 
       await act(async () =>
         container
-          .querySelector<HTMLButtonElement>('button[aria-label="Join Northwind Research"]')!
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Accept invitation to Northwind Research"]',
+          )!
           .click(),
       );
       await flush();

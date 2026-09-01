@@ -54,7 +54,11 @@ mock.module("@/api", () => ({
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#signin">{children}</a>,
+  Link: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => (
+    <a href="#signin" onClick={onClick}>
+      {children}
+    </a>
+  ),
 }));
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
@@ -120,6 +124,7 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      sessionStorage.clear();
     }
   });
 
@@ -383,8 +388,14 @@ describe("organization onboarding UI", () => {
       await flush();
       expect(container.textContent).toContain("Join Test Organization");
       expect(container.textContent).toContain("create an account to accept this invitation");
-      expect(container.textContent).toContain("Organization invitations");
-      expect(container.textContent).toContain("Sign in to accept invitation");
+      expect(container.textContent).toContain("take you directly back to this invitation");
+      const existingAccountLink = Array.from(container.querySelectorAll("a")).find(
+        (link) => link.textContent?.trim() === "Sign in and continue",
+      )!;
+      await act(async () => existingAccountLink.click());
+      expect(sessionStorage.getItem("opengeni:organization-invitation-continuation:v1")).toContain(
+        "Test Organization",
+      );
       await enter(container.querySelector("#setup-account-name")!, "Grace Hopper");
       await enter(container.querySelector("#setup-account-password")!, "password1234");
       await enter(container.querySelector("#setup-account-confirm")!, "password1234");
@@ -405,6 +416,7 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      sessionStorage.clear();
     }
   });
 
