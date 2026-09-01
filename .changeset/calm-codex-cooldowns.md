@@ -1,6 +1,6 @@
 ---
 "@opengeni/db": patch
-"@opengeni/worker": patch
+"@opengeni/worker-bundle": patch
 ---
 
 Recover capacity from revision-fenced untyped Codex cooldowns when a live usage read confirms allowance is available.
