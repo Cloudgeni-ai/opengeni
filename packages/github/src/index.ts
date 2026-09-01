@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  CanonicalGitHubRepository,
   GitHubAppRepositoryBranchPage,
   GitHubInstallationBindingCandidate,
   GitHubInstallationBindingProof,
@@ -7,7 +8,9 @@ import type {
   GitHubRepositoryPermissions,
   GitHubUserInstallationAccess,
   GitHubUserRepositoryAccess,
+  VerifyPublicGitHubRepositoryRefResponse,
 } from "@opengeni/contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts";
 import { readResponseTextBounded } from "@opengeni/network";
 import {
   createCipheriv,
@@ -27,6 +30,8 @@ const githubTokenMintTimeoutMs = 60_000;
 export const githubRepositoryLookupTimeoutMs = 10_000;
 export const githubRepositoryBranchesTimeoutMs = 10_000;
 const githubRepositoryBranchesResponseMaxBytes = 256 * 1024;
+export const githubPublicRepositoryVerificationTimeoutMs = 10_000;
+const githubPublicRepositoryVerificationResponseMaxBytes = 128 * 1024;
 const githubInstallationTokenResponseMaxBytes = 64 * 1024;
 const githubErrorResponseMaxBytes = 64 * 1024;
 const githubErrorMessageMaxLength = 1024;
@@ -252,6 +257,22 @@ export class GitHubAppApiError extends Error {
     readonly status: number | null = null,
   ) {
     super(message);
+  }
+}
+
+export type GitHubPublicRepositoryVerificationErrorCode =
+  | "invalid_input"
+  | "unavailable"
+  | "provider_unavailable";
+
+export class GitHubPublicRepositoryVerificationError extends Error {
+  constructor(
+    readonly code: GitHubPublicRepositoryVerificationErrorCode,
+    message: string,
+    readonly status?: number,
+  ) {
+    super(message);
+    this.name = "GitHubPublicRepositoryVerificationError";
   }
 }
 
@@ -976,6 +997,90 @@ export async function listGitHubAppRepositoryBranches(
   };
 }
 
+/**
+ * Verify one exact anonymous github.com repository and ref. The provider URL
+ * is derived only from strict canonical coordinates, follows no redirects,
+ * sends no credentials, and bounds both request time and response bytes.
+ */
+export async function verifyPublicGitHubRepositoryRef(
+  input: { repository: CanonicalGitHubRepository; ref: string },
+  fetchImpl: typeof fetch = fetch,
+): Promise<VerifyPublicGitHubRepositoryRefResponse> {
+  const ref = input.ref.trim();
+  if (!ref || ref.length > 1024 || /[\u0000-\u001f\u007f]/u.test(ref)) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "invalid_input",
+      "Enter a branch, tag, or commit SHA.",
+    );
+  }
+  const repositoryUrl = new URL(
+    `${githubApiBase}/repos/${encodeURIComponent(input.repository.owner)}/${encodeURIComponent(input.repository.name)}`,
+  );
+  const repositoryPayload = await anonymousGitHubJson(
+    fetchImpl,
+    repositoryUrl,
+    "GitHub repository",
+  );
+  if (
+    !repositoryPayload ||
+    typeof repositoryPayload !== "object" ||
+    Array.isArray(repositoryPayload)
+  ) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "provider_unavailable",
+      "GitHub returned an invalid repository response.",
+    );
+  }
+  const repository = repositoryPayload as Record<string, unknown>;
+  const fullName = typeof repository.full_name === "string" ? repository.full_name : "";
+  const defaultBranch =
+    typeof repository.default_branch === "string" ? repository.default_branch : "";
+  const privateRepository = repository.private;
+  if (
+    !Number.isSafeInteger(repository.id) ||
+    Number(repository.id) <= 0 ||
+    privateRepository !== false ||
+    !fullName ||
+    fullName.toLowerCase() !== input.repository.fullName.toLowerCase() ||
+    !defaultBranch ||
+    defaultBranch.length > 1024
+  ) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "unavailable",
+      "That GitHub repository is private or unavailable.",
+    );
+  }
+  let canonical: CanonicalGitHubRepository;
+  try {
+    canonical = parseCanonicalGitHubRepositoryUrl(`https://github.com/${fullName}`);
+  } catch {
+    throw new GitHubPublicRepositoryVerificationError(
+      "provider_unavailable",
+      "GitHub returned an invalid repository identity.",
+    );
+  }
+  const commitUrl = new URL(
+    `${githubApiBase}/repos/${encodeURIComponent(canonical.owner)}/${encodeURIComponent(canonical.name)}/commits/${encodeURIComponent(ref)}`,
+  );
+  const commitPayload = await anonymousGitHubJson(fetchImpl, commitUrl, "GitHub repository ref");
+  const commitSha =
+    commitPayload && typeof commitPayload === "object" && !Array.isArray(commitPayload)
+      ? (commitPayload as Record<string, unknown>).sha
+      : null;
+  if (typeof commitSha !== "string" || !/^[0-9a-f]{40}$/u.test(commitSha)) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "unavailable",
+      "That branch, tag, or commit SHA is not available on the public repository.",
+    );
+  }
+  return {
+    ...canonical,
+    defaultBranch,
+    ref,
+    commitSha,
+  };
+}
+
 export async function createGitHubAppInstallationToken(
   settings: Settings,
   input: {
@@ -1455,6 +1560,58 @@ async function githubResponseJsonBounded(response: Response, label: string): Pro
     ) as unknown;
   } catch {
     throw new GitHubAppApiError(`${label} was invalid or too large`);
+  }
+}
+
+async function anonymousGitHubJson(
+  fetchImpl: typeof fetch,
+  url: URL,
+  label: string,
+): Promise<unknown> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      headers: githubHeaders(),
+      redirect: "manual",
+      signal: AbortSignal.timeout(githubPublicRepositoryVerificationTimeoutMs),
+    });
+  } catch {
+    throw new GitHubPublicRepositoryVerificationError(
+      "provider_unavailable",
+      `${label} verification is temporarily unavailable.`,
+    );
+  }
+  if (response.status === 404) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "unavailable",
+      label === "GitHub repository"
+        ? "That GitHub repository is private or unavailable."
+        : "That branch, tag, or commit SHA is not available on the public repository.",
+      response.status,
+    );
+  }
+  if (!response.ok) {
+    throw new GitHubPublicRepositoryVerificationError(
+      "provider_unavailable",
+      response.status === 429
+        ? "GitHub is temporarily rate limited. Try again shortly."
+        : `${label} verification is temporarily unavailable.`,
+      response.status,
+    );
+  }
+  try {
+    return JSON.parse(
+      await readResponseTextBounded(
+        response,
+        githubPublicRepositoryVerificationResponseMaxBytes,
+        `${label} verification response`,
+      ),
+    ) as unknown;
+  } catch {
+    throw new GitHubPublicRepositoryVerificationError(
+      "provider_unavailable",
+      `${label} verification returned an invalid response.`,
+    );
   }
 }
 

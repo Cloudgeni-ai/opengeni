@@ -2339,7 +2339,7 @@ describe("GitHub repository resources", () => {
     expect(hydrated).toEqual([privateResource, manualResource]);
     expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
-      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main", attached: true }],
       selectedRepoIds: new Set([privateRepo.id]),
       selectedRepoRefs: { [privateRepo.id]: "develop" },
       selectedPersonalRepoIds: new Set(),

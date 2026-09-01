@@ -108,6 +108,7 @@ import {
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { attachManualRepository } from "@/lib/manual-repositories";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
@@ -1616,6 +1617,27 @@ function workspaceRepositoryPickerProps(
     onToggleRepo: context.toggleGitHubRepository,
     onRefChange: (repoId: number, ref: string) =>
       context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
+    onLoadGitHubBranches: async (repository) =>
+      (
+        await context.client.listGitHubRepositoryBranches(
+          workspaceId,
+          repository.installationId,
+          repository.id,
+          { limit: 100 },
+        )
+      ).branches,
+    onLoadPersonalGitHubBranches: async (repository) => {
+      const connectionId = context.personalGitHubStatus?.connection?.id;
+      if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
+      return (
+        await context.client.listPersonalGitHubRepositoryBranches(
+          workspaceId,
+          connectionId,
+          repository.repositoryId,
+          { limit: 100 },
+        )
+      ).branches;
+    },
     onManualOpenChange: context.setManualReposOpen,
     onManualAdd: context.addManualRepository,
     onManualUpdate: (id: number, patch: Partial<RepoDraft>) =>
@@ -1624,6 +1646,67 @@ function workspaceRepositoryPickerProps(
       ),
     onManualRemove: (id: number) =>
       context.setManualRepos((current) => current.filter((repo) => repo.id !== id)),
+    onManualAttach: async (repository) =>
+      await attachManualRepository({
+        repository,
+        workspaceRepositories: context.githubRepos,
+        personalRepositories: context.personalGitHubRepositories,
+        selectWorkspaceRepository: (matched, ref) => {
+          context.setSelectedRepoIds((current) => {
+            const next =
+              context.selectedInstallationId !== null &&
+              context.selectedInstallationId !== matched.installationId
+                ? new Set<number>()
+                : new Set(current);
+            next.add(matched.id);
+            return next;
+          });
+          context.setSelectedRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+          context.setSelectedPersonalGitHubRepoIds(
+            (current) =>
+              new Set(
+                [...current].filter(
+                  (id) =>
+                    context.personalGitHubRepositories
+                      .find((candidate) => candidate.repositoryId === id)
+                      ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                ),
+              ),
+          );
+        },
+        selectPersonalRepository: async (matched, ref) => {
+          if (!(await context.ensurePersonalGitHubAuthority(workspaceId))) {
+            throw new Error("Your GitHub identity could not be authorized for this workspace.");
+          }
+          context.setSelectedRepoIds(
+            (current) =>
+              new Set(
+                [...current].filter(
+                  (id) =>
+                    context.githubRepos
+                      .find((candidate) => candidate.id === id)
+                      ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                ),
+              ),
+          );
+          context.setSelectedPersonalGitHubRepoIds((current) =>
+            new Set(current).add(matched.repositoryId),
+          );
+          context.setSelectedPersonalGitHubRepoRefs((current) => ({
+            ...current,
+            [matched.repositoryId]: ref,
+          }));
+        },
+        verifyPublicGitHubRepository: async (request) =>
+          await context.client.verifyPublicGitHubRepositoryRef(workspaceId, request),
+        attach: (attached) =>
+          context.setManualRepos((current) =>
+            current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
+          ),
+        remove: (id) =>
+          context.setManualRepos((current) => current.filter((candidate) => candidate.id !== id)),
+      }),
+    validationError: context.repositoryValidationError,
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),

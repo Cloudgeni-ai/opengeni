@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   GitHubRepositoryBranchesResponse,
   ListGitHubRepositoryBranchesQuery,
+  parseCanonicalGitHubRepositoryUrl,
   ResourceRef,
+  VerifyPublicGitHubRepositoryRefRequest,
 } from "../src";
 
 describe("GitHub repository branch contracts", () => {
@@ -47,5 +49,47 @@ describe("GitHub repository branch contracts", () => {
       ref: "refs/pull/2095/merge^{commit}",
     };
     expect(ResourceRef.parse(resource)).toEqual(resource);
+  });
+
+  test("accepts only exact canonical github.com repository URLs", () => {
+    expect(
+      parseCanonicalGitHubRepositoryUrl("https://github.com/Cloudgeni-ai/opengeni.git"),
+    ).toEqual({
+      owner: "Cloudgeni-ai",
+      name: "opengeni",
+      fullName: "Cloudgeni-ai/opengeni",
+      canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+      cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+    });
+    for (const value of [
+      "http://github.com/acme/repo",
+      "https://www.github.com/acme/repo",
+      "https://user@github.com/acme/repo",
+      "https://github.com:443/acme/repo",
+      "https://github.com/acme/repo/issues",
+      "https://github.com/acme/repo?tab=readme",
+      "https://github.com/acme/repo#readme",
+      "https://github.com/acme%2frepo/other",
+    ]) {
+      expect(() => parseCanonicalGitHubRepositoryUrl(value)).toThrow();
+    }
+  });
+
+  test("requires one explicit non-control public GitHub ref", () => {
+    expect(
+      VerifyPublicGitHubRepositoryRefRequest.parse({
+        url: "https://github.com/Cloudgeni-ai/opengeni",
+        ref: "refs/tags/v1.0.0^{commit}",
+      }),
+    ).toEqual({
+      url: "https://github.com/Cloudgeni-ai/opengeni",
+      ref: "refs/tags/v1.0.0^{commit}",
+    });
+    expect(
+      VerifyPublicGitHubRepositoryRefRequest.safeParse({
+        url: "https://github.com/Cloudgeni-ai/opengeni",
+        ref: " ",
+      }).success,
+    ).toBe(false);
   });
 });

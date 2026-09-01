@@ -658,6 +658,8 @@ export type {
   GitHubInstallationLifecycle,
   GitHubRepositoryBranch,
   GitHubRepositoryBranchesResponse,
+  VerifyPublicGitHubRepositoryRefRequest,
+  VerifyPublicGitHubRepositoryRefResponse,
   GitHubRepositoriesResponse,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,

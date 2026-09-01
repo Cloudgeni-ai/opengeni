@@ -6,10 +6,11 @@ import {
   LockIcon,
   PlusIcon,
   RefreshCwIcon,
-  Trash2Icon,
 } from "lucide-react";
 import type { ReactNode } from "react";
 
+import { ManualRepositoryEditor } from "@/components/manual-repository-editor";
+import { RepositoryRefInput } from "@/components/repository-ref-input";
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,9 +18,9 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { repoCountLabel } from "@/lib/format";
+import { attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import { cn } from "@/lib/utils";
 
 type FollowUpRepositoryPickerProps = RepositoryContextPickerProps;
@@ -28,7 +29,7 @@ function selectedCount(props: FollowUpRepositoryPickerProps): number {
   return (
     props.selectedRepoIds.size +
     (props.selectedPersonalGitHubRepoIds?.size ?? 0) +
-    props.manualRepos.filter((repository) => repository.url.trim().length > 0).length
+    attachedManualRepositoryCount(props.manualRepos)
   );
 }
 
@@ -151,21 +152,22 @@ export function FollowUpRepositoryMenuBody(
                       </button>
                       {checked ? (
                         <div className="mt-2 flex items-center gap-2 pl-6">
-                          <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                          <Input
+                          <RepositoryRefInput
                             value={
                               props.selectedPersonalGitHubRepoRefs?.[repository.repositoryId] ??
                               repository.defaultBranch
                             }
-                            onChange={(event) =>
-                              props.onPersonalGitHubRefChange?.(
-                                repository.repositoryId,
-                                event.target.value,
-                              )
+                            defaultRef={repository.defaultBranch}
+                            label={`${repository.fullName} ref`}
+                            compact
+                            onChange={(value) =>
+                              props.onPersonalGitHubRefChange?.(repository.repositoryId, value)
                             }
                             disabled={props.pending || locked}
-                            aria-label={`${repository.fullName} ref`}
-                            className="h-7 text-xs"
+                            loadBranches={props.onLoadPersonalGitHubBranches?.bind(
+                              null,
+                              repository,
+                            )}
                           />
                         </div>
                       ) : null}
@@ -256,18 +258,16 @@ export function FollowUpRepositoryMenuBody(
                         </button>
                         {checked ? (
                           <div className="mt-2 flex items-center gap-2 pl-6">
-                            <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                            <Input
+                            <RepositoryRefInput
                               value={
                                 props.selectedRepoRefs[repository.id] ?? repository.defaultBranch
                               }
-                              onChange={(event) =>
-                                props.onRefChange(repository.id, event.target.value)
-                              }
+                              defaultRef={repository.defaultBranch}
+                              label={`${repository.fullName} ref`}
+                              compact
+                              onChange={(value) => props.onRefChange(repository.id, value)}
                               disabled={props.pending || locked}
-                              placeholder={repository.defaultBranch}
-                              aria-label={`${repository.fullName} ref`}
-                              className="h-7 text-xs"
+                              loadBranches={props.onLoadGitHubBranches?.bind(null, repository)}
                             />
                           </div>
                         ) : null}
@@ -288,7 +288,9 @@ export function FollowUpRepositoryMenuBody(
           <div className="flex items-center justify-between gap-2 px-3 py-2">
             <div>
               <div className="text-xs font-medium text-fg">Repository URL</div>
-              <div className="mt-0.5 text-2xs text-fg-subtle">HTTPS repositories only</div>
+              <div className="mt-0.5 text-2xs text-fg-subtle">
+                Public HTTPS only; private GitHub repositories require an authenticated source
+              </div>
             </div>
             <Button
               type="button"
@@ -307,52 +309,39 @@ export function FollowUpRepositoryMenuBody(
               {props.manualRepos.map((repository) => {
                 const locked = props.lockedManualRepoIds?.has(repository.id) === true;
                 return (
-                  <div
+                  <ManualRepositoryEditor
                     key={repository.id}
-                    className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
-                  >
-                    <Input
-                      value={repository.url}
-                      onChange={(event) =>
-                        props.onManualUpdate(repository.id, { url: event.target.value })
-                      }
-                      disabled={props.pending || locked}
-                      placeholder="https://github.com/org/repo"
-                      className="h-8 text-xs"
-                    />
-                    <Input
-                      value={repository.ref}
-                      onChange={(event) =>
-                        props.onManualUpdate(repository.id, { ref: event.target.value })
-                      }
-                      disabled={props.pending || locked}
-                      placeholder="main"
-                      aria-label="Repository ref"
-                      className="h-8 text-xs"
-                    />
-                    {locked ? (
-                      <MetaChip dot="idle" rounded="full" className="self-center">
-                        Mounted
-                      </MetaChip>
-                    ) : (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() => props.onManualRemove(repository.id)}
-                        disabled={props.pending}
-                        aria-label="Remove repository"
-                        className="size-8"
-                      >
-                        <Trash2Icon className="size-3.5" />
-                      </Button>
-                    )}
-                  </div>
+                    repository={repository}
+                    mounted={locked}
+                    pending={props.pending}
+                    onUpdate={(patch) => props.onManualUpdate(repository.id, patch)}
+                    onRemove={() => props.onManualRemove(repository.id)}
+                    onAttach={
+                      props.onManualAttach ??
+                      (async () => {
+                        throw new Error("Repository attachment is unavailable.");
+                      })
+                    }
+                  />
                 );
               })}
             </div>
           ) : null}
         </section>
+
+        {props.newChatUrl &&
+        ((props.lockedRepoIds?.size ?? 0) > 0 ||
+          (props.lockedPersonalGitHubRepoIds?.size ?? 0) > 0 ||
+          (props.lockedManualRepoIds?.size ?? 0) > 0) ? (
+          <p className="px-1 text-xs leading-5 text-fg-muted">
+            Mounted repositories cannot be removed or retargeted in this session. Start a new chat
+            to choose a different source set.{" "}
+            <a className="text-brand hover:underline" href={props.newChatUrl}>
+              Start a new chat
+            </a>
+            .
+          </p>
+        ) : null}
 
         {props.validationError ? (
           <p className="px-1 text-xs leading-5 text-status-failed" role="alert">

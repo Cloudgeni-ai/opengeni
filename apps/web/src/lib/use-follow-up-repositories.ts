@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
+import { attachManualRepository, attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
   buildAdditionalRepositoryResources,
   repositorySelectionFromResources,
@@ -136,8 +137,7 @@ export function useFollowUpRepositories(session: Session): {
   const selectionCount =
     selectedRepoIds.size +
     selectedPersonalRepoIds.size +
-    [...mountedManualRepos, ...pendingManualRepos].filter((repo) => repo.url.trim().length > 0)
-      .length;
+    attachedManualRepositoryCount([...mountedManualRepos, ...pendingManualRepos]);
 
   const togglePendingRepository = useCallback(
     (repo: GitHubRepository) => {
@@ -298,10 +298,34 @@ export function useFollowUpRepositories(session: Session): {
       onToggleRepo: togglePendingRepository,
       onRefChange: (repoId, ref) =>
         setPendingRepoRefs((current) => ({ ...current, [repoId]: ref })),
+      onLoadGitHubBranches: async (repository) =>
+        (
+          await context.client.listGitHubRepositoryBranches(
+            session.workspaceId,
+            repository.installationId,
+            repository.id,
+            { limit: 100 },
+          )
+        ).branches,
+      onLoadPersonalGitHubBranches: async (repository) => {
+        const connectionId = context.personalGitHubStatus?.connection?.id;
+        if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
+        return (
+          await context.client.listPersonalGitHubRepositoryBranches(
+            session.workspaceId,
+            connectionId,
+            repository.repositoryId,
+            { limit: 100 },
+          )
+        ).branches;
+      },
       onManualOpenChange: setManualReposOpen,
       onManualAdd: () => {
         const id = nextManualRepoId.current++;
-        setPendingManualRepos((current) => [...current, { id, url: "", ref: "main" }]);
+        setPendingManualRepos((current) => [
+          ...current,
+          { id, url: "", ref: "main", attached: false },
+        ]);
         setManualReposOpen(true);
       },
       onManualUpdate: (id, patch) =>
@@ -310,6 +334,91 @@ export function useFollowUpRepositories(session: Session): {
         ),
       onManualRemove: (id) =>
         setPendingManualRepos((current) => current.filter((repo) => repo.id !== id)),
+      onManualAttach: async (repository) =>
+        await attachManualRepository({
+          repository,
+          workspaceRepositories: context.githubRepos,
+          personalRepositories: context.personalGitHubRepositories,
+          selectWorkspaceRepository: (matched, ref) => {
+            const mountedPersonalConflict = context.personalGitHubRepositories.some(
+              (candidate) =>
+                mountedPersonalRepoIds.has(candidate.repositoryId) &&
+                candidate.fullName.toLowerCase() === matched.fullName.toLowerCase(),
+            );
+            if (mountedPersonalConflict) {
+              throw new Error("This repository is already mounted as your GitHub identity.");
+            }
+            const mountedInstallationId = context.githubRepos.find((candidate) =>
+              mountedRepositorySelection.selectedRepoIds.has(candidate.id),
+            )?.installationId;
+            if (
+              mountedInstallationId !== undefined &&
+              mountedInstallationId !== matched.installationId
+            ) {
+              throw new Error(
+                "This session already has repositories mounted from another App account.",
+              );
+            }
+            setPendingRepoIds((current) => {
+              const next =
+                selectedInstallationId !== null && selectedInstallationId !== matched.installationId
+                  ? new Set<number>()
+                  : new Set(current);
+              next.add(matched.id);
+              return next;
+            });
+            setPendingRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+            setPendingPersonalRepoIds(
+              (current) =>
+                new Set(
+                  [...current].filter(
+                    (id) =>
+                      context.personalGitHubRepositories
+                        .find((candidate) => candidate.repositoryId === id)
+                        ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                  ),
+                ),
+            );
+          },
+          selectPersonalRepository: async (matched, ref) => {
+            const mountedWorkspaceConflict = context.githubRepos.some(
+              (candidate) =>
+                mountedRepositorySelection.selectedRepoIds.has(candidate.id) &&
+                candidate.fullName.toLowerCase() === matched.fullName.toLowerCase(),
+            );
+            if (mountedWorkspaceConflict) {
+              throw new Error("This repository is already mounted with the workspace App.");
+            }
+            if (!(await context.ensurePersonalGitHubAuthority(session.workspaceId))) {
+              throw new Error("Your GitHub identity could not be authorized for this workspace.");
+            }
+            setPendingRepoIds(
+              (current) =>
+                new Set(
+                  [...current].filter(
+                    (id) =>
+                      context.githubRepos
+                        .find((candidate) => candidate.id === id)
+                        ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                  ),
+                ),
+            );
+            setPendingPersonalRepoIds((current) => new Set(current).add(matched.repositoryId));
+            setPendingPersonalRepoRefs((current) => ({
+              ...current,
+              [matched.repositoryId]: ref,
+            }));
+          },
+          verifyPublicGitHubRepository: async (request) =>
+            await context.client.verifyPublicGitHubRepositoryRef(session.workspaceId, request),
+          attach: (attached) =>
+            setPendingManualRepos((current) =>
+              current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
+            ),
+          remove: (id) =>
+            setPendingManualRepos((current) => current.filter((candidate) => candidate.id !== id)),
+        }),
+      newChatUrl: `/workspaces/${session.workspaceId}`,
       onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
       onStartGitHubApp: () => void context.startGitHubAppManifestFlow(session.workspaceId),

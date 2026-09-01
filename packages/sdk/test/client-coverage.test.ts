@@ -2119,6 +2119,10 @@ describe("OpenGeniClient github", () => {
       returnPath: `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     });
     await client.listGitHubRepositories(WORKSPACE_ID);
+    await client.verifyPublicGitHubRepositoryRef(WORKSPACE_ID, {
+      url: "https://github.com/acme/public",
+      ref: "main",
+    });
     await client.listGitHubRepositoryBranches(WORKSPACE_ID, 123, 456, {
       cursor: 3,
       limit: 40,
@@ -2132,6 +2136,7 @@ describe("OpenGeniClient github", () => {
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/github/app`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/repositories`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/github/public-repositories/verify`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/installations/123/repositories/456/branches`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/repositories/sync`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
@@ -2141,8 +2146,8 @@ describe("OpenGeniClient github", () => {
     expect(new URL(requests[0]!.url).searchParams.get("returnPath")).toBe(
       `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
-    expect(new URL(requests[2]!.url).searchParams.get("cursor")).toBe("3");
-    expect(new URL(requests[2]!.url).searchParams.get("limit")).toBe("40");
+    expect(new URL(requests[3]!.url).searchParams.get("cursor")).toBe("3");
+    expect(new URL(requests[3]!.url).searchParams.get("limit")).toBe("40");
     expect(client.githubConnectUrl(WORKSPACE_ID, "signed-state")).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/github/connect?state=signed-state`,
     );

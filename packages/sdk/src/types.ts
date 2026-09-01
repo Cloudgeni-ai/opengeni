@@ -7183,6 +7183,22 @@ export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
 };
 
+export type VerifyPublicGitHubRepositoryRefRequest = {
+  url: string;
+  ref: string;
+};
+
+export type VerifyPublicGitHubRepositoryRefResponse = {
+  owner: string;
+  name: string;
+  fullName: string;
+  canonicalUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  ref: string;
+  commitSha: string;
+};
+
 export type GitHubRepositoryBranch = {
   name: string;
   isDefault: boolean;

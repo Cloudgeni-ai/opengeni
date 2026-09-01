@@ -21,6 +21,7 @@ import {
   prReviewGitHubAppMissingSettings,
   sealPersonalGitHubGitBrokerClaims,
   settingsForPrReviewGitHubApp,
+  verifyPublicGitHubRepositoryRef,
   verifySignedState,
 } from "../src";
 
@@ -884,6 +885,91 @@ describe("GitHub App installation repository lookup", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+
+  test("verifies an exact public repository and arbitrary GitHub ref anonymously", async () => {
+    const requests: Array<{
+      url: string;
+      authorization: string | null;
+      redirect?: RequestRedirect;
+    }> = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      requests.push({
+        url,
+        authorization: new Headers(init?.headers).get("authorization"),
+        redirect: init?.redirect,
+      });
+      if (url.endsWith("/repos/Cloudgeni-ai/opengeni")) {
+        return Response.json({
+          id: 123,
+          full_name: "Cloudgeni-ai/opengeni",
+          private: false,
+          default_branch: "main",
+        });
+      }
+      if (url.endsWith("/commits/refs%2Ftags%2Fv1.0.0%5E%7Bcommit%7D")) {
+        return Response.json({ sha: "a".repeat(40) });
+      }
+      return Response.json({ message: "not found" }, { status: 404 });
+    }) as typeof fetch;
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        {
+          repository: {
+            owner: "Cloudgeni-ai",
+            name: "opengeni",
+            fullName: "Cloudgeni-ai/opengeni",
+            canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+            cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+          },
+          ref: "refs/tags/v1.0.0^{commit}",
+        },
+        fetchImpl,
+      ),
+    ).resolves.toEqual({
+      owner: "Cloudgeni-ai",
+      name: "opengeni",
+      fullName: "Cloudgeni-ai/opengeni",
+      canonicalUrl: "https://github.com/Cloudgeni-ai/opengeni",
+      cloneUrl: "https://github.com/Cloudgeni-ai/opengeni.git",
+      defaultBranch: "main",
+      ref: "refs/tags/v1.0.0^{commit}",
+      commitSha: "a".repeat(40),
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests.every((request) => request.authorization === null)).toBe(true);
+    expect(requests.every((request) => request.redirect === "manual")).toBe(true);
+  });
+
+  test("fails closed for private, missing-ref, redirected, or oversized public GitHub responses", async () => {
+    const repository = {
+      owner: "acme",
+      name: "app",
+      fullName: "acme/app",
+      canonicalUrl: "https://github.com/acme/app",
+      cloneUrl: "https://github.com/acme/app.git",
+    };
+    await expect(
+      verifyPublicGitHubRepositoryRef({ repository, ref: "main" }, (async () =>
+        Response.json({ message: "not found" }, { status: 404 })) as typeof fetch),
+    ).rejects.toMatchObject({ code: "unavailable" });
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        { repository, ref: "main" },
+        (async () =>
+          new Response(null, {
+            status: 302,
+            headers: { location: "https://evil.test" },
+          })) as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
+    await expect(
+      verifyPublicGitHubRepositoryRef(
+        { repository, ref: "main" },
+        (async () => new Response("x".repeat(140 * 1024))) as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ code: "provider_unavailable" });
   });
 
   test("refuses to build a lookup without GitHub App credentials", () => {

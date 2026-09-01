@@ -251,6 +251,8 @@ import type {
   GitHubAppInfo,
   GitHubRepositoryBranchesResponse,
   GitHubRepositoriesResponse,
+  VerifyPublicGitHubRepositoryRefRequest,
+  VerifyPublicGitHubRepositoryRefResponse,
   GoogleDriveBrowseResponse,
   GoogleDriveDisconnectRequest,
   SaveGoogleDriveIntegrationSourceRequest,
@@ -7006,6 +7008,18 @@ export class OpenGeniClient {
     return await this.requestJson<GitHubRepositoriesResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/github/repositories`,
+    );
+  }
+
+  /** Verify one exact public github.com repository and branch/tag/SHA anonymously. */
+  async verifyPublicGitHubRepositoryRef(
+    workspaceId: string,
+    request: VerifyPublicGitHubRepositoryRefRequest,
+  ): Promise<VerifyPublicGitHubRepositoryRefResponse> {
+    return await this.requestJson<VerifyPublicGitHubRepositoryRefResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/github/public-repositories/verify`,
+      request,
     );
   }
 
