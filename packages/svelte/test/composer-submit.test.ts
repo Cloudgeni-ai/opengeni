@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createSessionComposerRuntimeStore } from "@opengeni/sdk/session";
 import type {
   FileAttachmentStore,
   FileAttachmentStoreSnapshot,
@@ -8,10 +9,13 @@ import type {
 import { canSubmitSessionComposer, submitSessionComposer } from "../src/composer-submit";
 
 const composerSnapshot = (
-  overrides: Partial<Pick<SessionComposerRuntimeSnapshot, "canSend" | "submitting">> = {},
+  overrides: Partial<
+    Pick<SessionComposerRuntimeSnapshot, "canSend" | "pendingDelivery" | "submitting">
+  > = {},
 ) =>
   ({
     canSend: true,
+    pendingDelivery: null,
     submitting: false,
     ...overrides,
   }) as SessionComposerRuntimeSnapshot;
@@ -91,5 +95,79 @@ describe("native Svelte composer attachment transaction", () => {
 
     expect(await submitSessionComposer(controller, attachments, "send")).toBe(false);
     expect(removals).toEqual([]);
+  });
+
+  test("keeps Steer attachments when an uncertain delivery is reconciled", async () => {
+    const attemptedResources: unknown[] = [];
+    let attempts = 0;
+    const controller = createSessionComposerRuntimeStore({
+      client: {
+        listEvents: async () => [],
+        steerMessage: async (
+          _workspaceId: string,
+          _sessionId: string,
+          input: { resources?: readonly unknown[] },
+        ) => {
+          attemptedResources.push(input.resources ?? []);
+          attempts += 1;
+          if (attempts === 1) {
+            throw Object.assign(new Error("transport outcome unknown"), {
+              outcomeUnknown: true as const,
+            });
+          }
+          return {
+            accepted: { id: "accepted-steer" },
+            turn: { id: "steered-turn" },
+            routing: "accepted_for_steering",
+            interruptionCount: 1,
+            replay: false,
+          } as never;
+        },
+      } as never,
+      workspaceId: "99999999-9999-4999-8999-999999999999",
+      sessionId: "88888888-8888-4888-8888-888888888889",
+      draftPersistence: "disabled",
+      initialPolicy: {
+        model: "model-a",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+      },
+      events: [],
+    });
+    await controller.start();
+    controller.setText("change direction");
+
+    let currentAttachments = attachmentSnapshot(["file-original"]);
+    const removals: string[][] = [];
+    const attachments = {
+      getSnapshot: () => currentAttachments,
+      removeReadyFiles: (fileIds: Iterable<string>) => {
+        const removed = [...fileIds];
+        removals.push(removed);
+        currentAttachments = attachmentSnapshot(
+          currentAttachments.readyResources
+            .map((resource) => resource.fileId)
+            .filter((fileId) => !removed.includes(fileId)),
+        );
+      },
+    } as unknown as FileAttachmentStore;
+
+    expect(await submitSessionComposer(controller, attachments, "steer")).toBe(false);
+    expect(controller.getSnapshot().pendingDelivery).toBe("steer");
+
+    currentAttachments = attachmentSnapshot(["file-original", "file-later"]);
+    expect(await submitSessionComposer(controller, attachments, "steer")).toBe(true);
+
+    expect(attemptedResources).toEqual([
+      [{ kind: "file", fileId: "file-original" }],
+      [{ kind: "file", fileId: "file-original" }],
+    ]);
+    expect(removals).toEqual([]);
+    expect(currentAttachments.readyResources).toEqual([
+      { kind: "file", fileId: "file-original" },
+      { kind: "file", fileId: "file-later" },
+    ]);
+    expect(controller.getSnapshot().pendingDelivery).toBeNull();
+    controller.destroy();
   });
 });
