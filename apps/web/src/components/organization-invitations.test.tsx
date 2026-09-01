@@ -79,6 +79,65 @@ function invitation(input: {
 }
 
 describe("global organization invitations", () => {
+  test("continues through historical pages to find every pending invitation", async () => {
+    const pending = invitation({
+      id: crypto.randomUUID(),
+      organizationId: crypto.randomUUID(),
+      organizationName: "Later Pending Organization",
+      status: "pending",
+      revision: 2,
+    });
+    const nextCursor = crypto.randomUUID();
+    const historical = Array.from({ length: 100 }, (_, index) =>
+      invitation({
+        id: crypto.randomUUID(),
+        organizationId: crypto.randomUUID(),
+        organizationName: `Historical Organization ${index}`,
+        status: "accepted",
+        revision: 1,
+      }),
+    );
+    const listOrganizationInvitations = mock(async (options: { cursor?: string; limit?: number }) =>
+      options.cursor === nextCursor
+        ? { invitations: [pending], nextCursor: null }
+        : { invitations: historical, nextCursor },
+    );
+    const client = {
+      listOrganizationInvitations,
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    } as unknown as OpenGeniBrowserClient;
+
+    function Harness() {
+      const controller = useOrganizationInvitations({
+        client,
+        enabled: true,
+        onAccepted: () => undefined,
+      });
+      return <OrganizationInvitationsMenuItem controller={controller} />;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      await flush();
+      expect(listOrganizationInvitations).toHaveBeenCalledTimes(2);
+      expect(listOrganizationInvitations.mock.calls).toEqual([
+        [{ limit: 100 }],
+        [{ cursor: nextCursor, limit: 100 }],
+      ]);
+      expect(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Organization invitations, 1 pending"]',
+        ),
+      ).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("lists only pending invitations and accepts the chosen organization", async () => {
     const pending = invitation({
       id: crypto.randomUUID(),
