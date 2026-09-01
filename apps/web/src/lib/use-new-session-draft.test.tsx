@@ -361,6 +361,36 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("a create-time conflict enters recovery instead of reusing the stale flushed revision", async () => {
+    let authoritative = remote(2, { text: "initial" });
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          authoritative = remote(request.expectedRevision + 1, request);
+          return authoritative;
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "mine" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    expect(flushed?.revision).toBe(3);
+
+    authoritative = remote(4, { text: "sibling" });
+    expect(await actRun(() => hook.result.current.draft.captureConflict(conflict()))).toBe(true);
+    expect(hook.result.current.draft.conflict?.message).toContain("draft changed");
+    expect(await actRun(() => hook.result.current.draft.flush())).toBeNull();
+
+    await actRun(() => hook.result.current.draft.resolveConflict("keep_mine"));
+    expect(requests.at(-1)).toMatchObject({ expectedRevision: 4, text: "mine" });
+    expect(hook.result.current.draft.revision).toBe(5);
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
   test("use remote replaces local state and revalidates its files", async () => {
     let reads = 0;
     const fileId = "00000000-0000-4000-8000-000000000055";

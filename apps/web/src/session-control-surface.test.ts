@@ -135,6 +135,7 @@ describe("session control surface architecture", () => {
     expect(route).toContain("fixedResourceSelection.selectionResolved");
     expect(route).toContain("personalResourceSelectionIdentityKey");
     expect(route).toContain("recoverPersonalResourceAttachment(error, request)");
+    expect(route.match(/newSessionDraft\.captureConflict\(error\)/g)).toHaveLength(2);
     expect(route).toContain("recoverNewSessionPersonalResourceAttachment");
     expect(route).toContain("refreshPersonalResourceCatalogs");
     expect(route).toContain("canLoadVariableSetCatalog");
