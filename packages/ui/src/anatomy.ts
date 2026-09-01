@@ -65,9 +65,9 @@ export const OPEN_GENI_STATES = [
 export type OpenGeniComponentState = (typeof OPEN_GENI_STATES)[number];
 
 /**
- * Capability-level parity promise. Framework APIs may stay idiomatic, but
- * every listed capability must pass the shared conformance suite in both
- * renderers before it is documented as supported.
+ * Closed target inventory for cross-framework session parity. This inventory
+ * is not qualification evidence: a capability is supported only when an
+ * executable test mounts both renderers and exercises its listed states.
  */
 export const OPEN_GENI_SESSION_PARITY_CAPABILITIES = {
   session: {

@@ -12,7 +12,7 @@
     selected?: readonly string[];
     disabled?: boolean;
     label?: string;
-    onChange?: (ids: string[]) => unknown;
+    onChange?: ((ids: string[]) => unknown) | undefined;
   } = $props();
 
   function toggle(id: string, checked: boolean) {

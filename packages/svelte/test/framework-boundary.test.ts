@@ -22,8 +22,8 @@ test("native policy and human-input surfaces preserve host authority", () => {
   const mcpPolicy = readFileSync(join(components, "McpApprovalPolicySurface.svelte"), "utf8");
   const humanInput = readFileSync(join(components, "HumanInputForm.svelte"), "utf8");
 
-  expect(mcpPolicy).toContain('<option value="selected" disabled>');
-  expect(mcpPolicy).not.toContain('event.currentTarget.value === "never" ? false : []');
+  expect(mcpPolicy).toContain('<option value="selected">');
+  expect(mcpPolicy).toContain("controller.update(selectedToolNames())");
   expect(humanInput).toContain("{#if question.allowOther}");
 });
 

@@ -230,12 +230,11 @@ export type FrameworkSessionManifestRow = Readonly<{
       objectUrls: 0;
     }>;
   }>;
-  evidence: Readonly<{
+  references: Readonly<{
     controller: string;
     react: string;
     svelte: string;
     browser: string;
-    screenshot: string;
   }>;
   variantIds: readonly string[];
   accessibility: Readonly<{
@@ -281,7 +280,7 @@ const AREA_ACS: Record<FrameworkSessionArea, readonly FrameworkSessionAcceptance
   lifecycle: ["AC-10", "AC-14", "AC-16", "AC-20", "AC-21"],
 };
 
-const AREA_REACT_EVIDENCE: Record<FrameworkSessionArea, string> = {
+const AREA_REACT_REFERENCE: Record<FrameworkSessionArea, string> = {
   "session-lifecycle": "packages/react/test/use-session.test.tsx",
   streaming: "packages/react/test/use-session-events.test.tsx",
   composer: "packages/react/test/hooks.test.tsx",
@@ -294,16 +293,16 @@ const AREA_REACT_EVIDENCE: Record<FrameworkSessionArea, string> = {
   lifecycle: "packages/react/test/use-session-events.test.tsx",
 };
 
-const AREA_SVELTE_EVIDENCE: Record<FrameworkSessionArea, string> = {
-  "session-lifecycle": "packages/svelte/test/store.test.ts",
-  streaming: "packages/svelte/test/store.test.ts",
-  composer: "packages/svelte/test/store.test.ts",
-  "queue-control": "packages/svelte/test/store.test.ts",
+const AREA_SVELTE_REFERENCE: Record<FrameworkSessionArea, string> = {
+  "session-lifecycle": "packages/svelte/test/session-controller-composition.test.ts",
+  streaming: "packages/svelte/test/session-controller-composition.test.ts",
+  composer: "packages/svelte/test/composer-submit.test.ts",
+  "queue-control": "packages/svelte/test/queue-edit.test.ts",
   decisions: "packages/svelte/test/human-input.test.ts",
-  "goals-lineage": "packages/svelte/test/store.test.ts",
-  attachments: "packages/svelte/test/store.test.ts",
-  history: "packages/svelte/test/framework-boundary.test.ts",
-  "host-policy": "packages/svelte/test/framework-boundary.test.ts",
+  "goals-lineage": "packages/svelte/test/session-controller-composition.test.ts",
+  attachments: "packages/svelte/test/composer-submit.test.ts",
+  history: "test/e2e/framework-ui-parity.browser.e2e.ts",
+  "host-policy": "test/e2e/framework-ui-parity.browser.e2e.ts",
   lifecycle: "packages/svelte/test/store.test.ts",
 };
 
@@ -314,7 +313,7 @@ export const FRAMEWORK_SESSION_STATE_MANIFEST: readonly FrameworkSessionManifest
     ids.map((id, index) => createManifestRow(area as FrameworkSessionArea, id, index)),
   );
 
-export function runFrameworkSessionScenario(row: FrameworkSessionManifestRow): NormalizedTrace {
+export function projectFrameworkSessionScript(row: FrameworkSessionManifestRow): NormalizedTrace {
   const ordered = [...row.script.steps].sort(
     (left, right) => left.at - right.at || left.generation - right.generation || left.name.localeCompare(right.name),
   );
@@ -357,9 +356,9 @@ export function validateFrameworkSessionManifest(
     if (row.acceptanceCriteria.length === 0 || !row.acceptanceCriteria.includes("AC-21")) {
       errors.push(`${row.id}: acceptance criteria omit AC-21`);
     }
-    for (const [kind, reference] of Object.entries(row.evidence)) {
+    for (const [kind, reference] of Object.entries(row.references)) {
       if (!reference.trim() || /placeholder|todo|skip|tbd/i.test(reference)) {
-        errors.push(`${row.id}: invalid ${kind} evidence`);
+        errors.push(`${row.id}: invalid ${kind} reference`);
       }
     }
     if (!row.accessibility.focus || !row.accessibility.liveRegion || row.accessibility.keyboard.length === 0) {
@@ -368,7 +367,7 @@ export function validateFrameworkSessionManifest(
     if (Object.values(row.expected.teardown).some((value) => value !== 0)) {
       errors.push(`${row.id}: teardown does not return every resource to zero`);
     }
-    const trace = runFrameworkSessionScenario(row);
+    const trace = projectFrameworkSessionScript(row);
     if (trace.calls.length !== row.expected.network.reads + row.expected.network.mutations) {
       errors.push(`${row.id}: expected call count does not match executable script`);
     }
@@ -449,12 +448,11 @@ function createManifestRow(
       }),
       teardown: Object.freeze({ readers: 0, streams: 0, listeners: 0, timers: 0, objectUrls: 0 }),
     }),
-    evidence: Object.freeze({
+    references: Object.freeze({
       controller: "test/framework-session-state-manifest.test.ts",
-      react: AREA_REACT_EVIDENCE[area],
-      svelte: AREA_SVELTE_EVIDENCE[area],
-      browser: "test/e2e/svelte-demo.browser.e2e.ts",
-      screenshot: `framework-session-v${FRAMEWORK_SESSION_MANIFEST_VERSION}/${id}.png`,
+      react: AREA_REACT_REFERENCE[area],
+      svelte: AREA_SVELTE_REFERENCE[area],
+      browser: "test/e2e/framework-ui-parity.browser.e2e.ts",
     }),
     variantIds: Object.freeze(assignedVariants),
     accessibility: Object.freeze({

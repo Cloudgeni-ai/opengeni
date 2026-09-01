@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  let { children }: { children?: Snippet } = $props();
+  import type { HTMLAttributes } from "svelte/elements";
+  let { children, class: className = "", ...rest }: HTMLAttributes<HTMLElement> & { children?: Snippet } = $props();
 </script>
-<footer class="og-composer__footer og-composer-footer" data-og-part="footer">{@render children?.()}</footer>
+<footer {...rest} class={`og-composer__footer og-composer-footer ${className}`.trim()} data-og-part="footer">{@render children?.()}</footer>

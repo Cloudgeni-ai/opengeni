@@ -14,7 +14,7 @@ import {
 } from "../packages/sdk/src/session";
 import {
   FRAMEWORK_SESSION_STATE_MANIFEST,
-  runFrameworkSessionScenario,
+  projectFrameworkSessionScript,
   type FrameworkSessionManifestRow,
 } from "../test/fixtures/framework-session/state-manifest";
 
@@ -415,8 +415,8 @@ function runManifestGenerationProperties(random: SeededRandom, seed: number): vo
       ...row,
       script: { ...row.script, steps: shuffledSteps },
     } as FrameworkSessionManifestRow;
-    const expected = runFrameworkSessionScenario(row);
-    const actual = runFrameworkSessionScenario(permuted);
+    const expected = projectFrameworkSessionScript(row);
+    const actual = projectFrameworkSessionScript(permuted);
     invariantWithReplay(
       JSON.stringify(actual) === JSON.stringify(expected),
       "manifest scenario changed under an equivalent schedule permutation",

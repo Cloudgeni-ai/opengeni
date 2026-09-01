@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from "svelte";
-  let { children }: { children?: Snippet } = $props();
+  import type { HTMLAttributes } from "svelte/elements";
+  let { children, class: className = "", ...rest }: HTMLAttributes<HTMLDivElement> & { children?: Snippet } = $props();
 </script>
 
-<div class="og-composer__frame" data-og-part="body"><div class="og-composer__surface" data-og-part="content">{@render children?.()}</div></div>
+<div class="og-composer__frame" data-og-part="body"><div {...rest} class={`og-composer__surface ${className}`.trim()} data-og-part="content">{@render children?.()}</div></div>

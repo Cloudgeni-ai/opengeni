@@ -183,6 +183,26 @@ describe(`framework UI parity in ${engineName}`, () => {
       expect(await page.getByText("14 tests passed", { exact: false }).count()).toBe(1);
       expect(await page.getByRole("radio", { name: /Other/ }).count()).toBe(0);
 
+      await page.getByRole("combobox", { name: "Model" }).selectOption(
+        "accounts/fireworks/models/glm-5p2",
+      );
+      await page.getByRole("combobox", { name: "Reasoning effort" }).selectOption("high");
+      await page.getByRole("combobox", { name: "Latency" }).selectOption("priority");
+
+      const attachmentInput = page.locator('input[type="file"][aria-label="Attach files"]');
+      const attachment = {
+        name: "parity.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("parity"),
+      };
+      await attachmentInput.setInputFiles(attachment);
+      await page.getByText("parity.txt", { exact: true }).waitFor();
+      await page.locator('[data-og-component="attachment"][data-og-state="ready"]').waitFor();
+      await page.getByRole("button", { name: "Remove parity.txt" }).click();
+      await attachmentInput.setInputFiles(attachment);
+      await page.getByText("parity.txt", { exact: true }).waitFor();
+      await page.locator('[data-og-component="attachment"][data-og-state="ready"]').waitFor();
+
       const textbox = page.getByRole("textbox", { name: "Message" });
       const prompt = `${engineName} verifies the shared composer.`;
       await textbox.fill(prompt);
@@ -204,10 +224,28 @@ describe(`framework UI parity in ${engineName}`, () => {
         state: "detached",
       });
       await expectRecordedActions(page, [
+        "file.upload",
+        "file.upload",
         "composer.submit",
         "human-input.respond",
         "approval.respond",
       ]);
+      const submitted = await page.evaluate(() =>
+        (
+          window as typeof window & {
+            __OPENGENI_DEMO_REQUESTS__?: Array<{
+              action: string;
+              payload: Record<string, unknown>;
+            }>;
+          }
+        ).__OPENGENI_DEMO_REQUESTS__?.find(({ action }) => action === "composer.submit"),
+      );
+      expect(submitted?.payload).toMatchObject({
+        model: "accounts/fireworks/models/glm-5p2",
+        reasoningEffort: "high",
+        latencyMode: "priority",
+      });
+      expect(submitted?.payload.resources).toHaveLength(1);
 
       const geometry = await page.evaluate(() => {
         const input = document.querySelector<HTMLElement>(

@@ -12,13 +12,14 @@ registerDom();
 describe("useComposer embedding policy", () => {
   test("a synchronous host render cannot project an older composer state lane", async () => {
     const projectedValues: string[] = [];
+    const client = fakeClient({});
     let setComposerValue!: (value: string) => void;
     let forceHostRender!: () => void;
 
     function Harness() {
       const [, setHostRevision] = useState(0);
       const composer = useComposer(SESSION_ID, {
-        client: fakeClient({}),
+        client,
         workspaceId: WORKSPACE_ID,
         draftPersistence: "disabled",
         initialPolicy: {

@@ -2,7 +2,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
   FRAMEWORK_SESSION_MANIFEST_VERSION,
   FRAMEWORK_SESSION_STATE_MANIFEST,
-  runFrameworkSessionScenario,
+  projectFrameworkSessionScript,
 } from "./state-manifest";
 
 GlobalRegistrator.register();
@@ -268,7 +268,7 @@ function manifestRecord(): AnyRecord {
     states: FRAMEWORK_SESSION_STATE_MANIFEST.map((row) => ({
       area: row.area,
       id: row.id,
-      trace: runFrameworkSessionScenario(row),
+      trace: projectFrameworkSessionScript(row),
     })),
   };
 }

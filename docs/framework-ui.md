@@ -138,7 +138,7 @@ structured human input, goals, model/reasoning/latency controls, and tool policy
 selection. Host-specific renderers use Svelte snippets rather than React
 components. Unknown timeline kinds degrade to bounded readable output.
 
-For this supported boundary, parity means the same runtime mutations, visible
+For the qualified intersection, parity means the same runtime mutations, visible
 states, copy, semantic anatomy, responsive behavior, and default visual result;
 it does not require identical framework DOM implementation. The ready-made
 Svelte composer uses the same exported `ComposerRoot`, `ComposerSurface`,
@@ -146,6 +146,12 @@ Svelte composer uses the same exported `ComposerRoot`, `ComposerSurface`,
 `ComposerAttachButton`, and `ComposerSendButton` primitives available to hosts.
 This keeps the turnkey surface and customer-composed surface on one behavior
 path.
+
+The anatomy capability inventory is a target matrix, not proof by declaration.
+Only browser workflows that mount and drive both renderers qualify visual or
+interaction parity. The state manifest is a coverage specification, and the
+legacy differential runner is a React public-API regression oracle; neither is
+reported as Svelte execution evidence.
 
 ## Shared semantic CSS
 

@@ -6,6 +6,7 @@ import {
   createSessionControlStore,
   createSessionEventStore,
   createSessionLineageStore,
+  createSessionMcpApprovalPolicyStore,
   createSessionResourceStore,
   createTurnQueueStore,
   type FileAttachmentStore,
@@ -21,6 +22,8 @@ import {
   type SessionEventStore,
   type SessionLineageClientLike,
   type SessionLineageStore,
+  type SessionMcpApprovalPolicyClientLike,
+  type SessionMcpApprovalPolicyStore,
   type SessionResourceStore,
   type TurnQueueStore,
 } from "@opengeni/sdk/session";
@@ -37,6 +40,8 @@ export type SessionSurfaceControllers = Readonly<{
   goal?: OpenGeniControllerStore<GoalStore> | undefined;
   humanInput?: OpenGeniControllerStore<HumanInputStore> | undefined;
   lineage?: OpenGeniControllerStore<SessionLineageStore> | undefined;
+  mcpApprovalPolicy?:
+    OpenGeniControllerStore<SessionMcpApprovalPolicyStore> | undefined;
   /** Hold the shared composition while a raw-controller adapter is mounted. */
   acquire(): () => void;
   destroy(): void;
@@ -47,11 +52,19 @@ export type SessionControllerCompositionFeatures = Readonly<{
   goal?: boolean;
   humanInput?: boolean;
   lineage?: boolean;
+  /** MCP server id whose session approval policy should be displayed and edited. */
+  mcpApprovalPolicy?: string | false;
 }>;
 
 type ReconciledSessionControllers = Pick<
   SessionSurfaceControllers,
-  "session" | "composer" | "queue" | "goal" | "humanInput" | "lineage"
+  | "session"
+  | "composer"
+  | "queue"
+  | "goal"
+  | "humanInput"
+  | "lineage"
+  | "mcpApprovalPolicy"
 >;
 
 /** @internal Refresh every authoritative projection when the shared SSE feed opens. */
@@ -63,8 +76,15 @@ export async function reconcileSessionControllerComposition(
     () => controllers.composer.controller.refresh(),
     () => controllers.queue.controller.refresh(),
     ...(controllers.goal ? [() => controllers.goal!.controller.refresh()] : []),
-    ...(controllers.humanInput ? [() => controllers.humanInput!.controller.refresh()] : []),
-    ...(controllers.lineage ? [() => controllers.lineage!.controller.refresh()] : []),
+    ...(controllers.humanInput
+      ? [() => controllers.humanInput!.controller.refresh()]
+      : []),
+    ...(controllers.lineage
+      ? [() => controllers.lineage!.controller.refresh()]
+      : []),
+    ...(controllers.mcpApprovalPolicy
+      ? [() => controllers.mcpApprovalPolicy!.controller.refresh()]
+      : []),
   ];
   await Promise.all(refreshes.map(async (refresh) => await refresh()));
 }
@@ -81,12 +101,18 @@ export function createSessionControllerComposition(
     features.attachments === false
       ? undefined
       : (context.fileAttachmentClient ??
-        clientCapability<FileAttachmentClientLike>(context.client, ["uploadFile"]));
+        clientCapability<FileAttachmentClientLike>(context.client, [
+          "uploadFile",
+        ]));
   const goalClient =
     features.goal === false
       ? undefined
       : (context.goalClient ??
-        clientCapability<GoalClientLike>(context.client, ["getGoal", "updateGoal", "deleteGoal"]));
+        clientCapability<GoalClientLike>(context.client, [
+          "getGoal",
+          "updateGoal",
+          "deleteGoal",
+        ]));
   const humanInputClient =
     features.humanInput === false
       ? undefined
@@ -99,7 +125,26 @@ export function createSessionControllerComposition(
     features.lineage === false
       ? undefined
       : (context.lineageClient ??
-        clientCapability<SessionLineageClientLike>(context.client, ["getSessionLineage"]));
+        clientCapability<SessionLineageClientLike>(context.client, [
+          "getSessionLineage",
+        ]));
+  const mcpApprovalPolicyClient =
+    typeof features.mcpApprovalPolicy !== "string"
+      ? undefined
+      : (context.mcpApprovalPolicyClient ??
+        clientCapability<SessionMcpApprovalPolicyClientLike>(context.client, [
+          "getSession",
+          "streamEvents",
+          "updateSessionMcpApprovalPolicy",
+        ]));
+  if (
+    typeof features.mcpApprovalPolicy === "string" &&
+    !mcpApprovalPolicyClient
+  ) {
+    throw new Error(
+      "@opengeni/svelte: MCP approval policy client is not available",
+    );
+  }
   const sessionController = createSessionResourceStore({
     client: context.sessionClient ?? context.client,
     ...common,
@@ -121,16 +166,40 @@ export function createSessionControllerComposition(
     ...common,
     events: sharedEvents,
   });
-  const controlController = createSessionControlStore({ client: context.client, ...common });
+  const controlController = createSessionControlStore({
+    client: context.client,
+    ...common,
+  });
   const goalController = goalClient
     ? createGoalStore({ client: goalClient, ...common, events: sharedEvents })
     : undefined;
   const humanInputController = humanInputClient
-    ? createHumanInputStore({ client: humanInputClient, ...common, events: sharedEvents })
+    ? createHumanInputStore({
+        client: humanInputClient,
+        ...common,
+        events: sharedEvents,
+      })
     : undefined;
   const lineageController = lineageClient
-    ? createSessionLineageStore({ client: lineageClient, ...common, events: sharedEvents })
+    ? createSessionLineageStore({
+        client: lineageClient,
+        ...common,
+        events: sharedEvents,
+      })
     : undefined;
+  const mcpApprovalPolicyServerId =
+    typeof features.mcpApprovalPolicy === "string"
+      ? features.mcpApprovalPolicy
+      : undefined;
+  const mcpApprovalPolicyController =
+    mcpApprovalPolicyClient && mcpApprovalPolicyServerId
+      ? createSessionMcpApprovalPolicyStore({
+          client: mcpApprovalPolicyClient,
+          ...common,
+          serverId: mcpApprovalPolicyServerId,
+          events: sharedEvents,
+        })
+      : undefined;
   let destroyed = false;
   let reconciled: ReconciledSessionControllers | undefined;
   const eventController = createSessionEventStore({
@@ -160,14 +229,34 @@ export function createSessionControllerComposition(
     controllerStore(controller, { acquire: acquireComposition, owned: false });
   const session = linkedStore(sessionController);
   const composer = linkedStore(composerController);
-  const attachments = attachmentController ? linkedStore(attachmentController) : undefined;
+  const attachments = attachmentController
+    ? linkedStore(attachmentController)
+    : undefined;
   const queue = linkedStore(queueController);
   const control = linkedStore(controlController);
   const goal = goalController ? linkedStore(goalController) : undefined;
-  const humanInput = humanInputController ? linkedStore(humanInputController) : undefined;
-  const lineage = lineageController ? linkedStore(lineageController) : undefined;
-  const events = controllerStore(eventController, { acquire: acquireComposition, owned: false });
-  reconciled = { session, composer, queue, goal, humanInput, lineage };
+  const humanInput = humanInputController
+    ? linkedStore(humanInputController)
+    : undefined;
+  const lineage = lineageController
+    ? linkedStore(lineageController)
+    : undefined;
+  const mcpApprovalPolicy = mcpApprovalPolicyController
+    ? linkedStore(mcpApprovalPolicyController)
+    : undefined;
+  const events = controllerStore(eventController, {
+    acquire: acquireComposition,
+    owned: false,
+  });
+  reconciled = {
+    session,
+    composer,
+    queue,
+    goal,
+    humanInput,
+    lineage,
+    mcpApprovalPolicy,
+  };
   const controllers = {
     session,
     events,
@@ -178,6 +267,7 @@ export function createSessionControllerComposition(
     ...(goal ? { goal } : {}),
     ...(humanInput ? { humanInput } : {}),
     ...(lineage ? { lineage } : {}),
+    ...(mcpApprovalPolicy ? { mcpApprovalPolicy } : {}),
   };
   const applySharedEvents = () => {
     const retained = [...events.controller.getSnapshot().events];
@@ -187,13 +277,18 @@ export function createSessionControllerComposition(
     controllers.goal?.controller.applyEvents(retained);
     controllers.humanInput?.controller.applyEvents(retained);
     controllers.lineage?.controller.applyEvents(retained);
+    controllers.mcpApprovalPolicy?.controller.applyEvents(retained);
   };
   const unsubscribeEvents = events.controller.subscribe(applySharedEvents);
   const unsubscribeQueue = queue.controller.subscribe(() => {
-    composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
+    composer.controller.setEffectiveControl(
+      queue.controller.getSnapshot().effectiveControl,
+    );
   });
   applySharedEvents();
-  composer.controller.setEffectiveControl(queue.controller.getSnapshot().effectiveControl);
+  composer.controller.setEffectiveControl(
+    queue.controller.getSnapshot().effectiveControl,
+  );
   function destroyComposition() {
     if (destroyed) return;
     destroyed = true;
@@ -209,6 +304,7 @@ export function createSessionControllerComposition(
     controllers.goal?.destroy();
     controllers.humanInput?.destroy();
     controllers.lineage?.destroy();
+    controllers.mcpApprovalPolicy?.destroy();
     eventController.destroy();
     sessionController.destroy();
     composerController.destroy();
@@ -218,6 +314,7 @@ export function createSessionControllerComposition(
     goalController?.destroy();
     humanInputController?.destroy();
     lineageController?.destroy();
+    mcpApprovalPolicyController?.destroy();
   }
   return Object.freeze({
     ...controllers,

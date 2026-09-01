@@ -39,7 +39,7 @@ acceptance playground, not a product-shell or live-backend simulator.
 
 Use `setOpenGeniContext(...)` for a component subtree, or construct every
 controller with explicit `{ client, workspaceId, sessionId }` options. Context
-contains only clients, workspace identity, and optional controller factories;
+contains only clients, workspace identity, and optional capability clients;
 it does not duplicate session state.
 
 `createContextSessionControllers(sessionId)` composes the ordinary session

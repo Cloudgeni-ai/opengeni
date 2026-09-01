@@ -40,13 +40,10 @@ export type BrowserSessionEventWindow = Readonly<{
 }>;
 
 export function eventResumeSequence(event: SessionEvent): number {
-  const payload = asRecord(event.payload);
-  const coalescedUntil = Number(payload.coalescedUntil);
   return Math.max(
     event.sequence,
     sessionEventStreamCoveredThrough(event) ?? 0,
     event.coveredThrough ?? 0,
-    Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0,
   );
 }
 

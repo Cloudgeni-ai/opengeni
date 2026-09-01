@@ -104,8 +104,8 @@ try {
   await prepareSource(baselineRoot, ["contracts", "sdk", "react"], "baseline");
   await assertCleanTrackedSource(baselineRoot, "baseline");
 
-  progress("installing and building the candidate package closure sequentially");
-  await prepareSource(candidateRoot, ["contracts", "sdk", "ui", "react", "svelte"], "candidate");
+  progress("installing and building the candidate React package closure sequentially");
+  await prepareSource(candidateRoot, ["contracts", "sdk", "ui", "react"], "candidate");
   if (args.candidateSha) await assertCleanTrackedSource(candidateRoot, "candidate");
 
   progress("packing release-shaped baseline and candidate tarballs");
@@ -115,10 +115,9 @@ try {
     "sdk",
     "ui",
     "react",
-    "svelte",
   ]);
 
-  progress("installing isolated consumers and running the identical public React oracle");
+  progress("running the public React regression oracle against baseline and candidate");
   const baselineTrace = await runConsumer("baseline", baselineRoot, baselinePackages);
   const candidateTrace = await runConsumer("candidate", candidateRoot, candidatePackages);
   const comparison = compareFrameworkUiTraces(baselineTrace, candidateTrace);
@@ -130,6 +129,7 @@ try {
   const manifestPath = join(repoRoot, "test/fixtures/framework-session/state-manifest.ts");
   const manifestSha256 = sha256(await readFile(manifestPath));
   const environment = {
+    scope: "react_public_api_regression",
     generatedAt: new Date().toISOString(),
     platform: `${process.platform}-${process.arch}`,
     bun: Bun.version,
@@ -308,12 +308,6 @@ async function runConsumer(
   for (const packageInfo of packages) {
     dependencies[packageInfo.name] = `file:${packageInfo.tarball}`;
   }
-  if (lane === "candidate") {
-    const svelteSource = JSON.parse(
-      await readFile(join(sourceRoot, "packages/svelte/package.json"), "utf8"),
-    ) as PackageManifest;
-    dependencies.svelte = svelteSource.peerDependencies?.svelte ?? "^5.53.7";
-  }
   await writeJson(join(consumerRoot, "package.json"), {
     name: `opengeni-framework-ui-${lane}-consumer`,
     private: true,
@@ -340,7 +334,7 @@ async function runConsumer(
   const consoleErrors = Array.isArray(trace.consoleErrors) ? trace.consoleErrors : [];
   if (consoleErrors.length > 0) {
     throw new Error(
-      `${lane} React oracle emitted console errors: ${JSON.stringify(consoleErrors)}`,
+      `${lane} React regression oracle emitted console errors: ${JSON.stringify(consoleErrors)}`,
     );
   }
   const resources = trace.finalResources;
@@ -349,7 +343,7 @@ async function runConsumer(
     resources === null ||
     Object.values(resources).some((value) => value !== 0)
   ) {
-    throw new Error(`${lane} React oracle did not return every resource counter to zero`);
+    throw new Error(`${lane} React regression oracle did not return every resource counter to zero`);
   }
   if (!packageByName.has("@opengeni/react") || !packageByName.has("@opengeni/sdk")) {
     throw new Error(`${lane} consumer package closure is incomplete`);

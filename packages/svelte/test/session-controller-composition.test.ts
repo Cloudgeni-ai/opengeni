@@ -92,6 +92,23 @@ describe("native Svelte session controller composition", () => {
     }
   });
 
+  test("mounts an explicitly selected MCP policy controller without inventing server authority", () => {
+    const client = Object.assign(baselineClient({ calls: 0 }), {
+      updateSessionMcpApprovalPolicy: async () => ({}) as never,
+    });
+    const controllers = createSessionControllerComposition(
+      { client, workspaceId: "workspace-test", mcpApprovalPolicyClient: client },
+      "session-test",
+      { mcpApprovalPolicy: "github" },
+    );
+    try {
+      expect(controllers.mcpApprovalPolicy).toBeDefined();
+      expect(controllers.mcpApprovalPolicy?.controller.getSnapshot().server).toBeNull();
+    } finally {
+      controllers.destroy();
+    }
+  });
+
   test("a mounted raw-controller surface keeps the composition alive after linked consumers leave", async () => {
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
     Object.defineProperty(globalThis, "window", { configurable: true, value: {} });

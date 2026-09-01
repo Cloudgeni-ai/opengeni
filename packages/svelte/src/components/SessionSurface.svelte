@@ -4,11 +4,13 @@
   import { projectOptimisticQueuedMessages } from "../optimistic-messages";
   import { editQueuedTurnIntoComposer } from "../queue-edit";
   import type { AuthReconnectHandler } from "../renderers";
+  import type { ToolPolicyOption } from "../picker-types";
   import { readableFromController } from "../store";
   import ApprovalSurface from "./ApprovalSurface.svelte";
   import GoalSurface from "./GoalSurface.svelte";
   import HumanInputSurface from "./HumanInputSurface.svelte";
   import MessageTimeline from "./MessageTimeline.svelte";
+  import McpApprovalPolicySurface from "./McpApprovalPolicySurface.svelte";
   import QueueSurface from "./QueueSurface.svelte";
   import SessionChrome from "./SessionChrome.svelte";
   import SessionComposer from "./SessionComposer.svelte";
@@ -19,13 +21,22 @@
     models = [],
     showChrome = true,
     onReconnect,
+    confirmReplaceDraft = () => false,
+    tools = [],
+    selectedTools = [],
+    onToolsChange,
   }: {
     controllers: SessionSurfaceControllers;
     title?: string;
     models?: readonly string[];
     showChrome?: boolean;
     onReconnect?: AuthReconnectHandler | undefined;
+    confirmReplaceDraft?: () => boolean | Promise<boolean>;
+    tools?: readonly ToolPolicyOption[];
+    selectedTools?: readonly string[];
+    onToolsChange?: (ids: string[]) => unknown;
   } = $props();
+  let surface = $state<HTMLElement>();
   let session = $derived(readableFromController(controllers.session.controller, { owned: false }));
   let events = $derived(readableFromController(controllers.events.controller, { owned: false }));
   let control = $derived(readableFromController(controllers.control.controller, { owned: false }));
@@ -56,21 +67,18 @@
       queue: controllers.queue.controller,
       composer: controllers.composer.controller,
       turnId,
-      confirmReplace: () =>
-        window.confirm(
-          "Your composer already has a draft. Replace it with this queued prompt? The current draft will be permanently discarded.",
-        ),
+      confirmReplace: confirmReplaceDraft,
     });
     if (!edited) return;
     window.requestAnimationFrame(() => {
-      document
-        .querySelector<HTMLTextAreaElement>('textarea[aria-label="Message the agent"]')
+      surface
+        ?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message the agent"]')
         ?.focus();
     });
   }
 </script>
 
-<section class="og-root og-session" data-og-component="session" data-og-state={status}>
+<section bind:this={surface} class="og-root og-session" data-og-component="session" data-og-state={status}>
   {#if showChrome}
     <SessionChrome
       title={$session.value?.title ?? title}
@@ -91,6 +99,7 @@
     {#if approvals.length > 0}<ApprovalSurface {approvals} controller={controllers.control.controller} />{/if}
     {#if controllers.humanInput}<HumanInputSurface controller={controllers.humanInput.controller} />{/if}
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
+    {#if controllers.mcpApprovalPolicy}<McpApprovalPolicySurface controller={controllers.mcpApprovalPolicy.controller} />{/if}
     {#if $queue.queue.length > 0 || optimisticQueueCount > 0}<QueueSurface controller={controllers.queue.controller} composer={controllers.composer.controller} onEdit={editQueuedTurn} />{/if}
   </div>
   <div class="og-session__composer" data-og-part="composer">
@@ -98,6 +107,9 @@
       controller={controllers.composer.controller}
       attachments={controllers.attachments?.controller}
       {models}
+      {tools}
+      {selectedTools}
+      {onToolsChange}
     />
   </div>
 </section>

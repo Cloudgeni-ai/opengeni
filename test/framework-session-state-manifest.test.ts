@@ -3,13 +3,13 @@ import {
   FRAMEWORK_SESSION_REQUIRED_STATES,
   FRAMEWORK_SESSION_STATE_MANIFEST,
   FRAMEWORK_SESSION_VARIANTS,
-  runFrameworkSessionScenario,
+  projectFrameworkSessionScript,
   validateFrameworkSessionManifest,
   type FrameworkSessionManifestRow,
 } from "./fixtures/framework-session/state-manifest";
 
 describe("framework session state manifest", () => {
-  test("contains every binding state with executable evidence and zero-resource teardown", () => {
+  test("contains every binding state as a deterministic coverage specification", () => {
     expect(validateFrameworkSessionManifest()).toEqual([]);
     expect(FRAMEWORK_SESSION_STATE_MANIFEST).toHaveLength(
       Object.values(FRAMEWORK_SESSION_REQUIRED_STATES).flat().length,
@@ -19,10 +19,10 @@ describe("framework session state manifest", () => {
     );
   });
 
-  test("executes every row deterministically and rejects stale-generation settlements", () => {
+  test("projects every script deterministically and rejects stale-generation settlements", () => {
     for (const row of FRAMEWORK_SESSION_STATE_MANIFEST) {
-      const first = runFrameworkSessionScenario(row);
-      const second = runFrameworkSessionScenario(row);
+      const first = projectFrameworkSessionScript(row);
+      const second = projectFrameworkSessionScript(row);
       expect(first).toEqual(second);
       expect(first.finalResources).toEqual({
         readers: 0,
@@ -57,11 +57,11 @@ describe("framework session state manifest", () => {
     ).toContain(`duplicate state id: ${first.id}`);
 
     const placeholder = replaceRow(first, {
-      evidence: { ...first.evidence, react: "TODO placeholder" },
+      references: { ...first.references, react: "TODO placeholder" },
     });
     expect(
       validateFrameworkSessionManifest([placeholder, ...FRAMEWORK_SESSION_STATE_MANIFEST.slice(1)]),
-    ).toContain(`${first.id}: invalid react evidence`);
+    ).toContain(`${first.id}: invalid react reference`);
 
     const leaked = replaceRow(first, {
       expected: {

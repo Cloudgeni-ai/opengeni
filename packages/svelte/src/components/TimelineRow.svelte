@@ -123,7 +123,7 @@
       </details>
     {:else if item.kind === "startup-phase"}
       <div class="og-timeline-row__headline">
-        <span class="og-timeline-row__title"><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg><span>{titleize(item.phase)} ready</span></span>
+        <span class="og-timeline-row__title"><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m 12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="m2 14h2m16 0h2m-5-1v2m-6-2v2"/></svg><span>{titleize(item.phase)} ready</span></span>
         {#if item.durationMs !== null}<span class="og-timeline-row__summary">{item.durationMs.toLocaleString("en-US")} ms</span>{/if}
       </div>
     {:else if item.kind === "memory"}
@@ -173,7 +173,7 @@
         <span>Goal {humanize(item.action)}{#if item.text}: {item.text}{/if}</span>
       </div>
     {:else if item.kind === "notice"}
-      <div class="og-timeline-row__notice"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><span>{item.text}</span></div>
+      <div class="og-timeline-row__notice"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="m 12 9v4"/><path d="m 12 17h.01"/></svg><span>{item.text}</span></div>
       {#if item.details}<pre>{item.details.label}: {boundedTimelineValue(item.details.value)}</pre>{/if}
       {#if item.action}<a class="og-button" href={item.action.url}>{item.action.label}</a>{/if}
     {:else if item.kind === "context-compaction"}
