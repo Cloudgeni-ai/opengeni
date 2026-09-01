@@ -303,37 +303,40 @@ describe("curated AI Gateway catalogue", () => {
     }
   });
 
-  test("keeps compatible Gateway catalog entries available when max is the only configured effort", () => {
-    const settings = {
-      ...withEnv(
-        {
-          OPENGENI_OPENAI_REASONING_EFFORT: "max",
-          OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS: "max",
-        },
-        () => getSettings(),
-      ),
-      modelProvidersJson: "[]",
-      vercelAiGatewayApiKey: "vck_test",
-    };
-    expect(
-      configuredModels(settings)
-        .filter((model) => model.providerId === OPENGENI_GATEWAY_PROVIDER_ID)
-        .map((model) => model.id),
-    ).toEqual([
-      OPENGENI_GATEWAY_MODELS.deepseek.productId,
-      OPENGENI_GATEWAY_MODELS.kimi.productId,
-    ]);
+  test(
+    "keeps compatible Gateway catalog entries available when max is the only configured effort",
+    () => {
+      const settings = {
+        ...withEnv(
+          {
+            OPENGENI_OPENAI_REASONING_EFFORT: "max",
+            OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS: "max",
+          },
+          () => getSettings(),
+        ),
+        modelProvidersJson: "[]",
+        vercelAiGatewayApiKey: "vck_test",
+      };
+      expect(
+        configuredModels(settings)
+          .filter((model) => model.providerId === OPENGENI_GATEWAY_PROVIDER_ID)
+          .map((model) => model.id),
+      ).toEqual([
+        OPENGENI_GATEWAY_MODELS.deepseek.productId,
+        OPENGENI_GATEWAY_MODELS.kimi.productId,
+      ]);
 
-    const workspace = withWorkspaceGatewayCatalogProvider(settings);
-    expect(
-      configuredModels(workspace)
-        .filter((model) => model.providerId === WORKSPACE_GATEWAY_PROVIDER_ID)
-        .map((model) => model.id),
-    ).toEqual([
-      OPENGENI_GATEWAY_MODELS.deepseek.workspaceProductId,
-      OPENGENI_GATEWAY_MODELS.kimi.workspaceProductId,
-    ]);
-  });
+      const workspace = withWorkspaceGatewayCatalogProvider(settings);
+      expect(
+        configuredModels(workspace)
+          .filter((model) => model.providerId === WORKSPACE_GATEWAY_PROVIDER_ID)
+          .map((model) => model.id),
+      ).toEqual([
+        OPENGENI_GATEWAY_MODELS.deepseek.workspaceProductId,
+        OPENGENI_GATEWAY_MODELS.kimi.workspaceProductId,
+      ]);
+    },
+  );
 
   test("workspace overlay is externally billed and receives a key only at runtime", () => {
     const base = {
