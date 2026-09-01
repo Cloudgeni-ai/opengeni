@@ -218,6 +218,7 @@ import {
 
 import {
   approvalIdentifier,
+  boundSessionEvent,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   WORKSPACE_STATE_MEMORY_SAMPLE_LIMIT,
@@ -35197,6 +35198,8 @@ export type SessionEventPage = {
   events: SessionEvent[];
   hasMore: boolean;
   bytes: number;
+  /** True only when every full-mode event is the exact retained database row. */
+  fullPayloadsExact: boolean;
   direction: SessionEventReadDirection;
   coveredSequence: { first: number; last: number } | null;
   nextAfter: number | null;
@@ -35228,10 +35231,12 @@ type SessionEventProjectionRow = {
 
 /**
  * Read one direction-aware session-event page. Full mode selects the canonical
- * row exactly; summary/none modes derive bounded monitoring projections in SQL
- * without rewriting the retained source. `bytes` is the exact UTF-8 size of
- * `JSON.stringify(events)`; `hasMore` is true whenever count or byte selection
- * stopped before the durable range ended.
+ * row exactly when it fits the page; an oversized historical row that predates
+ * the durable write guard is projected at the bounded database-read boundary
+ * when it would otherwise strand its cursor forever. Summary/none modes derive
+ * bounded monitoring projections in SQL without rewriting the retained source.
+ * `bytes` is the exact UTF-8 size of `JSON.stringify(events)`; `hasMore` is true
+ * whenever count or byte selection stopped before the durable range ended.
  */
 export async function listSessionEventPage(
   db: Database,
@@ -35266,6 +35271,7 @@ export async function listSessionEventPage(
     let bytes = 2; // []
     let cursor = direction === "before" ? before : after;
     let hasMore = false;
+    let fullPayloadsExact = payloadMode === "full";
     let truncatedBy: SessionEventPage["truncatedBy"] = null;
 
     for (;;) {
@@ -35330,18 +35336,26 @@ export async function listSessionEventPage(
           truncatedBy = "count";
           break;
         }
-        const event = mapProjectedEvent(row);
-        const eventBytes = utf8JsonBytes(event);
+        let event = mapProjectedEvent(row);
+        let eventBytes = utf8JsonBytes(event);
         const separatorBytes = events.length === 0 ? 0 : 1;
         if (bytes + separatorBytes + eventBytes > maxBytes) {
           if (events.length === 0) {
-            throw new RangeError(
-              `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
-            );
+            if (payloadMode === "full") {
+              event = boundSessionEvent(event, { surface: "database_read_projection" });
+              eventBytes = utf8JsonBytes(event);
+              fullPayloadsExact = false;
+            }
+            if (eventBytes + 2 > maxBytes) {
+              throw new RangeError(
+                `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
+              );
+            }
+          } else {
+            hasMore = true;
+            truncatedBy = "bytes";
+            break;
           }
-          hasMore = true;
-          truncatedBy = "bytes";
-          break;
         }
         events.push(event);
         bytes += separatorBytes + eventBytes;
@@ -35358,6 +35372,7 @@ export async function listSessionEventPage(
       events,
       hasMore,
       bytes,
+      fullPayloadsExact,
       direction,
       coveredSequence: first === null || last === null ? null : { first, last },
       nextAfter: direction === "after" ? (last ?? after) : null,

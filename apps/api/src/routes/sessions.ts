@@ -2622,9 +2622,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result);
     }
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const forensicExact = mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
     const page = boundSessionEventHttpPage(projected, {
       direction,
-      eventProjection: mode === "forensic" && payloadMode === "full" ? "exact" : "bounded",
+      eventProjection: forensicExact ? "exact" : "bounded",
     });
     const hasMore = dbPage.hasMore || page.truncated;
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
@@ -2634,7 +2635,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Event-Mode", mode);
     c.header("X-OpenGeni-Event-Direction", direction);
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
-    c.header("X-OpenGeni-Forensic-Exact", String(mode === "forensic" && payloadMode === "full"));
+    c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
     const coveredFirst = page.events[0]?.sequence;
     const coveredLast = page.events.at(-1)?.sequence;
     if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));

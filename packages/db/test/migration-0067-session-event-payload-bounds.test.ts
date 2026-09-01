@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { sessionEventPayloadTruncation } from "@opengeni/contracts";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
-import { createDb, listSessionEventPage } from "../src";
+import { createDb, listSessionEventPage, SESSION_EVENT_DB_PAGE_MAX_BYTES } from "../src";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -107,6 +108,11 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         name: "sessions_list",
         output: `HEAD-${"h".repeat(180_000)}-TAIL`,
       };
+      const cursorStrandingPayload = {
+        id: "cursor-stranding-legacy-output",
+        name: "exec_command",
+        output: `HEAD-${"p".repeat(3 * 1024 * 1024)}-TAIL`,
+      };
       const insertPayload = {
         id: "insert-guard",
         name: "sessions_list",
@@ -143,6 +149,13 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
         ), (
           ${account!.id}, ${workspace!.id}, ${sessionId}, 2,
           'agent.tool_call.completed', ${admin.json({ id: "update-target", output: "small" })}
+        )`;
+      await admin`
+        insert into session_events (
+          account_id, workspace_id, session_id, sequence, type, payload
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${sessionId}, 9,
+          'agent.toolCall.output', ${admin.json(cursorStrandingPayload)}
         )`;
       await admin`
         insert into session_events (
@@ -243,8 +256,31 @@ describe("0065 session event payload bounds (real PostgreSQL)", () => {
           Buffer.byteLength(JSON.stringify(projectedPayloadPage.events), "utf8"),
         );
         expect(projectedPayloadPage.events[0]?.payload).toEqual(historicalPayload);
+        expect(projectedPayloadPage.fullPayloadsExact).toBeTrue();
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("HEAD-");
         expect(JSON.stringify(projectedPayloadPage.events)).toContain("-TAIL");
+
+        const projectedCursorStrandingPage = await listSessionEventPage(
+          projectionClient.db,
+          workspace!.id,
+          sessionId,
+          { before: 10, limit: 1, batchSize: 1 },
+        );
+        expect(projectedCursorStrandingPage.events).toHaveLength(1);
+        expect(projectedCursorStrandingPage.events[0]?.sequence).toBe(9);
+        expect(projectedCursorStrandingPage.nextBefore).toBe(9);
+        expect(projectedCursorStrandingPage.fullPayloadsExact).toBeFalse();
+        expect(projectedCursorStrandingPage.bytes).toBe(
+          Buffer.byteLength(JSON.stringify(projectedCursorStrandingPage.events), "utf8"),
+        );
+        expect(projectedCursorStrandingPage.bytes).toBeLessThanOrEqual(
+          SESSION_EVENT_DB_PAGE_MAX_BYTES,
+        );
+        expect(
+          sessionEventPayloadTruncation(projectedCursorStrandingPage.events[0]?.payload)?.surface,
+        ).toBe("database_read_projection");
+        expect(JSON.stringify(projectedCursorStrandingPage.events)).toContain("HEAD-");
+        expect(JSON.stringify(projectedCursorStrandingPage.events)).toContain("-TAIL");
 
         const projectedEnvelopePage = await listSessionEventPage(
           projectionClient.db,
