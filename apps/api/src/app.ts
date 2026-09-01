@@ -1130,6 +1130,10 @@ const publicWorkspaceBrowserRoutePatterns = [
 ] as const;
 
 export function workspaceActorContextExempt(method: string, pathname: string): boolean {
+  // The account-scoped provisioning route shares the workspace collection prefix.
+  // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
+  // the route performs its own organization API-key authorization.
+  if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
   if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
   if (
     method === "GET" &&
