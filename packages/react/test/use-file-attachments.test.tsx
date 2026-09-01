@@ -713,7 +713,9 @@ describe("useFileAttachments", () => {
     const [omittedAttachment, explicitDefaultAttachment] = hook.result.current.attachments;
     expect(omittedAttachment?.id).toBe(restoredAttachmentId(asset.id));
     expect(explicitDefaultAttachment?.id).toBe(restoredAttachmentId(asset.id, "default"));
-    expect(new Set(hook.result.current.attachments.map((attachment) => attachment.id)).size).toBe(2);
+    expect(new Set(hook.result.current.attachments.map((attachment) => attachment.id)).size).toBe(
+      2,
+    );
 
     await flushing(() => hook.result.current.failPreview?.(omittedAttachment!.id));
 
