@@ -134,6 +134,7 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
+import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
 import {
@@ -482,6 +483,7 @@ function validateSessionMcpServersForCreate(
   const dbServers: CreateSessionMcpServerInput[] = [];
   const metadata: SessionMcpServerMetadata[] = [];
   for (const server of servers) {
+    assertHostMcpAuthoritySourceAdmissionEnabled(settings, server.connectionRef);
     if (seenIds.has(server.id)) {
       throw new HTTPException(422, {
         message: `duplicate session MCP server id: ${server.id}`,

@@ -54,6 +54,19 @@ describe("session control surface architecture", () => {
     expect(route).toContain("loadRetainedScreenshot={loadRetainedScreenshot}");
   });
 
+  test("keeps host-owned auth recovery out of the native connection broker", async () => {
+    const route = await source("routes/session.tsx");
+    const hostGuard = route.indexOf('if (item.authoritySource === "host")');
+    const nativeRecovery = route.indexOf("if (item.capability)", hostGuard);
+    const hostBranch = route.slice(hostGuard, nativeRecovery);
+
+    expect(hostGuard).toBeGreaterThan(-1);
+    expect(nativeRecovery).toBeGreaterThan(hostGuard);
+    expect(hostBranch).toContain("window.location.assign(item.authorizationUrl)");
+    expect(hostBranch).not.toContain("listConnections");
+    expect(hostBranch).not.toContain("startConnectionOAuth");
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");

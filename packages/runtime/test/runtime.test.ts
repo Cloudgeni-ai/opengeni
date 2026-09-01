@@ -7395,6 +7395,63 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("retains successful host provenance when a replay-safe request still 401s after refresh", async () => {
+    const connectionId = "legacy-host-binding";
+    const mcp = startTestMcpServer();
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "host-refresh-failed",
+            name: "Legacy host binding",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "host.example.test",
+              kind: "delegated",
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "host-refresh-failed" }],
+      {
+        workspaceId: "44444444-4444-4444-8444-444444444444",
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "ok",
+          authoritySource: "host",
+          connectionId,
+          headers: { authorization: "Bearer host-token" },
+        }),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+        mcpFetchImpl: async (input, init) => {
+          const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+          if (body?.method === "tools/list") {
+            return new Response("unauthorized", { status: 401 });
+          }
+          return await globalThis.fetch(input, init);
+        },
+      },
+    );
+    try {
+      expect(await prepared.mcpServers[0]!.listTools()).toEqual([]);
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "host-refresh-failed",
+          providerDomain: "host.example.test",
+          connectionId,
+          authoritySource: "host",
+          reason: "expired",
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
   test("never replays brokered tools/call after 401 and reports an uncertain outcome", async () => {
     const connectionId = "34343434-3434-4434-8434-343434343434";
     const mcp = startTestMcpServer({
@@ -7521,6 +7578,67 @@ describe("runtime event normalization", () => {
           connectionId,
           reason: "insufficient_scope",
           scopes: ["documents:read", "documents:write"],
+        }),
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("retains successful host provenance for provider insufficient-scope auth", async () => {
+    const connectionId = "legacy-host-scoped-binding";
+    const mcp = startTestMcpServer({
+      forbiddenTools: ["search_documents"],
+      forbiddenAuthenticateHeader: 'Bearer error="insufficient_scope", scope="deploy:read"',
+    });
+    const authNeeded: ToolAuthNeededPayload[] = [];
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          {
+            id: "host-scoped",
+            name: "Legacy host scoped binding",
+            url: mcp.url,
+            connectionRef: {
+              connectionId,
+              providerDomain: "host.example.test",
+              kind: "delegated",
+              scopes: ["deploy:read"],
+              subjectScope: "workspace",
+            },
+            cacheToolsList: false,
+          },
+        ],
+      }),
+      [{ kind: "mcp", id: "host-scoped" }],
+      {
+        workspaceId: "66666666-6666-4666-8666-666666666666",
+        resolveCredential: async (): Promise<ResolveConnectionCredentialResult> => ({
+          status: "ok",
+          authoritySource: "host",
+          connectionId,
+          headers: {},
+        }),
+        onAuthNeeded: (payload) => authNeeded.push(payload),
+      },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      const result = await prepared.mcpServers[0]!.callToolResult!(
+        "host-scoped__search_documents",
+        { query: "scope" },
+      );
+      expect(result).toMatchObject({ isError: true });
+      expect(authNeeded).toContainEqual(
+        expect.objectContaining({
+          serverId: "host-scoped",
+          toolName: "search_documents",
+          providerDomain: "host.example.test",
+          connectionId,
+          authoritySource: "host",
+          reason: "insufficient_scope",
+          scopes: ["deploy:read"],
         }),
       );
     } finally {
@@ -9458,6 +9576,7 @@ describe("runtime event normalization", () => {
                 status: "auth_needed",
                 reason: "expired",
                 providerDomain: "api.integrations-example.com",
+                authoritySource: "host",
                 connectionId,
                 authorizationUrl: "https://api.integrations-example.com/oauth/start",
               }
@@ -9484,6 +9603,7 @@ describe("runtime event normalization", () => {
           serverId: "cap",
           toolName: "search_documents",
           reason: "expired",
+          authoritySource: "host",
         }),
       );
       // The healthy sibling remains fully usable in the same turn.

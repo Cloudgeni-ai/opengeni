@@ -610,6 +610,7 @@ export type McpConnectionAuthoritySelection = {
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  authoritySource?: "host" | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -1988,6 +1989,7 @@ export type ToolAuthNeededPayload = {
   providerDomain: string;
   provider?: string | undefined;
   connectionId?: string | null | undefined;
+  authoritySource?: "host" | undefined;
   reason:
     | "missing_connection"
     | "expired"
@@ -1996,6 +1998,15 @@ export type ToolAuthNeededPayload = {
     | "personal_authority_unavailable"
     | "unsupported_auth"
     | "resource_scope_unavailable";
+  hostReason?:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "personal_authority_unavailable"
+    | "unsupported_auth"
+    | "resource_scope_unavailable"
+    | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
   selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
@@ -6549,6 +6560,7 @@ export type CapabilityCatalogItem = {
   /** The connection backing this enabled installation, or null when none is involved. */
   connectionRef: {
     connectionId?: string | undefined;
+    authoritySource?: "host" | undefined;
     providerDomain: string;
     kind: string;
     subjectScope?: "subject" | "workspace" | undefined;

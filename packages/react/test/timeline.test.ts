@@ -2459,7 +2459,9 @@ describe("buildTimeline", () => {
           toolName: "create_issue",
           providerDomain: "linear.app",
           connectionId: "conn-1",
-          reason: "refresh_failed",
+          authoritySource: "host",
+          reason: "unsupported_auth",
+          hostReason: "refresh_failed",
           scopes: ["issues:write"],
           resource: "https://mcp.linear.app/sse",
           authorizationUrl: "https://linear.app/oauth/authorize",
@@ -2474,11 +2476,33 @@ describe("buildTimeline", () => {
       serverId: "mcp-linear",
       providerDomain: "linear.app",
       connectionId: "conn-1",
+      authoritySource: "host",
       reason: "refresh_failed",
       scopes: ["issues:write"],
       resource: "https://mcp.linear.app/sse",
       toolName: "create_issue",
       authorizationUrl: "https://linear.app/oauth/authorize",
+    });
+  });
+
+  test("host auth without a recovery URL stays unavailable despite its exact host reason", () => {
+    reset();
+    const items = buildTimeline([
+      event("tool.auth_needed", {
+        serverId: "host-tools",
+        toolName: "deploy",
+        providerDomain: "host.example.test",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "unsupported_auth",
+        hostReason: "refresh_failed",
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      authoritySource: "host",
+      reason: "unsupported_auth",
+      authorizationUrl: null,
     });
   });
 

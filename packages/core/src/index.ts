@@ -69,6 +69,7 @@ export * from "./billing/limits";
 // postUserMessageTurn, createAndStartSession, capability/pack/environment/
 // scheduled-task/workspace-member logic, …).
 export * from "./domain/capabilities";
+export * from "./domain/host-mcp-authority-source-admission";
 export * from "./domain/skill-imports";
 export * from "./domain/environments";
 export * from "./rigs";
