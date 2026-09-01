@@ -4,6 +4,7 @@ import { getOrCreateTrace } from "@openai/agents-core";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import {
+  applyModelCatalogDocument,
   configuredProviders,
   resolveModelProvider,
   type ResolvedModelProvider,
@@ -2463,6 +2464,41 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     });
     const model = await new MultiProviderModelProvider(settings).getModel("scripted-1");
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
+  });
+
+  test("the run-scoped provider routes a bare database Gateway model with one built-in default", async () => {
+    const gatewayModelId = "deepseek-v4-flash-0731";
+    const deploymentSettings = applyModelCatalogDocument(
+      testSettings({
+        openaiProvider: "azure",
+        azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
+        azureOpenaiApiKey: "az-test-key",
+        openaiModel: "gpt-5.6-terra",
+        openaiAllowedModels: "gpt-5.6-terra",
+        vercelAiGatewayApiKey: "gateway-key",
+      }),
+      {
+        schemaVersion: 1,
+        defaultModel: "gpt-5.6-terra",
+        builtInModels: ["gpt-5.6-terra"],
+        gatewayModels: [
+          {
+            productId: gatewayModelId,
+            workspaceProductId: `workspace-gateway/${gatewayModelId}`,
+            upstreamModelId: `deepseek/${gatewayModelId}`,
+            label: "DeepSeek V4 Flash 0731",
+            providers: ["baseten"],
+          },
+        ],
+      },
+    );
+    const resolved = resolveTurnModel(deploymentSettings, gatewayModelId);
+    expect(resolved?.provider.id).toBe("opengeni-gateway");
+
+    const runSettings = { ...deploymentSettings, openaiModel: gatewayModelId };
+    expect(
+      await new MultiProviderModelProvider(runSettings).getModel(gatewayModelId),
+    ).toBeDefined();
   });
 
   test("fails loud when a registry redeclares a bare built-in product id", () => {

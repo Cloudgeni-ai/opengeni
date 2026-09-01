@@ -2273,9 +2273,11 @@ export function applyModelCatalogDocument(settings: Settings, rawDocument: unkno
   const resolved = {
     ...settings,
     openaiModel: defaultModel,
-    openaiAllowedModels: document.builtInModels
-      .filter((modelId) => modelId !== defaultModel)
-      .join(","),
+    // Keep the complete built-in membership, including the default. The worker
+    // replaces openaiModel with the exact turn model; the run-scoped router
+    // needs one stable built-in id in this allow-list so a bare provider model
+    // is not temporarily claimed by OpenAI/Azure during name re-resolution.
+    openaiAllowedModels: document.builtInModels.join(","),
     modelProvidersJson: JSON.stringify(
       deploymentRegistryProvidersWithHostCredentials(settings, document.registryProviders),
     ),
