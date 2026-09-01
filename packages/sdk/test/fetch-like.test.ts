@@ -5,7 +5,7 @@ import type { FetchResponse as BrowserFetchResponse } from "../src/browser";
 import type { FetchResponse as CoreFetchResponse } from "../src/core";
 import type { FetchResponse as ArtifactFetchResponse } from "../src/artifacts";
 
-declare const expoResponse: Omit<Response, "clone" | "textStream"> & {
+declare const expoResponse: Omit<Response, "bytes" | "clone" | "textStream"> & {
   clone(): typeof expoResponse;
 };
 const standardFetchTypeProof: FetchLike = async () => new Response();
@@ -58,7 +58,6 @@ function webResponse(body?: BodyInit | null, init?: ResponseInit): FetchResponse
     },
     arrayBuffer: () => response.arrayBuffer(),
     blob: () => response.blob(),
-    bytes: () => response.bytes(),
     clone: () =>
       webResponse(response.clone().body, {
         headers: response.headers,
@@ -83,6 +82,7 @@ describe("FetchLike", () => {
       status: 200,
       headers: { "content-type": "text/event-stream" },
     });
+    expect("bytes" in response).toBe(false);
     expect("textStream" in response).toBe(false);
 
     const client = new OpenGeniClient({
@@ -168,6 +168,7 @@ describe("FetchLike", () => {
       { replicaId: "2222222222222222" },
     );
 
+    expect("bytes" in downloaded).toBe(false);
     expect("textStream" in downloaded).toBe(false);
     expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(Uint8Array.of(1, 2, 3));
   });

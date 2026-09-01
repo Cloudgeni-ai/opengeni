@@ -583,12 +583,12 @@ function sessionListQuery(options: {
 /**
  * Web-standard fetch response accepted by the SDK.
  *
- * Bun augments the global `Response` type with the non-standard `textStream()`
- * method. Fetch implementations such as Expo implement the web Response
- * contract without that runtime-specific extension, so it must not be part of
- * the adapter boundary.
+ * The project global `Response` type includes Bun's non-standard `textStream()`
+ * method and the newer `bytes()` method. Fetch implementations such as Expo do
+ * not necessarily provide either member, and the SDK does not use them, so
+ * they must not be part of the adapter boundary.
  */
-export type FetchResponse = Omit<Response, "clone" | "textStream"> & {
+export type FetchResponse = Omit<Response, "bytes" | "clone" | "textStream"> & {
   clone(): FetchResponse;
 };
 
