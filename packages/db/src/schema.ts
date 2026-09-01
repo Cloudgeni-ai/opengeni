@@ -6066,10 +6066,11 @@ export const sessionTurns = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({ backfill: true }),
-    // Immutable human authority for exact-attempt governance. Human turns bind
-    // their own subject; trusted continuations/compactions may inherit the
-    // causal turn's value while retaining a service initiator. Null means the
-    // turn has no human preference authority.
+    // Bounded, immutable causal-human selector for named attempt-bound
+    // capabilities. Human turns bind their own subject; trusted continuations
+    // and compactions may inherit the causal turn's value while retaining a
+    // service initiator. It never authorizes by itself. Null means pure service
+    // work has no human-bound authority.
     initiatingHumanSubjectId: text("initiating_human_subject_id"),
     // Exact goal authority frozen when the logical turn is accepted. The
     // migration trigger fills this for old and rolling writers; claim only

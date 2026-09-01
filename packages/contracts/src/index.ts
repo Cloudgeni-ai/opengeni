@@ -6586,7 +6586,10 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     /** Frozen authority that admitted the calling turn. */
     initiator: TurnInitiator,
     initiatorContext: TurnInitiatorContext,
-    /** Durable causal human for delegated/service work; null for pure service work. */
+    /**
+     * Durable causal-human selector for named human-bound capabilities. It never
+     * authorizes by itself and is null for pure service work.
+     */
     initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
