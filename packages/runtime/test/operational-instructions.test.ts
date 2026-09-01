@@ -20,6 +20,10 @@ describe("provider-neutral operational instructions", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "[My Report.md](<sandbox:/workspace/My Project/My Report.md:3>)",
     );
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link to /tmp");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "copy it into /workspace before responding",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
   });
 
