@@ -1392,10 +1392,6 @@ function eventResumeSequence(event: SessionEvent): number {
     : event.sequence;
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
-
 function assertAscending(events: SessionEvent[]): void {
   for (let index = 1; index < events.length; index += 1) {
     if (events[index - 1]!.sequence >= events[index]!.sequence) {
