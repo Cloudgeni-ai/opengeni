@@ -825,6 +825,11 @@ boundaries. Provider subscription pools such as Codex or SuperGrok add their
 own credential and capacity authority without changing the logical-turn model.
 Codex may resolve to a workspace pool or an organization pool inherited by a
 shared workspace; the resolved pool remains one complete allocator boundary.
+Vercel AI Gateway and OpenRouter expose separate workspace- and
+organization-owned BYOK products. Organization products use dedicated encrypted
+FORCE-RLS storage, inherit only into same-organization shared workspaces, and
+retain organization payer identity through admission and execution; no rail
+implicitly falls back to another key.
 Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits

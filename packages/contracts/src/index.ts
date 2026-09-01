@@ -2373,6 +2373,54 @@ export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
   typeof WorkspaceOpenRouterCustomModelsResponse
 >;
 
+export const CreateOrganizationProviderCustomModelRequest =
+  CreateWorkspaceGatewayCustomModelRequest;
+export type CreateOrganizationProviderCustomModelRequest = z.infer<
+  typeof CreateOrganizationProviderCustomModelRequest
+>;
+export const DeleteOrganizationProviderCustomModelRequest =
+  DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteOrganizationProviderCustomModelRequest = z.infer<
+  typeof DeleteOrganizationProviderCustomModelRequest
+>;
+export const OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+export type OrganizationProviderCustomModel = z.infer<typeof OrganizationProviderCustomModel>;
+export const OrganizationProviderCustomModelsResponse = z.object({
+  models: z.array(OrganizationProviderCustomModel),
+});
+export type OrganizationProviderCustomModelsResponse = z.infer<
+  typeof OrganizationProviderCustomModelsResponse
+>;
+
+export const OrganizationModelProviderKind = z.enum(["vercel_gateway", "openrouter"]);
+export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
+export const OrganizationModelProviderConnectionResponse = z.object({
+  providerKind: OrganizationModelProviderKind,
+  status: z.enum(["active", "revoked"]),
+  version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type OrganizationModelProviderConnectionResponse = z.infer<
+  typeof OrganizationModelProviderConnectionResponse
+>;
+export const UpsertOrganizationModelProviderConnectionRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+    apiKey: z.string().trim().min(1).max(8192),
+  })
+  .strict();
+export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
+  typeof UpsertOrganizationModelProviderConnectionRequest
+>;
+export const RevokeOrganizationModelProviderConnectionRequest = z
+  .object({ operationId: z.string().uuid(), expectedVersion: z.number().int().positive() })
+  .strict();
+export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
+  typeof RevokeOrganizationModelProviderConnectionRequest
+>;
+
 const turnInitiatorIdentityFields = {
   subjectId: z.string().min(1),
   /** Immutable display snapshot; never an authorization input. */
@@ -15694,6 +15742,12 @@ export const ModelCredentialSourceV1 =
           mechanism: z.literal("api_key"),
         })
         .strict(),
+      z
+        .object({
+          kind: z.literal("organization_connection"),
+          mechanism: z.literal("api_key"),
+        })
+        .strict(),
     ]),
   );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
@@ -15712,7 +15766,12 @@ export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z
       .object({
-        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+        upstreamPayer: z.enum([
+          "deployment",
+          "workspace",
+          "organization",
+          "connected_subscription",
+        ]),
         metering: z.enum(["opengeni_credits", "external"]),
       })
       .strict(),
@@ -15720,7 +15779,7 @@ export const ModelBillingAttributionV1 =
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const ModelCostClassV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["free", "credits", "subscription", "workspace"]),
+  z.enum(["free", "credits", "subscription", "workspace", "organization"]),
 );
 export type ModelCostClassV1 = z.infer<typeof ModelCostClassV1>;
 

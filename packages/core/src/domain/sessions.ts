@@ -92,8 +92,6 @@ import {
   initializeSessionStartAtomically,
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
-  lockActiveWorkspaceGatewayCustomModelForAdmission,
-  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   requireSession,
   setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
@@ -141,6 +139,7 @@ import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
 import {
   isWorkspaceCustomModelId,
+  lockActiveCustomModelForAdmission,
   resolveWorkspaceCatalogSettings,
   workspaceCustomModelReference,
 } from "../model-catalog";
@@ -825,23 +824,20 @@ export async function createAndStartSessionWithOutcome(input: {
           // was first accepted. Revalidate only the transaction inserting a new
           // session, while still running caller linkage on every replay.
           if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
-            const openRouter = input.model.startsWith(WORKSPACE_OPENROUTER_MODEL_ID_PREFIX);
-            const upstreamModelId = input.model.slice(
-              openRouter
-                ? WORKSPACE_OPENROUTER_MODEL_ID_PREFIX.length
-                : WORKSPACE_GATEWAY_MODEL_ID_PREFIX.length,
-            );
-            const active = openRouter
-              ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  upstreamModelId,
-                })
-              : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  upstreamModelId,
-                });
+            const reference = {
+              scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
+                ? ("organization" as const)
+                : ("workspace" as const),
+              providerKind: input.turnExecutionPolicy.providerId.includes("openrouter")
+                ? ("openrouter" as const)
+                : ("vercel_gateway" as const),
+              upstreamModelId: input.turnExecutionPolicy.upstreamModelId,
+            };
+            const active = await lockActiveCustomModelForAdmission(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              reference,
+            });
             if (!active) {
               throw new HTTPException(422, {
                 message: `model is not available: ${input.model}`,
@@ -1583,18 +1579,11 @@ export async function postUserMessageTurn(
                       if (!reference) {
                         throw new Error("workspace custom model reference disappeared");
                       }
-                      const active =
-                        reference.providerKind === "openrouter"
-                          ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
-                              accountId,
-                              workspaceId,
-                              upstreamModelId: reference.upstreamModelId,
-                            })
-                          : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-                              accountId,
-                              workspaceId,
-                              upstreamModelId: reference.upstreamModelId,
-                            });
+                      const active = await lockActiveCustomModelForAdmission(tx, {
+                        accountId,
+                        workspaceId,
+                        reference,
+                      });
                       if (!active) {
                         throw new HTTPException(422, {
                           message: `model is not available: ${freshWorkspaceCustomModel}`,

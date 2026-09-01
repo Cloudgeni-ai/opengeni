@@ -36,6 +36,19 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("labels organization provider billing separately from workspace BYOK", () => {
+    const model = catalogModel({
+      id: "organization-openrouter/openai/gpt-org",
+      label: "Org GPT",
+      provider: "organization-openrouter",
+      providerLabel: "Organization OpenRouter",
+      credentialSource: { kind: "organization_connection", mechanism: "api_key" },
+      billing: { upstreamPayer: "organization", metering: "external" },
+      cost: "organization",
+    });
+    expect(billingClassForModel(model)).toBe("organization_byok");
+    expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("Organization providers");
+  });
   test("omits disconnected subscription and workspace Gateway rails", () => {
     const rows = projectPickerRows([
       catalogModel({ id: "managed", label: "Managed", source: "opengeni" }),

@@ -223,7 +223,7 @@ async function managedCookieHuman(
   };
 }
 
-async function requireOrganizationCodexHuman(
+export async function requireOrganizationCodexHuman(
   c: Context,
   deps: ApiRouteDeps,
   organizationId: string,
@@ -239,7 +239,9 @@ async function requireOrganizationCodexHuman(
     };
   }
   if (!human) {
-    throw new HTTPException(401, { message: "organization administrator session required" });
+    throw new HTTPException(401, {
+      message: "organization administrator session required",
+    });
   }
   try {
     await getOrganizationCodexRotationSettings(deps.db, {
@@ -249,7 +251,9 @@ async function requireOrganizationCodexHuman(
   } catch (error) {
     const state = nestedPostgresSqlState(error);
     if (state === "42501") {
-      throw new HTTPException(403, { message: "organization administration is not authorized" });
+      throw new HTTPException(403, {
+        message: "organization administration is not authorized",
+      });
     }
     if (state === "P0002") {
       throw new HTTPException(404, { message: "organization not found" });
@@ -270,11 +274,13 @@ async function requireWorkspaceCodexManagementSource(
     });
   }
   if (source.effectiveSource === "disabled") {
-    throw new HTTPException(409, { message: "Codex is disabled for this workspace" });
+    throw new HTTPException(409, {
+      message: "Codex is disabled for this workspace",
+    });
   }
 }
 
-function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
+export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
     throw new HTTPException(403, {
@@ -287,16 +293,28 @@ function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void 
     });
   }
   const origin = c.req.header("origin");
+  const localOriginMatches =
+    deps.settings.productAccessMode === "local" && localBrowserOriginMatchesRequest(c, origin);
   if (
     deps.settings.productAccessMode === "local"
-      ? !localBrowserOriginMatchesRequest(c, origin)
+      ? !localOriginMatches
       : origin !== new URL(deps.settings.publicBaseUrl!).origin
   ) {
     throw new HTTPException(403, {
       message: "same-origin browser request required",
     });
   }
-  if (c.req.header("sec-fetch-site")?.toLowerCase() !== "same-origin") {
+  const fetchSite = c.req.header("sec-fetch-site")?.toLowerCase();
+  const localFetchSiteMatches =
+    localOriginMatches &&
+    (fetchSite === "same-origin" ||
+      fetchSite === "same-site" ||
+      (fetchSite === "cross-site" && localLoopbackOriginMatchesRequest(c, origin)));
+  if (
+    deps.settings.productAccessMode === "local"
+      ? !localFetchSiteMatches
+      : fetchSite !== "same-origin"
+  ) {
     throw new HTTPException(403, {
       message: "same-origin fetch metadata required",
     });
@@ -333,9 +351,33 @@ function localBrowserOriginMatchesRequest(c: Context, value: string | undefined)
   }
   return (
     origin.protocol === request.protocol &&
-    origin.hostname === request.hostname &&
-    (request.port === "" || origin.port === request.port)
+    (origin.hostname === request.hostname ||
+      (isLoopbackHostname(origin.hostname) && isLoopbackHostname(request.hostname)))
   );
+}
+
+function localLoopbackOriginMatchesRequest(c: Context, value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const origin = new URL(value);
+    const forwardedProtocol = c.req.header("x-forwarded-proto")?.trim().toLowerCase();
+    const protocol = forwardedProtocol ? `${forwardedProtocol}:` : new URL(c.req.url).protocol;
+    const forwardedHost = c.req.header("x-forwarded-host") ?? c.req.header("host");
+    if (!forwardedHost || /[\s,/?#@\\]/u.test(forwardedHost)) return false;
+    const request = new URL(`${protocol}//${forwardedHost}`);
+    return (
+      origin.origin === value &&
+      origin.protocol === request.protocol &&
+      isLoopbackHostname(origin.hostname) &&
+      isLoopbackHostname(request.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(value: string): boolean {
+  return value === "localhost" || value === "[::1]" || /^127(?:\.[0-9]{1,3}){3}$/u.test(value);
 }
 
 async function requireRedemptionHuman(
@@ -386,11 +428,15 @@ async function requireCodexAppsHuman(
   requireSameOriginBrowserMutation(c, deps);
   const human = await managedCookieHuman(c, deps);
   if (!human) {
-    throw new HTTPException(401, { message: "managed browser session required" });
+    throw new HTTPException(401, {
+      message: "managed browser session required",
+    });
   }
   const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
   if (grant.subjectId !== human.subjectId) {
-    throw new HTTPException(403, { message: "managed browser identity mismatch" });
+    throw new HTTPException(403, {
+      message: "managed browser identity mismatch",
+    });
   }
   return { human, accountId: grant.accountId };
 }
@@ -715,10 +761,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:write");
     const parsed = z
-      .object({ mode: z.enum(["automatic", "workspace", "organization", "disabled"]) })
+      .object({
+        mode: z.enum(["automatic", "workspace", "organization", "disabled"]),
+      })
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "a valid Codex source mode is required" });
+      throw new HTTPException(400, {
+        message: "a valid Codex source mode is required",
+      });
     }
     try {
       return c.json(
@@ -795,7 +845,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const { state } = (await c.req.json().catch(() => null)) as { state?: string };
+    const { state } = (await c.req.json().catch(() => null)) as {
+      state?: string;
+    };
     const payload = (state
       ? readSignedState(state, githubStateSecret)
       : null) as unknown as CodexConnectState | null;
@@ -806,7 +858,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       !payload.deviceAuthId ||
       !payload.userCode
     ) {
-      throw new HTTPException(400, { message: "codex connect state is invalid or expired" });
+      throw new HTTPException(400, {
+        message: "codex connect state is invalid or expired",
+      });
     }
     if (
       typeof payload.iat === "number" &&
@@ -927,7 +981,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
     const human = await requireOrganizationCodexHuman(c, deps, organizationId);
-    const body = (await c.req.json().catch(() => null)) as { label?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as {
+      label?: unknown;
+    } | null;
     const renamed = await renameOrganizationCodexAccount(db, {
       organizationId,
       actorSubjectId: human.subjectId,
@@ -967,7 +1023,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw error;
     }
     await signalCodexCapacityTargets(deps, result.wakeTargets);
-    return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
+    return c.json({
+      disconnected: result.removed,
+      newActiveId: result.newActiveCredentialId,
+    });
   });
 
   // Begin device-code login: returns the user code + verification URL and a
@@ -1116,7 +1175,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
-    return c.json({ status: "connected", plan: id.planType, accountId: upserted.id, isActive });
+    return c.json({
+      status: "connected",
+      plan: id.planType,
+      accountId: upserted.id,
+      isActive,
+    });
   });
 
   // Connection health: the cheapest real call is GET /codex/models (a 200 proves
@@ -1229,7 +1293,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireWorkspaceCodexManagementSource(deps, workspaceId);
     if (!settings.codexConnectedAppsEnabled) {
-      throw new HTTPException(409, { message: "Codex Apps is disabled for this deployment" });
+      throw new HTTPException(409, {
+        message: "Codex Apps is disabled for this deployment",
+      });
     }
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
     const parsed = z
@@ -1239,7 +1305,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       })
       .safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "accountId and expectedVersion are required" });
+      throw new HTTPException(400, {
+        message: "accountId and expectedVersion are required",
+      });
     }
     const result = await designateCodexAppsCredential(db, {
       accountId,
@@ -1257,10 +1325,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     if (result.kind === "forbidden") {
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
+      throw new HTTPException(403, {
+        message: "missing permission: connections:write",
+      });
     }
     if (result.kind === "unavailable") {
-      throw new HTTPException(409, { message: "codex account requires relogin" });
+      throw new HTTPException(409, {
+        message: "codex account requires relogin",
+      });
     }
     const response = {
       credentialId: result.credentialId,
@@ -1288,7 +1360,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       expectedVersion: parsed.data.expectedVersion,
     });
     if (result.kind === "forbidden") {
-      throw new HTTPException(403, { message: "missing permission: connections:write" });
+      throw new HTTPException(403, {
+        message: "missing permission: connections:write",
+      });
     }
     const response = {
       credentialId: result.credentialId,
@@ -1345,7 +1419,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (patch.rotationEnabled === undefined) {
       // Strategy-only writes are a deprecated no-op (no db touch): report the
       // (only) truth. Callers that also flip rotationEnabled fall through.
-      return c.json({ rotationStrategy: "sharded", rotationStrategyDeprecated: true });
+      return c.json({
+        rotationStrategy: "sharded",
+        rotationStrategyDeprecated: true,
+      });
     }
     await ensureCodexRotationSettings(db, grant.accountId, workspaceId);
     const mutation = await withCodexCapacityMutation(
@@ -1454,7 +1531,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
-    return c.json({ disconnected: result.removed, newActiveId: result.newActiveCredentialId });
+    return c.json({
+      disconnected: result.removed,
+      newActiveId: result.newActiveCredentialId,
+    });
   });
 
   // Legacy "disconnect all" (old workspace-wide behavior), deprecated in favor of
@@ -1752,10 +1832,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           });
         }
         if (adoption.kind === "not_found") {
-          throw new HTTPException(409, { message: "redemption recovery state changed" });
+          throw new HTTPException(409, {
+            message: "redemption recovery state changed",
+          });
         }
         if (adoption.kind === "forbidden") {
-          throw new HTTPException(403, { message: "redemption owner is unavailable" });
+          throw new HTTPException(403, {
+            message: "redemption owner is unavailable",
+          });
         }
         if (adoption.kind === "conflict") {
           throw new HTTPException(409, {
@@ -1769,7 +1853,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       // and a lost HTTP response must remain replayable after a later health
       // transition without another consume call.
       if (account.status !== "active" && existing?.status !== "completed") {
-        throw new HTTPException(403, { message: "redemption credential is unavailable" });
+        throw new HTTPException(403, {
+          message: "redemption credential is unavailable",
+        });
       }
       const secret = settings.betterAuthSecret;
       if (!secret) {
@@ -1968,13 +2054,21 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (fenced.kind !== "ready") {
         if (fenced.reason === "confirmation_expired") {
           return c.json(
-            { status: "confirmation_expired", attemptId: attempt.id, retryable: true },
+            {
+              status: "confirmation_expired",
+              attemptId: attempt.id,
+              retryable: true,
+            },
             403,
           );
         }
         if (fenced.reason === "credential_unavailable") {
           return c.json(
-            { status: "provider_unavailable", attemptId: attempt.id, retryable: true },
+            {
+              status: "provider_unavailable",
+              attemptId: attempt.id,
+              retryable: true,
+            },
             503,
           );
         }

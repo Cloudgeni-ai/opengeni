@@ -34,8 +34,6 @@ import {
   getSandbox,
   getSessionTurnXaiProviderAccountAuthoritySnapshot,
   getSession,
-  lockActiveWorkspaceGatewayCustomModelForAdmission,
-  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   requireWorkspace,
   scopedKnowledgeScopeKey,
@@ -56,7 +54,7 @@ import {
 } from "../session-authorization";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
-import { workspaceCustomModelReference } from "../model-catalog";
+import { lockActiveCustomModelForAdmission, workspaceCustomModelReference } from "../model-catalog";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
 import {
@@ -111,18 +109,11 @@ function workspaceCustomModelCommitGuard(input: {
   const reference = workspaceCustomModelReference(input.settings, input.modelId);
   if (!reference) return undefined;
   return async (tx: Database): Promise<void> => {
-    const active =
-      reference.providerKind === "openrouter"
-        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            upstreamModelId: reference.upstreamModelId,
-          })
-        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            upstreamModelId: reference.upstreamModelId,
-          });
+    const active = await lockActiveCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      reference,
+    });
     if (!active) {
       throw new HTTPException(422, {
         message: `model is not available: ${input.modelId}`,

@@ -178,6 +178,14 @@ import type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  OrganizationModelProviderKind,
+  OrganizationModelProviderConnection,
+  UpsertOrganizationModelProviderConnectionRequest,
+  RevokeOrganizationModelProviderConnectionRequest,
+  OrganizationProviderCustomModel,
+  OrganizationProviderCustomModelsResponse,
+  CreateOrganizationProviderCustomModelRequest,
+  DeleteOrganizationProviderCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -1648,7 +1656,11 @@ export class OpenGeniClient {
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number; latestStarted?: boolean; signal?: AbortSignal | undefined } = {},
+    options: {
+      limit?: number;
+      latestStarted?: boolean;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -4134,6 +4146,88 @@ export class OpenGeniClient {
     await this.requestVoid(
       "DELETE",
       `/v1/workspaces/${workspaceId}/openrouter-custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
+  /** Read metadata for one organization-owned model-provider connection. */
+  async getOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+  ): Promise<OrganizationModelProviderConnection | null> {
+    return await this.requestJson<OrganizationModelProviderConnection | null>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+    );
+  }
+
+  /** Connect or rotate one organization-owned provider credential. */
+  async upsertOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: UpsertOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationModelProviderConnection> {
+    return await this.requestJson<OrganizationModelProviderConnection>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** Revoke one organization-owned provider credential. */
+  async revokeOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationModelProviderConnection> {
+    return await this.requestJson<OrganizationModelProviderConnection>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** List organization-owned exact upstream model slugs. */
+  async listOrganizationProviderCustomModels(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+  ): Promise<OrganizationProviderCustomModelsResponse> {
+    return await this.requestJson<OrganizationProviderCustomModelsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add one organization-owned exact upstream model slug. */
+  async createOrganizationProviderCustomModel(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: CreateOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire one organization-owned custom model. */
+  async deleteOrganizationProviderCustomModel(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
       request,
     );
   }

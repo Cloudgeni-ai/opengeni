@@ -124,12 +124,13 @@ interface ConfiguredModel {
   credentialSource:
     | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" | "none" }
     | { kind: "connected_subscription"; provider: "codex" | "xai" }
-    | { kind: "workspace_connection"; mechanism: "api_key" };
+    | { kind: "workspace_connection"; mechanism: "api_key" }
+    | { kind: "organization_connection"; mechanism: "api_key" };
   billing: {
-    upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+    upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
     metering: "opengeni_credits" | "external";
   };
-  cost: "free" | "credits" | "subscription" | "workspace";
+  cost: "free" | "credits" | "subscription" | "workspace" | "organization";
   capabilities: ModelCapabilitiesV1;
   pricing?: ModelPricingScheduleV1;
   definitionVersion: `sha256:${string}`;
@@ -331,10 +332,21 @@ derives both from the provider kind:
 | Connected SuperGrok/xAI subscription | connected subscription        | connected subscription | external         |
 | Workspace Vercel AI Gateway          | workspace connection          | workspace              | external         |
 | Workspace OpenRouter                 | workspace connection          | workspace              | external         |
+| Organization Vercel AI Gateway      | organization connection       | organization           | external         |
+| Organization OpenRouter             | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
+
+`organization_connection` is the peer organization-owned broker. Organization
+admins connect Vercel AI Gateway or OpenRouter once in Organization settings and
+curate explicit custom model slugs. Active products use
+`organization-gateway/` or `organization-openrouter/`, are externally billed to
+the organization provider account, and inherit into current and future shared
+workspaces only. Canonical Personal workspaces remain local. Workspace provider
+connections coexist under their existing IDs; no payer rail falls back or
+migrates implicitly.
 
 The table describes credential and upstream-settlement identity, not the
 workspace-facing price. Deployment models—including anonymous and managed

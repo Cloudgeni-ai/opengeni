@@ -231,6 +231,13 @@ The same stable environments encryption key protects its OAuth material. See
 five-minute maximum silence between complete, valid SSE response events; it is
 not a total model-call or agent-run deadline.
 
+Migration `0390_organization_model_provider_connections.sql` is a maintenance
+activation for organization-owned Vercel AI Gateway/OpenRouter keys and custom
+models. Drain API/control/turn processes, apply with the complete application
+role list, deploy the matching release, then restart. Pre-0390 workers do not
+understand the new credential/billing branch. No new environment variable is
+required; the stable environments encryption key protects these credentials.
+
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
 

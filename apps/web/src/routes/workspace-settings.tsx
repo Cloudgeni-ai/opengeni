@@ -515,6 +515,20 @@ export function WorkspaceSettingsRoute({
 
         {section === "models" ? (
           <>
+            <section className="rounded-lg border border-border bg-surface px-4 py-3">
+              <p className="text-xs leading-5 text-fg-muted">
+                Organization Vercel AI Gateway and OpenRouter models appear here when connected by
+                an organization admin. Workspace-only connections below remain independent.
+              </p>
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "models" }}
+                className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+              >
+                Open organization model settings <ArrowUpRightIcon className="size-3.5" />
+              </Link>
+            </section>
             <section className="grid gap-2">
               <div>
                 <h2 className="text-sm font-medium">Default model</h2>

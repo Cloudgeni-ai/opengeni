@@ -3,6 +3,8 @@ import {
   getWorkspaceModelPolicy,
   listWorkspaceGatewayCustomModels,
   listWorkspaceOpenRouterCustomModels,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
@@ -544,6 +546,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           workspaceGatewayCustomModels,
           openRouterConnectionActive,
           workspaceOpenRouterCustomModels,
+          organizationGatewayConnectionActive,
+          organizationGatewayCustomModels,
+          organizationOpenRouterConnectionActive,
+          organizationOpenRouterCustomModels,
         ] = await Promise.all([
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
@@ -563,6 +569,26 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
           }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "vercel_gateway",
+          }),
+          organizationModelProviderConnectionActiveForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
+          listOrganizationModelProviderCustomModelsForWorkspace(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            providerKind: "openrouter",
+          }),
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
@@ -574,6 +600,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             workspaceGatewayCustomModels,
             workspaceOpenRouterConnectionActive: openRouterConnectionActive,
             workspaceOpenRouterCustomModels,
+            organizationGatewayConnectionActive,
+            organizationGatewayCustomModels,
+            organizationOpenRouterConnectionActive,
+            organizationOpenRouterCustomModels,
           }),
           modelNotes: currentCatalog.modelNotes,
         };

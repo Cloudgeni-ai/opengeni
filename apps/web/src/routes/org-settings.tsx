@@ -20,6 +20,7 @@ import {
   OrganizationRetentionSection,
 } from "@/components/organization-admin";
 import { OrganizationCodexSubscriptions } from "@/components/organization-codex-subscriptions";
+import { OrganizationModelProviderConnection } from "@/components/organization-model-provider-connection";
 import { OrganizationSettingsShell } from "@/components/settings/organization-settings-shell";
 import { OrganizationRecoverySection } from "@/components/organization-recovery";
 import { Button } from "@/components/ui/button";
@@ -367,7 +368,7 @@ export function OrgSettingsRoute({
   const singleUser = context.clientConfig.productAccessMode === "local";
   const organizationAdministratorSession =
     context.clientConfig.auth.mode === "managedSession" || singleUser;
-  const canManageOrganizationCodex =
+  const canManageOrganizationModels =
     organizationAdministratorSession && (actorRole === "owner" || actorRole === "admin");
   const adminIdentity = useMemo<OrganizationAdminIdentity>(
     () => ({
@@ -559,7 +560,7 @@ export function OrgSettingsRoute({
       workspaceId={workspaceId}
       organizationLabel={organizationLabel}
       section={section}
-      showModels={canManageOrganizationCodex}
+      showModels={canManageOrganizationModels}
     >
       <section className="grid gap-5 text-left">
         {section === "overview" ? (
@@ -615,14 +616,24 @@ export function OrgSettingsRoute({
           )
         ) : null}
 
-        {section === "models" && canManageOrganizationCodex ? (
-          <OrganizationCodexSubscriptions
-            key={`${identityKey}:organization-codex`}
-            organizationId={accountId}
-          />
+        {section === "models" && canManageOrganizationModels ? (
+          <div className="grid gap-6">
+            <OrganizationCodexSubscriptions
+              key={`${identityKey}:organization-codex`}
+              organizationId={accountId}
+            />
+            <OrganizationModelProviderConnection
+              organizationId={accountId}
+              providerKind="vercel_gateway"
+            />
+            <OrganizationModelProviderConnection
+              organizationId={accountId}
+              providerKind="openrouter"
+            />
+          </div>
         ) : null}
 
-        {section === "models" && !canManageOrganizationCodex ? (
+        {section === "models" && !canManageOrganizationModels ? (
           <p className="text-xs leading-5 text-fg-muted">
             Organization model subscriptions can be managed only by organization owners and admins
             using an organization administrator session.
