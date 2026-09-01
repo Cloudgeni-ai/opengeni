@@ -7,6 +7,7 @@ import {
   createSession,
   createWorkspaceGatewayCustomModel,
   deleteWorkspaceGatewayCustomModel,
+  getScheduledTaskRunByProducerKey,
   getScheduledTaskRunAcceptedExecution,
   listSessions,
   listScheduledTaskRuns,
@@ -515,11 +516,15 @@ describe("scheduled-task model catalog retention (real PostgreSQL)", () => {
     }
     expect(replay.sessionId).toBe(winner.sessionId);
     expect(replay.triggerEventId).toBe(winner.triggerEventId);
-    expect(
-      (await listScheduledTaskRuns(client.db, grant.workspaceId, task.id, 10)).filter(
-        (run) => run.producerKey === producerKey,
-      ),
-    ).toHaveLength(1);
+    const persistedRun = await getScheduledTaskRunByProducerKey(client.db, {
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(persistedRun).not.toBeNull();
+    expect(persistedRun?.sessionId).toBe(winner.sessionId);
+    expect(persistedRun?.triggerEventId).toBe(winner.triggerEventId);
     expect(await listSessions(client.db, grant.workspaceId, 10)).toHaveLength(1);
   }, 60_000);
 
