@@ -10,7 +10,9 @@ import {
   clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
+  updateSessionTitleWithEvent,
 } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   normalizeModelCallUsage,
   normalizeSdkEvent,
@@ -29,7 +31,7 @@ import {
   type RunCredentialCommandSession,
   type CodemodeTokenWriterSession,
 } from "@opengeni/runtime";
-import { type Settings } from "@opengeni/config";
+import { serviceTierForLatencyMode, type Settings } from "@opengeni/config";
 import { maybeCompactContext, settleFailedContextCompactionLandmark } from "../context-compaction";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
@@ -109,13 +111,16 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
   createModelResponseEventState,
+  createSessionTitleModelUsageEventState,
   modelResponseContextSignal,
   assertModelResponseLatencyMode,
   processModelResponseTerminalEvent,
+  processSessionTitleModelUsageEvent,
   emitModelCallUsage,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
 } from "./model-usage";
+import { startParallelSessionTitleGeneration } from "./session-title";
 import {
   assertAgentStreamNotCancelled,
   assertSuccessfulAgentStreamCompletion,
@@ -142,6 +147,7 @@ export type TurnStreamAttemptDeps = {
   input: RunAgentTurnInput;
   settings: Settings;
   db: ActivityServices["db"];
+  bus: ActivityServices["bus"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   observability: ActivityServices["observability"];
@@ -221,6 +227,8 @@ export type TurnStreamAttemptDeps = {
   providerApi: HistoryProviderApi;
   runSettings: Settings;
   turnTools: ReturnType<typeof withFirstPartyTools>;
+  generateSessionTitleInParallel: boolean;
+  sessionTitlePrompt: string;
   compactSummarizer: CompactionSummarizer;
   settleDeferredSteerAfterCompaction: () => Promise<RunAgentTurnResult | null>;
   compactionModelHistoryProjector: (
@@ -258,6 +266,7 @@ export async function runTurnStreamAttempt(
     input,
     settings,
     db,
+    bus,
     runtime,
     objectStorage,
     observability,
@@ -313,6 +322,8 @@ export async function runTurnStreamAttempt(
     providerApi,
     runSettings,
     turnTools,
+    generateSessionTitleInParallel,
+    sessionTitlePrompt,
     compactSummarizer,
     settleDeferredSteerAfterCompaction,
     compactionModelHistoryProjector,
@@ -336,6 +347,66 @@ export async function runTurnStreamAttempt(
   if (!activeTurnId) {
     throw new Error("Turn id was not initialized");
   }
+  const sessionTitleUsageState = createSessionTitleModelUsageEventState(
+    claimedModelUsageSourceKeys,
+  );
+  let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
+  let parallelSessionTitleFinished = false;
+  const finishParallelSessionTitle = async (): Promise<void> => {
+    if (parallelSessionTitleFinished) return;
+    parallelSessionTitleFinished = true;
+    const generated = await parallelSessionTitle?.finish();
+    if (!generated) return;
+
+    if (generated.usage) {
+      await processSessionTitleModelUsageEvent({
+        usage: generated.usage,
+        state: sessionTitleUsageState,
+        dispatchId: modelUsageDispatchId,
+        settings,
+        db,
+        observability,
+        publish: eventing.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        turnAttemptId: input.attemptId,
+        provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+        providerApi: resolvedModel?.provider.api ?? "responses",
+        model: resolvedModel?.configured.id ?? turn.model,
+        externallyBilled: billingState.isExternallyBilledTurn,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        servingCredentialId: providerTurn.effectiveCodexCredentialId,
+        priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+        emittedSourceKeys: emittedModelUsageSourceKeys,
+        renewLease: () => leases.renewServing("model_usage"),
+        leaseLost: leases.servingLost,
+        leaseLostMessage: "Provider credential lease expired during session title generation",
+      });
+    }
+    if (!generated.title) return;
+
+    try {
+      const result = await updateSessionTitleWithEvent(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        title: generated.title,
+        source: "agent",
+      });
+      if (result.events.length > 0) {
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+      }
+    } catch (error) {
+      observability.warn("parallel session title persistence failed", {
+        ...safeErrorDiagnostic(error),
+        errorClass: "ParallelSessionTitlePersistenceError",
+        errorCode: "parallel_session_title_persistence_failed",
+        origin: "worker",
+      });
+    }
+  };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
@@ -1523,6 +1594,7 @@ export async function runTurnStreamAttempt(
       if (!attached.accepted) {
         return claimedResult({ status: "cancelled" });
       }
+      await finishParallelSessionTitle();
       if (
         !(await eventing.settle!({
           events: [
@@ -1568,6 +1640,7 @@ export async function runTurnStreamAttempt(
     // frames). Best-effort: a miss leaves the runner's retention TTL to
     // reap, never fails a completed turn.
     await finalizeTurnOpStreamOps();
+    await finishParallelSessionTitle();
     if (
       !(await eventing.settle!({
         events: [
@@ -1635,151 +1708,194 @@ export async function runTurnStreamAttempt(
   ) {
     return claimedResult({ status: "cancelled" });
   }
-  let retriedAfterCompaction = false;
-  while (true) {
-    try {
-      const result = await runStreamAttempt({
-        requireTerminalModelResponse: retriedAfterCompaction,
-      });
-      if (retriedAfterCompaction) {
-        observability.info("context compaction recovery succeeded after in-activity retry", {
+  if (
+    generateSessionTitleInParallel &&
+    runtime.generateSessionTitle &&
+    !runtimeCancellationSignal.aborted
+  ) {
+    const serviceTier = serviceTierForLatencyMode(
+      turnExecutionPolicy.providerId,
+      turnExecutionPolicy.latencyMode,
+    );
+    parallelSessionTitle = startParallelSessionTitleGeneration({
+      signal: runtimeCancellationSignal,
+      generate: async (signal) =>
+        await withProviderRequestContext(() =>
+          runtime.generateSessionTitle!(runSettings, sessionTitlePrompt, {
+            ...(resolvedModel
+              ? {
+                  client: resolvedModel.client,
+                  provider: resolvedModel.provider,
+                  model: resolvedModel.model,
+                }
+              : {}),
+            modelName: turnExecutionPolicy.upstreamModelId,
+            ...(serviceTier ? { serviceTier } : {}),
+            signal,
+          }),
+        ),
+      onError: (error) => {
+        observability.warn("parallel session title generation failed", {
+          ...safeErrorDiagnostic(error),
+          errorClass: "ParallelSessionTitleGenerationError",
+          errorCode: "parallel_session_title_generation_failed",
+          origin: "worker",
+        });
+      },
+    });
+  }
+  try {
+    let retriedAfterCompaction = false;
+    while (true) {
+      try {
+        const result = await runStreamAttempt({
+          requireTerminalModelResponse: retriedAfterCompaction,
+        });
+        if (retriedAfterCompaction) {
+          observability.info("context compaction recovery succeeded after in-activity retry", {
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+          });
+        }
+        return result;
+      } catch (attemptError) {
+        const overflow = classifyContextWindowOverflowError(attemptError);
+        const compactionNeeded = findCompactionNeededError(attemptError);
+        const recoveryKind = compactionNeeded
+          ? compactionNeeded.trigger === "operator"
+            ? "operator"
+            : "proactive"
+          : overflow
+            ? "overflow"
+            : null;
+        if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
+          throw attemptError;
+        }
+        await flushRuntimeBatcher();
+        await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
+        observability.warn("context compaction recovery attempted", {
           sessionId: input.sessionId,
           turnId: activeTurnId,
+          reason: recoveryKind,
+          ...safeErrorDiagnostic(attemptError),
+          signalTokens: compactionNeeded?.signalTokens,
+          thresholdTokens: compactionNeeded?.thresholdTokens,
         });
-      }
-      return result;
-    } catch (attemptError) {
-      const overflow = classifyContextWindowOverflowError(attemptError);
-      const compactionNeeded = findCompactionNeededError(attemptError);
-      const recoveryKind = compactionNeeded
-        ? compactionNeeded.trigger === "operator"
-          ? "operator"
-          : "proactive"
-        : overflow
-          ? "overflow"
-          : null;
-      if (!recoveryKind || !eventing.publish || !eventing.turnStartedPublished) {
-        throw attemptError;
-      }
-      await flushRuntimeBatcher();
-      await historySink.reconcileConversationTruth({ skipInputOnlyRows: true });
-      observability.warn("context compaction recovery attempted", {
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        reason: recoveryKind,
-        ...safeErrorDiagnostic(attemptError),
-        signalTokens: compactionNeeded?.signalTokens,
-        thresholdTokens: compactionNeeded?.thresholdTokens,
-      });
-      let compacted = false;
-      let compactionHandled = false;
-      let compactionFailureMessage: string | null = null;
-      let compactionRequestCleared = false;
-      try {
-        const outcome = await forceContextCompaction(
-          recoveryKind,
-          compactionNeeded?.signalTokens ?? null,
-        );
-        compacted = outcome.compacted;
-        if (outcome.compacted) {
-          compactionHandled = true;
-        } else {
-          compactionHandled = recoveryKind === "operator" && outcome.requestConsumed;
-          if (!compactionHandled) {
-            compactionFailureMessage = compactionFailureReason(outcome.reason);
+        let compacted = false;
+        let compactionHandled = false;
+        let compactionFailureMessage: string | null = null;
+        let compactionRequestCleared = false;
+        try {
+          const outcome = await forceContextCompaction(
+            recoveryKind,
+            compactionNeeded?.signalTokens ?? null,
+          );
+          compacted = outcome.compacted;
+          if (outcome.compacted) {
+            compactionHandled = true;
+          } else {
+            compactionHandled = recoveryKind === "operator" && outcome.requestConsumed;
+            if (!compactionHandled) {
+              compactionFailureMessage = compactionFailureReason(outcome.reason);
+            }
           }
-        }
-      } catch (compactError) {
-        // Transient checkpoint-provider failures recover this same accepted
-        // turn through the normal provider/capacity path. They are not an
-        // empty summary and must not create a new goal continuation.
-        if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
-        if (compactError instanceof TurnAttemptFencedError) throw compactError;
-        const landmark = await settleFailedContextCompactionLandmark(
-          db,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
+        } catch (compactError) {
+          // Transient checkpoint-provider failures recover this same accepted
+          // turn through the normal provider/capacity path. They are not an
+          // empty summary and must not create a new goal continuation.
+          if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+          if (compactError instanceof TurnAttemptFencedError) throw compactError;
+          const landmark = await settleFailedContextCompactionLandmark(
+            db,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId!,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+            },
+            {
+              clearRequestedCompaction: recoveryKind === "operator",
+              publishLiveEvents: publishCompactionLiveEvents,
+            },
+          );
+          compactionRequestCleared = landmark.requestConsumed;
+          if (!isCompactionSummaryFailure(compactError)) throw compactError;
+          await finishParallelSessionTitle();
+          const deferredSteer = await settleDeferredSteerAfterCompaction();
+          if (deferredSteer) return deferredSteer;
+          compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
+          observability.warn("context compaction recovery compaction failed", {
             sessionId: input.sessionId,
-            turnId: activeTurnId!,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-          },
-          {
-            clearRequestedCompaction: recoveryKind === "operator",
-            publishLiveEvents: publishCompactionLiveEvents,
-          },
-        );
-        compactionRequestCleared = landmark.requestConsumed;
-        if (!isCompactionSummaryFailure(compactError)) throw compactError;
+            turnId: activeTurnId,
+            ...safeErrorDiagnostic(compactError),
+          });
+        }
+        if (!compactionHandled) {
+          const errorMessage =
+            compactionFailureMessage ??
+            "compaction summarization failed: compaction produced no replacement history";
+          await finishParallelSessionTitle();
+          if (
+            !(await eventing.settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error: errorMessage,
+                    code: "context_compaction_failed",
+                    retryable: false,
+                    recovery: "user_message",
+                    compacted: false,
+                  },
+                },
+                {
+                  type: "session.status.changed",
+                  payload: { status: "idle" },
+                },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              ...(recoveryKind === "operator" && !compactionRequestCleared
+                ? { consumeRequestedCompactionFailure: true }
+                : {}),
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
+          control.turnMetricOutcome = "failed";
+          control.activityStatus = "idle";
+          control.activityError = attemptError;
+          // The failed turn settlement already defers ordinary internal
+          // updates and makes the delivered goal-continuation receipt
+          // terminal. End this workflow run as well: returning plain idle
+          // would immediately synthesize another goal continuation against
+          // the unchanged active history and repeat the same failed
+          // compaction. A new human/API prompt, Steer, or explicitly requested
+          // Compact remains a durable explicit wake and may retry; ordinary
+          // machine updates stay pending for that actionable wake.
+          return claimedResult({ status: "idle", deferredUntilWake: true });
+        }
+        await finishParallelSessionTitle();
         const deferredSteer = await settleDeferredSteerAfterCompaction();
         if (deferredSteer) return deferredSteer;
-        compactionFailureMessage = String(compactionFailureReasonFromError(compactError));
-        observability.warn("context compaction recovery compaction failed", {
+        // Codex parity: compaction remains inside the same logical turn and
+        // the same activity. Rebuild the model-visible history from the
+        // durable replacement and continue the sampling loop; do not create
+        // a recovery event, a queue row, a fake user message, or a sandbox.
+        retriedAfterCompaction = true;
+        observability.info("context compaction recovery retrying turn after compaction", {
           sessionId: input.sessionId,
           turnId: activeTurnId,
-          ...safeErrorDiagnostic(compactError),
+          reason: recoveryKind,
+          compacted,
         });
+        await prepareRunAttemptInput();
       }
-      if (!compactionHandled) {
-        const errorMessage =
-          compactionFailureMessage ??
-          "compaction summarization failed: compaction produced no replacement history";
-        if (
-          !(await eventing.settle!({
-            events: [
-              {
-                type: "turn.failed",
-                payload: {
-                  error: errorMessage,
-                  code: "context_compaction_failed",
-                  retryable: false,
-                  recovery: "user_message",
-                  compacted: false,
-                },
-              },
-              {
-                type: "session.status.changed",
-                payload: { status: "idle" },
-              },
-            ],
-            turnStatus: "failed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-            ...(recoveryKind === "operator" && !compactionRequestCleared
-              ? { consumeRequestedCompactionFailure: true }
-              : {}),
-          }))
-        ) {
-          return claimedResult({ status: "cancelled" });
-        }
-        control.turnMetricOutcome = "failed";
-        control.activityStatus = "idle";
-        control.activityError = attemptError;
-        // The failed turn settlement already defers ordinary internal
-        // updates and makes the delivered goal-continuation receipt
-        // terminal. End this workflow run as well: returning plain idle
-        // would immediately synthesize another goal continuation against
-        // the unchanged active history and repeat the same failed
-        // compaction. A new human/API prompt, Steer, or explicitly requested
-        // Compact remains a durable explicit wake and may retry; ordinary
-        // machine updates stay pending for that actionable wake.
-        return claimedResult({ status: "idle", deferredUntilWake: true });
-      }
-      const deferredSteer = await settleDeferredSteerAfterCompaction();
-      if (deferredSteer) return deferredSteer;
-      // Codex parity: compaction remains inside the same logical turn and
-      // the same activity. Rebuild the model-visible history from the
-      // durable replacement and continue the sampling loop; do not create
-      // a recovery event, a queue row, a fake user message, or a sandbox.
-      retriedAfterCompaction = true;
-      observability.info("context compaction recovery retrying turn after compaction", {
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        reason: recoveryKind,
-        compacted,
-      });
-      await prepareRunAttemptInput();
     }
+  } finally {
+    await finishParallelSessionTitle();
   }
 }

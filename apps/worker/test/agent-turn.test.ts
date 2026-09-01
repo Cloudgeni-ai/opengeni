@@ -69,6 +69,7 @@ import {
   completedToolCallFromSdkEvent,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
+  createSessionTitleModelUsageEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   releaseTurnSandboxAfterWriterDrain,
@@ -99,6 +100,7 @@ import {
   PostCompactionContinuationEmptyError,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
+  processSessionTitleModelUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
@@ -1416,6 +1418,37 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+
+  test("keeps title usage distinct from compaction when a provider omits responseId", async () => {
+    const expectedSourceKey = "act-A:session-title-1";
+    const state = createSessionTitleModelUsageEventState(new Set([expectedSourceKey]));
+    const result = await processSessionTitleModelUsageEvent({
+      usage: { usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
+      state,
+      dispatchId: "act-A",
+      settings: testSettings(),
+      db: {} as any,
+      observability: createObservability(testSettings(), { component: "worker" }),
+      publish: null,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      turnAttemptId: "attempt-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5",
+      externallyBilled: true,
+      servingCredentialId: null,
+      priorSessionCredentialId: null,
+      emittedSourceKeys: new Set(),
+      renewLease: async () => undefined,
+      leaseLost: () => false,
+      leaseLostMessage: "lease lost",
+    });
+
+    expect(result).toEqual({ status: "duplicate", sourceKey: expectedSourceKey });
   });
 });
 

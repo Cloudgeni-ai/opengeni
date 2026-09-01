@@ -1104,6 +1104,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const {
         attemptConnectorActionBindings,
         connectorActionIdentity,
+        generateSessionTitleInParallel,
         postToolPreparationStartedAt,
         preparationIndependentToolNames,
       } = toolRuntime;
@@ -1413,6 +1414,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input,
         settings: capabilitySettings,
         db,
+        bus,
         runtime,
         objectStorage,
         observability,
@@ -1468,6 +1470,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         providerApi,
         runSettings,
         turnTools,
+        generateSessionTitleInParallel,
+        sessionTitlePrompt: session.initialMessage.trim() ? session.initialMessage : turn.prompt,
         compactSummarizer,
         settleDeferredSteerAfterCompaction,
         compactionModelHistoryProjector,
