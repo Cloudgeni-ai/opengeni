@@ -1344,6 +1344,31 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await rendered.unmount();
   });
 
+  test("an initial host file request wakes a cold workspace without a follow-up render", async () => {
+    const { client, spy } = coldClient();
+    const request = { path: "/workspace/reports/generated.pdf", requestId: 42 };
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          openFileRequest={request}
+          autoSaveId="og.test.prewarm.initial-file-request"
+        />,
+      ),
+    );
+    await flush(60);
+
+    expect(spy.attachCalls).toBe(1);
+    expect(selectedTabName(rendered.container)).toBe("Files");
+    expect(rendered.container.querySelector("[data-opengeni-selected-file]")?.textContent).toBe(
+      request.path,
+    );
+    await rendered.unmount();
+  });
+
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {
     let resolveCapture: (value: GetWorkspaceCaptureResponse) => void = () => {};
     const capturePromise = new Promise<GetWorkspaceCaptureResponse>((resolve) => {
