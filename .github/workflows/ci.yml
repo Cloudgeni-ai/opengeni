@@ -575,14 +575,15 @@ jobs:
             | sudo tee /etc/apt/apt.conf.d/99opengeni-ci-network >/dev/null
 
       # Firefox is included because the impact plan can select the artifact
-      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts), which
-      # launch Firefox; a Chromium-only install fails those shards on any
-      # web-broad candidate.
+      # browser E2E tests (artifact-spreadsheet-*.browser.e2e.ts). WebKit is
+      # included because multi-engine product E2E files such as the Gateway
+      # settings acceptance launch it directly. A Chromium-only install makes
+      # either class fail before exercising application behavior.
       - name: Install pinned browser runtimes
         uses: ./.github/actions/playwright-browsers
         timeout-minutes: 17
         with:
-          browsers: chromium firefox
+          browsers: chromium firefox webkit
 
       - name: Run exactly the impacted E2E tests
         timeout-minutes: 13
