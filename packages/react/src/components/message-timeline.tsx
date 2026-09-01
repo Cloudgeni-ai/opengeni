@@ -1715,7 +1715,13 @@ export function MessageTimeline({
           <TimelineComputeLabelProvider value={computeLabel ?? null}>
             <EntranceAnimationProvider value={false}>
               <TooltipProvider delayDuration={400}>
-                <div className={cn("og-root relative flex min-h-0 flex-col", className)}>
+                <div
+                  data-og-component="timeline"
+                  data-og-state={status === "running" ? "streaming" : "ready"}
+                  role="region"
+                  aria-label="Session timeline"
+                  className={cn("og-root og-timeline relative flex min-h-0 flex-col", className)}
+                >
                   {onAnnotate ? (
                     <Suspense fallback={null}>
                       <TimelineAnnotationSelection
@@ -1730,6 +1736,7 @@ export function MessageTimeline({
                   <div
                     ref={scrollRef}
                     data-og-timeline-scroller=""
+                    data-og-part="content"
                     data-og-bottom-follow={autoFollow && pinned && !hasNewer ? "true" : "false"}
                     tabIndex={-1}
                     onScroll={onScroll}

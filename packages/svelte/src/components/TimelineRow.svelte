@@ -57,7 +57,7 @@
       <div data-og-state={item.streaming ? "streaming" : "ready"}>{item.text}</div>
     {:else if item.kind === "tool-call"}
       <details class="og-timeline-row__details og-timeline-row__compact-details">
-        <summary><strong>{titleize(item.name)}</strong> <span>{item.status === "complete" ? "Done" : titleize(item.status)}</span></summary>
+        <summary><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z"/></svg><strong>{titleize(item.name)}</strong> <span>{item.status === "complete" ? "Done" : titleize(item.status)}</span></summary>
         {#if item.arguments !== undefined}<pre>{boundedTimelineValue(item.arguments)}</pre>{/if}
         {#if item.output !== undefined && item.output !== null}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
       </details>
@@ -94,13 +94,13 @@
       <code class="og-timeline-row__identifier">{item.childSessionId}</code>
     {:else if item.kind === "sandbox"}
       <details class="og-timeline-row__details og-timeline-row__compact-details">
-        <summary><strong>{titleize(item.name)}</strong>{#if item.command}<span>{item.command}</span>{/if}</summary>
+        <summary><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></svg><strong>{titleize(item.name)}</strong>{#if item.command}<span>{item.command}</span>{/if}</summary>
         {#if item.origin}<p class="og-timeline-row__summary">Sandbox {item.origin}</p>{/if}
         {#if item.output}<pre>{boundedTimelineValue(item.output)}</pre>{/if}
       </details>
     {:else if item.kind === "startup-phase"}
       <div class="og-timeline-row__headline">
-        <strong>{titleize(item.phase)} ready</strong>
+        <span class="og-timeline-row__title"><svg class="og-timeline-row__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2M20 14h2M15 13v2M9 13v2"/></svg><span>{titleize(item.phase)} ready</span></span>
         {#if item.durationMs !== null}<span class="og-timeline-row__summary">{item.durationMs.toLocaleString("en-US")} ms</span>{/if}
       </div>
     {:else if item.kind === "memory"}
@@ -146,11 +146,11 @@
       </div>
     {:else if item.kind === "goal"}
       <div class="og-timeline-row__landmark" role="status">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"/><circle cx="10" cy="10" r="3"/></svg>
-        <span>{titleize(item.action)}{#if item.text}: {item.text}{/if}</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+        <span>Goal {humanize(item.action)}{#if item.text}: {item.text}{/if}</span>
       </div>
     {:else if item.kind === "notice"}
-      <div class="og-timeline-row__notice"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3 18 17H2L10 3Z"/><path d="M10 7v4M10 14h.01"/></svg><span>{item.text}</span></div>
+      <div class="og-timeline-row__notice"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg><span>{item.text}</span></div>
       {#if item.details}<pre>{item.details.label}: {boundedTimelineValue(item.details.value)}</pre>{/if}
       {#if item.action}<a class="og-button" href={item.action.url}>{item.action.label}</a>{/if}
     {:else if item.kind === "context-compaction"}

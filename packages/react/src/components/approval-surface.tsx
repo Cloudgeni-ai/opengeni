@@ -120,14 +120,16 @@ export function ApprovalSurface({
 
   return (
     <section
+      data-og-component="approval"
+      data-og-state={busy ? "submitting" : "waiting"}
       className={cn(
-        "og-root flex w-full flex-col gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 p-4 shadow-og-sm",
+        "og-root og-approval flex w-full flex-col gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 p-4 shadow-og-sm",
         className,
       )}
       aria-labelledby={titleId}
     >
-      <header className="flex items-start gap-3">
-        <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+      <header data-og-part="header" className="og-approval__title flex items-start gap-3">
+        <span className="og-approval__icon mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
           <ShieldCheckIcon aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0">
@@ -138,7 +140,7 @@ export function ApprovalSurface({
         </div>
       </header>
 
-      <div className="flex flex-col gap-2">
+      <div data-og-part="content" className="og-approval__list flex flex-col gap-2">
         {approvals.map((approval) => {
           const approvalKey = approvalOwnershipKey(approval);
           const active = pending?.approvalKey === approvalKey ? pending.decision : null;
@@ -147,28 +149,28 @@ export function ApprovalSurface({
             <article
               key={approval.id}
               data-approval-id={approval.id}
-              className="rounded-og-md border border-og-border bg-og-surface-1 p-3"
+              className="og-approval__item rounded-og-md border border-og-border bg-og-surface-1 p-3"
             >
               {renderApproval ? (
                 renderApproval(approval)
               ) : (
                 <>
-                  <p className="text-og-sm font-medium text-og-fg">
+                  <p className="og-approval__name text-og-sm font-medium text-og-fg">
                     {messages.formatToolName(approval.name)}
                   </p>
                   {argumentsPreview !== null ? (
-                    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-og-sm bg-og-surface-2 p-2 font-mono text-og-xs text-og-fg-muted">
+                    <pre className="og-approval__arguments mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-og-sm bg-og-surface-2 p-2 font-mono text-og-xs text-og-fg-muted">
                       {argumentsPreview}
                     </pre>
                   ) : null}
                 </>
               )}
-              <div className="mt-3 flex flex-wrap justify-end gap-2">
+              <div data-og-part="actions" className="og-approval__actions mt-3 flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
                   disabled={busy}
                   onClick={() => void decide(approval, "reject")}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
+                  className="og-button inline-flex min-h-9 items-center gap-1.5 rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-2 hover:text-og-fg disabled:opacity-50"
                 >
                   <XIcon aria-hidden="true" className="size-3.5" />
                   {active === "reject" ? messages.rejecting : messages.reject}
@@ -177,7 +179,8 @@ export function ApprovalSurface({
                   type="button"
                   disabled={busy}
                   onClick={() => void decide(approval, "approve")}
-                  className="inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:brightness-110 disabled:opacity-50"
+                  data-og-variant="primary"
+                  className="og-button inline-flex min-h-9 items-center gap-1.5 rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:brightness-110 disabled:opacity-50"
                 >
                   <CheckIcon aria-hidden="true" className="size-3.5" />
                   {active === "approve" ? messages.approving : messages.approve}
@@ -189,7 +192,7 @@ export function ApprovalSurface({
       </div>
 
       {errorMessage ? (
-        <p role="alert" className="text-og-sm text-og-status-failed">
+        <p data-og-part="error" role="alert" className="og-error text-og-sm text-og-status-failed">
           {errorMessage}
         </p>
       ) : null}

@@ -167,7 +167,8 @@
     {#if request.questions.length > 1}<span>{request.questions.length} questions</span>{/if}
     <button class="og-icon-button" type="button" aria-label={messages.collapse} title={messages.collapse} onclick={() => (collapsed = true)}><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 12 4-4 4 4" /></svg></button>
   </header>
-  <fieldset disabled={busy} class="og-human-input__questions" data-og-part="content">
+  <div class="og-human-input__content" data-og-part="content">
+  <fieldset disabled={busy} class="og-human-input__questions">
     {#each request.questions as question, index (question.id)}
       {@const draft = drafts[question.id] ?? emptyDraft()}
       {@const questionError = validationErrors[question.id]}
@@ -258,6 +259,7 @@
       </div>
     {/each}
   </fieldset>
+  </div>
   {#if error ?? submissionError}<div class="og-error" data-og-part="error" role="alert">{error ?? submissionError}</div>{/if}
   <div class="og-human-input__actions" data-og-part="actions">
     {#if request.allowSkip}<button class="og-button" type="button" disabled={busy} onclick={() => void submitResponse({ outcome: "skipped" })}>{messages.skip}</button>{/if}

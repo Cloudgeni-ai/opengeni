@@ -138,6 +138,15 @@ structured human input, goals, model/reasoning/latency controls, and tool policy
 selection. Host-specific renderers use Svelte snippets rather than React
 components. Unknown timeline kinds degrade to bounded readable output.
 
+For this supported boundary, parity means the same runtime mutations, visible
+states, copy, semantic anatomy, responsive behavior, and default visual result;
+it does not require identical framework DOM implementation. The ready-made
+Svelte composer uses the same exported `ComposerRoot`, `ComposerSurface`,
+`ComposerInput`, `ComposerFooter`, `ComposerControls`, `ComposerActions`,
+`ComposerAttachButton`, and `ComposerSendButton` primitives available to hosts.
+This keeps the turnkey surface and customer-composed surface on one behavior
+path.
+
 ## Shared semantic CSS
 
 All shared styles are scoped beneath `.og-root` and use `data-og-component`,
@@ -169,8 +178,11 @@ concepts do not belong in either default demo.
 Run the React demo on port 3100 and the Svelte demo on port 3200. Browser
 qualification executes the same workflow in Chromium, Firefox, and WebKit,
 checks accessibility and responsive overflow, and compares the shared frame
-within each engine. Qualification is event- and assertion-driven; there is no
-arbitrary-duration framework UI soak.
+within each engine. The pairwise gate requires shared anatomy geometry within
+one CSS pixel, equivalent stable computed metrics, and a bounded whole-session
+pixel difference after deterministic scroll/font normalization. Qualification
+is event- and assertion-driven; there is no arbitrary-duration framework UI
+soak.
 
 Release qualification installs packed SDK/UI/React/Svelte tarballs into clean
 React, session-only, realtime-only, and native Svelte consumers. The native

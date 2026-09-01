@@ -185,6 +185,7 @@
     "@temporalio/client": "^1.20.2",
     "@temporalio/worker": "^1.20.2",
     "@types/bun": "^1.4.0",
+    "@types/pngjs": "^6.0.5",
     "drizzle-orm": "^0.45.2",
     "hermes-parser": "0.28.1",
     "metro": "0.82.2",
@@ -193,7 +194,9 @@
     "oxc-parser": "0.142.0",
     "oxfmt": "0.58.0",
     "oxlint": "1.73.0",
+    "pixelmatch": "^7.2.0",
     "playwright": "^1.61.1",
+    "pngjs": "^7.0.0",
     "postgres": "^3.4.9",
     "typescript": "7.0.2",
     "yaml": "2.9.0"

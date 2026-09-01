@@ -17,12 +17,12 @@
         <p>Review the requested action before the agent continues.</p>
       </div>
     </header>
-    <div class="og-approval__list">
+    <div class="og-approval__list" data-og-part="content">
     {#each approvals as approval (approval.id)}
       <article data-approval-id={approval.id}>
         <p class="og-approval__name">{approval.name.replaceAll("_", " ").replaceAll(".", " › ")}</p>
         <pre class="og-approval__arguments">{JSON.stringify(approval.arguments, null, 2)}</pre>
-        <div class="og-approval__actions">
+        <div class="og-approval__actions" data-og-part="actions">
           <button class="og-button" data-og-variant="secondary" type="button" disabled={$snapshot.responding} onclick={() => void controller.reject(approval.id)}>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12"/></svg> Reject
           </button>

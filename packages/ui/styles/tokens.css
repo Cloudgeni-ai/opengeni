@@ -65,7 +65,7 @@
   --og-shadow-glow: 0 0 24px color-mix(in oklch, var(--og-color-accent) 18%, transparent);
   --og-focus-ring: 0 0 0 2px var(--og-color-bg), 0 0 0 4px var(--og-color-accent);
   --og-composer-max-height: min(18rem, 42dvh);
-  --og-timeline-max-width: 56rem;
+  --og-timeline-max-width: 48rem;
   --og-touch-target: 2.75rem;
   --og-model-picker-menu-width: 18rem;
 }

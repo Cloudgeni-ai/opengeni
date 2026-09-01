@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import pixelmatch from "pixelmatch";
+import { PNG } from "pngjs";
 import {
   chromium,
   firefox,
@@ -208,7 +210,9 @@ describe(`framework UI parity in ${engineName}`, () => {
       ]);
 
       const geometry = await page.evaluate(() => {
-        const input = document.querySelector<HTMLElement>('textarea[aria-label="Message"]')!;
+        const input = document.querySelector<HTMLElement>(
+          'textarea[aria-label="Message the agent"]',
+        )!;
         return {
           overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
           composerOverflow:
@@ -276,6 +280,57 @@ describe(`framework UI parity in ${engineName}`, () => {
       for (const key of Object.keys(reactFrame) as Array<keyof typeof reactFrame>) {
         expect(Math.abs(reactFrame[key] - svelteFrame[key])).toBeLessThanOrEqual(2);
       }
+
+      const [reactAnatomy, svelteAnatomy] = await Promise.all([
+        captureSharedAnatomy(reactPage),
+        captureSharedAnatomy(sveltePage),
+      ]);
+      expect(Object.keys(svelteAnatomy)).toEqual(Object.keys(reactAnatomy));
+      for (const key of Object.keys(reactAnatomy)) {
+        const reactPart = reactAnatomy[key]!;
+        const sveltePart = svelteAnatomy[key]!;
+        for (const metric of ["x", "y", "width", "height"] as const) {
+          expect(
+            Math.abs(reactPart.rect[metric] - sveltePart.rect[metric]),
+            `${key}.${metric}`,
+          ).toBeLessThanOrEqual(1);
+        }
+        if (!key.startsWith("composer") || key === "composer.input") {
+          expect(sveltePart.style, `${key}.style`).toEqual(reactPart.style);
+        }
+      }
+
+      await Promise.all([preparePairwiseCapture(reactPage), preparePairwiseCapture(sveltePage)]);
+      const [reactSession, svelteSession] = await Promise.all([
+        reactPage.locator('[data-demo-surface="session"]').screenshot({ animations: "disabled" }),
+        sveltePage.locator('[data-demo-surface="session"]').screenshot({ animations: "disabled" }),
+      ]);
+      const reactPng = PNG.sync.read(reactSession);
+      const sveltePng = PNG.sync.read(svelteSession);
+      expect({ width: sveltePng.width, height: sveltePng.height }).toEqual({
+        width: reactPng.width,
+        height: reactPng.height,
+      });
+      const diff = new PNG({ width: reactPng.width, height: reactPng.height });
+      const differentPixels = pixelmatch(
+        reactPng.data,
+        sveltePng.data,
+        diff.data,
+        reactPng.width,
+        reactPng.height,
+        { threshold: 0.15, includeAA: false },
+      );
+      const pixelDifference = differentPixels / (reactPng.width * reactPng.height);
+      await Promise.all([
+        writeFile(join(evidenceRoot, "react-session.png"), reactSession),
+        writeFile(join(evidenceRoot, "svelte-session.png"), svelteSession),
+        writeFile(join(evidenceRoot, "session-diff.png"), PNG.sync.write(diff)),
+        writeFile(
+          join(evidenceRoot, "pairwise.json"),
+          `${JSON.stringify({ pixelDifference, reactAnatomy, svelteAnatomy }, null, 2)}\n`,
+        ),
+      ]);
+      expect(pixelDifference).toBeLessThanOrEqual(0.04);
       await Promise.all([
         reactPage.screenshot({
           path: join(evidenceRoot, "react-desktop-dark.png"),
@@ -324,6 +379,70 @@ async function startDemo(
       timeoutMs: 45_000,
     },
   );
+}
+
+const sharedAnatomySelectors = {
+  timeline: '[data-og-component="timeline"]',
+  "timeline.content": '[data-og-component="timeline"] > [data-og-part="content"]',
+  approval: '[data-og-component="approval"]',
+  "approval.header": '[data-og-component="approval"] > [data-og-part="header"]',
+  "approval.item": '[data-og-component="approval"] > [data-og-part="content"] > article',
+  "approval.actions": '[data-og-component="approval"] [data-og-part="actions"]',
+  "human-input": '[data-og-component="human-input"]',
+  "human-input.header": '[data-og-component="human-input"] > [data-og-part="header"]',
+  "human-input.content": '[data-og-component="human-input"] > [data-og-part="content"]',
+  "human-input.actions": '[data-og-component="human-input"] > [data-og-part="actions"]',
+  composer: '[data-og-component="composer"]',
+  "composer.body": '[data-og-component="composer"] > [data-og-part="body"]',
+  "composer.content": '[data-og-component="composer"] [data-og-part="content"]',
+  "composer.input": '[data-og-component="composer"] [data-og-part="input"]',
+  "composer.footer": '[data-og-component="composer"] [data-og-part="footer"]',
+  "composer.controls": '[data-og-component="composer"] [data-og-part="controls"]',
+  "composer.actions": '[data-og-component="composer"] [data-og-part="actions"]',
+} as const;
+
+type AnatomyCapture = Record<
+  keyof typeof sharedAnatomySelectors,
+  {
+    rect: { x: number; y: number; width: number; height: number };
+    style: Record<string, string>;
+  }
+>;
+
+async function captureSharedAnatomy(page: Page): Promise<AnatomyCapture> {
+  return await page.evaluate((selectors) => {
+    const result: Record<string, unknown> = {};
+    for (const [name, selector] of Object.entries(selectors)) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (!element) throw new Error(`Missing shared anatomy: ${name} (${selector})`);
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      result[name] = {
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
+        style: {
+          fontFamily: style.fontFamily,
+          fontSize: style.fontSize,
+          fontWeight: style.fontWeight,
+          lineHeight: style.lineHeight,
+          borderRadius: style.borderRadius,
+          borderWidth: style.borderWidth,
+          padding: style.padding,
+        },
+      };
+    }
+    return result;
+  }, sharedAnatomySelectors) as AnatomyCapture;
+}
+
+async function preparePairwiseCapture(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    for (const element of document.querySelectorAll<HTMLElement>(
+      '[data-og-component="timeline"] > [data-og-part="content"], [data-og-component="human-input"] > [data-og-part="content"]',
+    )) {
+      element.scrollTop = 0;
+    }
+  });
 }
 
 async function assertAxeClean(page: Page): Promise<void> {

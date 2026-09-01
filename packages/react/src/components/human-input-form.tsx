@@ -252,15 +252,17 @@ function HumanInputRequestForm({
   if (collapsed) {
     return (
       <div
+        data-og-component="human-input"
+        data-og-state="closed"
         data-human-input-request={request.id}
         data-human-input-collapsed=""
         aria-labelledby={titleId}
         className={cn(
-          "og-root flex w-full items-center gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 px-3 py-2.5 shadow-og-sm",
+          "og-root og-human-input og-human-input--collapsed flex w-full items-center gap-3 rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 px-3 py-2.5 shadow-og-sm",
           className,
         )}
       >
-        <span className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+        <span data-og-part="icon" className="og-human-input__icon inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
           <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
         </span>
         <div className="min-w-0 flex-1">
@@ -285,6 +287,8 @@ function HumanInputRequestForm({
 
   return (
     <form
+      data-og-component="human-input"
+      data-og-state={busy ? "submitting" : "waiting"}
       data-human-input-request={request.id}
       onSubmit={(event) => void submit(event)}
       aria-labelledby={titleId}
@@ -292,16 +296,16 @@ function HumanInputRequestForm({
         // Multi-question: pin height at the cap so the flex body gets a real
         // box and overflow-y engages. max-height alone + percentage/`h-full`
         // children often sizes to content and clips with no scroll.
-        "og-root flex min-h-0 w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
+        "og-root og-human-input flex min-h-0 w-full flex-col overflow-hidden rounded-og-lg border border-og-status-waiting/35 bg-og-status-waiting/5 shadow-og-sm",
         singleQuestion
           ? "max-h-[min(28rem,50dvh)]"
           : "h-[min(28rem,50dvh)] max-h-[min(28rem,50dvh)]",
         className,
       )}
     >
-      <header className="shrink-0 border-b border-og-status-waiting/20 px-4 py-3">
+      <header data-og-part="header" className="og-human-input__header shrink-0 border-b border-og-status-waiting/20 px-4 py-3">
         <div className="flex items-start gap-3">
-          <span className="mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
+          <span data-og-part="icon" className="og-human-input__icon mt-0.5 inline-flex size-8 shrink-0 items-center justify-center rounded-og-md bg-og-status-waiting/12 text-og-status-waiting">
             <MessageCircleQuestionIcon aria-hidden="true" className="size-4" />
           </span>
           <div className="min-w-0 flex-1">
@@ -355,17 +359,17 @@ function HumanInputRequestForm({
         </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div data-og-part="content" className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         <div
           ref={scrollRef}
           className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
         >
-          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
+          <fieldset disabled={busy} className="og-human-input__questions min-w-0 space-y-4 px-4 py-3">
             {request.questions.map((question, index) => {
               if (singleQuestion) {
                 // Title already carries the question; only render the control + help extras.
                 return (
-                  <div key={question.id} data-human-input-question={question.id}>
+                  <div className="og-human-input__question" data-og-part="item" key={question.id} data-human-input-question={question.id}>
                     <QuestionControls
                       question={question}
                       questionNumber={null}
@@ -388,7 +392,8 @@ function HumanInputRequestForm({
                 <div
                   key={question.id}
                   data-human-input-question={question.id}
-                  className="flex flex-col gap-1.5"
+                  data-og-part="item"
+                  className="og-human-input__question flex flex-col gap-1.5"
                 >
                   <QuestionControls
                     question={question}
@@ -425,20 +430,21 @@ function HumanInputRequestForm({
 
       {(error ?? submissionError) ? (
         <p
+          data-og-part="error"
           role="alert"
-          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
+          className="og-error relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
         >
           {error ?? submissionError}
         </p>
       ) : null}
 
-      <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
+      <footer data-og-part="actions" className="og-human-input__actions relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
         {request.allowSkip ? (
           <button
             type="button"
             disabled={busy}
             onClick={() => void submitResponse({ outcome: "skipped" })}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
+            className="og-button inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
           >
             {resolvedSkipLabel}
           </button>
@@ -446,7 +452,8 @@ function HumanInputRequestForm({
         <button
           type="submit"
           disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
+          data-og-variant="primary"
+          className="og-button inline-flex min-h-9 items-center rounded-og-md bg-og-accent-deep px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition hover:brightness-110 disabled:opacity-50"
         >
           {busy ? messages.submitting : resolvedSubmitLabel}
         </button>

@@ -30,11 +30,13 @@ test("native policy and human-input surfaces preserve host authority", () => {
 test("native composer submission and owning examples close their lifecycle", () => {
   const packageRoot = resolve(import.meta.dir, "..");
   const composer = readFileSync(join(packageRoot, "src/components/SessionComposer.svelte"), "utf8");
+  const sendButton = readFileSync(join(packageRoot, "src/components/ComposerSendButton.svelte"), "utf8");
   const readme = readFileSync(join(packageRoot, "README.md"), "utf8");
   const frameworkGuide = readFileSync(resolve(packageRoot, "../../docs/framework-ui.md"), "utf8");
 
-  expect(composer).toContain("submitSessionComposer(controller, attachments, delivery)");
-  expect(composer).not.toContain("void controller.submit(delivery");
+  expect(composer).toContain("<ComposerRoot {controller} {attachments}>");
+  expect(sendButton).toContain('submitSessionComposer(controller, attachments, "send")');
+  expect(`${composer}\n${sendButton}`).not.toContain("void controller.submit(delivery");
   expect(readme).toContain("onDestroy(() => events.destroy())");
   expect(frameworkGuide).toContain("onDestroy(() => events.destroy())");
 });

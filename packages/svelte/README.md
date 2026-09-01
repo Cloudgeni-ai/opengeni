@@ -66,6 +66,40 @@ native Svelte lifecycle.
 when the host supplies its own session header. Individual components and the
 controller stores remain available for customers that want different markup.
 
+The stock composer is itself assembled from the public composer primitives.
+Use the same pieces to omit, reorder, wrap, or style controls without forking
+submission or attachment behavior:
+
+```svelte
+<script lang="ts">
+  import {
+    ComposerActions,
+    ComposerAttachButton,
+    ComposerControls,
+    ComposerFooter,
+    ComposerInput,
+    ComposerRoot,
+    ComposerSendButton,
+    ComposerSurface,
+  } from "@opengeni/svelte/composer";
+</script>
+
+<ComposerRoot {controller} {attachments} class="customer-composer">
+  <ComposerSurface>
+    <ComposerInput placeholder="Ask the agent…" />
+    <ComposerFooter>
+      <ComposerControls><ComposerAttachButton /></ComposerControls>
+      <ComposerActions><ComposerSendButton /></ComposerActions>
+    </ComposerFooter>
+  </ComposerSurface>
+</ComposerRoot>
+```
+
+Stable `.og-*` classes, `data-og-component`, `data-og-part`, and `--og-*`
+tokens are the customization boundary. Tailwind hosts may use those selectors
+in their own layers; customers do not need OpenGeni's Tailwind build or source
+scanning.
+
 Unknown timeline kinds degrade to bounded readable output. Optional React-only
 accounts, realtime, browser/computer, machines, artifact editors,
 terminal/files/desktop, and workbench composition are deliberately outside the

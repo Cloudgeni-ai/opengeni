@@ -811,6 +811,8 @@ export const Root = forwardRef<HTMLDivElement, ComposerRootProps>(function Compo
             {...props}
             ref={mergeRefs(controller.rootRef, responsiveRootRef, forwardedRef)}
             data-og-composer-id={controller.id}
+            data-og-component="composer"
+            data-og-state={controller.sending ? "submitting" : controller.disabled ? "disabled" : "ready"}
             data-og-responsive-basis={responsiveBasis}
             className={cn("og-root og-composer", className)}
             style={{ paddingBottom: "env(safe-area-inset-bottom)", ...style }}
@@ -830,7 +832,7 @@ export const Frame = forwardRef<HTMLDivElement, ComposerFrameProps>(function Com
   { className, ...props },
   ref,
 ) {
-  return <div {...props} ref={ref} className={cn("relative", className)} />;
+  return <div {...props} ref={ref} data-og-part="body" className={cn("relative", className)} />;
 });
 
 export type ComposerCommandPaletteProps = { className?: string | undefined };
@@ -875,6 +877,7 @@ export const Surface = forwardRef<HTMLDivElement, ComposerSurfaceProps>(function
     <div
       {...props}
       ref={ref}
+      data-og-part="content"
       onDragOver={controller.attachments ? controller.handleDragOver : undefined}
       onDragLeave={controller.attachments ? controller.handleDragLeave : undefined}
       onDrop={controller.attachments ? controller.handleDrop : undefined}
@@ -990,6 +993,7 @@ export const Input = forwardRef<HTMLTextAreaElement, ComposerInputProps>(functio
     <textarea
       {...props}
       ref={mergeRefs(controller.textareaRef, forwardedRef)}
+      data-og-part="input"
       rows={rows}
       value={controller.value}
       onChange={(event) => controller.setValue(event.target.value)}
@@ -1046,6 +1050,7 @@ export const Footer = forwardRef<HTMLDivElement, ComposerFooterProps>(function C
     <div
       {...props}
       ref={ref}
+      data-og-part="footer"
       className={cn(
         "og-composer-footer flex items-end gap-1.5 px-2 pb-2 pt-0.5 sm:px-2.5 sm:pb-2.5",
         // Mobile: one control row — never wrap into a second toolbar line.
@@ -1064,6 +1069,7 @@ export const Controls = forwardRef<HTMLSpanElement, ComposerControlsProps>(
       <span
         {...props}
         ref={ref}
+        data-og-part="controls"
         className={cn(
           "og-composer-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5",
           "max-sm:flex-nowrap max-sm:gap-1",
@@ -1105,6 +1111,7 @@ export const Actions = forwardRef<HTMLSpanElement, ComposerActionsProps>(functio
     <span
       {...props}
       ref={ref}
+      data-og-part="actions"
       className={cn(
         "og-composer-actions ml-auto flex shrink-0 items-center gap-1.5",
         "max-sm:flex-nowrap max-sm:gap-1",

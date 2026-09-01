@@ -10,6 +10,7 @@
     attachments?: FileAttachmentStore;
     models?: readonly string[];
     placeholder?: string;
+    autoFocus?: boolean;
   } = $props();
 </script>
 

@@ -34,19 +34,22 @@
 </script>
 
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<section bind:this={timeline} class="og-timeline" data-og-component="timeline" data-og-state={$snapshot.initialLoading ? "loading" : $snapshot.connectionState} aria-label={label} aria-busy={$snapshot.initialLoading} tabindex="0" onscroll={onScroll}>
-  <HistoryControls
-    hasOlder={$snapshot.hasOlder}
-    hasNewer={$snapshot.hasNewer}
-    loadingOlder={$snapshot.loadingOlder}
-    loadingNewer={$snapshot.loadingNewer}
-    loadingLatest={$snapshot.loadingLatest}
-    onOlder={controller.loadOlder}
-    onNewer={controller.loadNewer}
-    onOldest={controller.loadOldest}
-    onLatest={controller.jumpToLatest}
-  />
-  <div class="og-timeline__content" data-og-part="content" aria-live="polite">
+<section class="og-root og-timeline" data-og-component="timeline" data-og-state={$snapshot.initialLoading ? "loading" : $snapshot.connectionState} aria-label={label} aria-busy={$snapshot.initialLoading}>
+  {#if $snapshot.hasOlder || $snapshot.hasNewer}
+    <HistoryControls
+      hasOlder={$snapshot.hasOlder}
+      hasNewer={$snapshot.hasNewer}
+      loadingOlder={$snapshot.loadingOlder}
+      loadingNewer={$snapshot.loadingNewer}
+      loadingLatest={$snapshot.loadingLatest}
+      onOlder={controller.loadOlder}
+      onNewer={controller.loadNewer}
+      onOldest={controller.loadOldest}
+      onLatest={controller.jumpToLatest}
+    />
+  {/if}
+  <div bind:this={timeline} class="og-timeline__scroller" data-og-part="content" tabindex="-1" onscroll={onScroll}>
+  <div class="og-timeline__content" aria-live="polite">
     {#if $snapshot.initialLoading}
       <div class="og-empty">Loading session activity…</div>
     {:else if groups.length === 0}
@@ -57,5 +60,6 @@
       {/each}
     {/if}
     {#if $snapshot.error}<div class="og-error" role="alert">{$snapshot.error.message}</div>{/if}
+  </div>
   </div>
 </section>

@@ -2,6 +2,7 @@
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 
 html, body, #app { height: 100%; margin: 0; }
+*, *::before, *::after { box-sizing: border-box; }
 body { overflow: hidden; background: var(--og-color-bg); color: var(--og-color-fg); font-family: var(--og-font-sans); }
 button, select, textarea, input { font: inherit; }
 
@@ -47,15 +48,15 @@ button, select, textarea, input { font: inherit; }
 
 .sdk-demo__main { min-height: 0; width: min(100%, 72rem); margin-inline: auto; padding: 1rem; box-sizing: border-box; }
 .sdk-session { display: flex; height: 100%; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--og-color-border); border-radius: var(--og-radius-xl); background: var(--og-color-surface-1); }
-.sdk-session__header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.8rem 1rem; border-bottom: 1px solid var(--og-color-border); }
+.sdk-session__header { display: flex; height: 4.03125rem; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.8rem 1rem; border-bottom: 1px solid var(--og-color-border); }
 .sdk-session__header h2 { font-size: 0.86rem; }
 .sdk-session__surface { min-height: 0; flex: 1; }
 .sdk-session__surface > .og-session { height: 100%; min-height: 0; border: 0; border-radius: 0; background: transparent; }
-.sdk-session__surface > .og-session > [data-og-part="controls"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; max-height: 18rem; overflow: auto; padding: 0.75rem 1rem; border-top: 1px solid var(--og-color-border); }
+.sdk-session__surface > .og-session > [data-og-part="controls"] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.5rem; max-height: 19.3125rem; overflow: auto; padding: 0.75rem 1rem; border-top: 1px solid var(--og-color-border); }
 .sdk-session__surface > .og-session > [data-og-part="controls"]:has(> :only-child) { grid-template-columns: minmax(0, 1fr); }
 .sdk-session__surface > .og-session > [data-og-part="controls"]:empty { display: none; }
 
-.sdk-session__surface .og-composer { margin-inline: 1rem; margin-bottom: 1rem; border-radius: 1rem; }
+.sdk-session__surface .og-session__composer { padding: 0.25rem 1rem 1rem; }
 .sdk-session__surface .og-composer__footer { gap: 0.5rem; }
 .sdk-session__surface .og-composer__controls { flex: 1; overflow-x: auto; scrollbar-width: none; }
 .sdk-session__surface .og-composer__controls::-webkit-scrollbar { display: none; }
@@ -85,7 +86,7 @@ button, select, textarea, input { font: inherit; }
 .sdk-session__surface .og-human-input__question > small:not(.og-error) { color: var(--og-color-fg-subtle); }
 .sdk-session__surface .og-human-input__choice { padding: 0.45rem 0.55rem; border-radius: var(--og-radius-md); }
 .sdk-session__surface .og-human-input__choice:hover, .sdk-session__surface .og-human-input__choice[data-og-state="ready"] { background: var(--og-color-surface-2); }
-.sdk-session__surface .og-human-input__actions { padding: 0.7rem 1rem; border-top: 1px solid var(--og-color-border); }
+.sdk-session__surface .og-human-input__actions { padding: 0.75rem 1rem; border-top: 1px solid var(--og-color-border); }
 
 @media (max-width: 40rem) {
   .sdk-demo__header { padding: 0.65rem 0.75rem; }
@@ -93,5 +94,5 @@ button, select, textarea, input { font: inherit; }
   .sdk-demo__main { padding: 0; }
   .sdk-session { border-inline: 0; border-radius: 0; }
   .sdk-session__surface > .og-session > [data-og-part="controls"] { grid-template-columns: minmax(0, 1fr); max-height: min(28rem, 55dvh); }
-  .sdk-session__surface .og-composer { margin-inline: 0.5rem; margin-bottom: max(0.5rem, env(safe-area-inset-bottom)); }
+  .sdk-session__surface .og-session__composer { padding: 0.25rem 0.5rem max(0.5rem, env(safe-area-inset-bottom)); }
 }

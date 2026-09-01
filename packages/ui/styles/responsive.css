@@ -1,6 +1,8 @@
 @container og-composer (max-width: 48rem) {
-  .og-root .og-composer__input,
+  .og-composer[data-og-component="composer"] .og-composer__input,
   .og-root .og-composer-input {
+    height: var(--og-touch-target);
+    min-height: var(--og-touch-target);
     font-size: var(--og-font-size-composer);
     line-height: var(--og-line-height-composer);
   }
@@ -28,7 +30,7 @@
 @media (max-width: 40rem) {
   .og-root.og-session, .og-root .og-session { min-height: 100dvh; border-inline: 0; border-radius: 0; }
   .og-root .og-chrome { padding-inline: var(--og-space-3); }
-  .og-root .og-timeline { padding: var(--og-space-3); }
+  .og-root .og-timeline > [data-og-part="content"] { padding: var(--og-space-3); }
   .og-root .og-composer { margin-inline: var(--og-space-2); margin-bottom: max(var(--og-space-2), env(safe-area-inset-bottom)); }
   .og-root .og-timeline-row[data-og-kind="user-message"] .og-timeline-row__body { max-width: 94%; }
   .og-root .og-queue-item { grid-template-columns: minmax(0, 1fr); }

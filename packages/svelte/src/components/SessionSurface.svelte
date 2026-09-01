@@ -53,9 +53,11 @@
     {#if controllers.goal}<GoalSurface controller={controllers.goal.controller} />{/if}
     {#if $queue.queue.length > 0}<QueueSurface controller={controllers.queue.controller} />{/if}
   </div>
-  <SessionComposer
-    controller={controllers.composer.controller}
-    attachments={controllers.attachments.controller}
-    {models}
-  />
+  <div class="og-session__composer" data-og-part="composer">
+    <SessionComposer
+      controller={controllers.composer.controller}
+      attachments={controllers.attachments.controller}
+      {models}
+    />
+  </div>
 </section>
