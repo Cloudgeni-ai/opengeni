@@ -4,6 +4,8 @@ import { join } from "node:path";
 import {
   OPEN_GENI_COMPONENTS,
   OPEN_GENI_ICON_ROLES,
+  OPEN_GENI_SESSION_PARITY_CAPABILITIES,
+  OPEN_GENI_STATES,
   defineOpenGeniIconMap,
   openGeniAnatomy,
   sessionStatusPresentation,
@@ -37,6 +39,27 @@ describe("@opengeni/ui contract", () => {
       tone: "danger",
       live: false,
     });
+  });
+
+  test("keeps the supported session parity inventory closed and valid", () => {
+    expect(Object.keys(OPEN_GENI_SESSION_PARITY_CAPABILITIES)).toEqual([
+      "session",
+      "timeline",
+      "composer",
+      "queue",
+      "approval",
+      "humanInput",
+      "goal",
+      "mcpPolicy",
+    ]);
+    for (const capability of Object.values(OPEN_GENI_SESSION_PARITY_CAPABILITIES)) {
+      expect(capability.components.length).toBeGreaterThan(0);
+      expect(capability.states.length).toBeGreaterThan(0);
+      expect(
+        capability.components.every((component) => OPEN_GENI_COMPONENTS.includes(component)),
+      ).toBe(true);
+      expect(capability.states.every((state) => OPEN_GENI_STATES.includes(state))).toBe(true);
+    }
   });
 
   test("compiled CSS is scoped and contains no framework scan directives", async () => {

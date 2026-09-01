@@ -64,6 +64,57 @@ export const OPEN_GENI_STATES = [
 
 export type OpenGeniComponentState = (typeof OPEN_GENI_STATES)[number];
 
+/**
+ * Capability-level parity promise. Framework APIs may stay idiomatic, but
+ * every listed capability must pass the shared conformance suite in both
+ * renderers before it is documented as supported.
+ */
+export const OPEN_GENI_SESSION_PARITY_CAPABILITIES = {
+  session: {
+    components: ["session", "chrome", "status"],
+    states: ["loading", "ready", "streaming", "waiting", "paused", "failed"],
+  },
+  timeline: {
+    components: ["timeline", "timeline-row", "user-message", "history", "fold"],
+    states: ["loading", "streaming", "ready", "failed", "empty", "open", "closed"],
+  },
+  composer: {
+    components: ["composer", "attachments", "attachment", "menu"],
+    states: ["loading", "ready", "submitting", "uploading", "failed", "disabled"],
+  },
+  queue: {
+    components: ["queue", "queue-item"],
+    states: ["ready", "submitting", "failed", "empty"],
+  },
+  approval: {
+    components: ["approval"],
+    states: ["waiting", "submitting", "failed"],
+  },
+  humanInput: {
+    components: ["human-input"],
+    states: ["waiting", "submitting", "failed", "open", "closed"],
+  },
+  goal: {
+    components: ["goal"],
+    states: ["loading", "ready", "submitting", "failed", "empty"],
+  },
+  mcpPolicy: {
+    components: ["mcp-policy"],
+    states: ["loading", "ready", "submitting", "failed", "disabled"],
+  },
+} as const satisfies Readonly<
+  Record<
+    string,
+    {
+      components: readonly OpenGeniComponentName[];
+      states: readonly OpenGeniComponentState[];
+    }
+  >
+>;
+
+export type OpenGeniSessionParityCapability =
+  keyof typeof OPEN_GENI_SESSION_PARITY_CAPABILITIES;
+
 export function openGeniAnatomy(options: {
   component: OpenGeniComponentName;
   part?: OpenGeniPartName | undefined;
