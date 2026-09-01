@@ -40,6 +40,7 @@ import {
   HUMAN_INPUT_TOOL_NAME,
   modelRequestPolicyForProvider,
   MultiProviderModelProvider,
+  OpenGeniResponsesModel,
   resolveTurnModel,
   summarizeForCompaction,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
@@ -2496,9 +2497,11 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     expect(resolved?.provider.id).toBe("opengeni-gateway");
 
     const runSettings = { ...deploymentSettings, openaiModel: gatewayModelId };
-    expect(
-      await new MultiProviderModelProvider(runSettings).getModel(gatewayModelId),
-    ).toBeDefined();
+    const model = await new MultiProviderModelProvider(runSettings).getModel(gatewayModelId);
+    expect(model).toBeInstanceOf(OpenGeniResponsesModel);
+    expect((model as unknown as { provider: ResolvedModelProvider }).provider.id).toBe(
+      "opengeni-gateway",
+    );
   });
 
   test("fails loud when a registry redeclares a bare built-in product id", () => {
