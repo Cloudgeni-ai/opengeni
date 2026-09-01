@@ -600,6 +600,7 @@ describe("contracts", () => {
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
     const binding = McpServerConnectionRef.parse({
       connectionId: "host:github:one",
+      authoritySource: "host",
       provider: "github",
       providerDomain: "github.com",
       kind: "app_install",
@@ -609,6 +610,13 @@ describe("contracts", () => {
       ],
     });
     expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(binding.authoritySource).toBe("host");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        authoritySource: "host",
+        providerDomain: "host.example",
+      }),
+    ).toThrow("host authority requires connectionId");
     expect(() =>
       McpServerConnectionRef.parse({
         connectionId: "azure-one",
@@ -634,11 +642,32 @@ describe("contracts", () => {
         serverId: "provider-tools",
         providerDomain: "provider.example",
         connectionId: "host:connection:42",
+        authoritySource: "host",
         provider: "gitlab",
         reason: "unsupported_auth",
+        hostReason: "resource_scope_unavailable",
         selectedResources: [{ kind: "repository", id: "project-42" }],
       }).connectionId,
     ).toBe("host:connection:42");
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "unsupported_auth",
+        hostReason: "refresh_failed",
+      }).authoritySource,
+    ).toBe("host");
+    expect(
+      ToolAuthNeededPayload.safeParse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        authoritySource: "host",
+        reason: "refresh_failed",
+      }).success,
+    ).toBe(false);
     expect(
       CredentialAuthNeededPayload.parse({
         credentialClass: "run",
@@ -1181,6 +1210,7 @@ describe("contracts", () => {
           url: "https://gitlab-tools.example/mcp",
           connectionRef: {
             connectionId: "cloud-connection:gitlab:42",
+            authoritySource: "host",
             providerDomain: "gitlab.example",
             kind: "oauth2",
           },
@@ -1190,6 +1220,7 @@ describe("contracts", () => {
     expect(hostPayload.mcpServers[0]?.connectionRef?.connectionId).toBe(
       "cloud-connection:gitlab:42",
     );
+    expect(hostPayload.mcpServers[0]?.connectionRef?.authoritySource).toBe("host");
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "bad url",
@@ -2077,12 +2108,27 @@ describe("contracts", () => {
             mcpServerId: "example",
             transport: "streamable-http",
           },
+          enabled: true,
+          connectionRef: {
+            authoritySource: "host",
+            connectionId: "host:example:42",
+            providerDomain: "example.com",
+            kind: "delegated",
+            subjectScope: "subject",
+          },
         },
       ],
       installations: [],
     });
     expect(catalog.items[0]?.runtime.mcpServerId).toBe("example");
-    expect(catalog.items[0]?.enabled).toBe(false);
+    expect(catalog.items[0]?.enabled).toBe(true);
+    expect(catalog.items[0]?.connectionRef).toEqual({
+      authoritySource: "host",
+      connectionId: "host:example:42",
+      providerDomain: "example.com",
+      kind: "delegated",
+      subjectScope: "subject",
+    });
   });
 
   test("rejects empty user message command", () => {

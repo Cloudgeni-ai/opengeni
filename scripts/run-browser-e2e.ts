@@ -8,6 +8,7 @@ const testFiles =
         "./test/e2e/artifact-spreadsheet-canvas.browser.e2e.ts",
         "./test/e2e/artifact-spreadsheet-scroll.browser.e2e.ts",
         "./test/e2e/artifact-static-renderer.browser.e2e.ts",
+        "./test/e2e/ai-gateway-connection.browser.e2e.ts",
         "./test/e2e/editable-artifacts.browser.e2e.ts",
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -35,22 +36,39 @@ const testFiles =
       ];
 
 for (const testFile of testFiles) {
-  const crossEngine = testFile.endsWith("artifact-spreadsheet-canvas.browser.e2e.ts")
-    ? { key: "OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
+  const crossEngine = testFile.endsWith(
+    "artifact-spreadsheet-canvas.browser.e2e.ts",
+  )
+    ? {
+        key: "OPENGENI_ARTIFACT_CANVAS_BROWSER_ENGINE",
+        ids: ["chromium", "firefox", "webkit"],
+      }
     : testFile.endsWith("framework-ui-parity.browser.e2e.ts")
-      ? { key: "OPENGENI_FRAMEWORK_UI_BROWSER_ENGINE", ids: ["chromium", "firefox", "webkit"] }
-      : null;
+      ? {
+          key: "OPENGENI_FRAMEWORK_UI_BROWSER_ENGINE",
+          ids: ["chromium", "firefox", "webkit"],
+        }
+      : testFile.endsWith("ai-gateway-connection.browser.e2e.ts")
+        ? {
+            key: "OPENGENI_AI_GATEWAY_BROWSER_ENGINE",
+            ids: ["chromium", "webkit"],
+          }
+        : null;
   const engineIds = crossEngine?.ids ?? [undefined];
   for (const engineId of engineIds) {
     // Keep native browser engines in separate Bun processes so one engine's teardown cannot
     // influence another engine's performance or liveness result.
-    const environment = engineId && crossEngine ? { [crossEngine.key]: engineId } : {};
+    const environment =
+      engineId && crossEngine ? { [crossEngine.key]: engineId } : {};
     const status = runTestFile(testFile, environment);
     if (status !== 0) process.exit(status);
   }
 }
 
-function runTestFile(testFile: string, environment: Readonly<Record<string, string>>): number {
+function runTestFile(
+  testFile: string,
+  environment: Readonly<Record<string, string>>,
+): number {
   const testArgs = ["--no-env-file", "test", "--max-concurrency=1", testFile];
   const first = spawnSync("bun", testArgs, {
     encoding: "utf8",
@@ -65,7 +83,10 @@ function runTestFile(testFile: string, environment: Readonly<Record<string, stri
   }
 
   const output = `${first.stdout}\n${first.stderr}`;
-  if (!output.includes("error while loading shared libraries") || !commandExists("nix")) {
+  if (
+    !output.includes("error while loading shared libraries") ||
+    !commandExists("nix")
+  ) {
     process.stdout.write(first.stdout);
     process.stderr.write(first.stderr);
     return first.status ?? 1;
@@ -104,31 +125,42 @@ function runTestFile(testFile: string, environment: Readonly<Record<string, stri
     return first.status ?? 1;
   }
 
-  process.stderr.write(`Retrying ${testFile} with Nix-provided Playwright runtime libraries.\n`);
+  process.stderr.write(
+    `Retrying ${testFile} with Nix-provided Playwright runtime libraries.\n`,
+  );
   const retry = spawnSync("bun", testArgs, {
     encoding: "utf8",
     stdio: "inherit",
     env: {
       ...process.env,
       ...environment,
-      LD_LIBRARY_PATH: [libraryPath, process.env.LD_LIBRARY_PATH].filter(Boolean).join(":"),
+      LD_LIBRARY_PATH: [libraryPath, process.env.LD_LIBRARY_PATH]
+        .filter(Boolean)
+        .join(":"),
     },
   });
   return retry.status ?? 1;
 }
 
 function commandExists(command: string): boolean {
-  return spawnSync("sh", ["-lc", `command -v ${command}`], { stdio: "ignore" }).status === 0;
+  return (
+    spawnSync("sh", ["-lc", `command -v ${command}`], { stdio: "ignore" })
+      .status === 0
+  );
 }
 
 function nixLibraryPath(attributes: string[]): string {
   const paths = new Set<string>();
   for (const attribute of attributes) {
     for (const suffix of [".out.outPath", ".lib.outPath", ".outPath"]) {
-      const result = spawnSync("nix", ["eval", "--raw", `nixpkgs#${attribute}${suffix}`], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      });
+      const result = spawnSync(
+        "nix",
+        ["eval", "--raw", `nixpkgs#${attribute}${suffix}`],
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      );
       const outPath = result.stdout.trim();
       if (result.status === 0 && outPath) {
         paths.add(`${outPath}/lib`);

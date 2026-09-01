@@ -359,6 +359,7 @@ export {
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
+  WorkspaceOpenRouterUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
   azureOpenAIDefaultQuery,
@@ -623,6 +624,7 @@ export type ResolveConnectionCredentialResult =
       status: "ok";
       headers: Record<string, string>;
       connectionId: string;
+      authoritySource?: "host";
       authorizeProviderRequest?: () => Promise<boolean>;
       expiresAt?: Date | null;
     }
@@ -630,6 +632,7 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      authoritySource?: "host";
       provider?: string;
       connectionId?: string;
       scopes?: string[];
@@ -1456,6 +1459,11 @@ export type ConnectorActionPolicyHooks = {
     outcome: "completed" | "not_executed" | "uncertain";
   }) => Promise<void>;
 };
+
+/** Expected rejection when model arguments do not match an attempt's frozen connector authority. */
+export class ConnectorActionBindingRejectedError extends Error {
+  override readonly name = "ConnectorActionBindingRejectedError";
+}
 
 /** Exact private binding for one attempt-local model tool backed by a connector action. */
 export type AttemptConnectorActionBinding = {
@@ -2683,9 +2691,18 @@ function installAttemptConnectorActionPolicy(
           if (!callId) {
             throw new Error("Attempt connector action is missing its durable approval identity");
           }
-          const preparation = await connectorActionPolicy.prepare(
-            binding.call(callId, parsedInput),
-          );
+          let call: ConnectorActionToolCall;
+          try {
+            call = binding.call(callId, parsedInput);
+          } catch (error) {
+            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+            // Exact-resource and connection bindings are evaluated before the
+            // provider can run. A model can name a repository outside the
+            // accepted turn resources; that is an ordinary rejected tool call,
+            // not an Agents SDK lifecycle failure.
+            return false;
+          }
+          const preparation = await connectorActionPolicy.prepare(call);
           if (!preparation.managed || preparation.decision === "block") return false;
           return (
             preparation.decision === "ask" ||
@@ -2706,7 +2723,22 @@ function installAttemptConnectorActionPolicy(
           } catch {
             throw new Error("Attempt connector action was not executed: malformed tool input");
           }
-          const admission = await connectorActionPolicy.begin(binding.call(callId, parsedInput));
+          let call: ConnectorActionToolCall;
+          try {
+            call = binding.call(callId, parsedInput);
+          } catch (error) {
+            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Connector action was not executed because its arguments are outside this turn's accepted authority.",
+                },
+              ],
+            };
+          }
+          const admission = await connectorActionPolicy.begin(call);
           if (!admission.allowed) {
             throw new Error(`Attempt connector action was not executed: ${admission.reason}`);
           }
@@ -4136,7 +4168,7 @@ function connectionBrokerFetch(
         options,
         config.id,
         request,
-        providerRequestAuthorizationDenied(connectionRef, first.connectionId),
+        providerRequestAuthorizationDenied(connectionRef, first),
         connectionRef,
         suppressSetupAuthNeeded,
       );
@@ -4194,7 +4226,7 @@ function connectionBrokerFetch(
           options,
           config.id,
           request,
-          providerRequestAuthorizationDenied(connectionRef, refreshed.connectionId),
+          providerRequestAuthorizationDenied(connectionRef, refreshed),
           connectionRef,
           suppressSetupAuthNeeded,
         );
@@ -4204,7 +4236,7 @@ function connectionBrokerFetch(
         withConnectionHeaders(input, init, refreshed.headers),
       );
       if (retry.status === 403) {
-        const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
+        const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed);
         if (auth) {
           await cancelMcpResponseBody(retry);
           return await authNeededFetchResponse(
@@ -4230,6 +4262,7 @@ function connectionBrokerFetch(
             providerDomain: connectionRef.providerDomain,
             ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
             connectionId: refreshed.connectionId,
+            ...(refreshed.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
             ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
             ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
             ...(connectionRef.selectedResources
@@ -4243,7 +4276,7 @@ function connectionBrokerFetch(
       return retry;
     }
     if (response.status === 403) {
-      const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
+      const auth = insufficientScopeAuth(response.headers, connectionRef, first);
       if (auth) {
         await cancelMcpResponseBody(response);
         return await authNeededFetchResponse(
@@ -4273,14 +4306,15 @@ async function authorizeResolvedProviderRequest(
 
 function providerRequestAuthorizationDenied(
   connectionRef: McpServerConnectionRef,
-  connectionId: string,
+  credential: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
 ): Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }> {
   return {
     status: "auth_needed",
     reason: "personal_authority_unavailable",
     providerDomain: connectionRef.providerDomain,
     ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-    connectionId,
+    connectionId: credential.connectionId,
+    ...(credential.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
     ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
     ...(connectionRef.selectedResources
@@ -4420,6 +4454,9 @@ function buildConnectorAttachmentAuthority(
             : connectionRef.connectionId
               ? { connectionId: connectionRef.connectionId }
               : {}),
+          ...(revalidated.authoritySource === "host" || connectionRef.authoritySource === "host"
+            ? { authoritySource: "host" as const }
+            : {}),
           ...(revalidated.scopes
             ? { scopes: revalidated.scopes }
             : connectionRef.scopes
@@ -4461,7 +4498,7 @@ function buildConnectorAttachmentAuthority(
 function insufficientScopeAuth(
   headers: Headers,
   connectionRef: McpServerConnectionRef,
-  connectionId: string,
+  credential: Extract<ResolveConnectionCredentialResult, { status: "ok" }>,
 ): Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }> | null {
   const challenge = parseWwwAuthenticate(headers.get("www-authenticate"));
   if (challenge.error !== "insufficient_scope") {
@@ -4472,7 +4509,8 @@ function insufficientScopeAuth(
     reason: "insufficient_scope",
     providerDomain: connectionRef.providerDomain,
     ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
-    connectionId,
+    connectionId: credential.connectionId,
+    ...(credential.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(challenge.scope?.length
       ? { scopes: challenge.scope }
       : connectionRef.scopes
@@ -4536,6 +4574,9 @@ async function publishAuthNeededForRequest(
         : {}),
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
+    ...(auth.authoritySource === "host" || connectionRef.authoritySource === "host"
+      ? { authoritySource: "host" as const }
+      : {}),
     ...(auth.scopes
       ? { scopes: auth.scopes }
       : connectionRef.scopes

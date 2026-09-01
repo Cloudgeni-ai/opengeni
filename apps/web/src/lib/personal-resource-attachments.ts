@@ -130,8 +130,12 @@ export async function loadPersonalResourceCatalog(
   scope: PersonalResourceOwnerScope,
 ): Promise<PersonalResourceCatalog> {
   const [variableSets, rigs, variableSetPage, rigPage, connectedMachinePage] = await Promise.all([
-    client.listVariableSets(scope.personalWorkspaceId),
-    client.listRigs(scope.personalWorkspaceId),
+    // User-scoped resources follow their owner into every workspace in the
+    // organization. Resolve them through the session's current workspace so a
+    // shared-workspace chat never depends on a second Personal-workspace route
+    // remaining selectable in the browser.
+    client.listVariableSets(scope.targetWorkspaceId),
+    client.listRigs(scope.targetWorkspaceId),
     listAuthorityPages(client, scope.targetWorkspaceId, "variable_set"),
     listAuthorityPages(client, scope.targetWorkspaceId, "rig"),
     listAuthorityPages(client, scope.targetWorkspaceId, "connected_machine"),
@@ -385,29 +389,23 @@ export function personalResourceSelectionIdentityKey(input: {
 }
 
 /**
- * New-session selection is already session-scoped, so personal resources use
- * the matching lifecycle mode without asking for a second duration decision.
- * Workspace-visible sessions still require the existing explicit warning
- * acknowledgement before the create request can be submitted.
+ * Selecting a personal resource is the explicit user action. Private sessions
+ * retain that authority for the session; workspace-visible sessions receive
+ * message-only authority for the creating human's first message.
  */
 export function newSessionPersonalResourceAttachment(input: {
   personalResourceCount: number;
   visibility: "private" | "workspace";
-  sharedAcknowledged: boolean;
 }): {
   intent: PersonalResourceAttachmentIntent | undefined;
-  requiresAcknowledgement: boolean;
 } {
-  const requiresAcknowledgement =
-    input.personalResourceCount > 0 &&
-    input.visibility === "workspace" &&
-    !input.sharedAcknowledged;
   return {
-    requiresAcknowledgement,
     intent: buildPersonalResourceAttachmentIntent({
-      mode: "session",
+      mode: input.visibility === "private" ? "session" : "once",
       visibility: input.visibility,
-      acknowledged: input.sharedAcknowledged,
+      // Choosing the Only-me resource in the setup is the acknowledgement;
+      // the adjacent copy explains that shared-session outputs remain visible.
+      acknowledged: input.visibility === "workspace",
       resourceCount: input.personalResourceCount,
     }),
   };
@@ -426,15 +424,13 @@ export function isPersonalAttachmentConflict(
   );
 }
 
-/** Reset consent and refresh both fixed-resource catalogs after a definitive conflict. */
+/** Refresh both fixed-resource catalogs after a definitive conflict. */
 export async function recoverNewSessionPersonalResourceAttachment(input: {
   error: unknown;
   attemptedInput: { personalResourceAttachment?: PersonalResourceAttachmentIntent } | undefined;
-  resetAcknowledgement: () => void;
   refreshCatalogs: () => Promise<void>;
 }): Promise<boolean> {
   if (!isPersonalAttachmentConflict(input.error, input.attemptedInput)) return false;
-  input.resetAcknowledgement();
   await input.refreshCatalogs();
   return true;
 }

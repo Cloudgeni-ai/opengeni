@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0387_continuability_projection_performance.sql",
+  "../drizzle/0390_continuability_projection_performance.sql",
   import.meta.url,
 );
 
@@ -14,7 +14,9 @@ describe("0387 continuability projection performance migration", () => {
       "CREATE OR REPLACE FUNCTION opengeni_private.list_continuable_sessions(",
     );
     expect(source).toContain("classified AS MATERIALIZED");
-    expect(source.match(/CASE WHEN(?: NOT session\.blocked AND)? EXISTS \(/gu)).toHaveLength(7);
+    expect(
+      source.match(/CASE WHEN(?: NOT session\.blocked AND)? EXISTS \(/gu),
+    ).toHaveLength(7);
     expect(source).not.toContain("queued_human AS (");
     expect(source).not.toContain("LEFT JOIN queued_human");
 

@@ -75,6 +75,11 @@ export type InspectSessionAttemptActivity = (input: {
  * agent runtime and document parser so each process can load only its role. */
 export type SharedActivityServices = {
   settings: Settings;
+  /**
+   * Original environment/host settings retained across live database-catalog
+   * refreshes. Older embedded test hosts may omit it and fall back to settings.
+   */
+  catalogSourceSettings?: Settings;
   db: Database;
   bus: EventBus;
   objectStorage: ObjectStorage | null;
@@ -461,6 +466,7 @@ export type DispatchAutomationRunResult =
   | { action: "started"; sessionId: string }
   | { action: "already_dispatched"; sessionId: string }
   | { action: "skipped"; reason: string }
+  | { action: "failed"; reason: string }
   | { action: "not_found" };
 
 export type RunKnowledgeSourceSyncBatchResult =

@@ -19,6 +19,7 @@ import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
 import type { ApiSandboxClient, ResumeBoxByIdInput, ResumedSandboxSession } from "./sandbox-types";
 import type { TranscriptionSegmenter, TranscriptionService } from "./transcription";
 import type { EditableArtifactApplicationPort } from "./editable-artifact-live";
+import type { ResolvedCatalogSettings } from "./model-catalog";
 import type {
   EditableArtifactAgentApplication,
   EditableArtifactDurableExportService,
@@ -129,6 +130,13 @@ export type ManagedEmailTransport = {
 
 export type AppDependencies = {
   settings: Settings;
+  /**
+   * Original deployment settings when `settings` is already overlaid with a
+   * deployment/workspace catalog snapshot. Model-bearing request adapters set
+   * this marker so core admission never feeds a synthetic reviewed provider
+   * back through deployment validation.
+   */
+  catalogSourceSettings?: Settings;
   db: Database;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
@@ -225,6 +233,7 @@ export type AppDependencies = {
 export type ObjectStorageDependency = ReturnType<typeof createObjectStorage>;
 
 export type ApiRouteDeps = AppDependencies & {
+  resolveCatalogSettings: () => Promise<ResolvedCatalogSettings>;
   managedEmailTransport: ManagedEmailTransport;
   objectStorage: ObjectStorageDependency;
   githubStateSecret: string;
@@ -244,7 +253,12 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus" | "sessionAuthorization" | "schedulePromptPostCommit"
+  | "settings"
+  | "catalogSourceSettings"
+  | "db"
+  | "bus"
+  | "sessionAuthorization"
+  | "schedulePromptPostCommit"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

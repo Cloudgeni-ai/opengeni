@@ -1,4 +1,5 @@
 import type { SessionEvent } from "../types";
+import { sessionEventStreamCoveredThrough } from "../stream";
 
 const BROWSER_EVENT_TYPE_MAX_BYTES = 256;
 const BROWSER_EVENT_ID_MAX_BYTES = 256;
@@ -41,7 +42,12 @@ export type BrowserSessionEventWindow = Readonly<{
 export function eventResumeSequence(event: SessionEvent): number {
   const payload = asRecord(event.payload);
   const coalescedUntil = Number(payload.coalescedUntil);
-  return Math.max(event.sequence, Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0);
+  return Math.max(
+    event.sequence,
+    sessionEventStreamCoveredThrough(event) ?? 0,
+    event.coveredThrough ?? 0,
+    Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : 0,
+  );
 }
 
 export function mergeSessionEvents(
@@ -51,7 +57,9 @@ export function mergeSessionEvents(
   const bySequence = new Map<number, SessionEvent>();
   for (const event of current) bySequence.set(event.sequence, event);
   for (const event of incoming) bySequence.set(event.sequence, event);
-  return [...bySequence.values()].sort((left, right) => left.sequence - right.sequence);
+  return [...bySequence.values()].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
 }
 
 /**
@@ -66,16 +74,29 @@ export function boundSessionEventWindow(
     direction?: "newest" | "oldest" | undefined;
   } = {},
 ): BrowserSessionEventWindow {
-  const maxBytes = Math.max(1024, options.maxBytes ?? SESSION_EVENT_BROWSER_MAX_BYTES);
-  const maxCount = Math.max(1, Math.floor(options.maxCount ?? SESSION_EVENT_BROWSER_MAX_COUNT));
+  const maxBytes = Math.max(
+    1024,
+    options.maxBytes ?? SESSION_EVENT_BROWSER_MAX_BYTES,
+  );
+  const maxCount = Math.max(
+    1,
+    Math.floor(options.maxCount ?? SESSION_EVENT_BROWSER_MAX_COUNT),
+  );
   const safe = events.map(boundSessionEvent);
   const selected: SessionEvent[] = [];
   let bytes = 2;
   const direction = options.direction ?? "newest";
   const start = direction === "newest" ? safe.length - 1 : 0;
-  const end = direction === "newest" ? Math.max(-1, safe.length - maxCount - 1) : safe.length;
+  const end =
+    direction === "newest"
+      ? Math.max(-1, safe.length - maxCount - 1)
+      : safe.length;
   const step = direction === "newest" ? -1 : 1;
-  for (let index = start; index !== end && selected.length < maxCount; index += step) {
+  for (
+    let index = start;
+    index !== end && selected.length < maxCount;
+    index += step
+  ) {
     const event = safe[index]!;
     const eventBytes = sessionEventWindowBytes(event);
     const separator = selected.length === 0 ? 0 : 1;
@@ -102,7 +123,10 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
     utf8Bytes(event.type) <= BROWSER_EVENT_TYPE_MAX_BYTES &&
     !event.type.includes("\n") &&
     !event.type.includes("\r");
-  const clientEventId = boundOptionalText(event.clientEventId, BROWSER_EVENT_CLIENT_ID_MAX_BYTES);
+  const clientEventId = boundOptionalText(
+    event.clientEventId,
+    BROWSER_EVENT_CLIENT_ID_MAX_BYTES,
+  );
   const duplicateReason = boundOptionalText(
     event.duplicateReason,
     BROWSER_EVENT_DUPLICATE_REASON_MAX_BYTES,
@@ -120,13 +144,25 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
 
   const envelopeProjection = [
     !typeIsSafe
-      ? envelopeFieldProjection("type", event.type, "session.event.envelope_omitted")
+      ? envelopeFieldProjection(
+          "type",
+          event.type,
+          "session.event.envelope_omitted",
+        )
       : null,
     clientEventId !== event.clientEventId
-      ? envelopeFieldProjection("clientEventId", event.clientEventId, clientEventId)
+      ? envelopeFieldProjection(
+          "clientEventId",
+          event.clientEventId,
+          clientEventId,
+        )
       : null,
     duplicateReason !== event.duplicateReason
-      ? envelopeFieldProjection("duplicateReason", event.duplicateReason, duplicateReason)
+      ? envelopeFieldProjection(
+          "duplicateReason",
+          event.duplicateReason,
+          duplicateReason,
+        )
       : null,
   ].filter((field) => field !== null);
   const payloadSerialization = serialize(event.payload);
@@ -140,13 +176,19 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
   const truncation = {
     truncated: true as const,
     surface: "browser_legacy_guard" as const,
-    reason: serialized.serializable ? "event_envelope_bytes_exceeded" : "event_not_serializable",
+    reason: serialized.serializable
+      ? "event_envelope_bytes_exceeded"
+      : "event_not_serializable",
     originalBytes,
     deliveredBytes: 0,
     omittedBytes: originalBytes,
-    estimatedOriginalTokens: originalBytes === null ? null : Math.ceil(originalBytes / 4),
+    estimatedOriginalTokens:
+      originalBytes === null ? null : Math.ceil(originalBytes / 4),
     estimatedDeliveredTokens: 0,
-    fullEvidence: { available: false as const, reason: "not_retained" as const },
+    fullEvidence: {
+      available: false as const,
+      reason: "not_retained" as const,
+    },
     details: [
       {
         path: "$.payload",
@@ -182,18 +224,30 @@ export function boundSessionEvent(event: SessionEvent): SessionEvent {
     clientEventId,
     turnId: boundOptionalText(event.turnId, BROWSER_EVENT_ID_MAX_BYTES),
     turnGeneration: event.turnGeneration,
-    turnAttemptId: boundOptionalText(event.turnAttemptId, BROWSER_EVENT_ID_MAX_BYTES),
+    turnAttemptId: boundOptionalText(
+      event.turnAttemptId,
+      BROWSER_EVENT_ID_MAX_BYTES,
+    ),
     turnAssociation: event.turnAssociation,
-    duplicateOfEventId: boundOptionalText(event.duplicateOfEventId, BROWSER_EVENT_ID_MAX_BYTES),
+    duplicateOfEventId: boundOptionalText(
+      event.duplicateOfEventId,
+      BROWSER_EVENT_ID_MAX_BYTES,
+    ),
     duplicateReason,
   };
   settleTruncation(bounded, truncation);
-  if (sessionEventWindowBytes(bounded) > SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) {
+  if (
+    sessionEventWindowBytes(bounded) >
+    SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES
+  ) {
     payload.preview = truncateUtf8Middle(String(payload.preview), 4 * 1024);
     truncation.details = truncation.details.slice(0, 1);
     settleTruncation(bounded, truncation);
   }
-  if (sessionEventWindowBytes(bounded) > SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES) {
+  if (
+    sessionEventWindowBytes(bounded) >
+    SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES
+  ) {
     bounded.clientEventId = null;
     bounded.duplicateReason = null;
     payload.preview = "[legacy event omitted at the browser byte boundary]";
@@ -209,7 +263,10 @@ export function sessionEventWindowBytes(value: unknown): number {
 function serialize(value: unknown): { value: string; serializable: boolean } {
   try {
     const serialized = JSON.stringify(value);
-    return { value: serialized === undefined ? "null" : serialized, serializable: true };
+    return {
+      value: serialized === undefined ? "null" : serialized,
+      serializable: true,
+    };
   } catch {
     return {
       value: '"[unserializable event payload omitted at browser boundary]"',
@@ -219,14 +276,19 @@ function serialize(value: unknown): { value: string; serializable: boolean } {
 }
 
 function payloadIdentity(payload: unknown): Record<string, unknown> {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return {};
+  if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    return {};
   const record = payload as Record<string, unknown>;
   const identity: Record<string, unknown> = {};
   for (const field of BROWSER_EVENT_PAYLOAD_IDENTITY_FIELDS) {
     const value = record[field];
     if (typeof value === "string") {
       identity[field] = boundText(value, BROWSER_EVENT_ID_MAX_BYTES);
-    } else if (typeof value === "number" || typeof value === "boolean" || value === null) {
+    } else if (
+      typeof value === "number" ||
+      typeof value === "boolean" ||
+      value === null
+    ) {
       identity[field] = value;
     }
   }
@@ -245,7 +307,10 @@ function envelopeFieldProjection(
   };
 }
 
-function boundOptionalText<T extends string | null | undefined>(value: T, maxBytes: number): T {
+function boundOptionalText<T extends string | null | undefined>(
+  value: T,
+  maxBytes: number,
+): T {
   return (typeof value === "string" ? boundText(value, maxBytes) : value) as T;
 }
 
@@ -255,7 +320,11 @@ function boundText(value: string, maxBytes: number): string {
   const marker = "…[truncated]";
   const prefixBudget = Math.max(0, maxBytes - utf8Bytes(marker));
   let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
-  while (prefixEnd > 0 && prefixEnd < bytes.byteLength && isUtf8Continuation(bytes[prefixEnd]!)) {
+  while (
+    prefixEnd > 0 &&
+    prefixEnd < bytes.byteLength &&
+    isUtf8Continuation(bytes[prefixEnd]!)
+  ) {
     prefixEnd -= 1;
   }
   return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
@@ -269,11 +338,18 @@ function truncateUtf8Middle(value: string, maxBytes: number): string {
   const leftBudget = Math.floor(contentBudget / 2);
   const rightBudget = contentBudget - leftBudget;
   let leftEnd = Math.min(leftBudget, bytes.byteLength);
-  while (leftEnd > 0 && leftEnd < bytes.byteLength && isUtf8Continuation(bytes[leftEnd]!)) {
+  while (
+    leftEnd > 0 &&
+    leftEnd < bytes.byteLength &&
+    isUtf8Continuation(bytes[leftEnd]!)
+  ) {
     leftEnd -= 1;
   }
   let rightStart = Math.max(0, bytes.byteLength - rightBudget);
-  while (rightStart < bytes.byteLength && isUtf8Continuation(bytes[rightStart]!)) {
+  while (
+    rightStart < bytes.byteLength &&
+    isUtf8Continuation(bytes[rightStart]!)
+  ) {
     rightStart += 1;
   }
   return `${decoder.decode(bytes.subarray(0, leftEnd))}${marker}${decoder.decode(bytes.subarray(rightStart))}`;

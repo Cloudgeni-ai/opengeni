@@ -1,4 +1,7 @@
-export type ComposerDraftLocalStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+export type ComposerDraftLocalStorage = Pick<
+  Storage,
+  "getItem" | "setItem" | "removeItem"
+>;
 
 export type SessionRuntimeEnvironment = {
   clock: {
@@ -24,11 +27,16 @@ export function defaultSessionRuntimeEnvironment(): SessionRuntimeEnvironment {
   return {
     clock: {
       now: () => Date.now(),
-      setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-      clearTimeout: (handle) => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
+      setTimeout: (callback, delayMs) =>
+        globalThis.setTimeout(callback, delayMs),
+      clearTimeout: (handle) =>
+        globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
     },
     ids: {
-      randomUUID: () => globalThis.crypto.randomUUID(),
+      randomUUID: () =>
+        typeof globalThis.crypto?.randomUUID === "function"
+          ? globalThis.crypto.randomUUID()
+          : `attachment:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`,
     },
     random: () => Math.random(),
     scheduleMicrotask: (callback) => queueMicrotask(callback),
@@ -36,7 +44,8 @@ export function defaultSessionRuntimeEnvironment(): SessionRuntimeEnvironment {
       ? {}
       : {
           visibility: {
-            getState: () => (document.visibilityState === "hidden" ? "hidden" : "visible"),
+            getState: () =>
+              document.visibilityState === "hidden" ? "hidden" : "visible",
             subscribe(listener: () => void) {
               document.addEventListener("visibilitychange", listener);
               window.addEventListener("pageshow", listener);

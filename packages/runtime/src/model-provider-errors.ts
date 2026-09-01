@@ -7,6 +7,15 @@ export class WorkspaceGatewayUnavailableError extends Error {
   }
 }
 
+export class WorkspaceOpenRouterUnavailableError extends Error {
+  constructor() {
+    super(
+      "Your OpenRouter model is unavailable: connect or reconnect the workspace OpenRouter key in Settings, then retry.",
+    );
+    this.name = "WorkspaceOpenRouterUnavailableError";
+  }
+}
+
 export const UNKNOWN_MODEL_FINISH_REASON_CODE = "provider_unknown_finish_reason";
 
 /**

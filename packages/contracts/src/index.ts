@@ -186,7 +186,8 @@ export type SandboxBackend = z.infer<typeof SandboxBackend>;
 // new provider's private state shape. Existing envelopes remain readable via
 // the legacy keys below, while every newly-serialized envelope carries this
 // stable field.
-export const OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD = "opengeniProviderInstanceId" as const;
+export const OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD =
+  "opengeniProviderInstanceId" as const;
 export const SANDBOX_PROVIDER_INSTANCE_ID_FIELDS_BY_BACKEND = {
   docker: ["containerId"],
   modal: ["sandboxId"],
@@ -244,7 +245,8 @@ export const SandboxCapabilityName = z.enum([
 export type SandboxCapabilityName = z.infer<typeof SandboxCapabilityName>;
 
 // How a backend exposes a network port to the data plane.
-export type PortExposureKind = "provider-tunnel" | "preview-url" | "local-port" | "none";
+export type PortExposureKind =
+  "provider-tunnel" | "preview-url" | "local-port" | "none";
 
 // Static per-backend metadata — pure data, no runtime state. This table lives
 // in CONTRACTS (not runtime) so config can read it without an import cycle
@@ -280,7 +282,8 @@ export type CapabilityDescriptor = {
     idleKillDisableHint?: string;
   };
   snapshot: {
-    kind: "native-fs" | "native-dir" | "native-snapshot-id" | "tar-only" | "none";
+    kind:
+      "native-fs" | "native-dir" | "native-snapshot-id" | "tar-only" | "none";
     hasTarFallback: boolean;
   };
   portExposure: { kind: PortExposureKind; supportsOnDemandPorts: boolean }; // runloop=false; blaxel only true
@@ -305,7 +308,10 @@ export const BROWSER_CONTROL_PORT = 7682;
 // backend (10 rows). v1 reachable cells are all Linux; macos/windows are seam
 // placeholders (no enum members shipped). Reading rule: a capability cell is
 // `available:false` + a reason in the negotiated doc, never absent.
-export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor> = {
+export const CAPABILITY_DESCRIPTORS: Record<
+  SandboxBackend,
+  CapabilityDescriptor
+> = {
   modal: {
     backend: "modal",
     backendId: "modal",
@@ -639,7 +645,15 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
   },
 };
 
-export const ReasoningEffort = z.enum(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+export const ReasoningEffort = z.enum([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 
 /** Provider service-tier / latency mode selected for a turn or session default. */
 export const LatencyMode = z.enum(["standard", "priority", "fast"]);
@@ -690,7 +704,9 @@ export const NestedAgentDepthPolicySource = z.enum([
   "deployment",
   "default",
 ]);
-export type NestedAgentDepthPolicySource = z.infer<typeof NestedAgentDepthPolicySource>;
+export type NestedAgentDepthPolicySource = z.infer<
+  typeof NestedAgentDepthPolicySource
+>;
 
 /** Durable evidence for a session-create denial at the database admission boundary. */
 export const SessionSpawnDenial = z.object({
@@ -706,7 +722,10 @@ export const SessionSpawnDenial = z.object({
   policySource: NestedAgentDepthPolicySource,
   policySessionId: z.string().uuid().nullable(),
   subjectId: z.string().nullable(),
-  code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
+  code: z.enum([
+    "nested_agent_depth_exceeded",
+    "nested_agent_depth_override_forbidden",
+  ]),
   idempotencyKey: z.string().nullable(),
   createdAt: z.string(),
 });
@@ -946,16 +965,16 @@ const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES = [
   "slack_bot_post_message",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
-const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET = new Set<FirstPartyMcpToolName>(
-  FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES,
-);
+const FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET =
+  new Set<FirstPartyMcpToolName>(FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAMES);
 
 /** Exact catalog registered by the remote first-party `opengeni` MCP server. */
-export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filter(
-  (name) =>
-    !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
-    !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
-) satisfies readonly FirstPartyMcpToolName[];
+export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES =
+  FIRST_PARTY_MCP_TOOL_NAMES.filter(
+    (name) =>
+      !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
+      !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
+  ) satisfies readonly FirstPartyMcpToolName[];
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */
 export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
@@ -967,7 +986,9 @@ export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
   editable_artifact_apply: ["artifacts", "apply"],
   editable_artifact_export: ["artifacts", "export"],
   editable_artifact_export_status: ["artifacts", "exportStatus"],
-} as const satisfies Partial<Record<FirstPartyMcpToolName, readonly [string, string]>>;
+} as const satisfies Partial<
+  Record<FirstPartyMcpToolName, readonly [string, string]>
+>;
 
 /**
  * Connector-wide tools are explicit-only. Ordinary session omission selects
@@ -984,7 +1005,10 @@ export const DEFAULT_FIRST_PARTY_MCP_TOOLS = FIRST_PARTY_MCP_TOOL_NAMES.filter(
     !name.startsWith("atlassian_"),
 ) satisfies readonly FirstPartyMcpToolName[];
 
-export function prefixedMcpToolName(registryId: string, toolName: string): string {
+export function prefixedMcpToolName(
+  registryId: string,
+  toolName: string,
+): string {
   return `${registryId}__${toolName}`;
 }
 
@@ -1008,7 +1032,11 @@ export type AccountRole = z.infer<typeof AccountRole>;
  * more than one workspace. This names authority only; parsing one of these
  * contracts never authorizes access by itself.
  */
-export const ResourceAuthorityScope = z.enum(["organization", "workspace", "user"]);
+export const ResourceAuthorityScope = z.enum([
+  "organization",
+  "workspace",
+  "user",
+]);
 export type ResourceAuthorityScope = z.infer<typeof ResourceAuthorityScope>;
 
 export const ResourceAuthorityListScope = z.enum([
@@ -1017,7 +1045,9 @@ export const ResourceAuthorityListScope = z.enum([
   "workspace",
   "user",
 ]);
-export type ResourceAuthorityListScope = z.infer<typeof ResourceAuthorityListScope>;
+export type ResourceAuthorityListScope = z.infer<
+  typeof ResourceAuthorityListScope
+>;
 
 export const OrganizationMembershipStatus = z.enum([
   "provisioning",
@@ -1025,12 +1055,19 @@ export const OrganizationMembershipStatus = z.enum([
   "suspended",
   "revoked",
 ]);
-export type OrganizationMembershipStatus = z.infer<typeof OrganizationMembershipStatus>;
+export type OrganizationMembershipStatus = z.infer<
+  typeof OrganizationMembershipStatus
+>;
 
 export const PersonalResourceRetentionMode = z.enum(["retain", "delete_after"]);
-export type PersonalResourceRetentionMode = z.infer<typeof PersonalResourceRetentionMode>;
+export type PersonalResourceRetentionMode = z.infer<
+  typeof PersonalResourceRetentionMode
+>;
 
-export const SessionTenancyVisibility = z.enum(["user_private", "workspace_shared"]);
+export const SessionTenancyVisibility = z.enum([
+  "user_private",
+  "workspace_shared",
+]);
 
 export const UserResourceAuthorityScope = z.literal("user");
 export const UserResourceKind = z.enum([
@@ -1050,7 +1087,11 @@ export const USER_RESOURCE_ACTION_BY_KIND = {
   connected_machine: "connected_machine.use",
 } as const satisfies Record<UserResourceKind, string>;
 
-export const UserResourceLifecycleGrantMode = z.enum(["once", "session", "always"]);
+export const UserResourceLifecycleGrantMode = z.enum([
+  "once",
+  "session",
+  "always",
+]);
 export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION = 1 as const;
 export const PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING =
   "Personal resources used in a workspace-shared session may influence outputs visible to other workspace members. The underlying credentials and secret values are not shared by the attachment itself.";
@@ -1065,10 +1106,14 @@ export const PersonalResourceAttachmentIntent = z
     mode: UserResourceLifecycleGrantMode,
     expectedAuthorityEpoch: z.number().int().positive().optional(),
     workspaceSharedAcknowledged: z.boolean().default(false),
-    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+    sharedOutputWarningVersion: z.literal(
+      PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
+    ),
   })
   .strict();
-export type PersonalResourceAttachmentIntent = z.infer<typeof PersonalResourceAttachmentIntent>;
+export type PersonalResourceAttachmentIntent = z.infer<
+  typeof PersonalResourceAttachmentIntent
+>;
 
 function requireEstablishedPersonalResourceEpoch(
   value: {
@@ -1098,10 +1143,14 @@ export const PersonalResourceAttachmentSummary = z
       .array(z.enum(["variable_set", "rig", "connected_machine"]))
       .min(1)
       .max(3),
-    sharedOutputWarningVersion: z.literal(PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION),
+    sharedOutputWarningVersion: z.literal(
+      PERSONAL_RESOURCE_SHARED_OUTPUT_WARNING_VERSION,
+    ),
   })
   .strict();
-export type PersonalResourceAttachmentSummary = z.infer<typeof PersonalResourceAttachmentSummary>;
+export type PersonalResourceAttachmentSummary = z.infer<
+  typeof PersonalResourceAttachmentSummary
+>;
 /** Public owner-management deliberately excludes race-prone standalone `once`. */
 export const ManagedUserResourceGrantMode = z.enum(["session", "always"]);
 export const UserResourceAuthorityGrant = z.object({
@@ -1154,25 +1203,36 @@ export const IssueUserResourceGrantRequest = z
     workspaceSharedAcknowledged: z.boolean().default(false),
   })
   .superRefine((value, context) => {
-    if (value.context === "workspace_shared" && !value.workspaceSharedAcknowledged) {
+    if (
+      value.context === "workspace_shared" &&
+      !value.workspaceSharedAcknowledged
+    ) {
       context.addIssue({
         code: "custom",
         path: ["workspaceSharedAcknowledged"],
-        message: "workspace_shared requires durable shared-output acknowledgement",
+        message:
+          "workspace_shared requires durable shared-output acknowledgement",
       });
     }
-    if (value.mode === "always" && (value.sessionId || value.expectedAuthorityEpoch)) {
+    if (
+      value.mode === "always" &&
+      (value.sessionId || value.expectedAuthorityEpoch)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
         message: "always is unbound from session authority",
       });
     }
-    if (value.mode === "session" && (!value.sessionId || !value.expectedAuthorityEpoch)) {
+    if (
+      value.mode === "session" &&
+      (!value.sessionId || !value.expectedAuthorityEpoch)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["sessionId"],
-        message: "session grants require a target session and expectedAuthorityEpoch",
+        message:
+          "session grants require a target session and expectedAuthorityEpoch",
       });
     }
   });
@@ -1192,14 +1252,24 @@ export const UserResourceGrantRevocationResponse = z.object({
 export const RevokeUserResourceGrantQuery = z.object({
   scope: UserResourceAuthorityScope,
 });
-export type UserResourceAuthorityGrant = z.infer<typeof UserResourceAuthorityGrant>;
-export type UserResourceAuthoritySummary = z.infer<typeof UserResourceAuthoritySummary>;
-export type ListUserResourceAuthoritiesQuery = z.infer<typeof ListUserResourceAuthoritiesQuery>;
+export type UserResourceAuthorityGrant = z.infer<
+  typeof UserResourceAuthorityGrant
+>;
+export type UserResourceAuthoritySummary = z.infer<
+  typeof UserResourceAuthoritySummary
+>;
+export type ListUserResourceAuthoritiesQuery = z.infer<
+  typeof ListUserResourceAuthoritiesQuery
+>;
 export type ListUserResourceAuthoritiesResponse = z.infer<
   typeof ListUserResourceAuthoritiesResponse
 >;
-export type IssueUserResourceGrantRequest = z.infer<typeof IssueUserResourceGrantRequest>;
-export type UserResourceGrantMutationResponse = z.infer<typeof UserResourceGrantMutationResponse>;
+export type IssueUserResourceGrantRequest = z.infer<
+  typeof IssueUserResourceGrantRequest
+>;
+export type UserResourceGrantMutationResponse = z.infer<
+  typeof UserResourceGrantMutationResponse
+>;
 export type UserResourceGrantRevocationResponse = z.infer<
   typeof UserResourceGrantRevocationResponse
 >;
@@ -1209,11 +1279,15 @@ export type SessionTenancyVisibility = z.infer<typeof SessionTenancyVisibility>;
 export const SessionVisibility = z.enum(["private", "workspace"]);
 export type SessionVisibility = z.infer<typeof SessionVisibility>;
 
-export function sessionVisibilityToPublic(value: SessionTenancyVisibility): SessionVisibility {
+export function sessionVisibilityToPublic(
+  value: SessionTenancyVisibility,
+): SessionVisibility {
   return value === "user_private" ? "private" : "workspace";
 }
 
-export function sessionVisibilityFromPublic(value: SessionVisibility): SessionTenancyVisibility {
+export function sessionVisibilityFromPublic(
+  value: SessionVisibility,
+): SessionTenancyVisibility {
   return value === "private" ? "user_private" : "workspace_shared";
 }
 
@@ -1228,7 +1302,12 @@ export const UserResourceGrantAction = z
   .regex(/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/u);
 export type UserResourceGrantAction = z.infer<typeof UserResourceGrantAction>;
 
-export const UserResourceGrantStatus = z.enum(["active", "consumed", "revoked", "expired"]);
+export const UserResourceGrantStatus = z.enum([
+  "active",
+  "consumed",
+  "revoked",
+  "expired",
+]);
 export type UserResourceGrantStatus = z.infer<typeof UserResourceGrantStatus>;
 
 function refineUserResourceGrantFence(
@@ -1261,14 +1340,16 @@ function refineUserResourceGrantFence(
     context.addIssue({
       code: "custom",
       path: ["mode"],
-      message: "always grants must not carry a session or authority-epoch fence",
+      message:
+        "always grants must not carry a session or authority-epoch fence",
     });
   }
   if (hasSession !== hasAuthorityEpoch) {
     context.addIssue({
       code: "custom",
       path: ["authorityEpoch"],
-      message: "sessionId and authorityEpoch must be present or absent together",
+      message:
+        "sessionId and authorityEpoch must be present or absent together",
     });
   }
 }
@@ -1281,7 +1362,9 @@ export const OrganizationMembershipProjection = z.object({
   personalWorkspaceId: z.string().uuid().nullable(),
   personalRetentionUntil: z.string().datetime({ offset: true }).nullable(),
 });
-export type OrganizationMembershipProjection = z.infer<typeof OrganizationMembershipProjection>;
+export type OrganizationMembershipProjection = z.infer<
+  typeof OrganizationMembershipProjection
+>;
 
 /**
  * Exact active-membership facts returned by managed-human login provisioning.
@@ -1318,7 +1401,9 @@ export const UserResourceAuthorityProjection = z.object({
   generation: z.number().int().positive(),
   status: z.enum(["active", "retained", "revoked"]),
 });
-export type UserResourceAuthorityProjection = z.infer<typeof UserResourceAuthorityProjection>;
+export type UserResourceAuthorityProjection = z.infer<
+  typeof UserResourceAuthorityProjection
+>;
 
 /**
  * Opaque grant projection. A grant is still inert until a server-side access
@@ -1341,7 +1426,9 @@ export const UserResourceGrantProjection = z
     expiresAt: z.string().datetime({ offset: true }).nullable(),
   })
   .superRefine(refineUserResourceGrantFence);
-export type UserResourceGrantProjection = z.infer<typeof UserResourceGrantProjection>;
+export type UserResourceGrantProjection = z.infer<
+  typeof UserResourceGrantProjection
+>;
 
 /**
  * Extensible immutable delegation payload for accepted work. It contains only
@@ -1392,7 +1479,9 @@ export const ResourceAuthorityEnvelope = z
       });
     }
   });
-export type ResourceAuthorityEnvelope = z.infer<typeof ResourceAuthorityEnvelope>;
+export type ResourceAuthorityEnvelope = z.infer<
+  typeof ResourceAuthorityEnvelope
+>;
 
 /** Secret-safe generic session tenancy metadata for an authorized viewer. */
 export const SessionTenancyProjection = z.object({
@@ -1422,7 +1511,9 @@ export const SessionTenancyPublicProjection = z.object({
     })
     .nullable(),
 });
-export type SessionTenancyPublicProjection = z.infer<typeof SessionTenancyPublicProjection>;
+export type SessionTenancyPublicProjection = z.infer<
+  typeof SessionTenancyPublicProjection
+>;
 
 export const SessionTenancyBlocker = z.enum([
   "nonterminal_turn",
@@ -1445,16 +1536,26 @@ export type SessionTenancyBlocker = z.infer<typeof SessionTenancyBlocker>;
 
 export const SESSION_OPERATION_KEY_MAX_CHARS = 256;
 export const MAX_SELECTED_VARIABLE_SETS = 25;
-const SessionTenancyIdempotencyKey = z.string().trim().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+const SessionTenancyIdempotencyKey = z
+  .string()
+  .trim()
+  .min(1)
+  .max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const UpdateSessionVisibilityRequest = z
   .object({
     visibility: SessionVisibility,
-    expectedAuthorityEpoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    expectedAuthorityEpoch: z
+      .number()
+      .int()
+      .positive()
+      .max(Number.MAX_SAFE_INTEGER),
     idempotencyKey: SessionTenancyIdempotencyKey,
   })
   .strict();
-export type UpdateSessionVisibilityRequest = z.infer<typeof UpdateSessionVisibilityRequest>;
+export type UpdateSessionVisibilityRequest = z.infer<
+  typeof UpdateSessionVisibilityRequest
+>;
 
 export const UpdateSessionVisibilityResponse = z
   .object({
@@ -1469,7 +1570,9 @@ export const UpdateSessionVisibilityResponse = z
   })
   .strict()
   .superRefine((value, context) => {
-    if (value.changed !== (value.eventId !== null && value.eventSequence !== null)) {
+    if (
+      value.changed !== (value.eventId !== null && value.eventSequence !== null)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["changed"],
@@ -1484,7 +1587,9 @@ export const UpdateSessionVisibilityResponse = z
       });
     }
   });
-export type UpdateSessionVisibilityResponse = z.infer<typeof UpdateSessionVisibilityResponse>;
+export type UpdateSessionVisibilityResponse = z.infer<
+  typeof UpdateSessionVisibilityResponse
+>;
 
 export const ForkSessionRequest = z
   .object({
@@ -1494,7 +1599,10 @@ export const ForkSessionRequest = z
     // Optional fresh-session runtime setup. Omission preserves the historical
     // content-only fork; explicit null/[] creates a rigless, set-free restart.
     rigId: z.string().uuid().nullable().optional(),
-    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+    variableSetIds: z
+      .array(z.string().uuid())
+      .max(MAX_SELECTED_VARIABLE_SETS)
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -1502,7 +1610,8 @@ export const ForkSessionRequest = z
       context.addIssue({
         code: "custom",
         path: ["workspaceSharedAcknowledged"],
-        message: "workspaceSharedAcknowledged must be false for a private destination",
+        message:
+          "workspaceSharedAcknowledged must be false for a private destination",
       });
     }
     if (
@@ -1586,21 +1695,31 @@ export const WorkspaceTranscriptionTarget = z
   })
   .strict()
   .superRefine((target, context) => {
-    if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
+    if (
+      target.provider === "azure-speech" &&
+      target.credentialMode !== "byok"
+    ) {
       context.addIssue({
         code: "custom",
         path: ["credentialMode"],
         message: "Azure Speech is supported only through workspace BYOK",
       });
     }
-    if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
+    if (
+      target.credentialMode === "byok" &&
+      target.credentialConnectionId === null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["credentialConnectionId"],
-        message: "BYOK transcription targets require a workspace connection reference",
+        message:
+          "BYOK transcription targets require a workspace connection reference",
       });
     }
-    if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
+    if (
+      target.credentialMode === "managed" &&
+      target.credentialConnectionId !== null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["credentialConnectionId"],
@@ -1608,7 +1727,9 @@ export const WorkspaceTranscriptionTarget = z
       });
     }
   });
-export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
+export type WorkspaceTranscriptionTarget = z.infer<
+  typeof WorkspaceTranscriptionTarget
+>;
 
 export const TranscriptionErrorCode = z.enum([
   "permission_denied",
@@ -1697,7 +1818,9 @@ export const TranscriptionResultMetadata = z
       }
     }
   });
-export type TranscriptionResultMetadata = z.infer<typeof TranscriptionResultMetadata>;
+export type TranscriptionResultMetadata = z.infer<
+  typeof TranscriptionResultMetadata
+>;
 
 const TranscriptionEventBase = z
   .object({
@@ -1729,7 +1852,11 @@ export const TranscriptionEvent = z.discriminatedUnion("type", [
   }),
   TranscriptionEventBase.extend({
     type: z.literal("usage"),
-    audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    audioMilliseconds: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(Number.MAX_SAFE_INTEGER),
     costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
   }),
   TranscriptionEventBase.extend({
@@ -1793,7 +1920,12 @@ export const WorkspaceTranscriptionPolicy = z
       .object({
         currency: z.literal("USD"),
         maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
-        maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
+        maxPerMonth: z
+          .number()
+          .finite()
+          .nonnegative()
+          .max(1_000_000)
+          .nullable(),
       })
       .strict(),
   })
@@ -1813,35 +1945,50 @@ export const WorkspaceTranscriptionPolicy = z
         message: "enabled transcription requires a primary target",
       });
     }
-    if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
+    if (
+      policy.enabled &&
+      !policy.autoDetectLanguage &&
+      policy.language === null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["language"],
-        message: "enabled transcription requires a language or accepted automatic detection",
+        message:
+          "enabled transcription requires a language or accepted automatic detection",
       });
     }
     if (policy.autoDetectLanguage && policy.language !== null) {
       context.addIssue({
         code: "custom",
         path: ["language"],
-        message: "automatic language detection and a fixed language are mutually exclusive",
+        message:
+          "automatic language detection and a fixed language are mutually exclusive",
       });
     }
-    if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
+    if (
+      !policy.diarization.enabled &&
+      policy.diarization.maxSpeakers !== null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["diarization", "maxSpeakers"],
         message: "disabled diarization cannot retain a speaker limit",
       });
     }
-    if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
+    if (
+      policy.fallback.mode === "disabled" &&
+      policy.fallback.targets.length > 0
+    ) {
       context.addIssue({
         code: "custom",
         path: ["fallback", "targets"],
         message: "disabled fallback cannot retain accepted targets",
       });
     }
-    if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
+    if (
+      policy.fallback.mode === "explicit" &&
+      policy.fallback.targets.length === 0
+    ) {
       context.addIssue({
         code: "custom",
         path: ["fallback", "targets"],
@@ -1849,7 +1996,9 @@ export const WorkspaceTranscriptionPolicy = z
       });
     }
     const targetKeys = [policy.primary, ...policy.fallback.targets]
-      .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
+      .filter(
+        (target): target is WorkspaceTranscriptionTarget => target !== null,
+      )
       .map((target) =>
         [
           target.provider,
@@ -1867,7 +2016,9 @@ export const WorkspaceTranscriptionPolicy = z
       });
     }
   });
-export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
+export type WorkspaceTranscriptionPolicy = z.infer<
+  typeof WorkspaceTranscriptionPolicy
+>;
 
 /**
  * Workspace toggle for native browser voice input. Provider/model/credentials
@@ -1879,7 +2030,9 @@ export const WorkspaceVoiceInputSettings = z
     enabled: z.boolean(),
   })
   .strict();
-export type WorkspaceVoiceInputSettings = z.infer<typeof WorkspaceVoiceInputSettings>;
+export type WorkspaceVoiceInputSettings = z.infer<
+  typeof WorkspaceVoiceInputSettings
+>;
 
 /** Model policy inherited by newly created chats and scheduled tasks. */
 export const WorkspaceSessionDefaults = z
@@ -1910,7 +2063,9 @@ export const WorkspaceSessionToolDefaults = z
       .transform((tools) => [...new Set(tools)]),
   })
   .strict();
-export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+export type WorkspaceSessionToolDefaults = z.infer<
+  typeof WorkspaceSessionToolDefaults
+>;
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
@@ -1922,7 +2077,10 @@ export const ClientVoiceInputConfig = z
       .int()
       .positive()
       .max(25 * 1024 * 1024),
-    acceptedMimeTypes: z.array(z.string().trim().min(1).max(128)).min(1).max(32),
+    acceptedMimeTypes: z
+      .array(z.string().trim().min(1).max(128))
+      .min(1)
+      .max(32),
     resumable: ClientResumableVoiceInputConfig.optional(),
   })
   .strict();
@@ -1962,15 +2120,18 @@ export type CodexCompactionMode = z.infer<typeof CodexCompactionMode>;
 export const SlackReactionEmojiName = z.literal("genie");
 export type SlackReactionEmojiName = z.infer<typeof SlackReactionEmojiName>;
 
-export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("bot_member") }).strict(),
-  z
-    .object({
-      mode: z.literal("allowlist"),
-      channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
-    })
-    .strict(),
-]);
+export const WorkspaceSlackReactionChannelPolicy = z.discriminatedUnion(
+  "mode",
+  [
+    z.object({ mode: z.literal("bot_member") }).strict(),
+    z
+      .object({
+        mode: z.literal("allowlist"),
+        channelIds: z.array(z.string().trim().min(1).max(64)).max(100),
+      })
+      .strict(),
+  ],
+);
 export type WorkspaceSlackReactionChannelPolicy = z.infer<
   typeof WorkspaceSlackReactionChannelPolicy
 >;
@@ -1997,7 +2158,9 @@ export const SlackReactionChannelListResponse = z.object({
   channels: z.array(SlackReactionChannel).max(200),
   nextCursor: z.string().max(1_024).nullable(),
 });
-export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
+export type SlackReactionChannelListResponse = z.infer<
+  typeof SlackReactionChannelListResponse
+>;
 
 /** Where one Slack channel starts work. */
 export const SlackChannelRoute = z.object({
@@ -2020,7 +2183,9 @@ export const SlackChannelRouteListResponse = z.object({
    */
   routingEnabled: z.boolean(),
 });
-export type SlackChannelRouteListResponse = z.infer<typeof SlackChannelRouteListResponse>;
+export type SlackChannelRouteListResponse = z.infer<
+  typeof SlackChannelRouteListResponse
+>;
 
 export const UpdateSlackChannelRoutesRequest = z.object({
   connectionId: z.string().uuid(),
@@ -2034,7 +2199,9 @@ export const UpdateSlackChannelRoutesRequest = z.object({
     )
     .max(200),
 });
-export type UpdateSlackChannelRoutesRequest = z.infer<typeof UpdateSlackChannelRoutesRequest>;
+export type UpdateSlackChannelRoutesRequest = z.infer<
+  typeof UpdateSlackChannelRoutesRequest
+>;
 
 export const DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS = {
   enabled: false,
@@ -2093,8 +2260,13 @@ export const DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS = {
 // agentHumanInputEnabled, codexCompactionDefault, voiceInput and Slack summon
 // to their defaults. The value is accepted and then ignored: see
 // resolveWorkspaceMemoryPromptMode.
-export const WorkspaceMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
-export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode>;
+export const WorkspaceMemoryPromptMode = z.enum([
+  "legacy_standing",
+  "retrieval_only",
+]);
+export type WorkspaceMemoryPromptMode = z.infer<
+  typeof WorkspaceMemoryPromptMode
+>;
 
 /**
  * What an already-accepted turn recorded. Snapshots and receipts are immutable,
@@ -2102,8 +2274,13 @@ export type WorkspaceMemoryPromptMode = z.infer<typeof WorkspaceMemoryPromptMode
  * `legacy_standing`. That is a fact about history, not a mode anyone can pick -
  * keep the two apart so retiring the setting never rewrites the record.
  */
-export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_only"]);
-export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
+export const HistoricalMemoryPromptMode = z.enum([
+  "legacy_standing",
+  "retrieval_only",
+]);
+export type HistoricalMemoryPromptMode = z.infer<
+  typeof HistoricalMemoryPromptMode
+>;
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled defaults off and the
@@ -2138,7 +2315,8 @@ export const WorkspaceSettingsSchema = z
     // BOTH DEFAULT OFF: absent, malformed, or partially invalid settings fail
     // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
     // because an unsolicited Slack post is worse than a missed one.
-    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    slackOrchestrationNotices:
+      WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -2177,14 +2355,18 @@ export function resolveWorkspaceMemoryPromptMode(): "retrieval_only" {
 }
 
 /** Default Codex compaction mode for new Codex sessions (remote_v2 when unset). */
-export function resolveWorkspaceCodexCompactionDefault(settings: unknown): CodexCompactionMode {
+export function resolveWorkspaceCodexCompactionDefault(
+  settings: unknown,
+): CodexCompactionMode {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   if (!parsed.success) return "remote_v2";
   return parsed.data.codexCompactionDefault ?? "remote_v2";
 }
 
 /** Whether agents may request structured human input (enabled when unset). */
-export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boolean {
+export function resolveWorkspaceAgentHumanInputEnabled(
+  settings: unknown,
+): boolean {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   return parsed.success ? parsed.data.agentHumanInputEnabled !== false : true;
 }
@@ -2197,7 +2379,9 @@ export function resolveWorkspaceAgentHumanInputEnabled(settings: unknown): boole
  * - Return `null` when neither is set so callers can default to deployment
  *   availability (enabled when a provider is configured).
  */
-export function resolveWorkspaceVoiceInputEnabled(settings: unknown): boolean | null {
+export function resolveWorkspaceVoiceInputEnabled(
+  settings: unknown,
+): boolean | null {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
   if (!parsed.success) return null;
   if (parsed.data.voiceInput) return parsed.data.voiceInput.enabled;
@@ -2209,7 +2393,9 @@ export function resolveWorkspaceSlackReactionSummonSettings(
   settings: unknown,
 ): WorkspaceSlackReactionSummonSettings {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  const configured = parsed.success ? parsed.data.slackReactionSummon : undefined;
+  const configured = parsed.success
+    ? parsed.data.slackReactionSummon
+    : undefined;
   if (!configured) {
     return {
       enabled: DEFAULT_WORKSPACE_SLACK_REACTION_SUMMON_SETTINGS.enabled,
@@ -2244,13 +2430,16 @@ export function resolveWorkspaceSlackOrchestrationNoticeSettings(
   settings: unknown,
 ): ResolvedWorkspaceSlackOrchestrationNoticeSettings {
   const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  const configured = parsed.success ? parsed.data.slackOrchestrationNotices : undefined;
+  const configured = parsed.success
+    ? parsed.data.slackOrchestrationNotices
+    : undefined;
   return {
     childRequiresAction:
       configured?.childRequiresAction ??
       DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS.childRequiresAction,
     goalPaused:
-      configured?.goalPaused ?? DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS.goalPaused,
+      configured?.goalPaused ??
+      DEFAULT_WORKSPACE_SLACK_ORCHESTRATION_NOTICE_SETTINGS.goalPaused,
   };
 }
 
@@ -2280,25 +2469,119 @@ export const UpdateWorkspaceSettingsRequest = z
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
-    slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    slackOrchestrationNotices:
+      WorkspaceSlackOrchestrationNoticeSettings.optional(),
   })
   .passthrough();
-export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
+export type UpdateWorkspaceSettingsRequest = z.infer<
+  typeof UpdateWorkspaceSettingsRequest
+>;
 
 export const SetWorkspaceDefaultRigRequest = z.object({
   rigId: z.string().uuid().nullable(),
 });
-export type SetWorkspaceDefaultRigRequest = z.infer<typeof SetWorkspaceDefaultRigRequest>;
+export type SetWorkspaceDefaultRigRequest = z.infer<
+  typeof SetWorkspaceDefaultRigRequest
+>;
 
 // PUT body for the workspace model policy (full replace, not a merge). null (or
 // omitted) = unrestricted for that dimension; an EMPTY array is a valid,
 // explicit total block. Entries are provider ids / exact model ids as the
 // router resolves them (see evaluateWorkspaceModelPolicy).
 export const UpdateWorkspaceModelPolicyRequest = z.object({
-  allowedProviders: z.array(z.string().min(1).max(128)).max(64).nullable().optional(),
-  allowedModels: z.array(z.string().min(1).max(256)).max(256).nullable().optional(),
+  allowedProviders: z
+    .array(z.string().min(1).max(128))
+    .max(64)
+    .nullable()
+    .optional(),
+  allowedModels: z
+    .array(z.string().min(1).max(256))
+    .max(256)
+    .nullable()
+    .optional(),
 });
-export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
+export type UpdateWorkspaceModelPolicyRequest = z.infer<
+  typeof UpdateWorkspaceModelPolicyRequest
+>;
+
+export const WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH = 238;
+
+export const CreateWorkspaceGatewayCustomModelRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    upstreamModelId: z
+      .string()
+      .max(WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH)
+      .regex(/^[!-{}-~]+$/),
+    label: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 128, {
+        message: "label must be at most 128 UTF-8 bytes",
+      })
+      .refine((value) => !/[\r\n|]/u.test(value), {
+        message: "label must not contain newlines or the | field separator",
+      })
+      .optional(),
+  })
+  .strict();
+export type CreateWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof CreateWorkspaceGatewayCustomModelRequest
+>;
+
+export const DeleteWorkspaceGatewayCustomModelRequest = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type DeleteWorkspaceGatewayCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceGatewayCustomModelRequest
+>;
+
+export const WorkspaceGatewayCustomModel = z.object({
+  id: z.string().uuid(),
+  upstreamModelId: z.string(),
+  label: z.string().nullable(),
+  version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type WorkspaceGatewayCustomModel = z.infer<
+  typeof WorkspaceGatewayCustomModel
+>;
+
+export const WorkspaceGatewayCustomModelsResponse = z.object({
+  models: z.array(WorkspaceGatewayCustomModel),
+});
+export type WorkspaceGatewayCustomModelsResponse = z.infer<
+  typeof WorkspaceGatewayCustomModelsResponse
+>;
+
+export const CreateWorkspaceOpenRouterCustomModelRequest =
+  CreateWorkspaceGatewayCustomModelRequest;
+export type CreateWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof CreateWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const DeleteWorkspaceOpenRouterCustomModelRequest =
+  DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteWorkspaceOpenRouterCustomModelRequest = z.infer<
+  typeof DeleteWorkspaceOpenRouterCustomModelRequest
+>;
+
+export const WorkspaceOpenRouterCustomModel = WorkspaceGatewayCustomModel;
+export type WorkspaceOpenRouterCustomModel = z.infer<
+  typeof WorkspaceOpenRouterCustomModel
+>;
+
+export const WorkspaceOpenRouterCustomModelsResponse = z.object({
+  models: z.array(WorkspaceOpenRouterCustomModel),
+});
+export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
+  typeof WorkspaceOpenRouterCustomModelsResponse
+>;
 
 const turnInitiatorIdentityFields = {
   subjectId: z.string().min(1),
@@ -2307,7 +2590,8 @@ const turnInitiatorIdentityFields = {
 } as const;
 
 /** Reserved creator/initiator id used only by legacy-row migration defaults. */
-export const UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID = "unattributed-legacy" as const;
+export const UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID =
+  "unattributed-legacy" as const;
 
 /**
  * A named machine/service principal asserted by a trusted embedding host. This
@@ -2348,34 +2632,44 @@ const reservedServiceTurnInitiatorContextKeys = new Set([
 ]);
 
 /** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
-export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((value, ctx) => {
-  for (const key of reservedServiceTurnInitiatorContextKeys) {
-    if (Object.prototype.hasOwnProperty.call(value, key)) {
+export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine(
+  (value, ctx) => {
+    for (const key of reservedServiceTurnInitiatorContextKeys) {
+      if (Object.prototype.hasOwnProperty.call(value, key)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: `${key} is reserved OpenGeni initiator context`,
+        });
+      }
+    }
+    try {
+      if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "service initiator context exceeds 4096 UTF-8 bytes",
+        });
+      }
+    } catch {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: [key],
-        message: `${key} is reserved OpenGeni initiator context`,
+        message: "service initiator context must be JSON-serializable",
       });
     }
-  }
-  try {
-    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "service initiator context exceeds 4096 UTF-8 bytes",
-      });
-    }
-  } catch {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "service initiator context must be JSON-serializable",
-    });
-  }
-});
-export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
+  },
+);
+export type ServiceTurnInitiatorContext = z.infer<
+  typeof ServiceTurnInitiatorContext
+>;
 
-export const DelegatedAccessPrincipalKind = z.enum(["human_session", "agent_attempt", "service"]);
-export type DelegatedAccessPrincipalKind = z.infer<typeof DelegatedAccessPrincipalKind>;
+export const DelegatedAccessPrincipalKind = z.enum([
+  "human_session",
+  "agent_attempt",
+  "service",
+]);
+export type DelegatedAccessPrincipalKind = z.infer<
+  typeof DelegatedAccessPrincipalKind
+>;
 
 export const AccessPrincipalKind = z.enum([
   ...DelegatedAccessPrincipalKind.options,
@@ -2468,10 +2762,13 @@ export const DelegatedAccessTokenPayload = z
       payload.attemptId,
       payload.executionGeneration,
     ];
-    const exactAttemptClaimCount = exactAttemptClaims.filter((value) => value !== undefined).length;
-    const depthClaimCount = [payload.nestedAgentDepth, payload.effectiveMaxNestedAgentDepth].filter(
+    const exactAttemptClaimCount = exactAttemptClaims.filter(
       (value) => value !== undefined,
     ).length;
+    const depthClaimCount = [
+      payload.nestedAgentDepth,
+      payload.effectiveMaxNestedAgentDepth,
+    ].filter((value) => value !== undefined).length;
     if (depthClaimCount !== 0 && depthClaimCount !== 2) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -2493,7 +2790,8 @@ export const DelegatedAccessTokenPayload = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["principalKind"],
-        message: "human_session principal cannot carry machine authority claims",
+        message:
+          "human_session principal cannot carry machine authority claims",
       });
     }
     if (
@@ -2504,7 +2802,8 @@ export const DelegatedAccessTokenPayload = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["principalKind"],
-        message: "agent_attempt principal requires one exact signed attempt authority",
+        message:
+          "agent_attempt principal requires one exact signed attempt authority",
       });
     }
     if (
@@ -2542,11 +2841,14 @@ export const DelegatedAccessTokenPayload = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["serviceInitiator"],
-        message: "serviceInitiator cannot replace an exact agent-attempt initiator",
+        message:
+          "serviceInitiator cannot replace an exact agent-attempt initiator",
       });
     }
   });
-export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
+export type DelegatedAccessTokenPayload = z.infer<
+  typeof DelegatedAccessTokenPayload
+>;
 
 const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
@@ -2565,7 +2867,9 @@ export async function signDelegatedAccessToken(
   // deploy; changing ogd2_ to ogd_ cannot turn provenance loss into success.
   const signature = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix === delegatedServiceAccessTokenPrefix
+      ? `${prefix}${encodedPayload}`
+      : encodedPayload,
   );
   return `${prefix}${encodedPayload}.${signature}`;
 }
@@ -2592,7 +2896,9 @@ export async function verifyDelegatedAccessToken(
   const signature = withoutPrefix.slice(dot + 1);
   const expected = await hmacSha256Base64Url(
     secret,
-    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+    prefix === delegatedServiceAccessTokenPrefix
+      ? `${prefix}${encodedPayload}`
+      : encodedPayload,
   );
   if (!constantTimeEqual(signature, expected)) {
     return null;
@@ -2646,7 +2952,9 @@ export async function signEnrollmentBearer(
   secret: string,
   payload: EnrollmentBearerPayload,
 ): Promise<string> {
-  const encodedPayload = base64UrlEncode(JSON.stringify(EnrollmentBearerPayload.parse(payload)));
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(EnrollmentBearerPayload.parse(payload)),
+  );
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `oge_${encodedPayload}.${signature}`;
 }
@@ -2715,7 +3023,9 @@ export async function signEnrollToken(
   secret: string,
   payload: EnrollTokenPayload,
 ): Promise<string> {
-  const encodedPayload = base64UrlEncode(JSON.stringify(EnrollTokenPayload.parse(payload)));
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(EnrollTokenPayload.parse(payload)),
+  );
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `oget_${encodedPayload}.${signature}`;
 }
@@ -2809,7 +3119,9 @@ export async function signStreamToken(
   secret: string,
   payload: StreamTokenPayload,
 ): Promise<string> {
-  const encodedPayload = base64UrlEncode(JSON.stringify(StreamTokenPayload.parse(payload)));
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(StreamTokenPayload.parse(payload)),
+  );
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `ogs_${encodedPayload}.${signature}`;
 }
@@ -2890,8 +3202,13 @@ export const RelayTokenPayload = z.object({
 });
 export type RelayTokenPayload = z.infer<typeof RelayTokenPayload>;
 
-export async function signRelayToken(secret: string, payload: RelayTokenPayload): Promise<string> {
-  const encodedPayload = base64UrlEncode(JSON.stringify(RelayTokenPayload.parse(payload)));
+export async function signRelayToken(
+  secret: string,
+  payload: RelayTokenPayload,
+): Promise<string> {
+  const encodedPayload = base64UrlEncode(
+    JSON.stringify(RelayTokenPayload.parse(payload)),
+  );
   const signature = await hmacSha256Base64Url(secret, encodedPayload);
   return `ogr_${encodedPayload}.${signature}`;
 }
@@ -3020,7 +3337,9 @@ export const CreateOrganizationApiKeyRequest = z
     expiresAt: z.string().datetime({ offset: true }).optional(),
   })
   .strict();
-export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
+export type CreateOrganizationApiKeyRequest = z.infer<
+  typeof CreateOrganizationApiKeyRequest
+>;
 
 // A person (or API key) with access to a workspace: one workspace_memberships
 // row. `subjectId` is `user:<betterAuthUserId>` or `api_key:<id>`; the People
@@ -3037,7 +3356,9 @@ export type WorkspaceMember = z.infer<typeof WorkspaceMember>;
 export const ListWorkspaceMembersResponse = z.object({
   members: z.array(WorkspaceMember),
 });
-export type ListWorkspaceMembersResponse = z.infer<typeof ListWorkspaceMembersResponse>;
+export type ListWorkspaceMembersResponse = z.infer<
+  typeof ListWorkspaceMembersResponse
+>;
 
 export const WorkspaceMemberCandidate = z.object({
   organizationMembershipId: z.string().uuid(),
@@ -3062,13 +3383,17 @@ export const AddWorkspaceMemberRequest = z.object({
   role: z.string().min(1).optional(),
   permissions: z.array(Permission),
 });
-export type AddWorkspaceMemberRequest = z.infer<typeof AddWorkspaceMemberRequest>;
+export type AddWorkspaceMemberRequest = z.infer<
+  typeof AddWorkspaceMemberRequest
+>;
 
 export const UpdateWorkspaceMemberRequest = z.object({
   role: z.string().min(1).optional(),
   permissions: z.array(Permission),
 });
-export type UpdateWorkspaceMemberRequest = z.infer<typeof UpdateWorkspaceMemberRequest>;
+export type UpdateWorkspaceMemberRequest = z.infer<
+  typeof UpdateWorkspaceMemberRequest
+>;
 
 export const SlackUserLinkAccessRequestStatus = z.enum([
   "prepared",
@@ -3078,7 +3403,9 @@ export const SlackUserLinkAccessRequestStatus = z.enum([
   "cancelled",
   "expired",
 ]);
-export type SlackUserLinkAccessRequestStatus = z.infer<typeof SlackUserLinkAccessRequestStatus>;
+export type SlackUserLinkAccessRequestStatus = z.infer<
+  typeof SlackUserLinkAccessRequestStatus
+>;
 
 /**
  * Durable, token-free projection of one signed Slack identity-link intent.
@@ -3099,24 +3426,33 @@ export const SlackUserLinkAccessRequest = z.object({
   createdAt: z.string().datetime({ offset: true }),
   updatedAt: z.string().datetime({ offset: true }),
 });
-export type SlackUserLinkAccessRequest = z.infer<typeof SlackUserLinkAccessRequest>;
+export type SlackUserLinkAccessRequest = z.infer<
+  typeof SlackUserLinkAccessRequest
+>;
 
 export const PrepareSlackUserLinkAccessRequest = z.object({
   linkToken: z.string().min(1).max(2_048),
 });
-export type PrepareSlackUserLinkAccessRequest = z.infer<typeof PrepareSlackUserLinkAccessRequest>;
+export type PrepareSlackUserLinkAccessRequest = z.infer<
+  typeof PrepareSlackUserLinkAccessRequest
+>;
 
 export const SlackUserLinkAccessMutationRequest = z.object({
   expectedVersion: z.number().int().positive(),
   idempotencyKey: z.string().trim().min(1).max(200),
 });
-export type SlackUserLinkAccessMutationRequest = z.infer<typeof SlackUserLinkAccessMutationRequest>;
+export type SlackUserLinkAccessMutationRequest = z.infer<
+  typeof SlackUserLinkAccessMutationRequest
+>;
 
-export const ApproveSlackUserLinkAccessRequest = SlackUserLinkAccessMutationRequest.extend({
-  role: z.string().trim().min(1).max(128).optional(),
-  permissions: z.array(Permission).min(1),
-});
-export type ApproveSlackUserLinkAccessRequest = z.infer<typeof ApproveSlackUserLinkAccessRequest>;
+export const ApproveSlackUserLinkAccessRequest =
+  SlackUserLinkAccessMutationRequest.extend({
+    role: z.string().trim().min(1).max(128).optional(),
+    permissions: z.array(Permission).min(1),
+  });
+export type ApproveSlackUserLinkAccessRequest = z.infer<
+  typeof ApproveSlackUserLinkAccessRequest
+>;
 
 export const ListSlackUserLinkAccessRequestsResponse = z.object({
   requests: z.array(SlackUserLinkAccessRequest),
@@ -3176,7 +3512,10 @@ export type InsightsRange = z.infer<typeof InsightsRange>;
 export const InsightsBillingPath = z.enum(["opengeni_credits", "external"]);
 export type InsightsBillingPath = z.infer<typeof InsightsBillingPath>;
 
-export const InsightsPricingSource = z.enum(["configured_list_price", "gateway_reported"]);
+export const InsightsPricingSource = z.enum([
+  "configured_list_price",
+  "gateway_reported",
+]);
 export type InsightsPricingSource = z.infer<typeof InsightsPricingSource>;
 
 export const ModelContextContributionSource = z.enum([
@@ -3187,7 +3526,9 @@ export const ModelContextContributionSource = z.enum([
   "legacy_memory_v1",
   "runtime_skill_catalog",
 ]);
-export type ModelContextContributionSource = z.infer<typeof ModelContextContributionSource>;
+export type ModelContextContributionSource = z.infer<
+  typeof ModelContextContributionSource
+>;
 
 /** Content-free per-call summary of model-visible Agent Knowledge material. */
 export const ModelContextContributionSummary = z
@@ -3195,10 +3536,16 @@ export const ModelContextContributionSummary = z
     source: ModelContextContributionSource,
     items: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
     utf8Bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-    estimatedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    estimatedTokens: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(Number.MAX_SAFE_INTEGER),
   })
   .strict();
-export type ModelContextContributionSummary = z.infer<typeof ModelContextContributionSummary>;
+export type ModelContextContributionSummary = z.infer<
+  typeof ModelContextContributionSummary
+>;
 
 export const ModelContextContributionSummaries = z
   .array(ModelContextContributionSummary)
@@ -3217,10 +3564,13 @@ export const ModelContextContributionSummaries = z
     }
   });
 
-export const InsightsPromptContributionRow = ModelContextContributionSummary.extend({
-  calls: z.number().int().nonnegative(),
-});
-export type InsightsPromptContributionRow = z.infer<typeof InsightsPromptContributionRow>;
+export const InsightsPromptContributionRow =
+  ModelContextContributionSummary.extend({
+    calls: z.number().int().nonnegative(),
+  });
+export type InsightsPromptContributionRow = z.infer<
+  typeof InsightsPromptContributionRow
+>;
 
 export const InsightsPromptContributions = z.object({
   /** Sum of UTF-8 byte / 4 estimates across calls with contribution receipts. */
@@ -3230,7 +3580,9 @@ export const InsightsPromptContributions = z.object({
   totalCalls: z.number().int().nonnegative(),
   sources: z.array(InsightsPromptContributionRow),
 });
-export type InsightsPromptContributions = z.infer<typeof InsightsPromptContributions>;
+export type InsightsPromptContributions = z.infer<
+  typeof InsightsPromptContributions
+>;
 
 export const InsightsModelUsageRow = z.object({
   id: z.string().min(1),
@@ -3330,7 +3682,14 @@ export type InsightsLiveWarmLease = z.infer<typeof InsightsLiveWarmLease>;
 export const InsightsFloorSession = z.object({
   id: z.string().uuid(),
   title: z.string(),
-  state: z.enum(["running", "paused", "failed", "idle", "compacting", "waiting"]),
+  state: z.enum([
+    "running",
+    "paused",
+    "failed",
+    "idle",
+    "compacting",
+    "waiting",
+  ]),
   depth: z.number().int().nonnegative(),
   model: z.string().nullable(),
   provider: z.string().nullable(),
@@ -3446,12 +3805,16 @@ export const WorkspaceInsightsSnapshot = z.object({
   /** True when provider/model filters exclude workspace-wide warm/caps meaning. */
   modelFilterActive: z.boolean(),
 });
-export type WorkspaceInsightsSnapshot = z.infer<typeof WorkspaceInsightsSnapshot>;
+export type WorkspaceInsightsSnapshot = z.infer<
+  typeof WorkspaceInsightsSnapshot
+>;
 
 export const WorkspaceInsightsResponse = z.object({
   snapshot: WorkspaceInsightsSnapshot,
 });
-export type WorkspaceInsightsResponse = z.infer<typeof WorkspaceInsightsResponse>;
+export type WorkspaceInsightsResponse = z.infer<
+  typeof WorkspaceInsightsResponse
+>;
 
 export const LimitAction = z.enum([
   "agent_run:create",
@@ -3476,7 +3839,12 @@ export const StaticUsageLimits = z.object({
 });
 export type StaticUsageLimits = z.infer<typeof StaticUsageLimits>;
 
-export const EntitlementValue = z.union([z.boolean(), z.string(), z.number(), z.array(z.string())]);
+export const EntitlementValue = z.union([
+  z.boolean(),
+  z.string(),
+  z.number(),
+  z.array(z.string()),
+]);
 export type EntitlementValue = z.infer<typeof EntitlementValue>;
 
 export const Entitlements = z.record(z.string().min(1), EntitlementValue);
@@ -3533,7 +3901,11 @@ export type EntitlementsPort = {
   admitRun(input: AdmitRunInput): Promise<EntitlementDecision>;
 };
 
-export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
+export const GitCredentialProvider = z.enum([
+  "github",
+  "gitlab",
+  "azure_devops",
+]);
 export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
 
 // Host-opaque identity for one independently mintable Git credential. It is
@@ -3545,7 +3917,10 @@ export type GitCredentialBindingId = z.infer<typeof GitCredentialBindingId>;
 export const GitRepositoryAccess = z.enum(["read", "write"]);
 export type GitRepositoryAccess = z.infer<typeof GitRepositoryAccess>;
 
-const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
+const GitProviderRepositoryId = z.union([
+  z.number().int().positive(),
+  z.string().min(1),
+]);
 
 export const GitCredentialRepositoryRef = z.object({
   provider: GitCredentialProvider.optional(),
@@ -3563,7 +3938,9 @@ export const GitCredentialRepositoryRef = z.object({
   projectId: GitProviderRepositoryId.optional(),
   connectionId: z.string().min(1).optional(),
 });
-export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryRef>;
+export type GitCredentialRepositoryRef = z.infer<
+  typeof GitCredentialRepositoryRef
+>;
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
@@ -3730,10 +4107,7 @@ export type SandboxSecrets = {
 };
 
 export type CredentialAuthNeededReason =
-  | "missing_connection"
-  | "expired"
-  | "insufficient_scope"
-  | "refresh_failed";
+  "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
 
 /**
  * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
@@ -3822,7 +4196,9 @@ export const McpConnectionResourceScope = z
     kind: z.literal("repository"),
   })
   .strict();
-export type McpConnectionResourceScope = z.infer<typeof McpConnectionResourceScope>;
+export type McpConnectionResourceScope = z.infer<
+  typeof McpConnectionResourceScope
+>;
 
 const McpConnectionResourceScopes = z
   .array(McpConnectionResourceScope)
@@ -3847,6 +4223,8 @@ export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
+    authoritySource: z.literal("host").optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -3861,6 +4239,13 @@ export const McpServerConnectionRef = z
   })
   .strict()
   .superRefine((reference, context) => {
+    if (reference.authoritySource === "host" && !reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "host authority requires connectionId",
+        path: ["connectionId"],
+      });
+    }
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -3894,7 +4279,9 @@ export const McpPersonalConnectionDelegation = z
     ownerSubjectId: z.string().min(1).max(512),
     providerDomain: z.string().min(1).max(2048),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
-    connectionType: z.enum(["mcp", "social", "atlassian", "github_personal"]).optional(),
+    connectionType: z
+      .enum(["mcp", "social", "atlassian", "github_personal"])
+      .optional(),
     /**
      * Explicit common-authority grant selected by the owning human. Omission is
      * retained only for legacy_user connections that cannot yet participate in
@@ -3952,11 +4339,15 @@ export const McpPersonalConnectionDelegation = z
   .strict()
   .superRefine((delegation, context) => {
     const personalGitHub = delegation.connectionType === "github_personal";
-    if (personalGitHub !== (delegation.personalGitHubRepositorySelection !== undefined)) {
+    if (
+      personalGitHub !==
+      (delegation.personalGitHubRepositorySelection !== undefined)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["personalGitHubRepositorySelection"],
-        message: "personal GitHub delegation requires one repository authority snapshot",
+        message:
+          "personal GitHub delegation requires one repository authority snapshot",
       });
     }
     if (!personalGitHub) return;
@@ -3969,43 +4360,65 @@ export const McpPersonalConnectionDelegation = z
     ) {
       context.addIssue({
         code: "custom",
-        message: "personal GitHub delegation requires exact user-owned connection authority",
+        message:
+          "personal GitHub delegation requires exact user-owned connection authority",
       });
     }
-    const repositories = delegation.personalGitHubRepositorySelection?.repositories ?? [];
+    const repositories =
+      delegation.personalGitHubRepositorySelection?.repositories ?? [];
     const repositoryIds = new Set<string>();
     const canonicalUrls = new Set<string>();
     repositories.forEach((repository, index) => {
       const canonicalUrl = repository.canonicalUrl.toLowerCase();
       if (
-        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(repository.fullName) ||
+        !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})\/[A-Za-z0-9_.-]{1,100}$/u.test(
+          repository.fullName,
+        ) ||
         repository.canonicalUrl !== `https://github.com/${repository.fullName}`
       ) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
+          path: [
+            "personalGitHubRepositorySelection",
+            "repositories",
+            index,
+            "canonicalUrl",
+          ],
           message: "personal GitHub repository identity must be canonical",
         });
       }
       if (repositoryIds.has(repository.repositoryId)) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "repositoryId"],
+          path: [
+            "personalGitHubRepositorySelection",
+            "repositories",
+            index,
+            "repositoryId",
+          ],
           message: "personal GitHub repositories must be unique by provider id",
         });
       }
       if (canonicalUrls.has(canonicalUrl)) {
         context.addIssue({
           code: "custom",
-          path: ["personalGitHubRepositorySelection", "repositories", index, "canonicalUrl"],
-          message: "personal GitHub repositories must be unique by canonical URL",
+          path: [
+            "personalGitHubRepositorySelection",
+            "repositories",
+            index,
+            "canonicalUrl",
+          ],
+          message:
+            "personal GitHub repositories must be unique by canonical URL",
         });
       }
       repositoryIds.add(repository.repositoryId);
       canonicalUrls.add(canonicalUrl);
     });
   });
-export type McpPersonalConnectionDelegation = z.infer<typeof McpPersonalConnectionDelegation>;
+export type McpPersonalConnectionDelegation = z.infer<
+  typeof McpPersonalConnectionDelegation
+>;
 
 /**
  * Exact personal MCP authority frozen on one causal turn or scheduled task.
@@ -4035,7 +4448,9 @@ export const McpPersonalConnectionSummary = z
     providerDomain: z.string().min(1).max(2048),
   })
   .strict();
-export type McpPersonalConnectionSummary = z.infer<typeof McpPersonalConnectionSummary>;
+export type McpPersonalConnectionSummary = z.infer<
+  typeof McpPersonalConnectionSummary
+>;
 
 /**
  * Public, credential-free selection of one exact personal connection grant for
@@ -4048,7 +4463,9 @@ export const McpConnectionAuthoritySelection = z
     userDelegation: UserResourceDelegation,
   })
   .strict();
-export type McpConnectionAuthoritySelection = z.infer<typeof McpConnectionAuthoritySelection>;
+export type McpConnectionAuthoritySelection = z.infer<
+  typeof McpConnectionAuthoritySelection
+>;
 
 export const McpConnectionAuthoritySelections = z
   .array(McpConnectionAuthoritySelection)
@@ -4165,14 +4582,18 @@ export type ConnectionCredentialsPort = {
    * OpenGeni variable set. OpenGeni transports and renews the material; the host
    * remains the sole owner of connection selection and credential policy.
    */
-  runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
+  runCredentials?(
+    input: RunCredentialsRequest,
+  ): Promise<RunCredentialsResolution>;
   /**
    * Resolve rotating MCP transport credentials at request time. Embedded hosts
    * use this to keep their provider connection as the sole credential source;
    * OpenGeni never requires a duplicate connection record. The same resolver is
    * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
-  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
+  mcpCredentials?(
+    input: McpCredentialsRequest,
+  ): Promise<McpCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -4206,7 +4627,8 @@ export type GitHubInstallationSummary = {
   suspended: boolean;
 };
 
-export type GitHubInstallationAuthorityKind = "personal_owner" | "organization_owner";
+export type GitHubInstallationAuthorityKind =
+  "personal_owner" | "organization_owner";
 
 export interface GitHubInstallationBindingCandidate {
   installation: GitHubInstallationSummary;
@@ -4259,7 +4681,9 @@ export type GitHubAppApiPort = {
   discoverInstallationBindingCandidates?: (input: {
     code: string;
   }) => Promise<GitHubInstallationBindingCandidate[]>;
-  authorizeUser?: (input: { code: string }) => Promise<GitHubUserInstallationAccess[]>;
+  authorizeUser?: (input: {
+    code: string;
+  }) => Promise<GitHubUserInstallationAccess[]>;
   verifyInstallationAccessForUser?: (input: {
     code: string;
     installationId: number;
@@ -4267,7 +4691,9 @@ export type GitHubAppApiPort = {
   getInstallation?: (input: {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
-  listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
+  listRepositories?: (input: {
+    installationIds?: number[];
+  }) => Promise<GitHubRepository[]>;
 };
 
 export const BillingBalance = z.object({
@@ -4285,7 +4711,9 @@ export const CreateCheckoutRequest = z.object({
     .min(5)
     .max(10_000)
     .refine(
-      (value) => Number.isFinite(value) && Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
+      (value) =>
+        Number.isFinite(value) &&
+        Math.abs(value - Math.round(value * 100) / 100) < 1e-9,
       { message: "amountUsd must use cent precision" },
     ),
   successUrl: z.string().url().optional(),
@@ -4303,13 +4731,17 @@ export const CreateBillingPortalRequest = z.object({
   accountId: z.string().uuid().optional(),
   returnUrl: z.string().url().optional(),
 });
-export type CreateBillingPortalRequest = z.infer<typeof CreateBillingPortalRequest>;
+export type CreateBillingPortalRequest = z.infer<
+  typeof CreateBillingPortalRequest
+>;
 
 export const CreateBillingPortalResponse = z.object({
   portalSessionId: z.string(),
   url: z.string().url(),
 });
-export type CreateBillingPortalResponse = z.infer<typeof CreateBillingPortalResponse>;
+export type CreateBillingPortalResponse = z.infer<
+  typeof CreateBillingPortalResponse
+>;
 
 export const RepositoryResourceRef = z.object({
   kind: z.literal("repository"),
@@ -4340,7 +4772,8 @@ export const RepositoryResourceRef = z.object({
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
 function positiveGitProviderInteger(value: unknown): number | null {
-  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "number" && Number.isInteger(value) && value > 0)
+    return value;
   if (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0) {
     return Number(value);
   }
@@ -4372,12 +4805,16 @@ export function gitCredentialProviderForRepository(
  */
 export function gitCredentialBindingIdForRepository(
   resource: RepositoryResourceRef,
-  provider: GitCredentialProvider | null = gitCredentialProviderForRepository(resource),
+  provider: GitCredentialProvider | null = gitCredentialProviderForRepository(
+    resource,
+  ),
 ): GitCredentialBindingId | null {
   if (!provider) return null;
   const installationId =
     provider === "github"
-      ? positiveGitProviderInteger(resource.githubInstallationId ?? resource.installationId)
+      ? positiveGitProviderInteger(
+          resource.githubInstallationId ?? resource.installationId,
+        )
       : null;
   return (
     resource.credentialBindingId ??
@@ -4427,7 +4864,9 @@ export function normalizeRepositoryTransportUri(uri: string): string {
     throw new RepositoryUriError(`invalid repository URI: ${uri}`);
   }
   if (url.protocol !== "https:" || !url.hostname) {
-    throw new RepositoryUriError("repository resources must use HTTPS Git URLs");
+    throw new RepositoryUriError(
+      "repository resources must use HTTPS Git URLs",
+    );
   }
   const path = url.pathname.replace(/^\/+|\/+$/g, "");
   if (path.split("/").filter(Boolean).length < 2) {
@@ -4488,15 +4927,20 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
  */
 export const MODEL_ATTACHMENT_REFS_FIELD = "opengeni_attachment_refs" as const;
 /** Private marker for the compact attachment-reference carrier created by compaction. */
-export const MODEL_ATTACHMENT_CATALOG_MARKER = "opengeni_attachment_catalog" as const;
+export const MODEL_ATTACHMENT_CATALOG_MARKER =
+  "opengeni_attachment_catalog" as const;
 /**
  * Structured timeline annotations retained beside the deterministic user-text
  * projection in canonical history. Provider adapters remove this OpenGeni
  * extension field; the numbered projection in `content` remains model-visible.
  */
-export const MODEL_TIMELINE_ANNOTATIONS_FIELD = "opengeni_timeline_annotations" as const;
+export const MODEL_TIMELINE_ANNOTATIONS_FIELD =
+  "opengeni_timeline_annotations" as const;
 
-export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
+export const ResourceRef = z.discriminatedUnion("kind", [
+  RepositoryResourceRef,
+  FileResourceRef,
+]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
 
 export class ResourceMountPathError extends Error {
@@ -4569,10 +5013,14 @@ export function defaultRepositoryMountPath(
   try {
     url = new URL(uri);
   } catch {
-    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+    throw new ResourceMountPathError(
+      `invalid repository URI for mount path: ${uri}`,
+    );
   }
   if (url.protocol !== "https:" || !url.host) {
-    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+    throw new ResourceMountPathError(
+      `invalid repository URI for mount path: ${uri}`,
+    );
   }
   const remotePath = url.pathname.replace(/^\/+|\/+$/g, "");
   const repositoryPath =
@@ -4581,7 +5029,9 @@ export function defaultRepositoryMountPath(
       : remotePath;
   const segments = repositoryPath.split("/").filter(Boolean);
   if (segments.length < 2) {
-    throw new ResourceMountPathError(`repository URI must include owner and repo: ${uri}`);
+    throw new ResourceMountPathError(
+      `repository URI must include owner and repo: ${uri}`,
+    );
   }
   return normalizeResourceMountPath(
     `repos/${encodeURIComponent(url.host.toLowerCase())}/${segments.join("/")}`,
@@ -4613,24 +5063,39 @@ export const DEFAULT_FILE_RESOURCE_MOUNT_ROOT = ".opengeni/files" as const;
 export function resourceMountPath(resource: ResourceRef): string {
   if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
   return resource.kind === "file"
-    ? normalizeResourceMountPath(`${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`)
-    : defaultRepositoryMountPath(resource.uri, gitCredentialProviderForRepository(resource));
+    ? normalizeResourceMountPath(
+        `${DEFAULT_FILE_RESOURCE_MOUNT_ROOT}/${resource.fileId}`,
+      )
+    : defaultRepositoryMountPath(
+        resource.uri,
+        gitCredentialProviderForRepository(resource),
+      );
 }
 
 /** Fail before sandbox execution when two resources share a portable path. */
-export function assertUniqueResourceMountPaths(resources: readonly ResourceRef[]): void {
+export function assertUniqueResourceMountPaths(
+  resources: readonly ResourceRef[],
+): void {
   const mounted = new Set<string>();
   for (const resource of resources) {
     const path = resourceMountPath(resource);
     const key = resourceMountPathCollisionKey(path);
     if (mounted.has(key)) {
-      throw new ResourceRefConflictError(`resource mount path is already attached: ${path}`);
+      throw new ResourceRefConflictError(
+        `resource mount path is already attached: ${path}`,
+      );
     }
     mounted.add(key);
   }
 }
 
-export const FileStatus = z.enum(["pending_upload", "ready", "failed", "expired", "deleted"]);
+export const FileStatus = z.enum([
+  "pending_upload",
+  "ready",
+  "failed",
+  "expired",
+  "deleted",
+]);
 export type FileStatus = z.infer<typeof FileStatus>;
 
 export const FileUploadStatus = z.enum([
@@ -4679,7 +5144,9 @@ export type CreateFileUploadResponse = z.infer<typeof CreateFileUploadResponse>;
 export const CompleteFileUploadResponse = z.object({
   file: FileAsset,
 });
-export type CompleteFileUploadResponse = z.infer<typeof CompleteFileUploadResponse>;
+export type CompleteFileUploadResponse = z.infer<
+  typeof CompleteFileUploadResponse
+>;
 
 export const FileDownloadUrlResponse = z.object({
   url: z.string().url(),
@@ -4707,7 +5174,11 @@ export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
 
 // Durable document authority. Collections/bases are organizational metadata,
 // never an authorization boundary.
-export const DocumentAuthorityKind = z.enum(["organization", "workspace", "personal"]);
+export const DocumentAuthorityKind = z.enum([
+  "organization",
+  "workspace",
+  "personal",
+]);
 export type DocumentAuthorityKind = z.infer<typeof DocumentAuthorityKind>;
 
 // 'workspace' documents are readable by anyone with workspace access;
@@ -4851,7 +5322,9 @@ export const IndexedDocumentProvenance = z.object({
   createdAt: z.string(),
   citation: KnowledgeProviderCitation.nullable().optional(),
 });
-export type IndexedDocumentProvenance = z.infer<typeof IndexedDocumentProvenance>;
+export type IndexedDocumentProvenance = z.infer<
+  typeof IndexedDocumentProvenance
+>;
 
 export const IndexedDocumentSummary = z.object({
   id: z.string().uuid(),
@@ -4870,20 +5343,26 @@ export const ListIndexedDocumentsRequest = z.object({
   checkpoint: z.string().min(1).max(1_024).optional(),
   limit: z.number().int().positive().max(100).default(50),
 });
-export type ListIndexedDocumentsRequest = z.infer<typeof ListIndexedDocumentsRequest>;
+export type ListIndexedDocumentsRequest = z.infer<
+  typeof ListIndexedDocumentsRequest
+>;
 
 export const ListIndexedDocumentsResponse = z.object({
   documents: z.array(IndexedDocumentSummary),
   nextCheckpoint: z.string().min(1).max(1_024),
   hasMore: z.boolean(),
 });
-export type ListIndexedDocumentsResponse = z.infer<typeof ListIndexedDocumentsResponse>;
+export type ListIndexedDocumentsResponse = z.infer<
+  typeof ListIndexedDocumentsResponse
+>;
 
 export const CreateDocumentBaseRequest = z.object({
   name: z.string().min(1),
   description: z.string().optional(),
 });
-export type CreateDocumentBaseRequest = z.infer<typeof CreateDocumentBaseRequest>;
+export type CreateDocumentBaseRequest = z.infer<
+  typeof CreateDocumentBaseRequest
+>;
 
 export const AddDocumentRequest = z.object({
   fileId: z.string().uuid(),
@@ -4918,10 +5397,15 @@ export const CreateKnowledgeDropRequest = z
     visibility: DocumentVisibility.optional(),
     agentAccess: z.boolean().optional(),
   })
-  .refine((value) => (value.text === undefined) !== (value.fileId === undefined), {
-    message: "provide exactly one of text or fileId",
-  });
-export type CreateKnowledgeDropRequest = z.infer<typeof CreateKnowledgeDropRequest>;
+  .refine(
+    (value) => (value.text === undefined) !== (value.fileId === undefined),
+    {
+      message: "provide exactly one of text or fileId",
+    },
+  );
+export type CreateKnowledgeDropRequest = z.infer<
+  typeof CreateKnowledgeDropRequest
+>;
 
 // Move a document (and its indexed chunks) to another base. With no explicit
 // targetBaseId, applies the document's stored curation suggestion.
@@ -4943,7 +5427,9 @@ export const ReclassifyDocumentAuthorityRequest = z.object({
   expectedAuthority: DocumentAuthorityTuple,
   targetAuthorityKind: DocumentAuthorityKind,
 });
-export type ReclassifyDocumentAuthorityRequest = z.infer<typeof ReclassifyDocumentAuthorityRequest>;
+export type ReclassifyDocumentAuthorityRequest = z.infer<
+  typeof ReclassifyDocumentAuthorityRequest
+>;
 
 export const DocumentAuthorityReclassification = z.object({
   operationId: z.string().uuid(),
@@ -4952,7 +5438,9 @@ export const DocumentAuthorityReclassification = z.object({
   authority: DocumentAuthorityTuple,
   createdAt: z.string().datetime({ offset: true }),
 });
-export type DocumentAuthorityReclassification = z.infer<typeof DocumentAuthorityReclassification>;
+export type DocumentAuthorityReclassification = z.infer<
+  typeof DocumentAuthorityReclassification
+>;
 
 export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT = 50;
 export const DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT = 100;
@@ -4965,7 +5453,11 @@ export const ListDocumentAuthorityReclassificationsQuery = z.object({
     .positive()
     .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_MAX_LIMIT)
     .default(DOCUMENT_AUTHORITY_RECLASSIFICATION_LIST_DEFAULT_LIMIT),
-  cursor: z.string().min(1).max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).optional(),
+  cursor: z
+    .string()
+    .min(1)
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .optional(),
 });
 export type ListDocumentAuthorityReclassificationsQuery = z.infer<
   typeof ListDocumentAuthorityReclassificationsQuery
@@ -4974,7 +5466,10 @@ export type ListDocumentAuthorityReclassificationsQuery = z.infer<
 export const ListDocumentAuthorityReclassificationsResponse = z.object({
   receipts: z.array(DocumentAuthorityReclassification),
   hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+  nextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
 });
 export type ListDocumentAuthorityReclassificationsResponse = z.infer<
   typeof ListDocumentAuthorityReclassificationsResponse
@@ -4999,15 +5494,18 @@ export const DocumentDefaultCollectionBackfill = z.object({
   adoptedCount: z.number().int().nonnegative(),
   completedAt: z.string().datetime({ offset: true }).nullable(),
 });
-export type DocumentDefaultCollectionBackfill = z.infer<typeof DocumentDefaultCollectionBackfill>;
+export type DocumentDefaultCollectionBackfill = z.infer<
+  typeof DocumentDefaultCollectionBackfill
+>;
 
-export const DocumentDefaultCollectionBackfillRunAudit = DocumentDefaultCollectionBackfill.omit({
-  operationId: true,
-}).extend({
-  actorSubjectId: z.string().min(1),
-  startedAt: z.string().datetime({ offset: true }),
-  updatedAt: z.string().datetime({ offset: true }),
-});
+export const DocumentDefaultCollectionBackfillRunAudit =
+  DocumentDefaultCollectionBackfill.omit({
+    operationId: true,
+  }).extend({
+    actorSubjectId: z.string().min(1),
+    startedAt: z.string().datetime({ offset: true }),
+    updatedAt: z.string().datetime({ offset: true }),
+  });
 export type DocumentDefaultCollectionBackfillRunAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillRunAudit
 >;
@@ -5031,13 +5529,19 @@ export type DocumentDefaultCollectionBackfillReceiptAudit = z.infer<
   typeof DocumentDefaultCollectionBackfillReceiptAudit
 >;
 
-export const ListDocumentMigrationAuditQuery = ListDocumentAuthorityReclassificationsQuery;
-export type ListDocumentMigrationAuditQuery = z.infer<typeof ListDocumentMigrationAuditQuery>;
+export const ListDocumentMigrationAuditQuery =
+  ListDocumentAuthorityReclassificationsQuery;
+export type ListDocumentMigrationAuditQuery = z.infer<
+  typeof ListDocumentMigrationAuditQuery
+>;
 
 export const ListDocumentDefaultCollectionBackfillRunsResponse = z.object({
   runs: z.array(DocumentDefaultCollectionBackfillRunAudit),
   hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
+  nextCursor: z
+    .string()
+    .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+    .nullable(),
 });
 export type ListDocumentDefaultCollectionBackfillRunsResponse = z.infer<
   typeof ListDocumentDefaultCollectionBackfillRunsResponse
@@ -5093,14 +5597,17 @@ export type OrganizationDocumentAuthorityReclassification = z.infer<
   typeof OrganizationDocumentAuthorityReclassification
 >;
 
-export const ListOrganizationDocumentAuthorityReclassificationsResponse = z.object({
-  receipts: z.array(OrganizationDocumentAuthorityReclassification),
-  hasMore: z.boolean(),
-  nextCursor: z.string().max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS).nullable(),
-});
-export type ListOrganizationDocumentAuthorityReclassificationsResponse = z.infer<
-  typeof ListOrganizationDocumentAuthorityReclassificationsResponse
->;
+export const ListOrganizationDocumentAuthorityReclassificationsResponse =
+  z.object({
+    receipts: z.array(OrganizationDocumentAuthorityReclassification),
+    hasMore: z.boolean(),
+    nextCursor: z
+      .string()
+      .max(DOCUMENT_AUTHORITY_RECLASSIFICATION_CURSOR_MAX_CHARS)
+      .nullable(),
+  });
+export type ListOrganizationDocumentAuthorityReclassificationsResponse =
+  z.infer<typeof ListOrganizationDocumentAuthorityReclassificationsResponse>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),
@@ -5138,7 +5645,13 @@ export const KnowledgeMemoryKind = z.enum([
 export type KnowledgeMemoryKind = z.infer<typeof KnowledgeMemoryKind>;
 
 export const KnowledgeSourceRef = z.object({
-  kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
+  kind: z.enum([
+    "document_chunk",
+    "document",
+    "session_event",
+    "memory",
+    "external",
+  ]),
   id: z.string().min(1),
   uri: z.string().min(1).optional(),
   title: z.string().min(1).optional(),
@@ -5193,7 +5706,9 @@ export const CreateKnowledgeMemoryRequest = z.object({
   replacesId: z.string().min(1).optional(),
   slackPublication: MemorySlackPublicationDistribution.optional(),
 });
-export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
+export type CreateKnowledgeMemoryRequest = z.infer<
+  typeof CreateKnowledgeMemoryRequest
+>;
 
 export const UpdateKnowledgeMemoryRequest = z.object({
   status: KnowledgeMemoryStatus.optional(),
@@ -5207,7 +5722,9 @@ export const UpdateKnowledgeMemoryRequest = z.object({
   // Human audit action: pin (never decays) / unpin.
   pinned: z.boolean().optional(),
 });
-export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
+export type UpdateKnowledgeMemoryRequest = z.infer<
+  typeof UpdateKnowledgeMemoryRequest
+>;
 
 // GET list/filter over knowledge memories (curated + memory).
 export const KnowledgeMemorySearchRequest = z.object({
@@ -5217,10 +5734,18 @@ export const KnowledgeMemorySearchRequest = z.object({
   scope: z.string().min(1).optional(),
   limit: z.number().int().positive().max(100).default(20),
 });
-export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
+export type KnowledgeMemorySearchRequest = z.infer<
+  typeof KnowledgeMemorySearchRequest
+>;
 
-export const WorkspaceMemorySearchMode = z.enum(["hybrid", "vector", "keyword"]);
-export type WorkspaceMemorySearchMode = z.infer<typeof WorkspaceMemorySearchMode>;
+export const WorkspaceMemorySearchMode = z.enum([
+  "hybrid",
+  "vector",
+  "keyword",
+]);
+export type WorkspaceMemorySearchMode = z.infer<
+  typeof WorkspaceMemorySearchMode
+>;
 
 // POST hybrid search over the workspace's agent-visible memory (active ∪ approved).
 export const WorkspaceMemorySearchRequest = z.object({
@@ -5229,7 +5754,9 @@ export const WorkspaceMemorySearchRequest = z.object({
   limit: z.number().int().positive().max(20).optional(),
   mode: WorkspaceMemorySearchMode.optional(),
 });
-export type WorkspaceMemorySearchRequest = z.infer<typeof WorkspaceMemorySearchRequest>;
+export type WorkspaceMemorySearchRequest = z.infer<
+  typeof WorkspaceMemorySearchRequest
+>;
 
 export const WorkspaceMemorySearchResult = z.object({
   memory: KnowledgeMemory,
@@ -5238,12 +5765,16 @@ export const WorkspaceMemorySearchResult = z.object({
   vectorScore: z.number().nullable(),
   keywordScore: z.number().nullable(),
 });
-export type WorkspaceMemorySearchResult = z.infer<typeof WorkspaceMemorySearchResult>;
+export type WorkspaceMemorySearchResult = z.infer<
+  typeof WorkspaceMemorySearchResult
+>;
 
 export const WorkspaceMemorySearchResponse = z.object({
   results: z.array(WorkspaceMemorySearchResult),
 });
-export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
+export type WorkspaceMemorySearchResponse = z.infer<
+  typeof WorkspaceMemorySearchResponse
+>;
 
 export const ToolRef = z.object({
   kind: z.literal("mcp"),
@@ -5321,7 +5852,9 @@ export const SessionEffectiveToolPolicy = z
     idsTruncated: z.boolean(),
   })
   .strict();
-export type SessionEffectiveToolPolicy = z.infer<typeof SessionEffectiveToolPolicy>;
+export type SessionEffectiveToolPolicy = z.infer<
+  typeof SessionEffectiveToolPolicy
+>;
 const httpsUrl = z
   .string()
   .url()
@@ -5349,7 +5882,10 @@ const sessionMcpApprovalToolName = z
   .string()
   .min(1)
   .superRefine((name, ctx) => {
-    if (new TextEncoder().encode(name).byteLength > SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) {
+    if (
+      new TextEncoder().encode(name).byteLength >
+      SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: `MCP approval tool names must be at most ${SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES} UTF-8 bytes`,
@@ -5372,7 +5908,10 @@ const selectiveSessionMcpApprovalPolicy = z
     }
   })
   .transform((names) => [...new Set(names)].sort());
-export const SessionMcpApprovalPolicy = z.union([z.boolean(), selectiveSessionMcpApprovalPolicy]);
+export const SessionMcpApprovalPolicy = z.union([
+  z.boolean(),
+  selectiveSessionMcpApprovalPolicy,
+]);
 export type SessionMcpApprovalPolicy = z.infer<typeof SessionMcpApprovalPolicy>;
 
 export const SessionMcpServerInput = z.object({
@@ -5397,7 +5936,9 @@ export const SessionMcpCredentialUpdateInput = z.object({
   id: SessionMcpServerId,
   headers: z.record(z.string(), z.string()),
 });
-export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
+export type SessionMcpCredentialUpdateInput = z.infer<
+  typeof SessionMcpCredentialUpdateInput
+>;
 
 export const SessionMcpServerMetadata = z
   .object({
@@ -5438,7 +5979,10 @@ export class ResourceRefConflictError extends Error {
   }
 }
 
-export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRef[] {
+export function mergeToolRefs(
+  existing: ToolRef[],
+  additions: ToolRef[],
+): ToolRef[] {
   const byKey = new Map<string, ToolRef>();
   const order: string[] = [];
   for (const tool of [...existing, ...additions]) {
@@ -5453,8 +5997,10 @@ export function mergeToolRefs(existing: ToolRef[], additions: ToolRef[]): ToolRe
     // strict occurrence upgrades the merged ref so an unavailable server fails
     // the turn. This preserves the fail-loud default when defaults, packs, and
     // per-turn tool selections are combined.
-    const optional = prior.optional === true && tool.optional === true ? true : undefined;
-    const eager = prior.eager === true || tool.eager === true ? true : undefined;
+    const optional =
+      prior.optional === true && tool.optional === true ? true : undefined;
+    const eager =
+      prior.eager === true || tool.eager === true ? true : undefined;
     byKey.set(key, {
       kind: "mcp",
       id: prior.id,
@@ -5477,11 +6023,17 @@ export function mergeResourceRefs(
   const mountPaths = new Map(
     existing.map(
       (resource) =>
-        [resourceMountPathCollisionKey(resourceMountPath(resource)), stableJson(resource)] as const,
+        [
+          resourceMountPathCollisionKey(resourceMountPath(resource)),
+          stableJson(resource),
+        ] as const,
     ),
   );
   const identities = new Map(
-    existing.map((resource) => [resourceIdentityKey(resource), stableJson(resource)] as const),
+    existing.map(
+      (resource) =>
+        [resourceIdentityKey(resource), stableJson(resource)] as const,
+    ),
   );
   const exact = new Set(existing.map(stableJson));
 
@@ -5492,9 +6044,13 @@ export function mergeResourceRefs(
     }
     if (options.rejectConflicts) {
       const mountPath = resourceMountPath(resource);
-      const existingAtMount = mountPaths.get(resourceMountPathCollisionKey(mountPath));
+      const existingAtMount = mountPaths.get(
+        resourceMountPathCollisionKey(mountPath),
+      );
       if (existingAtMount && existingAtMount !== serialized) {
-        throw new ResourceRefConflictError(`resource mount path is already attached: ${mountPath}`);
+        throw new ResourceRefConflictError(
+          `resource mount path is already attached: ${mountPath}`,
+        );
       }
       const identity = resourceIdentityKey(resource);
       const existingIdentity = identities.get(identity);
@@ -5507,7 +6063,10 @@ export function mergeResourceRefs(
     out.push(resource);
     exact.add(serialized);
     identities.set(resourceIdentityKey(resource), serialized);
-    mountPaths.set(resourceMountPathCollisionKey(resourceMountPath(resource)), serialized);
+    mountPaths.set(
+      resourceMountPathCollisionKey(resourceMountPath(resource)),
+      serialized,
+    );
   }
   return out;
 }
@@ -5533,7 +6092,9 @@ export function latencyModeForMetadata(
   fallback: LatencyMode = "standard",
 ): LatencyMode {
   const value = metadata.latencyMode;
-  return value === "standard" || value === "priority" || value === "fast" ? value : fallback;
+  return value === "standard" || value === "priority" || value === "fast"
+    ? value
+    : fallback;
 }
 
 export function stableJson(value: unknown): string {
@@ -5602,9 +6163,15 @@ export const SessionGoalMutationPolicy = z.enum([
   "preserve_intent",
   "autonomous_adaptation",
 ]);
-export type SessionGoalMutationPolicy = z.infer<typeof SessionGoalMutationPolicy>;
+export type SessionGoalMutationPolicy = z.infer<
+  typeof SessionGoalMutationPolicy
+>;
 
-export const SessionGoalChangeKind = z.enum(["refinement", "adaptation", "replacement"]);
+export const SessionGoalChangeKind = z.enum([
+  "refinement",
+  "adaptation",
+  "replacement",
+]);
 export type SessionGoalChangeKind = z.infer<typeof SessionGoalChangeKind>;
 
 export const SESSION_GOAL_TEXT_MAX_BYTES = 8 * 1024;
@@ -5640,15 +6207,24 @@ function compareUtf8(left: string, right: string): number {
   return leftBytes.length - rightBytes.length;
 }
 
-export function normalizeSessionGoalRootConstraints(values: readonly string[]): string[] {
+export function normalizeSessionGoalRootConstraints(
+  values: readonly string[],
+): string[] {
   // PostgreSQL btrim(text) removes U+0020 at both ends. Keep the public
   // projector byte-equivalent with the storage trigger instead of using
   // JavaScript trim(), whose Unicode whitespace set is broader.
-  return [...new Set(values.map((value) => value.replace(/^ +| +$/g, "")))].sort(compareUtf8);
+  return [
+    ...new Set(values.map((value) => value.replace(/^ +| +$/g, ""))),
+  ].sort(compareUtf8);
 }
 
 export const SessionGoalRootConstraintsWrite = z
-  .array(boundedSessionGoalString(SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES, "goal root constraint"))
+  .array(
+    boundedSessionGoalString(
+      SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
+      "goal root constraint",
+    ),
+  )
   .transform(normalizeSessionGoalRootConstraints)
   .pipe(
     z
@@ -5656,16 +6232,23 @@ export const SessionGoalRootConstraintsWrite = z
       .max(SESSION_GOAL_ROOT_CONSTRAINTS_MAX_ITEMS)
       .refine(
         (values) =>
-          values.reduce((total, value) => total + sessionGoalUtf8Bytes(value), 0) <=
-          SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
+          values.reduce(
+            (total, value) => total + sessionGoalUtf8Bytes(value),
+            0,
+          ) <= SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES,
         {
           message: `goal root constraints exceed ${SESSION_GOAL_ROOT_CONSTRAINTS_MAX_BYTES} aggregate UTF-8 bytes`,
         },
       ),
   );
-export type SessionGoalRootConstraintsWrite = z.infer<typeof SessionGoalRootConstraintsWrite>;
+export type SessionGoalRootConstraintsWrite = z.infer<
+  typeof SessionGoalRootConstraintsWrite
+>;
 
-const SessionGoalTextWrite = boundedSessionGoalString(SESSION_GOAL_TEXT_MAX_BYTES, "goal text");
+const SessionGoalTextWrite = boundedSessionGoalString(
+  SESSION_GOAL_TEXT_MAX_BYTES,
+  "goal text",
+);
 const SessionGoalSuccessCriteriaWrite = boundedSessionGoalString(
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
   "goal success criteria",
@@ -5726,32 +6309,42 @@ export const ListSessionGoalRevisionsQuery = z.object({
     .default(SESSION_GOAL_REVISION_LIST_DEFAULT_LIMIT),
   before: z.string().uuid().optional(),
 });
-export type ListSessionGoalRevisionsQuery = z.infer<typeof ListSessionGoalRevisionsQuery>;
+export type ListSessionGoalRevisionsQuery = z.infer<
+  typeof ListSessionGoalRevisionsQuery
+>;
 
 export const ListSessionGoalRevisionsResponse = z.object({
   revisions: z.array(SessionGoalRevision),
   hasMore: z.boolean(),
   nextCursor: z.string().uuid().nullable(),
 });
-export type ListSessionGoalRevisionsResponse = z.infer<typeof ListSessionGoalRevisionsResponse>;
+export type ListSessionGoalRevisionsResponse = z.infer<
+  typeof ListSessionGoalRevisionsResponse
+>;
 
 export const ApplySessionGoalRevisionRequest = z.object({
   expectedObjectiveRevision: z.number().int().positive(),
   rationale: SessionGoalRationaleWrite.optional(),
 });
-export type ApplySessionGoalRevisionRequest = z.infer<typeof ApplySessionGoalRevisionRequest>;
+export type ApplySessionGoalRevisionRequest = z.infer<
+  typeof ApplySessionGoalRevisionRequest
+>;
 
 export const RejectSessionGoalRevisionRequest = z.object({
   expectedObjectiveRevision: z.number().int().positive(),
   rationale: SessionGoalRationaleWrite,
 });
-export type RejectSessionGoalRevisionRequest = z.infer<typeof RejectSessionGoalRevisionRequest>;
+export type RejectSessionGoalRevisionRequest = z.infer<
+  typeof RejectSessionGoalRevisionRequest
+>;
 
 export const RollbackSessionGoalRevisionRequest = z.object({
   expectedObjectiveRevision: z.number().int().positive(),
   rationale: SessionGoalRationaleWrite,
 });
-export type RollbackSessionGoalRevisionRequest = z.infer<typeof RollbackSessionGoalRevisionRequest>;
+export type RollbackSessionGoalRevisionRequest = z.infer<
+  typeof RollbackSessionGoalRevisionRequest
+>;
 
 export const SessionGoalPausedReason = z.enum([
   "agent",
@@ -5770,7 +6363,9 @@ export const SessionGoalContinuationState = z.enum([
   "blocked",
   "invariant_broken",
 ]);
-export type SessionGoalContinuationState = z.infer<typeof SessionGoalContinuationState>;
+export type SessionGoalContinuationState = z.infer<
+  typeof SessionGoalContinuationState
+>;
 
 export const SessionGoalContinuationReason = z.enum([
   "goal_inactive",
@@ -5790,7 +6385,9 @@ export const SessionGoalContinuationReason = z.enum([
   "backoff_pending",
   "missing_obligation",
 ]);
-export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+export type SessionGoalContinuationReason = z.infer<
+  typeof SessionGoalContinuationReason
+>;
 
 /**
  * Why a paused goal became active again. `api` is the operator PATCH; the
@@ -5817,7 +6414,9 @@ export const SessionGoalResumedEventPayload = z
       .optional(),
   })
   .passthrough();
-export type SessionGoalResumedEventPayload = z.infer<typeof SessionGoalResumedEventPayload>;
+export type SessionGoalResumedEventPayload = z.infer<
+  typeof SessionGoalResumedEventPayload
+>;
 
 export const SessionGoalContinuation = z.object({
   state: SessionGoalContinuationState,
@@ -5907,7 +6506,9 @@ export const UpdateSessionVariableSetsRequest = z
       });
     }
   });
-export type UpdateSessionVariableSetsRequest = z.infer<typeof UpdateSessionVariableSetsRequest>;
+export type UpdateSessionVariableSetsRequest = z.infer<
+  typeof UpdateSessionVariableSetsRequest
+>;
 
 /**
  * Replace the complete durable session tool policy, or explicitly opt back in
@@ -5930,7 +6531,9 @@ export const UpdateSessionToolPolicyRequest = z.union([
     })
     .strict(),
 ]);
-export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
+export type UpdateSessionToolPolicyRequest = z.infer<
+  typeof UpdateSessionToolPolicyRequest
+>;
 
 /**
  * A member's personal pin preference for a session. `expectedVersion` is
@@ -5960,14 +6563,24 @@ export const UpdateSessionAttentionRequest = z
     expectedVersion: z.number().int().nonnegative().optional(),
   })
   .strict()
-  .refine((value) => value.unread !== undefined || value.activelyWorking !== undefined, {
-    message: "unread or activelyWorking is required",
-  })
-  .refine((value) => value.acknowledgedThroughSequence === undefined || value.unread === false, {
-    message: "acknowledgedThroughSequence requires unread false",
-    path: ["acknowledgedThroughSequence"],
-  });
-export type UpdateSessionAttentionRequest = z.infer<typeof UpdateSessionAttentionRequest>;
+  .refine(
+    (value) =>
+      value.unread !== undefined || value.activelyWorking !== undefined,
+    {
+      message: "unread or activelyWorking is required",
+    },
+  )
+  .refine(
+    (value) =>
+      value.acknowledgedThroughSequence === undefined || value.unread === false,
+    {
+      message: "acknowledgedThroughSequence requires unread false",
+      path: ["acknowledgedThroughSequence"],
+    },
+  );
+export type UpdateSessionAttentionRequest = z.infer<
+  typeof UpdateSessionAttentionRequest
+>;
 
 /** A member's personal archive state for a root chat. */
 export const UpdateSessionArchiveRequest = z
@@ -5976,7 +6589,9 @@ export const UpdateSessionArchiveRequest = z
     expectedVersion: z.number().int().nonnegative().optional(),
   })
   .strict();
-export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveRequest>;
+export type UpdateSessionArchiveRequest = z.infer<
+  typeof UpdateSessionArchiveRequest
+>;
 
 // Operator context controls (slash-command palette: /clear, /compact). These
 // are session/operator actions, NOT a structured way to talk to the agent —
@@ -5990,7 +6605,9 @@ export type UpdateSessionArchiveRequest = z.infer<typeof UpdateSessionArchiveReq
 export const ClearSessionContextRequest = z.object({
   confirm: z.literal(true),
 });
-export type ClearSessionContextRequest = z.infer<typeof ClearSessionContextRequest>;
+export type ClearSessionContextRequest = z.infer<
+  typeof ClearSessionContextRequest
+>;
 
 /**
  * The marker key on the sentinel run-state blob written by a context clear. The
@@ -6016,7 +6633,9 @@ export const CLEARED_RUN_STATE_BLOB = JSON.stringify({
  * malformed JSON — returns false so genuine blobs/corruption are handled by the
  * normal deserialize path.
  */
-export function isClearedRunStateBlob(serialized: string | null | undefined): boolean {
+export function isClearedRunStateBlob(
+  serialized: string | null | undefined,
+): boolean {
   if (!serialized) {
     return false;
   }
@@ -6044,7 +6663,9 @@ export const OPEN_SUFFIX_RUN_STATE_BLOB = JSON.stringify({
   [OPEN_SUFFIX_RUN_STATE_MARKER]: true,
 });
 
-export function isOpenSuffixRunStateBlob(serialized: string | null | undefined): boolean {
+export function isOpenSuffixRunStateBlob(
+  serialized: string | null | undefined,
+): boolean {
   if (!serialized) {
     return false;
   }
@@ -6062,7 +6683,9 @@ export function isOpenSuffixRunStateBlob(serialized: string | null | undefined):
 
 /** Trigger conversation compaction now. No body fields today (forward-room). */
 export const CompactSessionContextRequest = z.object({}).strict();
-export type CompactSessionContextRequest = z.infer<typeof CompactSessionContextRequest>;
+export type CompactSessionContextRequest = z.infer<
+  typeof CompactSessionContextRequest
+>;
 
 /** Outcome of a manual /compact trigger. */
 export const CompactSessionContextResult = z.object({
@@ -6072,7 +6695,9 @@ export const CompactSessionContextResult = z.object({
   status: z.enum(["pending", "completed", "noop"]),
   message: z.string(),
 });
-export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
+export type CompactSessionContextResult = z.infer<
+  typeof CompactSessionContextResult
+>;
 
 /**
  * The principal whose authority accepted a session or turn. `subjectId` is an
@@ -6101,14 +6726,18 @@ export const SessionAuthorizationSurface = z.enum([
   "first_party_mcp",
   "codemode",
 ]);
-export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
+export type SessionAuthorizationSurface = z.infer<
+  typeof SessionAuthorizationSurface
+>;
 
 // Native connected-Codex GPT-Live WebRTC negotiation. The browser sends its
 // SDP offer, non-provider session configuration, and proof of the exact active
 // ordinary-session realtime owner. The API consumes that proof before resolving
 // the subscription credential and returns only the provider's SDP answer.
 export const CodexRealtimeWebrtcVersion = z.literal("v3");
-export type CodexRealtimeWebrtcVersion = z.infer<typeof CodexRealtimeWebrtcVersion>;
+export type CodexRealtimeWebrtcVersion = z.infer<
+  typeof CodexRealtimeWebrtcVersion
+>;
 
 export const CodexRealtimeVoice = z.enum([
   "juniper",
@@ -6143,7 +6772,9 @@ export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
   instructions: z.string().max(32_768).optional(),
   voice: CodexRealtimeVoice.optional(),
 }).strict();
-export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
+export type CodexRealtimeWebrtcRequest = z.infer<
+  typeof CodexRealtimeWebrtcRequest
+>;
 
 export const CodexRealtimeWebrtcResponse = z
   .object({
@@ -6160,7 +6791,9 @@ export const CodexRealtimeWebrtcResponse = z
     replay: z.boolean(),
   })
   .strict();
-export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
+export type CodexRealtimeWebrtcResponse = z.infer<
+  typeof CodexRealtimeWebrtcResponse
+>;
 
 export const GatewayRealtimeConnectRequest = SessionRealtimeOwnerProof.extend({
   realtimeId: z.string().uuid(),
@@ -6169,13 +6802,17 @@ export const GatewayRealtimeConnectRequest = SessionRealtimeOwnerProof.extend({
   expectedConnectionEpoch: z.number().int().positive(),
   rotate: z.boolean(),
 }).strict();
-export type GatewayRealtimeConnectRequest = z.infer<typeof GatewayRealtimeConnectRequest>;
+export type GatewayRealtimeConnectRequest = z.infer<
+  typeof GatewayRealtimeConnectRequest
+>;
 
 export const GatewayRealtimeInitialItem = z.object({
   role: z.enum(["user", "developer", "assistant"]),
   text: z.string().min(1).max(131_072),
 });
-export type GatewayRealtimeInitialItem = z.infer<typeof GatewayRealtimeInitialItem>;
+export type GatewayRealtimeInitialItem = z.infer<
+  typeof GatewayRealtimeInitialItem
+>;
 
 export const GatewayRealtimeConnectResponse = z
   .object({
@@ -6192,20 +6829,28 @@ export const GatewayRealtimeConnectResponse = z
     replay: z.literal(false),
   })
   .strict();
-export type GatewayRealtimeConnectResponse = z.infer<typeof GatewayRealtimeConnectResponse>;
+export type GatewayRealtimeConnectResponse = z.infer<
+  typeof GatewayRealtimeConnectResponse
+>;
 
-export const ActivateCodexRealtimeConnectionRequest = SessionRealtimeOwnerProof.extend({
-  operationId: z.string().uuid(),
-  connectionEpoch: z.number().int().positive(),
-  expectedVersion: z.number().int().positive(),
-  expectedConnectionEpoch: z.number().int().positive(),
-}).strict();
+export const ActivateCodexRealtimeConnectionRequest =
+  SessionRealtimeOwnerProof.extend({
+    operationId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    expectedVersion: z.number().int().positive(),
+    expectedConnectionEpoch: z.number().int().positive(),
+  }).strict();
 export type ActivateCodexRealtimeConnectionRequest = z.infer<
   typeof ActivateCodexRealtimeConnectionRequest
 >;
 
-export const SessionRealtimeLedgerDirection = z.enum(["provider_in", "provider_out"]);
-export type SessionRealtimeLedgerDirection = z.infer<typeof SessionRealtimeLedgerDirection>;
+export const SessionRealtimeLedgerDirection = z.enum([
+  "provider_in",
+  "provider_out",
+]);
+export type SessionRealtimeLedgerDirection = z.infer<
+  typeof SessionRealtimeLedgerDirection
+>;
 
 export const SessionRealtimeLedgerKind = z.enum([
   "user_transcript",
@@ -6217,7 +6862,9 @@ export const SessionRealtimeLedgerKind = z.enum([
   "session_update",
   "error",
 ]);
-export type SessionRealtimeLedgerKind = z.infer<typeof SessionRealtimeLedgerKind>;
+export type SessionRealtimeLedgerKind = z.infer<
+  typeof SessionRealtimeLedgerKind
+>;
 
 export const SessionRealtimeLedgerEntry = z
   .object({
@@ -6242,7 +6889,9 @@ export const SessionRealtimeLedgerEntry = z
     updatedAt: z.string().datetime(),
   })
   .strict();
-export type SessionRealtimeLedgerEntry = z.infer<typeof SessionRealtimeLedgerEntry>;
+export type SessionRealtimeLedgerEntry = z.infer<
+  typeof SessionRealtimeLedgerEntry
+>;
 
 export const SessionRealtimeInboundEntry = z
   .object({
@@ -6275,38 +6924,56 @@ export const SessionRealtimeInboundEntry = z
       context.addIssue({
         code: "custom",
         path: ["modelContext"],
-        message: "modelContext requires a delegation or finalized transcript entry",
+        message:
+          "modelContext requires a delegation or finalized transcript entry",
       });
     }
   });
-export type SessionRealtimeInboundEntry = z.infer<typeof SessionRealtimeInboundEntry>;
+export type SessionRealtimeInboundEntry = z.infer<
+  typeof SessionRealtimeInboundEntry
+>;
 
-export const SyncSessionRealtimeLedgerRequest = SessionRealtimeOwnerProof.extend({
-  expectedVersion: z.number().int().positive(),
-  connectionId: z.string().uuid(),
-  connectionEpoch: z.number().int().positive(),
-  entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
-  clientAckThroughSequence: z.number().int().nonnegative().nullable().optional(),
-  providerAckSequences: z.array(z.number().int().positive()).max(100).optional(),
-  providerStarted: z
-    .object({
-      providerSessionId: z.string().min(1).max(1024),
-      providerEventId: z.string().min(1).max(1024).nullable().optional(),
-    })
-    .strict()
-    .optional(),
-}).strict();
-export type SyncSessionRealtimeLedgerRequest = z.infer<typeof SyncSessionRealtimeLedgerRequest>;
+export const SyncSessionRealtimeLedgerRequest =
+  SessionRealtimeOwnerProof.extend({
+    expectedVersion: z.number().int().positive(),
+    connectionId: z.string().uuid(),
+    connectionEpoch: z.number().int().positive(),
+    entries: z.array(SessionRealtimeInboundEntry).max(64).optional(),
+    clientAckThroughSequence: z
+      .number()
+      .int()
+      .nonnegative()
+      .nullable()
+      .optional(),
+    providerAckSequences: z
+      .array(z.number().int().positive())
+      .max(100)
+      .optional(),
+    providerStarted: z
+      .object({
+        providerSessionId: z.string().min(1).max(1024),
+        providerEventId: z.string().min(1).max(1024).nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  }).strict();
+export type SyncSessionRealtimeLedgerRequest = z.infer<
+  typeof SyncSessionRealtimeLedgerRequest
+>;
 
 export const SyncSessionRealtimeLedgerResponse = z
   .object({
     accepted: z.array(
-      z.object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() }).strict(),
+      z
+        .object({ entry: SessionRealtimeLedgerEntry, replay: z.boolean() })
+        .strict(),
     ),
     outbound: z.array(SessionRealtimeLedgerEntry),
   })
   .strict();
-export type SyncSessionRealtimeLedgerResponse = z.infer<typeof SyncSessionRealtimeLedgerResponse>;
+export type SyncSessionRealtimeLedgerResponse = z.infer<
+  typeof SyncSessionRealtimeLedgerResponse
+>;
 
 export const SessionRealtimeModel = z.enum([
   "gpt-live-1-boulder-alpha",
@@ -6323,13 +6990,20 @@ export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
 export const WorkspaceRealtimeModelCatalogItem = z.object({
   id: SessionRealtimeModel,
   label: z.string().min(1),
-  provider: z.enum(["OpenGeni", "Connected Codex", "Connected SuperGrok", "Your Gateway"]),
+  provider: z.enum([
+    "OpenGeni",
+    "Connected Codex",
+    "Connected SuperGrok",
+    "Your Gateway",
+  ]),
   description: z.string().min(1),
   available: z.boolean(),
   unavailableReason: z.string().nullable(),
   recommended: z.boolean(),
 });
-export type WorkspaceRealtimeModelCatalogItem = z.infer<typeof WorkspaceRealtimeModelCatalogItem>;
+export type WorkspaceRealtimeModelCatalogItem = z.infer<
+  typeof WorkspaceRealtimeModelCatalogItem
+>;
 
 export const WorkspaceRealtimeModelCatalogResponse = z.object({
   models: z.array(WorkspaceRealtimeModelCatalogItem),
@@ -6370,23 +7044,31 @@ export const BeginSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
   operationId: z.string().uuid(),
   model: SessionRealtimeModel,
 });
-export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;
+export type BeginSessionRealtimeRequest = z.infer<
+  typeof BeginSessionRealtimeRequest
+>;
 
 export const RenewSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
   expectedVersion: z.number().int().positive(),
 });
-export type RenewSessionRealtimeRequest = z.infer<typeof RenewSessionRealtimeRequest>;
+export type RenewSessionRealtimeRequest = z.infer<
+  typeof RenewSessionRealtimeRequest
+>;
 
 export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
   reason: z.enum(["user_stop", "browser_unload"]),
 });
-export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
+export type EndSessionRealtimeRequest = z.infer<
+  typeof EndSessionRealtimeRequest
+>;
 
 export const SessionRealtimeMutationResponse = z.object({
   mode: SessionRealtimeMode,
   replay: z.boolean(),
 });
-export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
+export type SessionRealtimeMutationResponse = z.infer<
+  typeof SessionRealtimeMutationResponse
+>;
 
 export const SessionAuthorizationOperation = z.enum([
   "session.read",
@@ -6436,7 +7118,9 @@ export const SessionAuthorizationOperation = z.enum([
   "session.fork.create",
   "session.personal_resource.grant",
 ]);
-export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
+export type SessionAuthorizationOperation = z.infer<
+  typeof SessionAuthorizationOperation
+>;
 
 export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
   z.object({
@@ -6460,14 +7144,18 @@ export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
     initiatingHumanSubjectId: z.string().min(1).max(1024).nullable(),
   }),
 ]);
-export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
+export type SessionAuthorizationActor = z.infer<
+  typeof SessionAuthorizationActor
+>;
 
 export const SessionAuthorizationTarget = z.object({
   sessionId: z.string().uuid(),
   /** Server-resolved workspace lineage root; never accepted from a caller. */
   rootSessionId: z.string().uuid(),
 });
-export type SessionAuthorizationTarget = z.infer<typeof SessionAuthorizationTarget>;
+export type SessionAuthorizationTarget = z.infer<
+  typeof SessionAuthorizationTarget
+>;
 
 export type AuthorizeSessionInput = {
   accountId: string;
@@ -6496,7 +7184,9 @@ export const SessionAuthorizationDecision = z.discriminatedUnion("allowed", [
     reason: z.enum(["not_found", "forbidden", "revoked"]),
   }),
 ]);
-export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDecision>;
+export type SessionAuthorizationDecision = z.infer<
+  typeof SessionAuthorizationDecision
+>;
 
 /**
  * A database-applicable listing scope. `rootSessionIds` includes every
@@ -6511,11 +7201,17 @@ export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("all") }),
   z.object({
     kind: z.literal("scoped"),
-    rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
-    sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    rootSessionIds: z
+      .array(z.string().uuid())
+      .max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    sessionIds: z
+      .array(z.string().uuid())
+      .max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
   }),
 ]);
-export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
+export type SessionAuthorizationListScope = z.infer<
+  typeof SessionAuthorizationListScope
+>;
 
 export type ResolveSessionAuthorizationListScopeInput = {
   accountId: string;
@@ -6525,7 +7221,9 @@ export type ResolveSessionAuthorizationListScopeInput = {
 };
 
 export type SessionAuthorizationPort = {
-  authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  authorizeSession(
+    input: AuthorizeSessionInput,
+  ): Promise<SessionAuthorizationDecision>;
   /**
    * Return the complete current scope used inside OpenGeni's cursor query.
    * This is deliberately not a post-filter callback: search, pinning, ordering,
@@ -6548,14 +7246,18 @@ export const TimelineAnnotationSourceKind = z.enum([
   "assistant_message",
   "tool_output",
 ]);
-export type TimelineAnnotationSourceKind = z.infer<typeof TimelineAnnotationSourceKind>;
+export type TimelineAnnotationSourceKind = z.infer<
+  typeof TimelineAnnotationSourceKind
+>;
 
 export const TimelineAnnotationSourceEventType = z.enum([
   "user.message",
   "agent.message.completed",
   "agent.toolCall.output",
 ]);
-export type TimelineAnnotationSourceEventType = z.infer<typeof TimelineAnnotationSourceEventType>;
+export type TimelineAnnotationSourceEventType = z.infer<
+  typeof TimelineAnnotationSourceEventType
+>;
 
 function timelineAnnotationUtf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -6623,8 +7325,14 @@ export const DraftTimelineAnnotation = z
   .object({
     id: z.string().uuid(),
     source: TimelineAnnotationSource,
-    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
-    note: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_NOTE_MAX_BYTES, "annotation note"),
+    quote: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_QUOTE_MAX_BYTES,
+      "annotation quote",
+    ),
+    note: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_NOTE_MAX_BYTES,
+      "annotation note",
+    ),
   })
   .strict()
   .superRefine((annotation, ctx) => {
@@ -6649,13 +7357,18 @@ export const SubmittedTimelineAnnotation = DraftTimelineAnnotation.superRefine(
     }
   },
 );
-export type SubmittedTimelineAnnotation = z.infer<typeof SubmittedTimelineAnnotation>;
+export type SubmittedTimelineAnnotation = z.infer<
+  typeof SubmittedTimelineAnnotation
+>;
 
 export const TimelineAnnotation = z
   .object({
     id: z.string().uuid(),
     source: TimelineAnnotationSource,
-    quote: timelineAnnotationBoundedText(TIMELINE_ANNOTATION_QUOTE_MAX_BYTES, "annotation quote"),
+    quote: timelineAnnotationBoundedText(
+      TIMELINE_ANNOTATION_QUOTE_MAX_BYTES,
+      "annotation quote",
+    ),
     note: timelineAnnotationBoundedText(
       TIMELINE_ANNOTATION_NOTE_MAX_BYTES,
       "annotation note",
@@ -6685,7 +7398,8 @@ function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
         if (typeof id === "string") ids.add(id);
       }
       if (
-        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) > TIMELINE_ANNOTATIONS_MAX_BYTES
+        timelineAnnotationUtf8Bytes(JSON.stringify(annotations)) >
+        TIMELINE_ANNOTATIONS_MAX_BYTES
       ) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -6695,25 +7409,31 @@ function timelineAnnotationArray<T extends z.ZodTypeAny>(item: T) {
     });
 }
 
-export const DraftTimelineAnnotations = timelineAnnotationArray(DraftTimelineAnnotation);
+export const DraftTimelineAnnotations = timelineAnnotationArray(
+  DraftTimelineAnnotation,
+);
 export type DraftTimelineAnnotations = z.infer<typeof DraftTimelineAnnotations>;
 
-export const SubmittedTimelineAnnotations = timelineAnnotationArray(SubmittedTimelineAnnotation);
-export type SubmittedTimelineAnnotations = z.infer<typeof SubmittedTimelineAnnotations>;
-
-export const TimelineAnnotations = timelineAnnotationArray(TimelineAnnotation).superRefine(
-  (annotations, ctx) => {
-    for (let index = 0; index < annotations.length; index += 1) {
-      if (annotations[index]!.ordinal !== index + 1) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [index, "ordinal"],
-          message: "annotation ordinals must be contiguous and match array order",
-        });
-      }
-    }
-  },
+export const SubmittedTimelineAnnotations = timelineAnnotationArray(
+  SubmittedTimelineAnnotation,
 );
+export type SubmittedTimelineAnnotations = z.infer<
+  typeof SubmittedTimelineAnnotations
+>;
+
+export const TimelineAnnotations = timelineAnnotationArray(
+  TimelineAnnotation,
+).superRefine((annotations, ctx) => {
+  for (let index = 0; index < annotations.length; index += 1) {
+    if (annotations[index]!.ordinal !== index + 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [index, "ordinal"],
+        message: "annotation ordinals must be contiguous and match array order",
+      });
+    }
+  }
+});
 export type TimelineAnnotations = z.infer<typeof TimelineAnnotations>;
 
 export function numberTimelineAnnotations(
@@ -6757,7 +7477,8 @@ export function renderTimelineAnnotationsForModel(
   ].join("\n");
 }
 
-export const MODEL_CONTEXT_LABEL = "[Application context attached to this user message]" as const;
+export const MODEL_CONTEXT_LABEL =
+  "[Application context attached to this user message]" as const;
 export const SESSION_GOAL_CONTEXT_LABEL =
   "[Session goal frozen when this turn was accepted]" as const;
 
@@ -6766,7 +7487,9 @@ export const SESSION_GOAL_CONTEXT_LABEL =
  * state belongs at the chronological input boundary, not in the mutable
  * Agent.instructions prefix.
  */
-export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string | undefined {
+export function renderSessionGoalContext(
+  snapshot?: SessionGoalSnapshot,
+): string | undefined {
   if (!snapshot || snapshot.state === "none") return undefined;
   const rootConstraints = snapshot.rootConstraints.length
     ? `\nRoot constraints (must remain satisfied):\n${snapshot.rootConstraints.map((constraint) => `- ${constraint}`).join("\n")}`
@@ -6854,7 +7577,8 @@ export const SessionTurn = z
     /** Secret-safe projection of the exact personal authority frozen on this turn. */
     personalConnections: z.array(McpPersonalConnectionSummary).default([]),
     /** Safe summary only; opaque resource/grant identity remains private. */
-    personalResources: PersonalResourceAttachmentSummary.nullable().default(null),
+    personalResources:
+      PersonalResourceAttachmentSummary.nullable().default(null),
     cancelledBy: z.string().nullable(),
     cancelReason: z.string().nullable(),
     startedAt: z.string().nullable(),
@@ -6891,7 +7615,9 @@ export const EffectiveControlResumeOption = z.object({
   remainingPrimaryBlocker: EffectiveControlBlocker.optional(),
   impactCopy: z.string().min(1),
 });
-export type EffectiveControlResumeOption = z.infer<typeof EffectiveControlResumeOption>;
+export type EffectiveControlResumeOption = z.infer<
+  typeof EffectiveControlResumeOption
+>;
 
 export const EffectiveSessionControl = z.object({
   state: SessionControlState,
@@ -6928,7 +7654,10 @@ export const EffectiveSessionControl = z.object({
 });
 export type EffectiveSessionControl = z.infer<typeof EffectiveSessionControl>;
 
-const SessionOperationKey = z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS);
+const SessionOperationKey = z
+  .string()
+  .min(1)
+  .max(SESSION_OPERATION_KEY_MAX_CHARS);
 
 export const SessionCommandReceipt = z.object({
   id: z.string().uuid(),
@@ -6971,7 +7700,9 @@ export const MoveSessionQueueItemRequest = z.object({
   expectedQueueVersion: z.number().int().nonnegative(),
   beforeTurnId: z.string().uuid().nullable(),
 });
-export type MoveSessionQueueItemRequest = z.infer<typeof MoveSessionQueueItemRequest>;
+export type MoveSessionQueueItemRequest = z.infer<
+  typeof MoveSessionQueueItemRequest
+>;
 
 export const EditSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
@@ -6979,21 +7710,27 @@ export const EditSessionQueueItemRequest = z.object({
   expectedDraftRevision: z.number().int().nonnegative(),
   replaceDraft: z.boolean(),
 });
-export type EditSessionQueueItemRequest = z.infer<typeof EditSessionQueueItemRequest>;
+export type EditSessionQueueItemRequest = z.infer<
+  typeof EditSessionQueueItemRequest
+>;
 
 export const SteerSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
   expectedTurnVersion: z.number().int().positive(),
   controlEtag: z.string().min(1).optional(),
 });
-export type SteerSessionQueueItemRequest = z.infer<typeof SteerSessionQueueItemRequest>;
+export type SteerSessionQueueItemRequest = z.infer<
+  typeof SteerSessionQueueItemRequest
+>;
 
 export const DeleteSessionQueueItemRequest = z.object({
   clientEventId: SessionOperationKey,
   expectedTurnVersion: z.number().int().positive(),
   reason: z.string().min(1).optional(),
 });
-export type DeleteSessionQueueItemRequest = z.infer<typeof DeleteSessionQueueItemRequest>;
+export type DeleteSessionQueueItemRequest = z.infer<
+  typeof DeleteSessionQueueItemRequest
+>;
 
 export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
@@ -7029,7 +7766,9 @@ export const SubmitComposerDraftRequest = ComposerDraft.pick({
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .superRefine(requireEstablishedPersonalResourceEpoch);
-export type SubmitComposerDraftRequest = z.infer<typeof SubmitComposerDraftRequest>;
+export type SubmitComposerDraftRequest = z.infer<
+  typeof SubmitComposerDraftRequest
+>;
 
 /**
  * Create-only options saved with an actor's private pre-session draft. This is
@@ -7042,7 +7781,10 @@ export const NewSessionDraftOptions = withVariableSetIdAlias({
   targetSandboxId: z.string().uuid().optional(),
   workingDir: z.string().min(1).optional(),
   variableSetId: z.string().uuid().optional(),
-  variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+  variableSetIds: z
+    .array(z.string().uuid())
+    .max(MAX_SELECTED_VARIABLE_SETS)
+    .optional(),
   rigId: z.string().uuid().optional(),
   goal: GoalSpec.optional(),
   firstPartyMcpPermissions: z.array(Permission).optional(),
@@ -7073,7 +7815,9 @@ export const NewSessionSelectionHistory = z.object({
     )
     .max(50),
 });
-export type NewSessionSelectionHistory = z.infer<typeof NewSessionSelectionHistory>;
+export type NewSessionSelectionHistory = z.infer<
+  typeof NewSessionSelectionHistory
+>;
 
 /** Actor-private, server-authoritative composer state before a session exists. */
 export const NewSessionDraft = z.object({
@@ -7102,7 +7846,9 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   latencyMode: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
-export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
+export type SaveNewSessionDraftRequest = z.infer<
+  typeof SaveNewSessionDraftRequest
+>;
 
 export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
 export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
@@ -7111,9 +7857,13 @@ export const WORKSPACE_CONTROL_EVENT_MAX_BYTES = 16 * 1024;
 const WorkspaceControlReason = z
   .string()
   .min(1)
-  .refine((value) => !value.includes("\u0000"), "reason must not contain NUL bytes")
   .refine(
-    (value) => workspaceControlUtf8Bytes(value) <= WORKSPACE_CONTROL_REASON_MAX_BYTES,
+    (value) => !value.includes("\u0000"),
+    "reason must not contain NUL bytes",
+  )
+  .refine(
+    (value) =>
+      workspaceControlUtf8Bytes(value) <= WORKSPACE_CONTROL_REASON_MAX_BYTES,
     `reason must not exceed ${WORKSPACE_CONTROL_REASON_MAX_BYTES} UTF-8 bytes`,
   );
 
@@ -7131,7 +7881,9 @@ export const WorkspaceInferenceControlRequest = z.object({
   clientEventId: SessionOperationKey,
   expectedRevision: z.number().int().nonnegative().optional(),
 });
-export type WorkspaceInferenceControlRequest = z.infer<typeof WorkspaceInferenceControlRequest>;
+export type WorkspaceInferenceControlRequest = z.infer<
+  typeof WorkspaceInferenceControlRequest
+>;
 
 export const WorkspaceInferenceControlResponse = z.object({
   receipt: SessionCommandReceipt,
@@ -7140,7 +7892,9 @@ export const WorkspaceInferenceControlResponse = z.object({
   interruptionCount: z.number().int().nonnegative(),
   wakeCount: z.number().int().nonnegative(),
 });
-export type WorkspaceInferenceControlResponse = z.infer<typeof WorkspaceInferenceControlResponse>;
+export type WorkspaceInferenceControlResponse = z.infer<
+  typeof WorkspaceInferenceControlResponse
+>;
 
 /**
  * One durable workspace-wide invalidation for one committed control revision.
@@ -7170,7 +7924,9 @@ export const WorkspaceControlEventTruncation = z.object({
     reason: z.literal("not_retained"),
   }),
 });
-export type WorkspaceControlEventTruncation = z.infer<typeof WorkspaceControlEventTruncation>;
+export type WorkspaceControlEventTruncation = z.infer<
+  typeof WorkspaceControlEventTruncation
+>;
 
 export const WorkspaceControlEvent = z.object({
   id: z.string().uuid(),
@@ -7189,7 +7945,8 @@ export const WorkspaceControlEvent = z.object({
 });
 export type WorkspaceControlEvent = z.infer<typeof WorkspaceControlEvent>;
 
-export type WorkspaceControlBoundarySurface = WorkspaceControlEventTruncation["surface"];
+export type WorkspaceControlBoundarySurface =
+  WorkspaceControlEventTruncation["surface"];
 
 export type BoundWorkspaceControlEventOptions = {
   surface?: WorkspaceControlBoundarySurface;
@@ -7212,13 +7969,21 @@ export function boundWorkspaceControlEvent(
   options: BoundWorkspaceControlEventOptions = {},
 ): WorkspaceControlEvent {
   const existingFields = new Map(
-    (event.truncation?.fields ?? []).map((field) => [field.field, field] as const),
+    (event.truncation?.fields ?? []).map(
+      (field) => [field.field, field] as const,
+    ),
   );
   const reason =
     event.reason === null
       ? null
-      : boundWorkspaceControlText(event.reason, WORKSPACE_CONTROL_REASON_MAX_BYTES);
-  const actor = boundWorkspaceControlText(event.actor, WORKSPACE_CONTROL_ACTOR_MAX_BYTES);
+      : boundWorkspaceControlText(
+          event.reason,
+          WORKSPACE_CONTROL_REASON_MAX_BYTES,
+        );
+  const actor = boundWorkspaceControlText(
+    event.actor,
+    WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  );
   const reasonBytes = reason === null ? 0 : workspaceControlUtf8Bytes(reason);
   const actorBytes = workspaceControlUtf8Bytes(actor);
   const reasonOriginalBytes =
@@ -7253,7 +8018,9 @@ export function boundWorkspaceControlEvent(
   }
   if (fields.length === 0 && event.truncation == null) {
     if (sessionEventJsonBytes(event) > WORKSPACE_CONTROL_EVENT_MAX_BYTES) {
-      throw new RangeError("Workspace control event exceeds its bounded envelope");
+      throw new RangeError(
+        "Workspace control event exceeds its bounded envelope",
+      );
     }
     return event;
   }
@@ -7287,15 +8054,24 @@ function boundWorkspaceControlText(value: string, maxBytes: number): string {
   const bytes = encoder.encode(value);
   if (bytes.byteLength <= maxBytes) return value;
   const marker = "…[truncated]";
-  const prefixBudget = Math.max(0, maxBytes - encoder.encode(marker).byteLength);
+  const prefixBudget = Math.max(
+    0,
+    maxBytes - encoder.encode(marker).byteLength,
+  );
   let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
-  while (prefixEnd > 0 && prefixEnd < bytes.byteLength && (bytes[prefixEnd]! & 0xc0) === 0x80) {
+  while (
+    prefixEnd > 0 &&
+    prefixEnd < bytes.byteLength &&
+    (bytes[prefixEnd]! & 0xc0) === 0x80
+  ) {
     prefixEnd -= 1;
   }
   return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
 }
 
-function normalizedWorkspaceControlOriginalBytes(value: number | null | undefined): number {
+function normalizedWorkspaceControlOriginalBytes(
+  value: number | null | undefined,
+): number {
   return value === null || value === undefined || !Number.isFinite(value)
     ? 0
     : Math.max(0, Math.floor(value));
@@ -7312,12 +8088,21 @@ function settleWorkspaceControlDeliveredBytes(
   }
   const deliveredBytes = sessionEventJsonBytes(event);
   if (truncation.deliveredBytes !== deliveredBytes) {
-    throw new RangeError("Workspace control event byte accounting did not converge");
+    throw new RangeError(
+      "Workspace control event byte accounting did not converge",
+    );
   }
 }
 
-export const SystemUpdateClassification = z.enum(["success", "failure", "action_required", "info"]);
-export type SystemUpdateClassification = z.infer<typeof SystemUpdateClassification>;
+export const SystemUpdateClassification = z.enum([
+  "success",
+  "failure",
+  "action_required",
+  "info",
+]);
+export type SystemUpdateClassification = z.infer<
+  typeof SystemUpdateClassification
+>;
 
 export const SessionSystemUpdateKind = z.enum([
   "scheduled_occurrence",
@@ -7373,7 +8158,8 @@ export const CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS = [
   "child_waiting_capacity",
   "child_progress",
 ] as const satisfies readonly SessionSystemUpdateKind[];
-export type ChildLifecycleSystemUpdateKind = (typeof CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS)[number];
+export type ChildLifecycleSystemUpdateKind =
+  (typeof CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS)[number];
 
 const CHILD_LIFECYCLE_SYSTEM_UPDATE_KIND_SET: ReadonlySet<string> = new Set(
   CHILD_LIFECYCLE_SYSTEM_UPDATE_KINDS,
@@ -7401,16 +8187,20 @@ export const CHILD_PAUSED_REASON_MAX_BYTES = 2 * 1024;
 export const CHILD_PROGRESS_NOTE_MAX_BYTES = 4 * 1024;
 
 const boundedUtf8String = (maxBytes: number) =>
-  z.string().refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
-    message: `must be at most ${maxBytes} UTF-8 bytes`,
-  });
+  z
+    .string()
+    .refine((value) => new TextEncoder().encode(value).byteLength <= maxBytes, {
+      message: `must be at most ${maxBytes} UTF-8 bytes`,
+    });
 
 export const ChildRequiresActionRequest = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("human_input"),
     requestId: z.string().uuid(),
     questionCount: z.number().int().nonnegative(),
-    firstQuestion: boundedUtf8String(CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES),
+    firstQuestion: boundedUtf8String(
+      CHILD_REQUIRES_ACTION_QUESTION_PREVIEW_MAX_BYTES,
+    ),
     allowSkip: z.boolean(),
     expiresAt: z.string().nullable(),
   }),
@@ -7420,7 +8210,9 @@ export const ChildRequiresActionRequest = z.discriminatedUnion("kind", [
     toolName: boundedUtf8String(128).nullable(),
   }),
 ]);
-export type ChildRequiresActionRequest = z.infer<typeof ChildRequiresActionRequest>;
+export type ChildRequiresActionRequest = z.infer<
+  typeof ChildRequiresActionRequest
+>;
 
 export const ChildRequiresActionPayload = z
   .object({
@@ -7428,11 +8220,15 @@ export const ChildRequiresActionPayload = z
     childSessionId: z.string().uuid(),
     childTurnId: z.string().uuid(),
     childTurnGeneration: z.number().int().positive(),
-    requests: z.array(ChildRequiresActionRequest).max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
+    requests: z
+      .array(ChildRequiresActionRequest)
+      .max(CHILD_REQUIRES_ACTION_MAX_REQUESTS),
     truncated: z.boolean(),
   })
   .passthrough();
-export type ChildRequiresActionPayload = z.infer<typeof ChildRequiresActionPayload>;
+export type ChildRequiresActionPayload = z.infer<
+  typeof ChildRequiresActionPayload
+>;
 
 export const ChildRequiresActionResolvedOutcome = z.enum([
   "answered",
@@ -7442,7 +8238,9 @@ export const ChildRequiresActionResolvedOutcome = z.enum([
   "approved",
   "rejected",
 ]);
-export type ChildRequiresActionResolvedOutcome = z.infer<typeof ChildRequiresActionResolvedOutcome>;
+export type ChildRequiresActionResolvedOutcome = z.infer<
+  typeof ChildRequiresActionResolvedOutcome
+>;
 
 export const ChildRequiresActionRespondedByKind = z.enum([
   "human",
@@ -7450,7 +8248,9 @@ export const ChildRequiresActionRespondedByKind = z.enum([
   "agent_attempt",
   "system",
 ]);
-export type ChildRequiresActionRespondedByKind = z.infer<typeof ChildRequiresActionRespondedByKind>;
+export type ChildRequiresActionRespondedByKind = z.infer<
+  typeof ChildRequiresActionRespondedByKind
+>;
 
 export const ChildRequiresActionResolvedPayload = z
   .object({
@@ -7464,7 +8264,9 @@ export const ChildRequiresActionResolvedPayload = z
     respondedByKind: ChildRequiresActionRespondedByKind,
   })
   .passthrough();
-export type ChildRequiresActionResolvedPayload = z.infer<typeof ChildRequiresActionResolvedPayload>;
+export type ChildRequiresActionResolvedPayload = z.infer<
+  typeof ChildRequiresActionResolvedPayload
+>;
 
 export const ChildPausedPayload = z
   .object({
@@ -7486,7 +8288,9 @@ export const ChildWaitingCapacityPayload = z
     nextCheckAt: z.string().nullable(),
   })
   .passthrough();
-export type ChildWaitingCapacityPayload = z.infer<typeof ChildWaitingCapacityPayload>;
+export type ChildWaitingCapacityPayload = z.infer<
+  typeof ChildWaitingCapacityPayload
+>;
 
 export const ChildProgressPayload = z
   .object({
@@ -7548,7 +8352,9 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   ChildWaitingCapacityPayload,
   ChildProgressPayload,
 ]);
-export type SessionSystemUpdatePayload = z.infer<typeof SessionSystemUpdatePayload>;
+export type SessionSystemUpdatePayload = z.infer<
+  typeof SessionSystemUpdatePayload
+>;
 
 export const SessionSystemUpdateState = z.enum([
   "pending",
@@ -7596,7 +8402,9 @@ export const SessionPendingInputPreview = SessionSystemUpdate.pick({
   summary: true,
   createdAt: true,
 });
-export type SessionPendingInputPreview = z.infer<typeof SessionPendingInputPreview>;
+export type SessionPendingInputPreview = z.infer<
+  typeof SessionPendingInputPreview
+>;
 
 export const SessionQueueSnapshot = z.object({
   version: z.number().int().nonnegative(),
@@ -7637,12 +8445,20 @@ export function renderSessionSystemUpdateBatch(
   updates: ReadonlyArray<
     Pick<
       SessionSystemUpdate,
-      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+      | "id"
+      | "kind"
+      | "classification"
+      | "sourceId"
+      | "summary"
+      | "payload"
+      | "lineage"
     >
   >,
 ): string {
   if (updates.length === 0) {
-    throw new TypeError("A durable machine-input batch requires at least one update");
+    throw new TypeError(
+      "A durable machine-input batch requires at least one update",
+    );
   }
   return [
     "[OpenGeni internal updates]",
@@ -7661,7 +8477,8 @@ export function renderSessionSystemUpdateBatch(
   ].join("\n");
 }
 
-export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurrence]" as const;
+export const SCHEDULED_OCCURRENCE_TASK_LABEL =
+  "[OpenGeni scheduled task occurrence]" as const;
 
 /**
  * A pure scheduled-occurrence batch is a new task boundary for the model, not
@@ -7675,7 +8492,10 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurre
 function renderScheduledOccurrenceTaskBatch(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
 ): string | null {
-  if (updates.length === 0 || updates.some((update) => update.kind !== "scheduled_occurrence")) {
+  if (
+    updates.length === 0 ||
+    updates.some((update) => update.kind !== "scheduled_occurrence")
+  ) {
     return null;
   }
   const occurrences = updates.map((update) => {
@@ -7777,7 +8597,9 @@ export function variableSetVariableNameReservation(
   if ((VARIABLE_SET_RESERVED_EXACT_NAMES as readonly string[]).includes(name)) {
     return { kind: "exact", value: name };
   }
-  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) => name.startsWith(candidate));
+  const prefix = VARIABLE_SET_RESERVED_PREFIXES.find((candidate) =>
+    name.startsWith(candidate),
+  );
   return prefix ? { kind: "prefix", value: prefix } : null;
 }
 
@@ -7791,15 +8613,20 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(
         return input;
       }
       const record = input as Record<string, unknown>;
-      if (options.rejectKeys?.some((key) => Object.hasOwn(record, key))) return null;
+      if (options.rejectKeys?.some((key) => Object.hasOwn(record, key)))
+        return null;
       const aliased =
         record.variableSetId !== undefined || record.environmentId === undefined
           ? record
           : { ...record, variableSetId: record.environmentId };
-      if (aliased.variableSetIds === undefined && aliased.variableSetId !== undefined) {
+      if (
+        aliased.variableSetIds === undefined &&
+        aliased.variableSetId !== undefined
+      ) {
         return {
           ...aliased,
-          variableSetIds: aliased.variableSetId === null ? [] : [aliased.variableSetId],
+          variableSetIds:
+            aliased.variableSetId === null ? [] : [aliased.variableSetId],
         };
       }
       return aliased;
@@ -7807,7 +8634,9 @@ function withVariableSetIdAlias<T extends z.ZodRawShape>(
     z.object(shape).superRefine((value, context) => {
       const record = value as Record<string, unknown>;
       if (!Array.isArray(record.variableSetIds)) return;
-      if (new Set(record.variableSetIds).size !== record.variableSetIds.length) {
+      if (
+        new Set(record.variableSetIds).size !== record.variableSetIds.length
+      ) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["variableSetIds"],
@@ -7839,7 +8668,9 @@ export const VariableSetVariableMetadata = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-export type VariableSetVariableMetadata = z.infer<typeof VariableSetVariableMetadata>;
+export type VariableSetVariableMetadata = z.infer<
+  typeof VariableSetVariableMetadata
+>;
 /** @deprecated use VariableSetVariableMetadata */
 export const WorkspaceEnvironmentVariableMetadata = VariableSetVariableMetadata;
 /** @deprecated use VariableSetVariableMetadata */
@@ -7865,13 +8696,18 @@ export const VariableSetAttachmentMetadata = z.object({
   id: z.string().uuid(),
   scope: VariableSetScope,
 });
-export type VariableSetAttachmentMetadata = z.infer<typeof VariableSetAttachmentMetadata>;
+export type VariableSetAttachmentMetadata = z.infer<
+  typeof VariableSetAttachmentMetadata
+>;
 
-export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS = MAX_SELECTED_VARIABLE_SETS * 2;
+export const MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS =
+  MAX_SELECTED_VARIABLE_SETS * 2;
 export const ResolveVariableSetAttachmentsRequest = z
   .object({
     // One create can carry 25 explicit selections plus 25 defaults from its Rig.
-    variableSetIds: z.array(z.string().uuid()).max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
+    variableSetIds: z
+      .array(z.string().uuid())
+      .max(MAX_RESOLVED_VARIABLE_SET_ATTACHMENTS),
   })
   .strict()
   .superRefine((value, context) => {
@@ -7946,11 +8782,15 @@ export type UpdateWorkspaceEnvironmentRequest = UpdateVariableSetRequest;
 export const SetVariableSetVariableRequest = z.object({
   value: z.string().min(1).max(32768),
 });
-export type SetVariableSetVariableRequest = z.infer<typeof SetVariableSetVariableRequest>;
+export type SetVariableSetVariableRequest = z.infer<
+  typeof SetVariableSetVariableRequest
+>;
 /** @deprecated use SetVariableSetVariableRequest */
-export const SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
+export const SetWorkspaceEnvironmentVariableRequest =
+  SetVariableSetVariableRequest;
 /** @deprecated use SetVariableSetVariableRequest */
-export type SetWorkspaceEnvironmentVariableRequest = SetVariableSetVariableRequest;
+export type SetWorkspaceEnvironmentVariableRequest =
+  SetVariableSetVariableRequest;
 
 // --- Rigs ---------------------------------------------------------------------
 // Workspace-scoped, versioned sandbox machine definitions. A rig is the named
@@ -7964,8 +8804,15 @@ export const RigCheck = z.object({
 });
 export type RigCheck = z.infer<typeof RigCheck>;
 
-export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
-export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
+export const RigProviderImageBuildStatus = z.enum([
+  "building",
+  "ready",
+  "failed",
+  "unsupported",
+]);
+export type RigProviderImageBuildStatus = z.infer<
+  typeof RigProviderImageBuildStatus
+>;
 
 export const RigProviderImage = z
   .object({
@@ -8014,7 +8861,8 @@ export const RigProviderImage = z
       ctx.addIssue({
         code: "custom",
         path: ["imageId"],
-        message: "ready provider images require an immutable image id or digest",
+        message:
+          "ready provider images require an immutable image id or digest",
       });
     }
     if (
@@ -8024,8 +8872,11 @@ export const RigProviderImage = z
     ) {
       ctx.addIssue({
         code: "custom",
-        path: [value.artifactId === null ? "artifactId" : "providerBindingKeyHash"],
-        message: "ready Modal provider images require durable artifact ownership and binding",
+        path: [
+          value.artifactId === null ? "artifactId" : "providerBindingKeyHash",
+        ],
+        message:
+          "ready Modal provider images require durable artifact ownership and binding",
       });
     }
     if (value.status !== "ready" && value.artifactId !== null) {
@@ -8057,7 +8908,10 @@ export const RigProviderImage = z
         message: "terminal provider images require a finish timestamp",
       });
     }
-    if ((value.status === "failed" || value.status === "unsupported") && value.error === null) {
+    if (
+      (value.status === "failed" || value.status === "unsupported") &&
+      value.error === null
+    ) {
       ctx.addIssue({
         code: "custom",
         path: ["error"],
@@ -8081,7 +8935,10 @@ export const RigProviderImage = z
   });
 export type RigProviderImage = z.infer<typeof RigProviderImage>;
 
-export const RigProviderImages = z.partialRecord(SandboxBackend, RigProviderImage);
+export const RigProviderImages = z.partialRecord(
+  SandboxBackend,
+  RigProviderImage,
+);
 export type RigProviderImages = z.infer<typeof RigProviderImages>;
 
 export const RigVersion = z.object({
@@ -8135,7 +8992,13 @@ export type Rig = z.infer<typeof Rig>;
 export const RigChangeKind = z.enum(["setup_append", "definition_edit"]);
 export type RigChangeKind = z.infer<typeof RigChangeKind>;
 
-export const RigChangeStatus = z.enum(["proposed", "verifying", "merged", "rejected", "failed"]);
+export const RigChangeStatus = z.enum([
+  "proposed",
+  "verifying",
+  "merged",
+  "rejected",
+  "failed",
+]);
 export type RigChangeStatus = z.infer<typeof RigChangeStatus>;
 
 // A single check's outcome inside a verification run (populated in M4).
@@ -8245,7 +9108,9 @@ export type ReorderChannelsRequest = z.infer<typeof ReorderChannelsRequest>;
 export const UpdateSessionChannelRequest = z.object({
   channelId: z.string().uuid().nullable(),
 });
-export type UpdateSessionChannelRequest = z.infer<typeof UpdateSessionChannelRequest>;
+export type UpdateSessionChannelRequest = z.infer<
+  typeof UpdateSessionChannelRequest
+>;
 
 // setup_append: the exact command that already worked (+ an optional note).
 export const RigSetupAppendPayload = z.object({
@@ -8302,7 +9167,9 @@ export const ScheduledTaskOverlapPolicy = /* @__PURE__ */ z.enum([
   "skip",
   "buffer_one",
 ]);
-export type ScheduledTaskOverlapPolicy = z.infer<typeof ScheduledTaskOverlapPolicy>;
+export type ScheduledTaskOverlapPolicy = z.infer<
+  typeof ScheduledTaskOverlapPolicy
+>;
 
 export const ScheduledTaskTriggerType = /* @__PURE__ */ z.enum([
   "scheduled",
@@ -8322,7 +9189,8 @@ export type ScheduledTaskActionKind = z.infer<typeof ScheduledTaskActionKind>;
 
 const KnowledgeSourceSyncPositiveInteger = z.number().int().positive();
 const KnowledgeSourceSyncNonnegativeInteger = z.number().int().nonnegative();
-const KnowledgeSourceSyncZeroInteger = KnowledgeSourceSyncNonnegativeInteger.default(0);
+const KnowledgeSourceSyncZeroInteger =
+  KnowledgeSourceSyncNonnegativeInteger.default(0);
 const KnowledgeSourceSyncUuid = z.string().uuid();
 const KnowledgeSourceSyncSubject = z.string().min(1).max(1024);
 const KnowledgeSourceSyncEnabled = z.boolean().default(true);
@@ -8330,14 +9198,19 @@ const KnowledgeSourceSyncDisabled = z.boolean().default(false);
 
 export const KnowledgeSourceSyncLimits = /* @__PURE__ */ z.object({
   maxItems: KnowledgeSourceSyncPositiveInteger.max(10_000).default(500),
-  maxBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
-  maxFileBytes: KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
-  maxProviderRequests: KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
+  maxBytes:
+    KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(500_000_000),
+  maxFileBytes:
+    KnowledgeSourceSyncPositiveInteger.max(5_000_000_000).default(100_000_000),
+  maxProviderRequests:
+    KnowledgeSourceSyncPositiveInteger.max(10_000).default(1_000),
   maxElapsedSeconds: KnowledgeSourceSyncPositiveInteger.max(3_600).default(300),
   maxConcurrency: KnowledgeSourceSyncPositiveInteger.max(32).default(4),
   maxFailureDetails: KnowledgeSourceSyncPositiveInteger.max(100).default(25),
 });
-export type KnowledgeSourceSyncLimits = z.infer<typeof KnowledgeSourceSyncLimits>;
+export type KnowledgeSourceSyncLimits = z.infer<
+  typeof KnowledgeSourceSyncLimits
+>;
 
 export const KnowledgeSourceSyncConnectionAuthority = /* @__PURE__ */ z.object({
   connectionId: KnowledgeSourceSyncUuid,
@@ -8366,7 +9239,9 @@ export const KnowledgeSourceSyncAction = /* @__PURE__ */ z
     limits: KnowledgeSourceSyncLimits.prefault({}),
   })
   .strict();
-export type KnowledgeSourceSyncAction = z.infer<typeof KnowledgeSourceSyncAction>;
+export type KnowledgeSourceSyncAction = z.infer<
+  typeof KnowledgeSourceSyncAction
+>;
 
 export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ z
   .object({
@@ -8374,42 +9249,64 @@ export const KnowledgeSourceSyncScheduleControl = /* @__PURE__ */ z
     connectionPaused: KnowledgeSourceSyncDisabled,
   })
   .strict();
-export type KnowledgeSourceSyncScheduleControl = z.infer<typeof KnowledgeSourceSyncScheduleControl>;
+export type KnowledgeSourceSyncScheduleControl = z.infer<
+  typeof KnowledgeSourceSyncScheduleControl
+>;
 
-export const ScheduledTaskAction = /* @__PURE__ */ z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("agent_turn") }).strict(),
-  KnowledgeSourceSyncAction,
-]);
+export const ScheduledTaskAction = /* @__PURE__ */ z.discriminatedUnion(
+  "kind",
+  [
+    z.object({ kind: z.literal("agent_turn") }).strict(),
+    KnowledgeSourceSyncAction,
+  ],
+);
 export type ScheduledTaskAction = z.infer<typeof ScheduledTaskAction>;
 
-export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion("type", [
-  z.object({ type: z.literal("manual") }).strict(),
-  z.object({
-    type: z.literal("once"),
-    runAt: z.string().datetime({ offset: true }),
-    timeZone: z.string().min(1).default("UTC"),
-  }),
-  z.object({
-    type: z.literal("interval"),
-    everySeconds: z.number().int().positive(),
-    startAt: z.string().datetime({ offset: true }).optional(),
-    endAt: z.string().datetime({ offset: true }).optional(),
-  }),
-  z.object({
-    type: z.literal("calendar"),
-    timeZone: z.string().min(1).default("UTC"),
-    hour: z.number().int().min(0).max(23),
-    minute: z.number().int().min(0).max(59),
-    daysOfWeek: z
-      .array(z.enum(["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"]))
-      .min(1)
-      .optional(),
-  }),
-]);
-export type ScheduledTaskScheduleSpec = z.infer<typeof ScheduledTaskScheduleSpec>;
+export const ScheduledTaskScheduleSpec = /* @__PURE__ */ z.discriminatedUnion(
+  "type",
+  [
+    z.object({ type: z.literal("manual") }).strict(),
+    z.object({
+      type: z.literal("once"),
+      runAt: z.string().datetime({ offset: true }),
+      timeZone: z.string().min(1).default("UTC"),
+    }),
+    z.object({
+      type: z.literal("interval"),
+      everySeconds: z.number().int().positive(),
+      startAt: z.string().datetime({ offset: true }).optional(),
+      endAt: z.string().datetime({ offset: true }).optional(),
+    }),
+    z.object({
+      type: z.literal("calendar"),
+      timeZone: z.string().min(1).default("UTC"),
+      hour: z.number().int().min(0).max(23),
+      minute: z.number().int().min(0).max(59),
+      daysOfWeek: z
+        .array(
+          z.enum([
+            "SUNDAY",
+            "MONDAY",
+            "TUESDAY",
+            "WEDNESDAY",
+            "THURSDAY",
+            "FRIDAY",
+            "SATURDAY",
+          ]),
+        )
+        .min(1)
+        .optional(),
+    }),
+  ],
+);
+export type ScheduledTaskScheduleSpec = z.infer<
+  typeof ScheduledTaskScheduleSpec
+>;
 
 export const IncidentTelemetryExecutionClass = z.literal("incident_telemetry");
-export type IncidentTelemetryExecutionClass = z.infer<typeof IncidentTelemetryExecutionClass>;
+export type IncidentTelemetryExecutionClass = z.infer<
+  typeof IncidentTelemetryExecutionClass
+>;
 
 const IncidentTelemetryIdentifier = z.string().trim().min(1).max(200);
 const IncidentTelemetryMetricName = z
@@ -8431,7 +9328,9 @@ export const IncidentTelemetrySeriesMetadata = z
     labels: z.array(IncidentTelemetryLabelName).min(1).max(64),
   })
   .strict();
-export type IncidentTelemetrySeriesMetadata = z.infer<typeof IncidentTelemetrySeriesMetadata>;
+export type IncidentTelemetrySeriesMetadata = z.infer<
+  typeof IncidentTelemetrySeriesMetadata
+>;
 
 export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
   z
@@ -8460,7 +9359,9 @@ export const IncidentTelemetryDataRoute = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-export type IncidentTelemetryDataRoute = z.infer<typeof IncidentTelemetryDataRoute>;
+export type IncidentTelemetryDataRoute = z.infer<
+  typeof IncidentTelemetryDataRoute
+>;
 
 export const IncidentTelemetryPreflight = z
   .object({
@@ -8468,19 +9369,31 @@ export const IncidentTelemetryPreflight = z
     // validator requires every entry to already be present in agentConfig.
     requiredResources: z.array(ResourceRef).max(100).default([]),
     requiredMcpServerIds: z.array(SessionMcpServerId).max(64).default([]),
-    requiredFirstPartyMcpTools: z.array(FirstPartyMcpToolName).max(100).default([]),
+    requiredFirstPartyMcpTools: z
+      .array(FirstPartyMcpToolName)
+      .max(100)
+      .default([]),
     requiredFirstPartyMcpPermissions: z.array(Permission).max(100).default([]),
     requiredRig: z
       .object({
         name: z.string().trim().min(1).max(120),
-        credentialHookIds: z.array(IncidentTelemetryIdentifier).max(50).default([]),
+        credentialHookIds: z
+          .array(IncidentTelemetryIdentifier)
+          .max(50)
+          .default([]),
       })
       .strict()
       .nullable()
       .default(null),
     // Names only. The dispatch preflight never reads or decrypts values.
-    requiredVariableSetNames: z.array(z.string().trim().min(1).max(120)).max(25).default([]),
-    requiredVariableNames: z.array(VariableSetVariableName).max(100).default([]),
+    requiredVariableSetNames: z
+      .array(z.string().trim().min(1).max(120))
+      .max(25)
+      .default([]),
+    requiredVariableNames: z
+      .array(VariableSetVariableName)
+      .max(100)
+      .default([]),
     dataSource: z
       .object({
         kind: z.literal("prometheus"),
@@ -8491,14 +9404,23 @@ export const IncidentTelemetryPreflight = z
         // structured alert occurrence and bound every telemetry query.
         alertSelectorLabels: z.array(IncidentTelemetryLabelName).min(1).max(16),
         route: IncidentTelemetryDataRoute,
-        requiredSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(100),
-        availableSeries: z.array(IncidentTelemetrySeriesMetadata).min(1).max(500),
+        requiredSeries: z
+          .array(IncidentTelemetrySeriesMetadata)
+          .min(1)
+          .max(100),
+        availableSeries: z
+          .array(IncidentTelemetrySeriesMetadata)
+          .min(1)
+          .max(500),
       })
       .strict(),
   })
   .strict()
   .superRefine((value, context) => {
-    for (const [index, label] of value.dataSource.alertSelectorLabels.entries()) {
+    for (const [
+      index,
+      label,
+    ] of value.dataSource.alertSelectorLabels.entries()) {
       if (label === value.dataSource.workspaceLabel) {
         context.addIssue({
           code: "custom",
@@ -8520,13 +9442,16 @@ export const IncidentTelemetryPreflight = z
           context.addIssue({
             code: "custom",
             path: ["dataSource", "requiredSeries", index, "labels"],
-            message: "required incident series must include every alert selector label",
+            message:
+              "required incident series must include every alert selector label",
           });
         }
       }
     }
   });
-export type IncidentTelemetryPreflight = z.infer<typeof IncidentTelemetryPreflight>;
+export type IncidentTelemetryPreflight = z.infer<
+  typeof IncidentTelemetryPreflight
+>;
 
 /**
  * Canonical UTF-8 ingress limits for newly written scheduled execution truth.
@@ -8565,7 +9490,9 @@ function scheduledTaskUtf8Bytes(value: string): number {
 function scheduledTaskJsonUtf8Bytes(value: unknown): number {
   try {
     const encoded = JSON.stringify(value);
-    return encoded === undefined ? Number.POSITIVE_INFINITY : scheduledTaskUtf8Bytes(encoded);
+    return encoded === undefined
+      ? Number.POSITIVE_INFINITY
+      : scheduledTaskUtf8Bytes(encoded);
   } catch {
     return Number.POSITIVE_INFINITY;
   }
@@ -8587,7 +9514,9 @@ export function scheduledOccurrencePayloadUtf8Bytes(agentConfig: {
     text: agentConfig.prompt,
     scheduledTaskId: placeholder,
     scheduledTaskRunId: placeholder,
-    ...(agentConfig.resources?.length ? { resources: agentConfig.resources } : {}),
+    ...(agentConfig.resources?.length
+      ? { resources: agentConfig.resources }
+      : {}),
     ...(agentConfig.tools?.length ? { tools: agentConfig.tools } : {}),
   });
 }
@@ -8619,7 +9548,10 @@ function scheduledTaskBoundedString(maxBytes: number, label: string) {
 
 /** Ingress-bounded task name for create/update requests. */
 export const ScheduledTaskNameInput =
-  /* @__PURE__ */ scheduledTaskBoundedString(SCHEDULED_TASK_NAME_MAX_BYTES, "scheduled task name");
+  /* @__PURE__ */ scheduledTaskBoundedString(
+    SCHEDULED_TASK_NAME_MAX_BYTES,
+    "scheduled task name",
+  );
 /** Ingress-bounded task metadata for create/update requests. */
 export const ScheduledTaskMetadataInput =
   /* @__PURE__ */ scheduledTaskBoundedJsonObject(
@@ -8638,7 +9570,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     .strict();
   return {
     prompt: bounded
-      ? scheduledTaskBoundedString(SCHEDULED_TASK_PROMPT_MAX_BYTES, "scheduled task prompt")
+      ? scheduledTaskBoundedString(
+          SCHEDULED_TASK_PROMPT_MAX_BYTES,
+          "scheduled task prompt",
+        )
       : z.string().min(1),
     resources: bounded
       ? z.array(ResourceRef).max(SCHEDULED_TASK_RESOURCE_MAX_COUNT).default([])
@@ -8680,18 +9615,25 @@ function refineScheduledTaskAgentConfig(
   value: { executionClass?: unknown; incidentTelemetryPreflight?: unknown },
   context: z.RefinementCtx,
 ): void {
-  if (value.executionClass === "incident_telemetry" && !value.incidentTelemetryPreflight) {
+  if (
+    value.executionClass === "incident_telemetry" &&
+    !value.incidentTelemetryPreflight
+  ) {
     context.addIssue({
       code: "custom",
       path: ["incidentTelemetryPreflight"],
       message: "incident telemetry tasks require incidentTelemetryPreflight",
     });
   }
-  if (value.executionClass !== "incident_telemetry" && value.incidentTelemetryPreflight) {
+  if (
+    value.executionClass !== "incident_telemetry" &&
+    value.incidentTelemetryPreflight
+  ) {
     context.addIssue({
       code: "custom",
       path: ["executionClass"],
-      message: "incidentTelemetryPreflight requires executionClass=incident_telemetry",
+      message:
+        "incidentTelemetryPreflight requires executionClass=incident_telemetry",
     });
   }
 }
@@ -8720,7 +9662,9 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
         message: "selfhosted scheduled tasks require machineTarget",
       });
     }
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES) {
+    if (
+      scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES
+    ) {
       context.addIssue({
         code: "custom",
         message: `scheduled task agent config exceeds ${SCHEDULED_TASK_AGENT_CONFIG_MAX_BYTES} UTF-8 bytes`,
@@ -8738,7 +9682,9 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
     }
     refineScheduledTaskAgentConfig(value, context);
   });
-export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
+export type ScheduledTaskAgentConfigInput = z.infer<
+  typeof ScheduledTaskAgentConfigInput
+>;
 
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
@@ -8787,6 +9733,10 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
     resolvedModel: z.string().min(1),
     resolvedReasoningEffort: ReasoningEffort,
     resolvedLatencyMode: LatencyMode,
+    /** Secret-safe TurnExecutionPolicyV1 accepted with this occurrence. Kept
+     * structurally open here because the canonical policy schema is declared
+     * later in this package; consumers must parse it with TurnExecutionPolicyV1. */
+    turnExecutionPolicy: z.unknown().optional(),
     resolvedSandboxBackend: SandboxBackend,
     resolvedSandboxOs: SandboxOs,
     resolvedTools: z.array(ToolRef).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
@@ -8855,7 +9805,9 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
         firstPartyMcpTools: z.array(FirstPartyMcpToolName),
         firstPartyMcpPermissions: z.array(Permission).nullable(),
         toolPolicy: SessionToolPolicy,
-        mcpServerIds: z.array(z.string().min(1).max(256)).max(SCHEDULED_TASK_TOOL_MAX_COUNT),
+        mcpServerIds: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
         effectiveMcpServerIds: z
           .array(z.string().min(1).max(256))
           .max(SCHEDULED_TASK_TOOL_MAX_COUNT),
@@ -8923,14 +9875,19 @@ export const ScheduledTaskRunAcceptedExecution = /* @__PURE__ */ z
   })
   .strict()
   .superRefine((value, context) => {
-    if (scheduledTaskJsonUtf8Bytes(value) > SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES) {
+    if (
+      scheduledTaskJsonUtf8Bytes(value) >
+      SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES
+    ) {
       context.addIssue({
         code: "custom",
         message: `scheduled accepted execution exceeds ${SCHEDULED_TASK_ACCEPTED_EXECUTION_MAX_BYTES} UTF-8 bytes`,
       });
     }
   });
-export type ScheduledTaskRunAcceptedExecution = z.infer<typeof ScheduledTaskRunAcceptedExecution>;
+export type ScheduledTaskRunAcceptedExecution = z.infer<
+  typeof ScheduledTaskRunAcceptedExecution
+>;
 
 export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
   externalObjectId: KnowledgeSourceSyncSubject,
@@ -8950,11 +9907,21 @@ export const KnowledgeSourceSyncFailure = /* @__PURE__ */ z.object({
   retryable: z.boolean(),
   message: z.string().min(1).max(1000),
 });
-export type KnowledgeSourceSyncFailure = z.infer<typeof KnowledgeSourceSyncFailure>;
+export type KnowledgeSourceSyncFailure = z.infer<
+  typeof KnowledgeSourceSyncFailure
+>;
 
 export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
   phase: z
-    .enum(["queued", "inventory", "transfer", "index", "checkpoint", "completed", "failed"])
+    .enum([
+      "queued",
+      "inventory",
+      "transfer",
+      "index",
+      "checkpoint",
+      "completed",
+      "failed",
+    ])
     .default("queued"),
   scanned: KnowledgeSourceSyncZeroInteger,
   imported: KnowledgeSourceSyncZeroInteger,
@@ -8975,7 +9942,9 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
   reconnectRequired: KnowledgeSourceSyncDisabled,
   failures: z.array(KnowledgeSourceSyncFailure).max(100).default([]),
 });
-export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
+export type KnowledgeSourceSyncRunSummary = z.infer<
+  typeof KnowledgeSourceSyncRunSummary
+>;
 
 export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
@@ -9041,7 +10010,8 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
     context.addIssue({
       code: "custom",
       path: ["agentConfig", "goal"],
-      message: "agentConfig.goal cannot be used with an existing-session target",
+      message:
+        "agentConfig.goal cannot be used with an existing-session target",
     });
   }
   if (value.runMode === "existing_session" && value.agentConfig.machineTarget) {
@@ -9083,7 +10053,9 @@ export const CreateScheduledTaskRequest = /* @__PURE__ */ z.union([
   CreateKnowledgeSourceSyncScheduledTaskRequest,
   CreateAgentScheduledTaskRequest,
 ]);
-export type CreateScheduledTaskRequest = z.infer<typeof CreateScheduledTaskRequest>;
+export type CreateScheduledTaskRequest = z.infer<
+  typeof CreateScheduledTaskRequest
+>;
 
 export const UpdateScheduledTaskRequest =
   /* @__PURE__ */ withVariableSetIdAlias({
@@ -9103,14 +10075,21 @@ export const UpdateScheduledTaskRequest =
     rigId: z.string().uuid().nullable().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
   }).superRefine((value, context) => {
-    if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
+    if (
+      value.targetSessionId &&
+      value.runMode &&
+      value.runMode !== "existing_session"
+    ) {
       context.addIssue({
         code: "custom",
         path: ["targetSessionId"],
         message: "targetSessionId requires runMode=existing_session",
       });
     }
-    if (value.runMode === "existing_session" && value.targetSessionId === null) {
+    if (
+      value.runMode === "existing_session" &&
+      value.targetSessionId === null
+    ) {
       context.addIssue({
         code: "custom",
         path: ["targetSessionId"],
@@ -9124,7 +10103,8 @@ export const UpdateScheduledTaskRequest =
       context.addIssue({
         code: "custom",
         path: ["agentConfig", "goal"],
-        message: "agentConfig.goal cannot be used with an existing-session target",
+        message:
+          "agentConfig.goal cannot be used with an existing-session target",
       });
     }
     if (
@@ -9138,7 +10118,9 @@ export const UpdateScheduledTaskRequest =
       });
     }
   });
-export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskRequest>;
+export type UpdateScheduledTaskRequest = z.infer<
+  typeof UpdateScheduledTaskRequest
+>;
 
 /**
  * Manual-trigger body. `triggerId` is a client-supplied idempotency token: a
@@ -9148,7 +10130,9 @@ export type UpdateScheduledTaskRequest = z.infer<typeof UpdateScheduledTaskReque
 export const TriggerScheduledTaskRequest = z.object({
   triggerId: z.string().min(1).max(128).optional(),
 });
-export type TriggerScheduledTaskRequest = z.infer<typeof TriggerScheduledTaskRequest>;
+export type TriggerScheduledTaskRequest = z.infer<
+  typeof TriggerScheduledTaskRequest
+>;
 
 // ============ Event-triggered automations ============
 
@@ -9157,21 +10141,23 @@ export const AUTOMATION_EVENT_PAYLOAD_MAX_BYTES = 256 * 1024;
 export const AUTOMATION_SESSION_TEMPLATE_MAX_BYTES = 512 * 1024;
 export const AUTOMATION_MAX_MATCHED_TRIGGERS = 32;
 
-const AutomationBoundedJson = z.record(z.string(), z.unknown()).superRefine((value, context) => {
-  let bytes = Number.POSITIVE_INFINITY;
-  try {
-    bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
-  } catch {
-    // The shared JSON/protocol boundary reports the exact runtime path later;
-    // this public ingress still fails closed on an unserializable value.
-  }
-  if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
-    context.addIssue({
-      code: "custom",
-      message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
-    });
-  }
-});
+const AutomationBoundedJson = z
+  .record(z.string(), z.unknown())
+  .superRefine((value, context) => {
+    let bytes = Number.POSITIVE_INFINITY;
+    try {
+      bytes = new TextEncoder().encode(JSON.stringify(value)).byteLength;
+    } catch {
+      // The shared JSON/protocol boundary reports the exact runtime path later;
+      // this public ingress still fails closed on an unserializable value.
+    }
+    if (bytes > AUTOMATION_EVENT_PAYLOAD_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `automation JSON exceeds ${AUTOMATION_EVENT_PAYLOAD_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
 
 export const AutomationAdapterId = z
   .string()
@@ -9209,7 +10195,9 @@ export const SignedJsonAutomationEnvelope = z
     data: z.record(z.string(), z.unknown()).default({}),
   })
   .strict();
-export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
+export type SignedJsonAutomationEnvelope = z.infer<
+  typeof SignedJsonAutomationEnvelope
+>;
 
 const AutomationSessionSkill = z
   .object({
@@ -9232,7 +10220,10 @@ const AutomationSessionSkill = z
                 !path.includes("\\") &&
                 path
                   .split("/")
-                  .every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
+                  .every(
+                    (segment) =>
+                      segment.length > 0 && segment !== "." && segment !== "..",
+                  ),
               "automation skill file path must be a safe relative POSIX path",
             ),
           content: z.string().max(256 * 1024),
@@ -9291,7 +10282,9 @@ export const AutomationSessionTemplate = z
       });
     }
   });
-export type AutomationSessionTemplate = z.infer<typeof AutomationSessionTemplate>;
+export type AutomationSessionTemplate = z.infer<
+  typeof AutomationSessionTemplate
+>;
 
 export const AutomationNormalizedEvent = z
   .object({
@@ -9304,7 +10297,9 @@ export const AutomationNormalizedEvent = z
     payload: AutomationBoundedJson,
   })
   .strict();
-export type AutomationNormalizedEvent = z.infer<typeof AutomationNormalizedEvent>;
+export type AutomationNormalizedEvent = z.infer<
+  typeof AutomationNormalizedEvent
+>;
 
 export const AutomationAcceptedExecution = z
   .object({
@@ -9328,7 +10323,9 @@ export const AutomationAcceptedExecution = z
     provenance: AutomationBoundedJson,
   })
   .strict();
-export type AutomationAcceptedExecution = z.infer<typeof AutomationAcceptedExecution>;
+export type AutomationAcceptedExecution = z.infer<
+  typeof AutomationAcceptedExecution
+>;
 
 export const CreateAutomationSourceRequest = z
   .object({
@@ -9338,7 +10335,9 @@ export const CreateAutomationSourceRequest = z
     configuration: AutomationBoundedJson.default({}),
   })
   .strict();
-export type CreateAutomationSourceRequest = z.infer<typeof CreateAutomationSourceRequest>;
+export type CreateAutomationSourceRequest = z.infer<
+  typeof CreateAutomationSourceRequest
+>;
 
 export const UpdateAutomationSourceRequest = z
   .object({
@@ -9348,8 +10347,13 @@ export const UpdateAutomationSourceRequest = z
     status: AutomationSourceStatus.optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).length > 0, "automation source update is empty");
-export type UpdateAutomationSourceRequest = z.infer<typeof UpdateAutomationSourceRequest>;
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "automation source update is empty",
+  );
+export type UpdateAutomationSourceRequest = z.infer<
+  typeof UpdateAutomationSourceRequest
+>;
 
 export const AutomationSource = z.object({
   id: z.string().uuid(),
@@ -9384,31 +10388,46 @@ export const CreateAutomationTriggerRequest = z
   })
   .strict()
   .superRefine((value, context) => {
-    if ((value.packInstallationId === null) !== (value.packTemplateId === null)) {
+    if (
+      (value.packInstallationId === null) !==
+      (value.packTemplateId === null)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["packTemplateId"],
-        message: "packInstallationId and packTemplateId must be supplied together",
+        message:
+          "packInstallationId and packTemplateId must be supplied together",
       });
     }
   });
-export type CreateAutomationTriggerRequest = z.infer<typeof CreateAutomationTriggerRequest>;
+export type CreateAutomationTriggerRequest = z.infer<
+  typeof CreateAutomationTriggerRequest
+>;
 
 export const UpdateAutomationTriggerRequest = z
   .object({
     expectedRevision: z.number().int().positive(),
     name: z.string().trim().min(1).max(200).optional(),
-    eventTypes: z.array(z.string().trim().min(1).max(256)).min(1).max(64).optional(),
+    eventTypes: z
+      .array(z.string().trim().min(1).max(256))
+      .min(1)
+      .max(64)
+      .optional(),
     configuration: AutomationBoundedJson.optional(),
     parameters: AutomationBoundedJson.optional(),
     sessionTemplate: AutomationSessionTemplate.optional(),
     status: AutomationTriggerStatus.optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).some((key) => key !== "expectedRevision"), {
-    message: "automation trigger update is empty",
-  });
-export type UpdateAutomationTriggerRequest = z.infer<typeof UpdateAutomationTriggerRequest>;
+  .refine(
+    (value) => Object.keys(value).some((key) => key !== "expectedRevision"),
+    {
+      message: "automation trigger update is empty",
+    },
+  );
+export type UpdateAutomationTriggerRequest = z.infer<
+  typeof UpdateAutomationTriggerRequest
+>;
 
 export const AutomationTrigger = z.object({
   id: z.string().uuid(),
@@ -9468,7 +10487,9 @@ export const TriggerAutomationManuallyRequest = z
     resource: z.string().trim().min(1).max(1024).nullable().default(null),
   })
   .strict();
-export type TriggerAutomationManuallyRequest = z.infer<typeof TriggerAutomationManuallyRequest>;
+export type TriggerAutomationManuallyRequest = z.infer<
+  typeof TriggerAutomationManuallyRequest
+>;
 
 export const CapabilityPackAutomationTemplate = z
   .object({
@@ -9482,7 +10503,9 @@ export const CapabilityPackAutomationTemplate = z
     connectionRequirement: z.string().min(1).max(128).nullable().default(null),
   })
   .strict();
-export type CapabilityPackAutomationTemplate = z.infer<typeof CapabilityPackAutomationTemplate>;
+export type CapabilityPackAutomationTemplate = z.infer<
+  typeof CapabilityPackAutomationTemplate
+>;
 
 export const CapabilityPackConnectorAuthModel = z.enum([
   "oauth2_authorization_code_pkce",
@@ -9490,7 +10513,9 @@ export const CapabilityPackConnectorAuthModel = z.enum([
   "api_key",
   "credential_ref",
 ]);
-export type CapabilityPackConnectorAuthModel = z.infer<typeof CapabilityPackConnectorAuthModel>;
+export type CapabilityPackConnectorAuthModel = z.infer<
+  typeof CapabilityPackConnectorAuthModel
+>;
 
 export const CapabilityPackConnector = z.object({
   id: z.string().min(1),
@@ -9535,7 +10560,8 @@ export type CapabilityPackScheduledTaskTemplate = z.infer<
 // row in workspace_packs is the storage of record for pack skills).
 export const CapabilityPackSkillFile = z.object({
   path: z.string().min(1).max(512).refine(isSafePackSkillRelativePath, {
-    message: "skill file path must be a safe relative POSIX path without '..' segments",
+    message:
+      "skill file path must be a safe relative POSIX path without '..' segments",
   }),
   content: z.string().max(256 * 1024),
 });
@@ -9551,7 +10577,8 @@ export const CapabilityPackSkill = z
       .min(1)
       .max(64)
       .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
-        message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
+        message:
+          "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
       }),
     description: z.string().min(1).max(2048).optional(),
     files: z.array(CapabilityPackSkillFile).min(1).max(64),
@@ -9589,7 +10616,10 @@ export const SessionSkills = z
   .array(SessionSkill)
   .max(32)
   .transform((skills, ctx) => {
-    const selected = new Map<string, { fingerprint: string; skill: SessionSkill }>();
+    const selected = new Map<
+      string,
+      { fingerprint: string; skill: SessionSkill }
+    >();
     for (const skill of skills) {
       const key = skill.name.toLowerCase();
       const fingerprint = JSON.stringify({
@@ -9619,7 +10649,9 @@ function isSafePackSkillRelativePath(path: string): boolean {
   }
   return path
     .split("/")
-    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+    .every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    );
 }
 
 const CapabilityPackVariableSet = z
@@ -9691,7 +10723,9 @@ export const CapabilityPackComponentReference = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-export type CapabilityPackComponentReference = z.infer<typeof CapabilityPackComponentReference>;
+export type CapabilityPackComponentReference = z.infer<
+  typeof CapabilityPackComponentReference
+>;
 
 export const CapabilityPackRigRequirement = z
   .object({
@@ -9701,7 +10735,9 @@ export const CapabilityPackRigRequirement = z
     requireVerified: z.boolean().default(false),
   })
   .strict();
-export type CapabilityPackRigRequirement = z.infer<typeof CapabilityPackRigRequirement>;
+export type CapabilityPackRigRequirement = z.infer<
+  typeof CapabilityPackRigRequirement
+>;
 
 export const CapabilityPack = z.preprocess(
   (input) => {
@@ -9723,7 +10759,9 @@ export const CapabilityPack = z.preprocess(
         variableSet: {
           description: "Required variables",
           requiredVariables: record.requiredVariables,
-          required: Array.isArray(record.requiredVariables) && record.requiredVariables.length > 0,
+          required:
+            Array.isArray(record.requiredVariables) &&
+            record.requiredVariables.length > 0,
         },
       };
     }
@@ -9783,13 +10821,21 @@ export const CapabilityPack = z.preprocess(
           });
         })
         .default([]),
-      components: z.array(CapabilityPackComponentReference).max(128).default([]),
+      components: z
+        .array(CapabilityPackComponentReference)
+        .max(128)
+        .default([]),
       rig: CapabilityPackRigRequirement.optional(),
       tools: z.array(ToolRef).default([]),
       connectors: z.array(CapabilityPackConnector).default([]),
       knowledge: z.array(CapabilityPackKnowledge).default([]),
-      scheduledTaskTemplates: z.array(CapabilityPackScheduledTaskTemplate).default([]),
-      automationTemplates: z.array(CapabilityPackAutomationTemplate).max(64).optional(),
+      scheduledTaskTemplates: z
+        .array(CapabilityPackScheduledTaskTemplate)
+        .default([]),
+      automationTemplates: z
+        .array(CapabilityPackAutomationTemplate)
+        .max(64)
+        .optional(),
       variableSet: CapabilityPackVariableSet.optional(),
       metadata: z.record(z.string(), z.unknown()).default({}),
     })
@@ -9853,7 +10899,9 @@ export type CapabilityPack = z.infer<typeof CapabilityPack>;
 // Registering a pack stores the manifest itself; the request body is a full
 // CapabilityPack manifest.
 export const RegisterCapabilityPackRequest = CapabilityPack;
-export type RegisterCapabilityPackRequest = z.infer<typeof RegisterCapabilityPackRequest>;
+export type RegisterCapabilityPackRequest = z.infer<
+  typeof RegisterCapabilityPackRequest
+>;
 
 export const WorkspaceRegisteredPack = z.object({
   accountId: z.string().uuid(),
@@ -9914,7 +10962,8 @@ export const PrReviewWebhookAuthKind = /* @__PURE__ */ z.enum([
 ]);
 export type PrReviewWebhookAuthKind = z.infer<typeof PrReviewWebhookAuthKind>;
 
-const PrReviewSecretInput = /* @__PURE__ */ (() => z.string().min(16).max(65_536))();
+const PrReviewSecretInput = /* @__PURE__ */ (() =>
+  z.string().min(16).max(65_536))();
 
 export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
   z
@@ -9932,25 +10981,34 @@ export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
     })
     .strict()
     .superRefine((value, context) => {
-      if (value.provider === "github" && value.credentialKind !== "github_app") {
+      if (
+        value.provider === "github" &&
+        value.credentialKind !== "github_app"
+      ) {
         context.addIssue({
           code: "custom",
           path: ["credentialKind"],
-          message: "GitHub PR Review registrations require a dedicated GitHub App",
+          message:
+            "GitHub PR Review registrations require a dedicated GitHub App",
         });
       }
       if (value.provider === "github" && (!value.appId || !value.privateKey)) {
         context.addIssue({
           code: "custom",
           path: [!value.appId ? "appId" : "privateKey"],
-          message: "GitHub PR Review registrations require the dedicated App ID and private key",
+          message:
+            "GitHub PR Review registrations require the dedicated App ID and private key",
         });
       }
-      if (value.provider !== "github" && value.credentialKind !== "provider_token") {
+      if (
+        value.provider !== "github" &&
+        value.credentialKind !== "provider_token"
+      ) {
         context.addIssue({
           code: "custom",
           path: ["credentialKind"],
-          message: "GitLab and Azure DevOps PR Review registrations require a provider token",
+          message:
+            "GitLab and Azure DevOps PR Review registrations require a provider token",
         });
       }
       if (value.credentialKind === "provider_token" && !value.accessToken) {
@@ -9966,18 +11024,28 @@ export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
       ) {
         context.addIssue({
           code: "custom",
-          path: [value.accessToken !== undefined ? "accessToken" : "privateKey"],
-          message: "GitHub App credentials require privateKey and cannot include accessToken",
+          path: [
+            value.accessToken !== undefined ? "accessToken" : "privateKey",
+          ],
+          message:
+            "GitHub App credentials require privateKey and cannot include accessToken",
         });
       }
-      if (value.credentialKind === "provider_token" && value.privateKey !== undefined) {
+      if (
+        value.credentialKind === "provider_token" &&
+        value.privateKey !== undefined
+      ) {
         context.addIssue({
           code: "custom",
           path: ["privateKey"],
-          message: "provider_token credentials cannot include a GitHub privateKey",
+          message:
+            "provider_token credentials cannot include a GitHub privateKey",
         });
       }
-      if (value.provider === "github" && value.accessTokenExpiresAt !== undefined) {
+      if (
+        value.provider === "github" &&
+        value.accessTokenExpiresAt !== undefined
+      ) {
         context.addIssue({
           code: "custom",
           path: ["accessTokenExpiresAt"],
@@ -9988,7 +11056,8 @@ export const CreatePrReviewAppRegistrationRequest = /* @__PURE__ */ (() =>
         context.addIssue({
           code: "custom",
           path: ["webhookUsername"],
-          message: "Azure DevOps service hooks require a Basic authentication username",
+          message:
+            "Azure DevOps service hooks require a Basic authentication username",
         });
       }
     }))();
@@ -10050,7 +11119,9 @@ export const PrReviewManagedGitHubInstallation = /* @__PURE__ */ (() =>
     configureUrl: z.string().url().nullable(),
     repositoryCount: z.number().int().nonnegative(),
   }))();
-export type PrReviewManagedGitHubInstallation = z.infer<typeof PrReviewManagedGitHubInstallation>;
+export type PrReviewManagedGitHubInstallation = z.infer<
+  typeof PrReviewManagedGitHubInstallation
+>;
 
 export const PrReviewManagedGitHubSetup = /* @__PURE__ */ (() =>
   z.object({
@@ -10061,7 +11132,9 @@ export const PrReviewManagedGitHubSetup = /* @__PURE__ */ (() =>
     installations: z.array(PrReviewManagedGitHubInstallation),
     missing: z.array(z.string()),
   }))();
-export type PrReviewManagedGitHubSetup = z.infer<typeof PrReviewManagedGitHubSetup>;
+export type PrReviewManagedGitHubSetup = z.infer<
+  typeof PrReviewManagedGitHubSetup
+>;
 
 export const CreatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
   z
@@ -10069,9 +11142,16 @@ export const CreatePrReviewRepositoryBindingRequest = /* @__PURE__ */ (() =>
       registrationId: z.string().uuid(),
       repositoryUri: z.string().url().max(2048),
       repositoryFullName: z.string().trim().min(1).max(1024),
-      providerRepositoryId: z.union([z.string().min(1).max(512), z.number().int().positive()]),
-      installationId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
-      projectId: z.union([z.string().min(1).max(512), z.number().int().positive()]).optional(),
+      providerRepositoryId: z.union([
+        z.string().min(1).max(512),
+        z.number().int().positive(),
+      ]),
+      installationId: z
+        .union([z.string().min(1).max(512), z.number().int().positive()])
+        .optional(),
+      projectId: z
+        .union([z.string().min(1).max(512), z.number().int().positive()])
+        .optional(),
       model: z.string().min(1).max(512).nullable().optional(),
       additionalInstructions: z.string().max(16_384).nullable().optional(),
       status: z.enum(["active", "disabled"]).default("active"),
@@ -10116,7 +11196,9 @@ export const PrReviewRepositoryBinding = /* @__PURE__ */ (() =>
     createdAt: z.string(),
     updatedAt: z.string(),
   }))();
-export type PrReviewRepositoryBinding = z.infer<typeof PrReviewRepositoryBinding>;
+export type PrReviewRepositoryBinding = z.infer<
+  typeof PrReviewRepositoryBinding
+>;
 
 export const EnablePackRequest = withVariableSetIdAlias({
   variableSetId: z.string().uuid().optional(),
@@ -10125,8 +11207,14 @@ export const EnablePackRequest = withVariableSetIdAlias({
 });
 export type EnablePackRequest = z.infer<typeof EnablePackRequest>;
 
-export const PackComponentResolutionStatus = z.enum(["ready", "missing", "mismatch"]);
-export type PackComponentResolutionStatus = z.infer<typeof PackComponentResolutionStatus>;
+export const PackComponentResolutionStatus = z.enum([
+  "ready",
+  "missing",
+  "mismatch",
+]);
+export type PackComponentResolutionStatus = z.infer<
+  typeof PackComponentResolutionStatus
+>;
 
 export const PackComponentResolution = z
   .object({
@@ -10149,7 +11237,13 @@ export type PackComponentResolution = z.infer<typeof PackComponentResolution>;
 export const PackRigResolution = z
   .object({
     required: z.boolean(),
-    status: z.enum(["not_required", "ready", "missing", "mismatch", "unverified"]),
+    status: z.enum([
+      "not_required",
+      "ready",
+      "missing",
+      "mismatch",
+      "unverified",
+    ]),
     requestedRigId: z.string().uuid().nullable(),
     rigId: z.string().uuid().nullable(),
     rigVersionId: z.string().uuid().nullable(),
@@ -10165,7 +11259,9 @@ export const PreviewPackInstallationRequest = z
     variableSetId: z.string().uuid().optional(),
   })
   .strict();
-export type PreviewPackInstallationRequest = z.infer<typeof PreviewPackInstallationRequest>;
+export type PreviewPackInstallationRequest = z.infer<
+  typeof PreviewPackInstallationRequest
+>;
 
 export const PackInstallationPreview = z
   .object({
@@ -10207,7 +11303,13 @@ export const PackUninstallPreview = z
         z
           .object({
             key: CapabilityPackComponentKey,
-            kind: z.enum(["plugin", "skill", "integration", "facet", "inline_skill"]),
+            kind: z.enum([
+              "plugin",
+              "skill",
+              "integration",
+              "facet",
+              "inline_skill",
+            ]),
             capabilityId: z.string().min(1).max(512),
             retainedByOtherOwners: z.boolean(),
           })
@@ -10247,7 +11349,11 @@ export const SocialProvider = z.enum([
 ]);
 export type SocialProvider = z.infer<typeof SocialProvider>;
 
-export const SocialConnectionStatus = z.enum(["connected", "needs_reauth", "disabled"]);
+export const SocialConnectionStatus = z.enum([
+  "connected",
+  "needs_reauth",
+  "disabled",
+]);
 export type SocialConnectionStatus = z.infer<typeof SocialConnectionStatus>;
 
 export const ConnectionOwnership = z.enum(["workspace", "personal"]);
@@ -10283,7 +11389,9 @@ export const CreateSocialConnectionRequest = z.object({
   tokenMetadata: z.record(z.string(), z.unknown()).default({}),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
-export type CreateSocialConnectionRequest = z.infer<typeof CreateSocialConnectionRequest>;
+export type CreateSocialConnectionRequest = z.infer<
+  typeof CreateSocialConnectionRequest
+>;
 
 export const SocialPost = z.object({
   id: z.string().uuid(),
@@ -10328,19 +11436,37 @@ export const SocialOAuthStartRequest = z.object({
 });
 export type SocialOAuthStartRequest = z.infer<typeof SocialOAuthStartRequest>;
 
-export const ConnectionKind = z.enum(["oauth2", "api_key", "app_install", "delegated"]);
+export const ConnectionKind = z.enum([
+  "oauth2",
+  "api_key",
+  "app_install",
+  "delegated",
+]);
 export type ConnectionKind = z.infer<typeof ConnectionKind>;
 
-export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
+export const ConnectionStatus = z.enum([
+  "active",
+  "needs_reauth",
+  "revoked",
+  "error",
+]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
-export const OPENGENI_PERSONAL_SLACK_MCP_URL = "https://mcp.slack.com/mcp" as const;
+export const OPENGENI_PERSONAL_SLACK_MCP_URL =
+  "https://mcp.slack.com/mcp" as const;
 
 export const OPENGENI_SLACK_BOT_CREDENTIAL_ROLE = "opengeni_slack_bot" as const;
-export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL = "OpenGeni Slack bot" as const;
-export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY = "opengeniSlackBotConnectionId" as const;
-export const OpenGeniSlackBotDisplayName = z.enum(["OpenGeni", "OpenGeni Staging"]);
-export type OpenGeniSlackBotDisplayName = z.infer<typeof OpenGeniSlackBotDisplayName>;
+export const OPENGENI_SLACK_BOT_CREDENTIAL_LABEL =
+  "OpenGeni Slack bot" as const;
+export const OPENGENI_SLACK_BOT_SESSION_METADATA_KEY =
+  "opengeniSlackBotConnectionId" as const;
+export const OpenGeniSlackBotDisplayName = z.enum([
+  "OpenGeni",
+  "OpenGeni Staging",
+]);
+export type OpenGeniSlackBotDisplayName = z.infer<
+  typeof OpenGeniSlackBotDisplayName
+>;
 export const OpenGeniSlackBotConnectionMetadata = z
   .object({
     credentialRole: z.literal(OPENGENI_SLACK_BOT_CREDENTIAL_ROLE),
@@ -10353,7 +11479,9 @@ export const OpenGeniSlackBotConnectionMetadata = z
     verifiedAt: z.string().datetime({ offset: true }),
   })
   .passthrough();
-export type OpenGeniSlackBotConnectionMetadata = z.infer<typeof OpenGeniSlackBotConnectionMetadata>;
+export type OpenGeniSlackBotConnectionMetadata = z.infer<
+  typeof OpenGeniSlackBotConnectionMetadata
+>;
 
 export const FIKEN_PROVIDER_DOMAIN = "fiken.no" as const;
 export const FIKEN_CREDENTIAL_ROLE = "fiken_api_token" as const;
@@ -10413,7 +11541,11 @@ export const ConnectionMetadata = z.object({
   lastUsedAt: z.string().nullable(),
   lastError: z.string().nullable(),
   version: z.number().int().positive(),
-  verifiedInstallAt: z.string().datetime({ offset: true }).nullable().optional(),
+  verifiedInstallAt: z
+    .string()
+    .datetime({ offset: true })
+    .nullable()
+    .optional(),
   verifiedInstallVersion: z.number().int().positive().nullable().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdBySubjectId: z.string().nullable(),
@@ -10465,12 +11597,15 @@ export function comparePersonalSlackCanonicalConnections(
   return compareDescending(left.id, right.id);
 }
 
-export function selectCanonicalPersonalSlackConnection<T extends PersonalSlackCanonicalConnection>(
-  connections: readonly T[],
-): T | null {
+export function selectCanonicalPersonalSlackConnection<
+  T extends PersonalSlackCanonicalConnection,
+>(connections: readonly T[]): T | null {
   let selected: T | null = null;
   for (const connection of connections) {
-    if (!selected || comparePersonalSlackCanonicalConnections(connection, selected) < 0) {
+    if (
+      !selected ||
+      comparePersonalSlackCanonicalConnections(connection, selected) < 0
+    ) {
       selected = connection;
     }
   }
@@ -10482,13 +11617,27 @@ function canonicalConnectionTimestamp(value: string): number {
   return Number.isFinite(timestamp) ? timestamp : Number.NEGATIVE_INFINITY;
 }
 
-function compareDescending(left: number | string, right: number | string): number {
+function compareDescending(
+  left: number | string,
+  right: number | string,
+): number {
   if (left === right) return 0;
   return left > right ? -1 : 1;
 }
 
 export const ConnectionCredentialBundle = z.record(z.string(), z.unknown());
-export type ConnectionCredentialBundle = z.infer<typeof ConnectionCredentialBundle>;
+export type ConnectionCredentialBundle = z.infer<
+  typeof ConnectionCredentialBundle
+>;
+
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationId" as const;
+export const VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "vercelAiGatewayCredentialOperationDigest" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY =
+  "openRouterCredentialOperationId" as const;
+export const OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY =
+  "openRouterCredentialOperationDigest" as const;
 
 export const CreateConnectionRequest = z.object({
   providerDomain: z.string().min(1),
@@ -10500,22 +11649,29 @@ export const CreateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).default([]),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
+  operationId: z.string().uuid().optional(),
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
 export const OpenGeniSlackBotInstallRequest = z.object({
   connectionId: z.string().uuid().optional(),
 });
-export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+export type OpenGeniSlackBotInstallRequest = z.infer<
+  typeof OpenGeniSlackBotInstallRequest
+>;
 
 export const OpenGeniSlackBotInstallStart = z.object({
   authorizationUrl: z.string().url(),
   expiresAt: z.string().datetime({ offset: true }),
 });
-export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
+export type OpenGeniSlackBotInstallStart = z.infer<
+  typeof OpenGeniSlackBotInstallStart
+>;
 
 export const SlackInstallationBindingState = z.enum(["active", "quarantined"]);
-export type SlackInstallationBindingState = z.infer<typeof SlackInstallationBindingState>;
+export type SlackInstallationBindingState = z.infer<
+  typeof SlackInstallationBindingState
+>;
 
 export const SlackInstallationBinding = z.object({
   id: z.string().uuid(),
@@ -10555,6 +11711,8 @@ export const UpdateConnectionRequest = z.object({
   grantedScopes: z.array(z.string().min(1)).optional(),
   expiresAt: z.string().datetime({ offset: true }).nullable().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  expectedVersion: z.number().int().positive().optional(),
+  operationId: z.string().uuid().optional(),
 });
 export type UpdateConnectionRequest = z.infer<typeof UpdateConnectionRequest>;
 
@@ -10608,7 +11766,9 @@ export const IntegrationClientMetadata = z.object({
   grant_types: z.array(z.enum(["authorization_code", "refresh_token"])),
   response_types: z.array(z.literal("code")),
 });
-export type IntegrationClientMetadata = z.infer<typeof IntegrationClientMetadata>;
+export type IntegrationClientMetadata = z.infer<
+  typeof IntegrationClientMetadata
+>;
 
 export const MarketingDailyAnalysisTaskRequest = z.object({
   name: z.string().min(1).optional(),
@@ -10622,7 +11782,9 @@ export const MarketingDailyAnalysisTaskRequest = z.object({
   runMode: ScheduledTaskRunMode.default("new_session_per_run"),
   overlapPolicy: ScheduledTaskOverlapPolicy.default("skip"),
 });
-export type MarketingDailyAnalysisTaskRequest = z.infer<typeof MarketingDailyAnalysisTaskRequest>;
+export type MarketingDailyAnalysisTaskRequest = z.infer<
+  typeof MarketingDailyAnalysisTaskRequest
+>;
 
 export const CapabilityKind = z.enum(["pack", "mcp", "api", "skill", "plugin"]);
 export type CapabilityKind = z.infer<typeof CapabilityKind>;
@@ -10638,10 +11800,19 @@ export const CapabilitySource = z.enum([
 export type CapabilitySource = z.infer<typeof CapabilitySource>;
 
 export const CapabilityInstallationStatus = z.enum(["active", "disabled"]);
-export type CapabilityInstallationStatus = z.infer<typeof CapabilityInstallationStatus>;
+export type CapabilityInstallationStatus = z.infer<
+  typeof CapabilityInstallationStatus
+>;
 
-export const CapabilityCatalogAuthKind = z.enum(["oauth2", "api_key", "none", "unknown"]);
-export type CapabilityCatalogAuthKind = z.infer<typeof CapabilityCatalogAuthKind>;
+export const CapabilityCatalogAuthKind = z.enum([
+  "oauth2",
+  "api_key",
+  "none",
+  "unknown",
+]);
+export type CapabilityCatalogAuthKind = z.infer<
+  typeof CapabilityCatalogAuthKind
+>;
 
 export const CapabilityCatalogTier = z.enum(["verified", "community"]);
 export type CapabilityCatalogTier = z.infer<typeof CapabilityCatalogTier>;
@@ -10660,9 +11831,16 @@ export const CapabilityLifecycleStatus = z.enum([
   "unavailable",
   "managed",
 ]);
-export type CapabilityLifecycleStatus = z.infer<typeof CapabilityLifecycleStatus>;
+export type CapabilityLifecycleStatus = z.infer<
+  typeof CapabilityLifecycleStatus
+>;
 
-export const CapabilityReadiness = z.enum(["ready", "setup_required", "attention", "unavailable"]);
+export const CapabilityReadiness = z.enum([
+  "ready",
+  "setup_required",
+  "attention",
+  "unavailable",
+]);
 export type CapabilityReadiness = z.infer<typeof CapabilityReadiness>;
 
 export const CapabilityAction = z.enum([
@@ -10681,7 +11859,10 @@ export const CapabilityLifecycle = z.object({
   status: CapabilityLifecycleStatus,
   readiness: CapabilityReadiness,
   detail: z.string().nullable().default(null),
-  managedBy: z.enum(["deployment", "platform", "workspace"]).nullable().default(null),
+  managedBy: z
+    .enum(["deployment", "platform", "workspace"])
+    .nullable()
+    .default(null),
 });
 export type CapabilityLifecycle = z.infer<typeof CapabilityLifecycle>;
 
@@ -10750,11 +11931,14 @@ export const CapabilityCatalogItem = z.object({
   /** @deprecated Compatibility explanation paired with enabled. */
   enabledReason: z.string().nullable().default(null),
   // The non-secret connection binding stored with an enabled installation.
-  // Workspace refs retain an exact row id. Subject refs deliberately omit it:
-  // each caller resolves their own visible row by provider/kind at runtime.
+  // Native workspace refs retain an exact row id. Native subject refs omit it
+  // so each caller resolves their own row. The first-party catalog projects a
+  // host-owned installation as null for old-browser safety; the schema remains
+  // tolerant of additive host projections from embedding-specific catalogs.
   connectionRef: z
     .object({
       connectionId: z.string().min(1).optional(),
+      authoritySource: z.literal("host").optional(),
       providerDomain: z.string().min(1),
       kind: z.string().min(1),
       subjectScope: z.enum(["workspace", "subject"]).optional(),
@@ -10775,7 +11959,10 @@ export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
  * runtime contract and must fail closed.
  */
 export function capabilityCatalogItemIsTrustedForExposure(
-  item: Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata">,
+  item: Pick<
+    CapabilityCatalogItem,
+    "source" | "stale" | "authKind" | "metadata"
+  >,
 ): boolean {
   if (item.stale) return false;
   if (item.source !== "registry") return true;
@@ -10785,7 +11972,8 @@ export function capabilityCatalogItemIsTrustedForExposure(
   if (item.authKind === null || item.authKind === "unknown") return false;
   if (item.authKind !== "api_key") return true;
   const contract = item.metadata.authContract;
-  if (!contract || typeof contract !== "object" || Array.isArray(contract)) return false;
+  if (!contract || typeof contract !== "object" || Array.isArray(contract))
+    return false;
   const record = contract as Record<string, unknown>;
   return (
     typeof record.headerName === "string" &&
@@ -10823,7 +12011,9 @@ export const CreateCapabilityCatalogItemRequest = z.object({
   authModel: z.string().min(1).optional(),
   metadata: z.record(z.string(), z.unknown()).default({}),
 });
-export type CreateCapabilityCatalogItemRequest = z.infer<typeof CreateCapabilityCatalogItemRequest>;
+export type CreateCapabilityCatalogItemRequest = z.infer<
+  typeof CreateCapabilityCatalogItemRequest
+>;
 
 export const EnableCapabilityRequest = z.object({
   config: z.record(z.string(), z.unknown()).default({}),
@@ -10843,25 +12033,36 @@ export const CapabilityCatalogResponse = z.object({
   items: z.array(CapabilityCatalogItem),
   installations: z.array(CapabilityInstallation),
 });
-export type CapabilityCatalogResponse = z.infer<typeof CapabilityCatalogResponse>;
+export type CapabilityCatalogResponse = z.infer<
+  typeof CapabilityCatalogResponse
+>;
 
 export const DiscoverMcpCapabilitiesResponse = z.object({
   items: z.array(CapabilityCatalogItem),
   source: z.literal("official_mcp_registry"),
   sourceUrl: z.string().url(),
 });
-export type DiscoverMcpCapabilitiesResponse = z.infer<typeof DiscoverMcpCapabilitiesResponse>;
+export type DiscoverMcpCapabilitiesResponse = z.infer<
+  typeof DiscoverMcpCapabilitiesResponse
+>;
 
 export const SkillImportSource = z.enum(["github", "skills_sh"]);
 export type SkillImportSource = z.infer<typeof SkillImportSource>;
 
-export const SkillInstallationSource = z.enum(["library", "github", "skills_sh", "pack"]);
+export const SkillInstallationSource = z.enum([
+  "library",
+  "github",
+  "skills_sh",
+  "pack",
+]);
 export type SkillInstallationSource = z.infer<typeof SkillInstallationSource>;
 
 export const PreviewSkillImportRequest = z.object({
   url: z.string().url().max(2048),
 });
-export type PreviewSkillImportRequest = z.infer<typeof PreviewSkillImportRequest>;
+export type PreviewSkillImportRequest = z.infer<
+  typeof PreviewSkillImportRequest
+>;
 
 export const SkillImportFileSummary = z.object({
   path: z.string().min(1).max(1024),
@@ -10904,7 +12105,9 @@ export const InstallLibrarySkillRequest = z
     expectedInstallationVersion: z.number().int().positive().optional(),
   })
   .strict();
-export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
+export type InstallLibrarySkillRequest = z.infer<
+  typeof InstallLibrarySkillRequest
+>;
 
 export const InstalledSkill = z.object({
   capabilityId: z.string().min(1),
@@ -10961,7 +12164,9 @@ export type InstalledSkillSummary = z.infer<typeof InstalledSkillSummary>;
 export const ListInstalledSkillsResponse = z
   .object({ skills: z.array(InstalledSkillSummary).max(1000) })
   .strict();
-export type ListInstalledSkillsResponse = z.infer<typeof ListInstalledSkillsResponse>;
+export type ListInstalledSkillsResponse = z.infer<
+  typeof ListInstalledSkillsResponse
+>;
 
 export const SkillUninstallPreview = z.object({
   capabilityId: z.string().min(1),
@@ -10989,7 +12194,9 @@ export const ApiIntegrationProtocol = z.enum(["openapi", "graphql"]);
 export type ApiIntegrationProtocol = z.infer<typeof ApiIntegrationProtocol>;
 
 export const IntegrationDefinitionProvenance = z.enum(["curated", "workspace"]);
-export type IntegrationDefinitionProvenance = z.infer<typeof IntegrationDefinitionProvenance>;
+export type IntegrationDefinitionProvenance = z.infer<
+  typeof IntegrationDefinitionProvenance
+>;
 
 export const IntegrationFacetKey = z
   .string()
@@ -11007,24 +12214,31 @@ export const IntegrationFacetKind = z.enum([
 ]);
 export type IntegrationFacetKind = z.infer<typeof IntegrationFacetKind>;
 
-export const IntegrationFacetStatus = z.enum(["active", "paused", "needs_attention", "disabled"]);
+export const IntegrationFacetStatus = z.enum([
+  "active",
+  "paused",
+  "needs_attention",
+  "disabled",
+]);
 export type IntegrationFacetStatus = z.infer<typeof IntegrationFacetStatus>;
 
-const IntegrationFacetJsonObject = z.record(z.string(), z.unknown()).superRefine((value, ctx) => {
-  let serialized: string;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
-    return;
-  }
-  if (new TextEncoder().encode(serialized).byteLength > 131_072) {
-    ctx.addIssue({
-      code: "custom",
-      message: "must not exceed 131072 UTF-8 bytes",
-    });
-  }
-});
+const IntegrationFacetJsonObject = z
+  .record(z.string(), z.unknown())
+  .superRefine((value, ctx) => {
+    let serialized: string;
+    try {
+      serialized = JSON.stringify(value);
+    } catch {
+      ctx.addIssue({ code: "custom", message: "must be JSON serializable" });
+      return;
+    }
+    if (new TextEncoder().encode(serialized).byteLength > 131_072) {
+      ctx.addIssue({
+        code: "custom",
+        message: "must not exceed 131072 UTF-8 bytes",
+      });
+    }
+  });
 
 export const IntegrationFacetDefinitionSummary = z
   .object({
@@ -11034,7 +12248,9 @@ export const IntegrationFacetDefinitionSummary = z
     capabilities: IntegrationFacetJsonObject,
   })
   .strict();
-export type IntegrationFacetDefinitionSummary = z.infer<typeof IntegrationFacetDefinitionSummary>;
+export type IntegrationFacetDefinitionSummary = z.infer<
+  typeof IntegrationFacetDefinitionSummary
+>;
 
 /**
  * Presentation-only consent copy for an integration or connector. Never grants
@@ -11095,12 +12311,16 @@ export const IntegrationDefinitionSummary = z
     facets: z.array(IntegrationFacetDefinitionSummary).max(128),
   })
   .strict();
-export type IntegrationDefinitionSummary = z.infer<typeof IntegrationDefinitionSummary>;
+export type IntegrationDefinitionSummary = z.infer<
+  typeof IntegrationDefinitionSummary
+>;
 
 export const ListIntegrationDefinitionsResponse = z
   .object({ definitions: z.array(IntegrationDefinitionSummary).max(128) })
   .strict();
-export type ListIntegrationDefinitionsResponse = z.infer<typeof ListIntegrationDefinitionsResponse>;
+export type ListIntegrationDefinitionsResponse = z.infer<
+  typeof ListIntegrationDefinitionsResponse
+>;
 
 export const IntegrationInstanceKey = z
   .string()
@@ -11129,7 +12349,9 @@ export const IntegrationFacetBindingSummary = z
     owners: z.array(CapabilityComponentOwner),
   })
   .strict();
-export type IntegrationFacetBindingSummary = z.infer<typeof IntegrationFacetBindingSummary>;
+export type IntegrationFacetBindingSummary = z.infer<
+  typeof IntegrationFacetBindingSummary
+>;
 
 export const IntegrationInstanceFacetsResponse = z
   .object({
@@ -11149,7 +12371,9 @@ export const IntegrationInstanceFacetsResponse = z
       .max(128),
   })
   .strict();
-export type IntegrationInstanceFacetsResponse = z.infer<typeof IntegrationInstanceFacetsResponse>;
+export type IntegrationInstanceFacetsResponse = z.infer<
+  typeof IntegrationInstanceFacetsResponse
+>;
 
 export const UpsertIntegrationFacetRequest = z
   .object({
@@ -11159,7 +12383,9 @@ export const UpsertIntegrationFacetRequest = z
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type UpsertIntegrationFacetRequest = z.infer<typeof UpsertIntegrationFacetRequest>;
+export type UpsertIntegrationFacetRequest = z.infer<
+  typeof UpsertIntegrationFacetRequest
+>;
 
 export const MutateIntegrationFacetRequest = z
   .object({
@@ -11167,7 +12393,9 @@ export const MutateIntegrationFacetRequest = z
     idempotencyKey: z.string().uuid(),
   })
   .strict();
-export type MutateIntegrationFacetRequest = z.infer<typeof MutateIntegrationFacetRequest>;
+export type MutateIntegrationFacetRequest = z.infer<
+  typeof MutateIntegrationFacetRequest
+>;
 
 export const IntegrationFacetMutationResult = z
   .object({
@@ -11178,7 +12406,9 @@ export const IntegrationFacetMutationResult = z
     binding: IntegrationFacetBindingSummary,
   })
   .strict();
-export type IntegrationFacetMutationResult = z.infer<typeof IntegrationFacetMutationResult>;
+export type IntegrationFacetMutationResult = z.infer<
+  typeof IntegrationFacetMutationResult
+>;
 
 export const IntegrationFacetRemovalResult = z
   .object({
@@ -11190,7 +12420,9 @@ export const IntegrationFacetRemovalResult = z
     remainingOwners: z.array(CapabilityComponentOwner),
   })
   .strict();
-export type IntegrationFacetRemovalResult = z.infer<typeof IntegrationFacetRemovalResult>;
+export type IntegrationFacetRemovalResult = z.infer<
+  typeof IntegrationFacetRemovalResult
+>;
 
 export const IntegrationSource = z.discriminatedUnion("kind", [
   z
@@ -11230,7 +12462,9 @@ export const PreviewApiIntegrationRequest = z
     ownership: ConnectionOwnership.optional(),
   })
   .strict();
-export type PreviewApiIntegrationRequest = z.infer<typeof PreviewApiIntegrationRequest>;
+export type PreviewApiIntegrationRequest = z.infer<
+  typeof PreviewApiIntegrationRequest
+>;
 
 export const ApiIntegrationOAuthStartRequest = z
   .object({
@@ -11240,9 +12474,12 @@ export const ApiIntegrationOAuthStartRequest = z
     returnPath: z.string().min(1).max(2048).optional(),
   })
   .strict();
-export type ApiIntegrationOAuthStartRequest = z.infer<typeof ApiIntegrationOAuthStartRequest>;
+export type ApiIntegrationOAuthStartRequest = z.infer<
+  typeof ApiIntegrationOAuthStartRequest
+>;
 
-export const API_INTEGRATION_OAUTH_CREDENTIAL_ROLE = "api_integration_oauth" as const;
+export const API_INTEGRATION_OAUTH_CREDENTIAL_ROLE =
+  "api_integration_oauth" as const;
 
 export const ApiIntegrationOAuthConnectionMetadata = z
   .object({
@@ -11284,7 +12521,9 @@ export const ApiIntegrationAuthPreview = z.discriminatedUnion("kind", [
     })
     .strict(),
 ]);
-export type ApiIntegrationAuthPreview = z.infer<typeof ApiIntegrationAuthPreview>;
+export type ApiIntegrationAuthPreview = z.infer<
+  typeof ApiIntegrationAuthPreview
+>;
 
 export const ApiIntegrationToolPreview = z
   .object({
@@ -11297,7 +12536,9 @@ export const ApiIntegrationToolPreview = z
     deprecated: z.boolean(),
   })
   .strict();
-export type ApiIntegrationToolPreview = z.infer<typeof ApiIntegrationToolPreview>;
+export type ApiIntegrationToolPreview = z.infer<
+  typeof ApiIntegrationToolPreview
+>;
 
 export const ApiIntegrationPreview = z
   .object({
@@ -11338,7 +12579,9 @@ export const InstallApiIntegrationRequest = z
     allowedTools: z.array(z.string().min(1).max(200)).max(2000).optional(),
   })
   .strict();
-export type InstallApiIntegrationRequest = z.infer<typeof InstallApiIntegrationRequest>;
+export type InstallApiIntegrationRequest = z.infer<
+  typeof InstallApiIntegrationRequest
+>;
 
 export const InstalledApiIntegration = z
   .object({
@@ -11391,12 +12634,16 @@ export const ApiIntegrationInstallationSummary = z
     contentSha256: z.string().regex(/^[0-9a-f]{64}$/),
   })
   .strict();
-export type ApiIntegrationInstallationSummary = z.infer<typeof ApiIntegrationInstallationSummary>;
+export type ApiIntegrationInstallationSummary = z.infer<
+  typeof ApiIntegrationInstallationSummary
+>;
 
 export const ListApiIntegrationsResponse = z
   .object({ integrations: z.array(ApiIntegrationInstallationSummary) })
   .strict();
-export type ListApiIntegrationsResponse = z.infer<typeof ListApiIntegrationsResponse>;
+export type ListApiIntegrationsResponse = z.infer<
+  typeof ListApiIntegrationsResponse
+>;
 
 export const ApiIntegrationUninstallPreview = z
   .object({
@@ -11412,7 +12659,9 @@ export const ApiIntegrationUninstallPreview = z
     removesDefinition: z.boolean(),
   })
   .strict();
-export type ApiIntegrationUninstallPreview = z.infer<typeof ApiIntegrationUninstallPreview>;
+export type ApiIntegrationUninstallPreview = z.infer<
+  typeof ApiIntegrationUninstallPreview
+>;
 
 export const UninstallApiIntegrationRequest = z
   .object({
@@ -11420,18 +12669,26 @@ export const UninstallApiIntegrationRequest = z
     expectedInstanceVersion: z.number().int().positive(),
   })
   .strict();
-export type UninstallApiIntegrationRequest = z.infer<typeof UninstallApiIntegrationRequest>;
+export type UninstallApiIntegrationRequest = z.infer<
+  typeof UninstallApiIntegrationRequest
+>;
 
 export const UninstallApiIntegrationResult = z
   .object({
     capabilityId: z.string().min(1),
     instanceKey: IntegrationInstanceKey,
-    status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
+    status: z.enum([
+      "not_installed",
+      "uninstalled",
+      "retained_by_other_owners",
+    ]),
     remainingOwners: z.array(CapabilityComponentOwner),
     definitionStatus: z.enum(["retained", "disabled"]),
   })
   .strict();
-export type UninstallApiIntegrationResult = z.infer<typeof UninstallApiIntegrationResult>;
+export type UninstallApiIntegrationResult = z.infer<
+  typeof UninstallApiIntegrationResult
+>;
 
 const PluginComponentKey = z
   .string()
@@ -11608,12 +12865,16 @@ export const PluginInstallationSummary = z
     updatedAt: z.string().datetime({ offset: true }),
   })
   .strict();
-export type PluginInstallationSummary = z.infer<typeof PluginInstallationSummary>;
+export type PluginInstallationSummary = z.infer<
+  typeof PluginInstallationSummary
+>;
 
 export const ListInstalledPluginsResponse = z
   .object({ plugins: z.array(PluginInstallationSummary).max(1000) })
   .strict();
-export type ListInstalledPluginsResponse = z.infer<typeof ListInstalledPluginsResponse>;
+export type ListInstalledPluginsResponse = z.infer<
+  typeof ListInstalledPluginsResponse
+>;
 
 export const PluginUninstallPreview = z
   .object({
@@ -11649,11 +12910,23 @@ export const UninstallPluginResult = z
   .strict();
 export type UninstallPluginResult = z.infer<typeof UninstallPluginResult>;
 
-export const SessionBackgroundCommandState = z.enum(["running", "stopping", "exited", "lost"]);
-export type SessionBackgroundCommandState = z.infer<typeof SessionBackgroundCommandState>;
+export const SessionBackgroundCommandState = z.enum([
+  "running",
+  "stopping",
+  "exited",
+  "lost",
+]);
+export type SessionBackgroundCommandState = z.infer<
+  typeof SessionBackgroundCommandState
+>;
 
-export const SessionBackgroundCommandProvider = z.enum(["managed", "connected_machine"]);
-export type SessionBackgroundCommandProvider = z.infer<typeof SessionBackgroundCommandProvider>;
+export const SessionBackgroundCommandProvider = z.enum([
+  "managed",
+  "connected_machine",
+]);
+export type SessionBackgroundCommandProvider = z.infer<
+  typeof SessionBackgroundCommandProvider
+>;
 
 export const SessionBackgroundCommandActivity = z
   .object({
@@ -11661,7 +12934,9 @@ export const SessionBackgroundCommandActivity = z
     count: z.number().int().positive(),
   })
   .strict();
-export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
+export type SessionBackgroundCommandActivity = z.infer<
+  typeof SessionBackgroundCommandActivity
+>;
 
 export const SessionBackgroundCommand = z
   .object({
@@ -11751,7 +13026,10 @@ export const Session = z.object({
   workingDir: z.string().nullable().default(null),
   // Ordered low-to-high precedence. The legacy singular aliases below expose
   // the final (highest-precedence) entry for older clients.
-  variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).default([]),
+  variableSetIds: z
+    .array(z.string().uuid())
+    .max(MAX_SELECTED_VARIABLE_SETS)
+    .default([]),
   variableSetId: z.string().uuid().nullable().default(null),
   /** @deprecated use variableSetId */
   environmentId: z.string().uuid().nullable().default(null),
@@ -12137,7 +13415,9 @@ export const SessionEventSemanticClass = z.enum([
   "tool_receipt",
   "provider_account",
 ]);
-export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
+export type SessionEventSemanticClass = z.infer<
+  typeof SessionEventSemanticClass
+>;
 
 /**
  * The semantic classes accepted by an exclusive latest lookup. `receipt` is
@@ -12172,7 +13452,9 @@ export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
 export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
 
 export const SessionEventReadDirection = z.enum(["after", "before"]);
-export type SessionEventReadDirection = z.infer<typeof SessionEventReadDirection>;
+export type SessionEventReadDirection = z.infer<
+  typeof SessionEventReadDirection
+>;
 
 export const SESSION_EVENT_RAW_DELTA_TYPES = [
   "agent.message.delta",
@@ -12283,7 +13565,10 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "machine.link.restored",
     "machine.runner.restarted",
   ],
-} as const satisfies Record<SessionEventSemanticClass, readonly SessionEventType[]>;
+} as const satisfies Record<
+  SessionEventSemanticClass,
+  readonly SessionEventType[]
+>;
 
 export type ResolveSessionEventTypeFiltersInput = {
   includeTypes?: readonly SessionEventType[] | undefined;
@@ -12295,18 +13580,22 @@ export type ResolveSessionEventTypeFiltersInput = {
 };
 
 /** Resolve class/type filter algebra once so every read surface behaves alike. */
-export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFiltersInput): {
+export function resolveSessionEventTypeFilters(
+  input: ResolveSessionEventTypeFiltersInput,
+): {
   includeTypes: SessionEventType[];
   excludeTypes: SessionEventType[];
 } {
   const included = new Set<SessionEventType>(input.includeTypes ?? []);
   for (const semanticClass of input.includeClasses ?? []) {
-    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass]) included.add(type);
+    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass])
+      included.add(type);
   }
 
   const excluded = new Set<SessionEventType>(input.excludeTypes ?? []);
   for (const semanticClass of input.excludeClasses ?? []) {
-    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass]) excluded.add(type);
+    for (const type of SESSION_EVENT_SEMANTIC_CLASS_TYPES[semanticClass])
+      excluded.add(type);
   }
   for (const type of input.defaultExcludeTypes ?? []) {
     if (!included.has(type)) excluded.add(type);
@@ -12339,6 +13628,11 @@ export const ToolAuthNeededPayload = z
     connectionId: z.string().min(1).nullable().optional(),
     /** The failed binding is owned by the embedding host, not OpenGeni's connection broker. */
     authoritySource: z.literal("host").optional(),
+    /**
+     * Legacy-compatible reason. Host-owned event writers pin this to
+     * unsupported_auth so a pre-host-authority browser cannot launch native
+     * OAuth for the opaque id.
+     */
     reason: ToolAuthNeededReason,
     /** Exact host recovery reason consumed by host-aware clients. */
     hostReason: ToolAuthNeededReason.optional(),
@@ -12368,7 +13662,8 @@ export const ToolAuthNeededPayload = z
       if (payload.reason !== "unsupported_auth") {
         context.addIssue({
           code: "custom",
-          message: "host auth-needed events require the legacy-safe unsupported_auth reason",
+          message:
+            "host auth-needed events require the legacy-safe unsupported_auth reason",
           path: ["reason"],
         });
       }
@@ -12394,13 +13689,20 @@ export const CredentialAuthNeededPayload = z.object({
   credentialClass: z.literal("run"),
   providerDomain: z.string().min(1).optional(),
   connectionId: z.string().min(1).optional(),
-  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  reason: z.enum([
+    "missing_connection",
+    "expired",
+    "insufficient_scope",
+    "refresh_failed",
+  ]),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
   authorizationUrl: z.string().url().optional(),
   message: z.string().min(1).optional(),
 });
-export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPayload>;
+export type CredentialAuthNeededPayload = z.infer<
+  typeof CredentialAuthNeededPayload
+>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
 // z.unknown() (NOT a discriminated union) — these are standalone schemas parsed
@@ -12458,7 +13760,10 @@ export const RecordingStartedPayload = z.object({
   turnId: z.string().uuid().nullable(),
   mode: RecordingMode,
   codec: RecordingCodec,
-  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+  dimensions: z.tuple([
+    z.number().int().positive(),
+    z.number().int().positive(),
+  ]),
   framerate: z.number().int().positive(),
   startedAt: z.string(), // ISO
   // The verification rationale ("agent-verification: tf apply succeeded"). Agent-
@@ -12477,9 +13782,14 @@ export const RecordingAvailablePayload = z.object({
   storageKey: z.string(),
   durationSeconds: z.number().nonnegative().nullable(),
   sizeBytes: z.number().int().nonnegative(),
-  dimensions: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+  dimensions: z.tuple([
+    z.number().int().positive(),
+    z.number().int().positive(),
+  ]),
 });
-export type RecordingAvailablePayload = z.infer<typeof RecordingAvailablePayload>;
+export type RecordingAvailablePayload = z.infer<
+  typeof RecordingAvailablePayload
+>;
 
 // `max-bytes-exceeded` is distinct from `timeout` (the -t ceiling hitting is a
 // SUCCESSFUL finalize, never a failure) — the adversarial-review F7 fix.
@@ -12520,9 +13830,16 @@ export const SandboxCommandOutputDeltaPayload = z.object({
   commandId: z.string().optional(), // groups deltas to one agent command
   seq: z.number().int().nonnegative().optional(), // intra-command ordering hint
 });
-export type SandboxCommandOutputDeltaPayload = z.infer<typeof SandboxCommandOutputDeltaPayload>;
+export type SandboxCommandOutputDeltaPayload = z.infer<
+  typeof SandboxCommandOutputDeltaPayload
+>;
 
-export const FsChangeKind = z.enum(["created", "modified", "deleted", "renamed"]);
+export const FsChangeKind = z.enum([
+  "created",
+  "modified",
+  "deleted",
+  "renamed",
+]);
 export type FsChangeKind = z.infer<typeof FsChangeKind>;
 export const FsChangedPayload = z.object({
   changes: z
@@ -12567,7 +13884,9 @@ export const TerminalPtyStartedPayload = z.object({
   shell: z.string(), // resolved shell, e.g. "/bin/bash"
   cwd: z.string(),
 });
-export type TerminalPtyStartedPayload = z.infer<typeof TerminalPtyStartedPayload>;
+export type TerminalPtyStartedPayload = z.infer<
+  typeof TerminalPtyStartedPayload
+>;
 
 export const TerminalPtyOutputDeltaPayload = z.object({
   ptyId: z.string().uuid(),
@@ -12575,7 +13894,9 @@ export const TerminalPtyOutputDeltaPayload = z.object({
   chunk: z.string(), // raw terminal bytes (incl. ANSI), utf-8 lossy
   seq: z.number().int().nonnegative(), // strict per-pty ordering (owner-assigned)
 });
-export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDeltaPayload>;
+export type TerminalPtyOutputDeltaPayload = z.infer<
+  typeof TerminalPtyOutputDeltaPayload
+>;
 
 export const TerminalPtyExitedPayload = z.object({
   ptyId: z.string().uuid(),
@@ -12891,7 +14212,9 @@ export const WorkspaceCaptureDegradedReason = z.enum([
   "repository_discovery_result_limit_exceeded",
   "repository_read_unavailable",
 ]);
-export type WorkspaceCaptureDegradedReason = z.infer<typeof WorkspaceCaptureDegradedReason>;
+export type WorkspaceCaptureDegradedReason = z.infer<
+  typeof WorkspaceCaptureDegradedReason
+>;
 
 // Rollup counters — carried on the row (jsonb) and the announce event so the UI
 // can reserve layout (no layout shift) before fetching the manifest.
@@ -12939,7 +14262,9 @@ export const WorkspaceRevisionCapturedPayload = z.object({
   leaseEpoch: z.number().int().nonnegative(),
   stats: WorkspaceCaptureStats,
 });
-export type WorkspaceRevisionCapturedPayload = z.infer<typeof WorkspaceRevisionCapturedPayload>;
+export type WorkspaceRevisionCapturedPayload = z.infer<
+  typeof WorkspaceRevisionCapturedPayload
+>;
 
 export const WorkspaceRevisionDegradedPayload = z.object({
   revision: z.number().int().nonnegative(),
@@ -12948,7 +14273,9 @@ export const WorkspaceRevisionDegradedPayload = z.object({
   leaseEpoch: z.number().int().nonnegative(),
   reason: WorkspaceCaptureDegradedReason,
 });
-export type WorkspaceRevisionDegradedPayload = z.infer<typeof WorkspaceRevisionDegradedPayload>;
+export type WorkspaceRevisionDegradedPayload = z.infer<
+  typeof WorkspaceRevisionDegradedPayload
+>;
 
 // --- M2 capture READ API -------------------------------------
 // A short-TTL signed GET URL minted PER REQUEST (never stored). The manifest is
@@ -12958,7 +14285,9 @@ export const WorkspaceCaptureSignedUrl = z.object({
   url: z.string().url(),
   expiresAt: z.string(),
 });
-export type WorkspaceCaptureSignedUrl = z.infer<typeof WorkspaceCaptureSignedUrl>;
+export type WorkspaceCaptureSignedUrl = z.infer<
+  typeof WorkspaceCaptureSignedUrl
+>;
 
 // GET …/sessions/:sid/workspace/capture. `{available:false}` when no capture row
 // exists yet (or its manifest blob was GC'd) — the client falls back to the
@@ -12990,7 +14319,9 @@ export const GetWorkspaceCaptureResponse = z.discriminatedUnion("available", [
     manifestUrl: WorkspaceCaptureSignedUrl.nullable().default(null),
   }),
 ]);
-export type GetWorkspaceCaptureResponse = z.infer<typeof GetWorkspaceCaptureResponse>;
+export type GetWorkspaceCaptureResponse = z.infer<
+  typeof GetWorkspaceCaptureResponse
+>;
 
 // GET …/sessions/:sid/workspace/capture/file?path=…&revision=…. A single
 // after-image resolved from the (revision|latest) manifest. The file metadata
@@ -13013,7 +14344,9 @@ export const GetWorkspaceCaptureFileResponse = z.object({
   content: z.string().nullable().default(null), // inline ≤256KB (per encoding)
   contentUrl: WorkspaceCaptureSignedUrl.nullable().default(null), // signed >256KB
 });
-export type GetWorkspaceCaptureFileResponse = z.infer<typeof GetWorkspaceCaptureFileResponse>;
+export type GetWorkspaceCaptureFileResponse = z.infer<
+  typeof GetWorkspaceCaptureFileResponse
+>;
 
 export const GitLogRequest = z.object({
   path: z.string().default(""),
@@ -13148,13 +14481,17 @@ export const SessionStructuredCapabilities = z.object({
   }),
   Git: z.object({ available: z.boolean(), repos: z.array(z.string()) }),
 });
-export type SessionStructuredCapabilities = z.infer<typeof SessionStructuredCapabilities>;
+export type SessionStructuredCapabilities = z.infer<
+  typeof SessionStructuredCapabilities
+>;
 
 export const SessionEvent = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
   sessionId: z.string().uuid(),
   sequence: z.number().int().positive(),
+  /** Server-owned durable high-water mark for a synthetic compact event. */
+  coveredThrough: z.number().int().positive().optional(),
   type: SessionEventType,
   payload: z.unknown().default({}),
   occurredAt: z.string(),
@@ -13162,7 +14499,10 @@ export const SessionEvent = z.object({
   turnId: z.string().uuid().nullable().optional(),
   turnGeneration: z.number().int().nonnegative().nullable().optional(),
   turnAttemptId: z.string().uuid().nullable().optional(),
-  turnAssociation: z.enum(["current", "late_rejected", "duplicate"]).nullable().optional(),
+  turnAssociation: z
+    .enum(["current", "late_rejected", "duplicate"])
+    .nullable()
+    .optional(),
   duplicateOfEventId: z.string().uuid().nullable().optional(),
   duplicateReason: z.string().min(1).max(1024).nullable().optional(),
 });
@@ -13253,13 +14593,21 @@ export function compactSessionEventResult(
   let originalBytes = 0;
 
   const textCandidate = typeof payload.text === "string" ? payload.text : null;
-  const outputCandidate = Object.prototype.hasOwnProperty.call(payload, "output")
+  const outputCandidate = Object.prototype.hasOwnProperty.call(
+    payload,
+    "output",
+  )
     ? payload.output
     : null;
-  const resultCandidate = Object.prototype.hasOwnProperty.call(payload, "result")
+  const resultCandidate = Object.prototype.hasOwnProperty.call(
+    payload,
+    "result",
+  )
     ? payload.result
     : undefined;
-  const textValue = textCandidate ?? (typeof outputCandidate === "string" ? outputCandidate : null);
+  const textValue =
+    textCandidate ??
+    (typeof outputCandidate === "string" ? outputCandidate : null);
   const text = textValue === null ? null : compactResultText(textValue);
   if (text && text.truncated) {
     fields.push("text");
@@ -13273,14 +14621,20 @@ export function compactSessionEventResult(
   }
 
   const result = compactResultValue(
-    resultCandidate === undefined ? (textValue ?? outputCandidate) : resultCandidate,
+    resultCandidate === undefined
+      ? (textValue ?? outputCandidate)
+      : resultCandidate,
   );
   if (resultCandidate !== undefined && result.truncated) {
     fields.push("result");
     originalBytes += result.originalBytes ?? 0;
   }
 
-  const checkpointField = firstOwnPayloadValue(payload, ["checkpoint", "summary", "snapshot"]);
+  const checkpointField = firstOwnPayloadValue(payload, [
+    "checkpoint",
+    "summary",
+    "snapshot",
+  ]);
   const checkpointCandidate =
     checkpointField !== undefined
       ? checkpointField
@@ -13293,7 +14647,10 @@ export function compactSessionEventResult(
     originalBytes += checkpoint.originalBytes ?? 0;
   }
 
-  const receiptCandidate = firstOwnPayloadValue(payload, ["receipt", "receiptData"]);
+  const receiptCandidate = firstOwnPayloadValue(payload, [
+    "receipt",
+    "receiptData",
+  ]);
   const receipt = compactResultValue(
     receiptCandidate !== undefined
       ? receiptCandidate
@@ -13312,7 +14669,10 @@ export function compactSessionEventResult(
     originalBytes += failure.originalBytes ?? 0;
   }
 
-  if (isSessionEventJsonRecord(payload.truncation) && payload.truncation.truncated === true) {
+  if (
+    isSessionEventJsonRecord(payload.truncation) &&
+    payload.truncation.truncated === true
+  ) {
     fields.push("payload");
   }
 
@@ -13329,9 +14689,12 @@ export function compactSessionEventResult(
   const status = compactResultStatus(event.type, semanticClass, payload);
   const outputValue = outputCandidate === null ? null : output.value;
   const resultValue = result.value;
-  const checkpointValue = checkpointCandidate === null ? null : checkpoint.value;
+  const checkpointValue =
+    checkpointCandidate === null ? null : checkpoint.value;
   const receiptValue =
-    receiptCandidate === null && semanticClass !== "tool_receipt" ? null : receipt.value;
+    receiptCandidate === null && semanticClass !== "tool_receipt"
+      ? null
+      : receipt.value;
   const compact: SessionEventCompactResult = {
     version: 1,
     semanticClass,
@@ -13373,7 +14736,10 @@ function isSessionEventJsonRecord(value: unknown): value is JsonRecord {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function firstOwnPayloadValue(payload: JsonRecord, keys: readonly string[]): unknown | undefined {
+function firstOwnPayloadValue(
+  payload: JsonRecord,
+  keys: readonly string[],
+): unknown | undefined {
   for (const key of keys) {
     if (Object.prototype.hasOwnProperty.call(payload, key)) return payload[key];
   }
@@ -13385,15 +14751,22 @@ function compactResultText(value: string): CompactValue & { value: string } {
   if (originalBytes <= SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES) {
     return { value, truncated: false, originalBytes };
   }
-  let omittedBytes = originalBytes - SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES;
+  let omittedBytes =
+    originalBytes - SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES;
   let projected = value;
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const marker = `…[${omittedBytes} UTF-8 bytes omitted from compact result]…`;
-    const budget = Math.max(0, SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES - utf8Bytes(marker));
+    const budget = Math.max(
+      0,
+      SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES - utf8Bytes(marker),
+    );
     const head = utf8PrefixForResult(value, Math.floor(budget * 0.7));
     const tail = utf8SuffixForResult(value, budget - utf8Bytes(head));
     projected = `${head}${marker}${tail}`;
-    const nextOmitted = Math.max(0, originalBytes - utf8Bytes(head) - utf8Bytes(tail));
+    const nextOmitted = Math.max(
+      0,
+      originalBytes - utf8Bytes(head) - utf8Bytes(tail),
+    );
     if (nextOmitted === omittedBytes) break;
     omittedBytes = nextOmitted;
   }
@@ -13413,7 +14786,9 @@ function compactResultValue(value: unknown): CompactValue {
   return {
     value: bounded,
     truncated:
-      measurement.bytes === null || deliveredBytes === null || measurement.bytes !== deliveredBytes,
+      measurement.bytes === null ||
+      deliveredBytes === null ||
+      measurement.bytes !== deliveredBytes,
     originalBytes: measurement.bytes,
   };
 }
@@ -13428,8 +14803,8 @@ function compactFailure(
     eventType === "turn.failed" ||
     eventType === "turn.cancelled" ||
     eventType === "turn.superseded";
-  const hasFailureField = ["error", "code", "retryable", "recovery"].some((key) =>
-    Object.prototype.hasOwnProperty.call(payload, key),
+  const hasFailureField = ["error", "code", "retryable", "recovery"].some(
+    (key) => Object.prototype.hasOwnProperty.call(payload, key),
   );
   if (!isFailure && !hasFailureField) {
     return { value: null, truncated: false, originalBytes: null };
@@ -13437,7 +14812,8 @@ function compactFailure(
   const error = compactResultStringField(payload.error);
   const code = compactResultStringField(payload.code);
   const recovery = compactResultStringField(payload.recovery);
-  const retryable = typeof payload.retryable === "boolean" ? payload.retryable : null;
+  const retryable =
+    typeof payload.retryable === "boolean" ? payload.retryable : null;
   const value = {
     error: error.value,
     code: code.value,
@@ -13454,7 +14830,9 @@ function compactFailure(
   };
 }
 
-function compactResultStringField(value: unknown): CompactValue & { value: string | null } {
+function compactResultStringField(
+  value: unknown,
+): CompactValue & { value: string | null } {
   if (typeof value !== "string") {
     return { value: null, truncated: false, originalBytes: null };
   }
@@ -13469,7 +14847,10 @@ function compactResultStatus(
   if (eventType === "turn.failed") return "failed";
   if (eventType === "turn.cancelled") return "cancelled";
   if (eventType === "turn.superseded") return "superseded";
-  if (eventType === "turn.completed" || eventType === "agent.message.completed") {
+  if (
+    eventType === "turn.completed" ||
+    eventType === "agent.message.completed"
+  ) {
     return "completed";
   }
   if (semanticClass === "checkpoint") return "checkpoint";
@@ -13509,7 +14890,9 @@ function utf8SuffixForResult(value: string, maxBytes: number): string {
   let index = value.length;
   while (index > 0) {
     const width =
-      index > 1 && value.charCodeAt(index - 1) >= 0xdc00 && value.charCodeAt(index - 1) <= 0xdfff
+      index > 1 &&
+      value.charCodeAt(index - 1) >= 0xdc00 &&
+      value.charCodeAt(index - 1) <= 0xdfff
         ? 2
         : 1;
     const character = value.slice(index - width, index);
@@ -13524,7 +14907,8 @@ function utf8SuffixForResult(value: string, maxBytes: number): string {
 // --- Durable host export ------------------------------------------------------
 
 /** Wire revision for the durable host event/usage export stream. */
-export const OPENGENI_HOST_EXPORT_SCHEMA_REVISION = "2026-07-host-export-v1" as const;
+export const OPENGENI_HOST_EXPORT_SCHEMA_REVISION =
+  "2026-07-host-export-v1" as const;
 
 /**
  * Decimal string rather than a JavaScript number: export cursors are PostgreSQL
@@ -13556,7 +14940,9 @@ export const HostExportInitiatorContext = TurnInitiatorContext.refine(
   },
   { message: "Host export initiator context exceeds 4096 UTF-8 bytes" },
 );
-export type HostExportInitiatorContext = z.infer<typeof HostExportInitiatorContext>;
+export type HostExportInitiatorContext = z.infer<
+  typeof HostExportInitiatorContext
+>;
 
 const HostExportAttribution = {
   initiator: HostExportInitiator.nullable(),
@@ -13664,7 +15050,8 @@ export type HostUsageSink = {
 };
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;
-export const SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES = SESSION_OPERATION_KEY_MAX_CHARS * 4;
+export const SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES =
+  SESSION_OPERATION_KEY_MAX_CHARS * 4;
 export const SESSION_EVENT_TURN_ASSOCIATION_MAX_BYTES = 64;
 export const SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES = 4 * 1024;
 export const SESSION_EVENT_ENVELOPE_MAX_BYTES = 80 * 1024;
@@ -13685,15 +15072,24 @@ export function boundSessionEvent(
   options: BoundSessionEventOptions = {},
 ): SessionEvent {
   const surface = options.surface ?? "durable_audit";
-  const maxBytes = Math.max(8 * 1024, options.maxBytes ?? SESSION_EVENT_ENVELOPE_MAX_BYTES);
+  const maxBytes = Math.max(
+    8 * 1024,
+    options.maxBytes ?? SESSION_EVENT_ENVELOPE_MAX_BYTES,
+  );
   // Never stringify the untrusted complete event. Measurement has one global
   // work budget and never invokes accessors/custom toJSON; serialization is
   // permitted only after the compact projection below has been constructed.
   const originalBytes = measureSessionEventJson(event).bytes;
   const source = sessionEventOwnDataFields(event);
   const id = canonicalSessionEventUuid(source.id, SESSION_EVENT_ZERO_UUID);
-  const workspaceId = canonicalSessionEventUuid(source.workspaceId, SESSION_EVENT_ZERO_UUID);
-  const sessionId = canonicalSessionEventUuid(source.sessionId, SESSION_EVENT_ZERO_UUID);
+  const workspaceId = canonicalSessionEventUuid(
+    source.workspaceId,
+    SESSION_EVENT_ZERO_UUID,
+  );
+  const sessionId = canonicalSessionEventUuid(
+    source.sessionId,
+    SESSION_EVENT_ZERO_UUID,
+  );
   const sequence =
     source.sequence.readable &&
     typeof source.sequence.value === "number" &&
@@ -13713,7 +15109,9 @@ export function boundSessionEvent(
     sessionEventUtf8Bytes(rawType) <= SESSION_EVENT_TYPE_MAX_BYTES &&
     !rawType.includes("\n") &&
     !rawType.includes("\r");
-  const rawClientEventId = source.clientEventId.readable ? source.clientEventId.value : undefined;
+  const rawClientEventId = source.clientEventId.readable
+    ? source.clientEventId.value
+    : undefined;
   const clientEventId = boundOptionalSessionEventText(
     typeof rawClientEventId === "string" || rawClientEventId === null
       ? rawClientEventId
@@ -13743,7 +15141,18 @@ export function boundSessionEvent(
   const turnId = canonicalOptionalSessionEventUuid(source.turnId);
   const turnGeneration = canonicalSessionEventGeneration(source.turnGeneration);
   const turnAttemptId = canonicalOptionalSessionEventUuid(source.turnAttemptId);
-  const duplicateOfEventId = canonicalOptionalSessionEventUuid(source.duplicateOfEventId);
+  const duplicateOfEventId = canonicalOptionalSessionEventUuid(
+    source.duplicateOfEventId,
+  );
+  const rawCoveredThrough = source.coveredThrough.readable
+    ? source.coveredThrough.value
+    : undefined;
+  const coveredThrough =
+    typeof rawCoveredThrough === "number" &&
+    Number.isSafeInteger(rawCoveredThrough) &&
+    rawCoveredThrough >= sequence
+      ? rawCoveredThrough
+      : undefined;
   const envelopeFields = [
     sessionEventCustomSerializerProjection(event),
     sessionEventAdditionalTopLevelFieldProjection(event),
@@ -13779,6 +15188,14 @@ export function boundSessionEvent(
           source.duplicateReason.readable,
         )
       : null,
+    !source.coveredThrough.readable || rawCoveredThrough !== coveredThrough
+      ? sessionEventEnvelopeFieldProjection(
+          "coveredThrough",
+          rawCoveredThrough,
+          coveredThrough,
+          source.coveredThrough.readable,
+        )
+      : null,
     ...sessionEventCanonicalFieldProjections(source, {
       id,
       workspaceId,
@@ -13804,9 +15221,13 @@ export function boundSessionEvent(
       ? boundSessionEventPayload(rawPayload, { surface })
       : boundSessionEventPayload(
           {
-            preview: "[legacy event envelope normalized at bounded projection boundary]",
+            preview:
+              "[legacy event envelope normalized at bounded projection boundary]",
             originalEventBytes: originalBytes,
-            originalType: typeof rawType === "string" ? boundSessionEventText(rawType, 256) : null,
+            originalType:
+              typeof rawType === "string"
+                ? boundSessionEventText(rawType, 256)
+                : null,
             envelopeProjection: {
               truncated: true,
               surface,
@@ -13821,18 +15242,31 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
-    type: typeIsSafe ? (rawType as SessionEvent["type"]) : "session.event.envelope_omitted",
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
+    type: typeIsSafe
+      ? (rawType as SessionEvent["type"])
+      : "session.event.envelope_omitted",
     payload,
     occurredAt,
-    ...(sessionEventShouldEmitOptionalField(source.clientEventId) ? { clientEventId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.clientEventId)
+      ? { clientEventId }
+      : {}),
     ...(sessionEventShouldEmitOptionalField(source.turnId) ? { turnId } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnGeneration) ? { turnGeneration } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId) ? { turnAttemptId } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnAssociation) ? { turnAssociation } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnGeneration)
+      ? { turnGeneration }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId)
+      ? { turnAttemptId }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAssociation)
+      ? { turnAssociation }
+      : {}),
     ...(sessionEventShouldEmitOptionalField(source.duplicateOfEventId)
       ? { duplicateOfEventId }
       : {}),
-    ...(sessionEventShouldEmitOptionalField(source.duplicateReason) ? { duplicateReason } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateReason)
+      ? { duplicateReason }
+      : {}),
   };
   if (sessionEventJsonBytes(bounded) <= maxBytes) return bounded;
 
@@ -13841,26 +15275,41 @@ export function boundSessionEvent(
     workspaceId,
     sessionId,
     sequence,
+    ...(coveredThrough === undefined ? {} : { coveredThrough }),
     type: "session.event.envelope_omitted",
     payload: boundSessionEventPayload(
       {
-        preview: "[legacy event envelope omitted at bounded projection boundary]",
+        preview:
+          "[legacy event envelope omitted at bounded projection boundary]",
         originalEventBytes: originalBytes,
-        originalType: typeof rawType === "string" ? boundSessionEventText(rawType, 256) : null,
+        originalType:
+          typeof rawType === "string"
+            ? boundSessionEventText(rawType, 256)
+            : null,
         fullEvidence: { available: false, reason: "not_retained" },
       },
       { surface, maxBytes: 4 * 1024 },
     ),
     occurredAt,
-    ...(sessionEventShouldEmitOptionalField(source.clientEventId) ? { clientEventId } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.clientEventId)
+      ? { clientEventId }
+      : {}),
     ...(sessionEventShouldEmitOptionalField(source.turnId) ? { turnId } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnGeneration) ? { turnGeneration } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId) ? { turnAttemptId } : {}),
-    ...(sessionEventShouldEmitOptionalField(source.turnAssociation) ? { turnAssociation } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnGeneration)
+      ? { turnGeneration }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAttemptId)
+      ? { turnAttemptId }
+      : {}),
+    ...(sessionEventShouldEmitOptionalField(source.turnAssociation)
+      ? { turnAssociation }
+      : {}),
     ...(sessionEventShouldEmitOptionalField(source.duplicateOfEventId)
       ? { duplicateOfEventId }
       : {}),
-    ...(sessionEventShouldEmitOptionalField(source.duplicateReason) ? { duplicateReason } : {}),
+    ...(sessionEventShouldEmitOptionalField(source.duplicateReason)
+      ? { duplicateReason }
+      : {}),
   };
   const deliveredBytes = sessionEventJsonBytes(fallback);
   if (deliveredBytes > maxBytes) {
@@ -13907,7 +15356,11 @@ function sessionEventCustomSerializerProjection(
   } as const;
   let candidate: object | null = event;
   try {
-    for (let depth = 0; depth <= SESSION_EVENT_PROTOTYPE_MAX_DEPTH; depth += 1) {
+    for (
+      let depth = 0;
+      depth <= SESSION_EVENT_PROTOTYPE_MAX_DEPTH;
+      depth += 1
+    ) {
       if (candidate === null) return null;
       const descriptor = Object.getOwnPropertyDescriptor(candidate, "toJSON");
       if (descriptor) {
@@ -13915,7 +15368,8 @@ function sessionEventCustomSerializerProjection(
         // executable behavior and an unknown possible serializer. A data
         // property shadows the rest of the chain and is relevant only when it
         // is callable.
-        return !("value" in descriptor) || typeof descriptor.value === "function"
+        return !("value" in descriptor) ||
+          typeof descriptor.value === "function"
           ? projection
           : null;
       }
@@ -13939,6 +15393,7 @@ const SESSION_EVENT_OWN_DATA_FIELDS = [
   "workspaceId",
   "sessionId",
   "sequence",
+  "coveredThrough",
   "type",
   "payload",
   "occurredAt",
@@ -13973,9 +15428,13 @@ function sessionEventAdditionalTopLevelFieldProjection(
   try {
     for (const key in event as SessionEvent & Record<string, unknown>) {
       inspected += 1;
-      if (inspected > SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.size + 1) return projection;
+      if (inspected > SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.size + 1)
+        return projection;
       const descriptor = Object.getOwnPropertyDescriptor(event, key);
-      if (descriptor?.enumerable && !SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.has(key)) {
+      if (
+        descriptor?.enumerable &&
+        !SESSION_EVENT_KNOWN_ENUMERABLE_FIELDS.has(key)
+      ) {
         return projection;
       }
     }
@@ -13985,10 +15444,16 @@ function sessionEventAdditionalTopLevelFieldProjection(
   }
 }
 
-type SessionEventOwnField = { readable: true; value: unknown } | { readable: false };
-type SessionEventOwnDataFields = Record<keyof SessionEvent, SessionEventOwnField>;
+type SessionEventOwnField =
+  { readable: true; value: unknown } | { readable: false };
+type SessionEventOwnDataFields = Record<
+  keyof SessionEvent,
+  SessionEventOwnField
+>;
 
-function sessionEventOwnDataFields(event: SessionEvent): SessionEventOwnDataFields {
+function sessionEventOwnDataFields(
+  event: SessionEvent,
+): SessionEventOwnDataFields {
   return Object.fromEntries(
     SESSION_EVENT_OWN_DATA_FIELDS.map((key) => {
       try {
@@ -13996,7 +15461,9 @@ function sessionEventOwnDataFields(event: SessionEvent): SessionEventOwnDataFiel
         if (!descriptor) return [key, { readable: true, value: undefined }];
         return [
           key,
-          "value" in descriptor ? { readable: true, value: descriptor.value } : { readable: false },
+          "value" in descriptor
+            ? { readable: true, value: descriptor.value }
+            : { readable: false },
         ];
       } catch {
         return [key, { readable: false }];
@@ -14005,7 +15472,10 @@ function sessionEventOwnDataFields(event: SessionEvent): SessionEventOwnDataFiel
   ) as SessionEventOwnDataFields;
 }
 
-function canonicalSessionEventUuid(field: SessionEventOwnField, fallback: string): string {
+function canonicalSessionEventUuid(
+  field: SessionEventOwnField,
+  fallback: string,
+): string {
   return field.readable &&
     typeof field.value === "string" &&
     SESSION_EVENT_UUID_PATTERN.test(field.value)
@@ -14013,7 +15483,9 @@ function canonicalSessionEventUuid(field: SessionEventOwnField, fallback: string
     : fallback;
 }
 
-function canonicalOptionalSessionEventUuid(field: SessionEventOwnField): string | null {
+function canonicalOptionalSessionEventUuid(
+  field: SessionEventOwnField,
+): string | null {
   return field.readable &&
     typeof field.value === "string" &&
     SESSION_EVENT_UUID_PATTERN.test(field.value)
@@ -14021,7 +15493,9 @@ function canonicalOptionalSessionEventUuid(field: SessionEventOwnField): string 
     : null;
 }
 
-function canonicalSessionEventGeneration(field: SessionEventOwnField): number | null {
+function canonicalSessionEventGeneration(
+  field: SessionEventOwnField,
+): number | null {
   return field.readable &&
     typeof field.value === "number" &&
     Number.isSafeInteger(field.value) &&
@@ -14030,7 +15504,9 @@ function canonicalSessionEventGeneration(field: SessionEventOwnField): number | 
     : null;
 }
 
-function sessionEventShouldEmitOptionalField(field: SessionEventOwnField): boolean {
+function sessionEventShouldEmitOptionalField(
+  field: SessionEventOwnField,
+): boolean {
   return !field.readable || field.value !== undefined;
 }
 
@@ -14048,21 +15524,21 @@ function sessionEventCanonicalFieldProjections(
   originalBytes: number | null;
   deliveredBytes: number;
 }> {
-  return (["id", "workspaceId", "sessionId", "sequence", "occurredAt"] as const).flatMap(
-    (field) => {
-      const original = source[field].readable ? source[field].value : undefined;
-      return source[field].readable && original === delivered[field]
-        ? []
-        : [
-            sessionEventEnvelopeFieldProjection(
-              field,
-              original,
-              delivered[field],
-              source[field].readable,
-            ),
-          ];
-    },
-  );
+  return (
+    ["id", "workspaceId", "sessionId", "sequence", "occurredAt"] as const
+  ).flatMap((field) => {
+    const original = source[field].readable ? source[field].value : undefined;
+    return source[field].readable && original === delivered[field]
+      ? []
+      : [
+          sessionEventEnvelopeFieldProjection(
+            field,
+            original,
+            delivered[field],
+            source[field].readable,
+          ),
+        ];
+  });
 }
 
 function sessionEventOptionalFieldProjections(
@@ -14078,29 +15554,31 @@ function sessionEventOptionalFieldProjections(
   originalBytes: number | null;
   deliveredBytes: number;
 }> {
-  return (["turnId", "turnGeneration", "turnAttemptId", "duplicateOfEventId"] as const).flatMap(
-    (field) => {
-      const original = source[field].readable ? source[field].value : undefined;
-      const canonicalOriginal = original ?? null;
-      return source[field].readable && canonicalOriginal === delivered[field]
-        ? []
-        : [
-            sessionEventEnvelopeFieldProjection(
-              field,
-              original,
-              delivered[field],
-              source[field].readable,
-            ),
-          ];
-    },
-  );
+  return (
+    ["turnId", "turnGeneration", "turnAttemptId", "duplicateOfEventId"] as const
+  ).flatMap((field) => {
+    const original = source[field].readable ? source[field].value : undefined;
+    const canonicalOriginal = original ?? null;
+    return source[field].readable && canonicalOriginal === delivered[field]
+      ? []
+      : [
+          sessionEventEnvelopeFieldProjection(
+            field,
+            original,
+            delivered[field],
+            source[field].readable,
+          ),
+        ];
+  });
 }
 
 function boundOptionalSessionEventText<T extends string | null | undefined>(
   value: T,
   maxBytes: number,
 ): T {
-  return (typeof value === "string" ? boundSessionEventText(value, maxBytes) : value) as T;
+  return (
+    typeof value === "string" ? boundSessionEventText(value, maxBytes) : value
+  ) as T;
 }
 
 function boundSessionEventText(value: string, maxBytes: number): string {
@@ -14112,7 +15590,11 @@ function boundSessionEventText(value: string, maxBytes: number): string {
   const markerBytes = encoder.encode(marker).byteLength;
   const prefixBudget = Math.max(0, maxBytes - markerBytes);
   let prefixEnd = Math.min(prefixBudget, bytes.byteLength);
-  while (prefixEnd > 0 && prefixEnd < bytes.byteLength && (bytes[prefixEnd]! & 0xc0) === 0x80) {
+  while (
+    prefixEnd > 0 &&
+    prefixEnd < bytes.byteLength &&
+    (bytes[prefixEnd]! & 0xc0) === 0x80
+  ) {
     prefixEnd -= 1;
   }
   return `${decoder.decode(bytes.subarray(0, prefixEnd))}${marker}`;
@@ -14127,7 +15609,9 @@ export const SessionQueueMutationResponse = z.object({
   snapshot: SessionQueueSnapshot,
   draft: ComposerDraft.optional(),
 });
-export type SessionQueueMutationResponse = z.infer<typeof SessionQueueMutationResponse>;
+export type SessionQueueMutationResponse = z.infer<
+  typeof SessionQueueMutationResponse
+>;
 
 export const SessionControlResponse = z.object({
   receipt: SessionCommandReceipt,
@@ -14173,7 +15657,12 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // event, unlike goal/initialMessage). Trimmed, non-empty, and bounded by the
     // shared durable session-instruction contract. Absent ⇒ byte-identical to
     // today.
-    instructions: z.string().trim().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
+    instructions: z
+      .string()
+      .trim()
+      .min(1)
+      .max(SESSION_INSTRUCTIONS_MAX_CHARACTERS)
+      .optional(),
     // Immutable prompt-policy role binding for matching one activated role
     // policy. This never derives from or grants a human workspace membership
     // role. Existing callers may continue to use normalized metadata.role as a
@@ -14210,7 +15699,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // Ordered low-to-high precedence. A legacy singular selection is normalized
     // into one entry by withVariableSetIdAlias; when both are present the
     // singular value must match the final (highest-precedence) entry.
-    variableSetIds: z.array(z.string().uuid()).max(MAX_SELECTED_VARIABLE_SETS).optional(),
+    variableSetIds: z
+      .array(z.string().uuid())
+      .max(MAX_SELECTED_VARIABLE_SETS)
+      .optional(),
     variableSetId: z.string().uuid().optional(),
     environmentId: z.string().uuid().optional(),
     // The rig to bind this session to (M3). Its ACTIVE version is resolved and
@@ -14258,7 +15750,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // including [], are authoritative; non-empty explicit arrays require attach
     // permission. Credential headers are write-only: create responses and events
     // expose only SessionMcpServerMetadata.
-    mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
+    mcpServers: z
+      .array(SessionMcpServerInput)
+      .max(SESSION_MCP_SERVERS_MAX)
+      .default([]),
     /** Explicit personal-connection grants for the initial accepted turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
     /** Atomic owner issuance for the selected personal Variable Set/Rig closure. */
@@ -14284,7 +15779,11 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // request 422s at create (instead of the first turn dying on the SDK's
     // manifest-env guard).
     sandbox: z
-      .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
+      .union([
+        z.literal("shared"),
+        z.literal("new"),
+        z.object({ groupId: z.string().uuid() }),
+      ])
       .optional(),
   },
   { rejectKeys: ["turnInstructions"] },
@@ -14307,10 +15806,14 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["modelContext"],
-      message: "modelContext requires an initialMessage; attach it to a realtime entry instead",
+      message:
+        "modelContext requires an initialMessage; attach it to a realtime entry instead",
     });
   }
-  if (value.startMode === "realtime" && value.connectionAuthorities.length > 0) {
+  if (
+    value.startMode === "realtime" &&
+    value.connectionAuthorities.length > 0
+  ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["connectionAuthorities"],
@@ -14318,7 +15821,10 @@ export const CreateSessionRequest = withVariableSetIdAlias(
         "connectionAuthorities require an accepted initial turn and are not supported by realtime session staging",
     });
   }
-  if (value.startMode === "realtime" && value.personalResourceAttachment !== undefined) {
+  if (
+    value.startMode === "realtime" &&
+    value.personalResourceAttachment !== undefined
+  ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["personalResourceAttachment"],
@@ -14330,7 +15836,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["personalResourceAttachment", "expectedAuthorityEpoch"],
-      message: "new-session attachment authority epoch is derived by the server",
+      message:
+        "new-session attachment authority epoch is derived by the server",
     });
   }
 });
@@ -14339,15 +15846,26 @@ export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 export const SessionTenancyCreateCapabilities = z.object({
   activated: z.boolean(),
   canCreatePrivate: z.boolean(),
-  reason: z.enum(["available", "not_activated", "managed_session_required", "unavailable"]),
+  reason: z.enum([
+    "available",
+    "not_activated",
+    "managed_session_required",
+    "unavailable",
+  ]),
 });
-export type SessionTenancyCreateCapabilities = z.infer<typeof SessionTenancyCreateCapabilities>;
+export type SessionTenancyCreateCapabilities = z.infer<
+  typeof SessionTenancyCreateCapabilities
+>;
 
 // Generic, host-neutral structured human input. One model tool call creates one
 // request containing one or more questions; the durable response resumes that
 // exact call. This is deliberately distinct from tool approval: an answer,
 // skip, or expiry is structured tool output, never an approve/reject decision.
-export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select"]);
+export const HumanInputQuestionKind = z.enum([
+  "text",
+  "single_select",
+  "multi_select",
+]);
 export type HumanInputQuestionKind = z.infer<typeof HumanInputQuestionKind>;
 
 export const HumanInputOption = z.object({
@@ -14374,8 +15892,20 @@ export const HumanInputQuestion = z
     // Answer strings stay platform-capped on HumanInputAnswer (~8192).
     validation: z
       .object({
-        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
-        maxSelections: z.number().int().positive().max(20).nullable().optional(),
+        minSelections: z
+          .number()
+          .int()
+          .nonnegative()
+          .max(20)
+          .nullable()
+          .optional(),
+        maxSelections: z
+          .number()
+          .int()
+          .positive()
+          .max(20)
+          .nullable()
+          .optional(),
       })
       .nullable()
       .optional(),
@@ -14446,7 +15976,9 @@ export const RequestHumanInputToolInput = z.object({
     .nullable()
     .optional(),
 });
-export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+export type RequestHumanInputToolInput = z.infer<
+  typeof RequestHumanInputToolInput
+>;
 
 export const HumanInputAnswer = z.object({
   questionId: z.string().min(1).max(64),
@@ -14473,7 +16005,9 @@ export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
   }),
   z.object({ outcome: z.literal("skipped") }),
 ]);
-export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
+export type SubmitHumanInputResponseRequest = z.infer<
+  typeof SubmitHumanInputResponseRequest
+>;
 
 export const SessionHumanInputRequest = z.object({
   id: z.string().uuid(),
@@ -14507,8 +16041,10 @@ export function approvalIdentifier(value: unknown): string | null {
     approval.rawItem && typeof approval.rawItem === "object"
       ? (approval.rawItem as Record<string, unknown>)
       : null;
-  const candidate = rawItem?.callId ?? rawItem?.id ?? approval.id ?? approval.name;
-  if (typeof candidate !== "string" && typeof candidate !== "number") return null;
+  const candidate =
+    rawItem?.callId ?? rawItem?.id ?? approval.id ?? approval.name;
+  if (typeof candidate !== "string" && typeof candidate !== "number")
+    return null;
   return String(candidate);
 }
 
@@ -14548,7 +16084,9 @@ export const SessionUserMessagePayload = z
   .strict()
   .superRefine(requireMessageTextOrAnnotations)
   .superRefine(requireEstablishedPersonalResourceEpoch);
-export type SessionUserMessagePayload = z.infer<typeof SessionUserMessagePayload>;
+export type SessionUserMessagePayload = z.infer<
+  typeof SessionUserMessagePayload
+>;
 
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
@@ -14597,7 +16135,9 @@ export const SteerSessionMessageRequest = z
   .strict()
   .superRefine(requireMessageTextOrAnnotations)
   .superRefine(requireEstablishedPersonalResourceEpoch);
-export type SteerSessionMessageRequest = z.infer<typeof SteerSessionMessageRequest>;
+export type SteerSessionMessageRequest = z.infer<
+  typeof SteerSessionMessageRequest
+>;
 
 export const SteerSessionMessageResponse = z.object({
   accepted: SessionEvent,
@@ -14607,7 +16147,9 @@ export const SteerSessionMessageResponse = z.object({
   interruptionCount: z.number().int().nonnegative(),
   replay: z.boolean(),
 });
-export type SteerSessionMessageResponse = z.infer<typeof SteerSessionMessageResponse>;
+export type SteerSessionMessageResponse = z.infer<
+  typeof SteerSessionMessageResponse
+>;
 
 export const SubmitComposerDraftResponse = z.object({
   accepted: SessionEvent,
@@ -14618,7 +16160,9 @@ export const SubmitComposerDraftResponse = z.object({
   interruptionCount: z.number().int().nonnegative(),
   replay: z.boolean(),
 });
-export type SubmitComposerDraftResponse = z.infer<typeof SubmitComposerDraftResponse>;
+export type SubmitComposerDraftResponse = z.infer<
+  typeof SubmitComposerDraftResponse
+>;
 
 export const SessionBusMessage = z.object({
   workspaceId: z.string().uuid(),
@@ -14658,8 +16202,15 @@ export type GitHubBindingStatus = z.infer<typeof GitHubBindingStatus>;
 export const GitHubAppSetupMode = z.enum(["platform", "operator"]);
 export type GitHubAppSetupMode = z.infer<typeof GitHubAppSetupMode>;
 
-export const GitHubInstallationLifecycle = z.enum(["active", "suspended", "deleted", "unverified"]);
-export type GitHubInstallationLifecycle = z.infer<typeof GitHubInstallationLifecycle>;
+export const GitHubInstallationLifecycle = z.enum([
+  "active",
+  "suspended",
+  "deleted",
+  "unverified",
+]);
+export type GitHubInstallationLifecycle = z.infer<
+  typeof GitHubInstallationLifecycle
+>;
 
 export const GitHubInstallationBinding = z.object({
   installationId: z.number().int().positive(),
@@ -14673,7 +16224,9 @@ export const GitHubInstallationBinding = z.object({
   createdAt: z.string(),
   updatedAt: z.string(),
 });
-export type GitHubInstallationBinding = z.infer<typeof GitHubInstallationBinding>;
+export type GitHubInstallationBinding = z.infer<
+  typeof GitHubInstallationBinding
+>;
 
 export const GitHubAppInfo = z.object({
   configured: z.boolean(),
@@ -14692,7 +16245,9 @@ export type GitHubAppInfo = z.infer<typeof GitHubAppInfo>;
 export const GitHubRepositoriesResponse = z.object({
   repositories: z.array(GitHubRepository),
 });
-export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
+export type GitHubRepositoriesResponse = z.infer<
+  typeof GitHubRepositoriesResponse
+>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({
@@ -14737,7 +16292,9 @@ export const CapabilityUnavailableReason = z.enum([
   "consent_required", // whole-machine / screen-control consent not yet acknowledged
   "display_unavailable", // headless machine with no display stack (no DesktopStream)
 ]);
-export type CapabilityUnavailableReason = z.infer<typeof CapabilityUnavailableReason>;
+export type CapabilityUnavailableReason = z.infer<
+  typeof CapabilityUnavailableReason
+>;
 
 export const SessionCapabilities = z.object({
   sessionId: z.string().uuid(),
@@ -14782,7 +16339,9 @@ export const SessionCapabilities = z.object({
     // "relay-frames" is the selfhosted framebuffer stream: PNG-per-frame protobuf
     // datagrams spliced over the relay (NOT RFB). The viewer renders it with the
     // "frames" client (a canvas painter), distinct from Modal's "vnc-ws"/"novnc".
-    transport: z.enum(["vnc-ws", "rdp-ws", "webrtc", "relay-frames"]).nullable(),
+    transport: z
+      .enum(["vnc-ws", "rdp-ws", "webrtc", "relay-frames"])
+      .nullable(),
     client: z.enum(["novnc", "web-rdp", "frames"]).nullable(),
     mode: z.enum(["read-only", "interactive"]).default("read-only"),
     url: z.string().url().nullable(),
@@ -14870,7 +16429,9 @@ export type ViewerHolder = z.infer<typeof ViewerHolder>;
 export const AttachViewerResponse = /* @__PURE__ */ ViewerHolder.extend({
   streamToken: z.string().nullable(),
   streamExpiresAt: z.string().nullable(),
-  resolution: z.tuple([z.number().int().positive(), z.number().int().positive()]).nullable(),
+  resolution: z
+    .tuple([z.number().int().positive(), z.number().int().positive()])
+    .nullable(),
   transport: z.enum(["vnc-ws", "relay-frames"]).nullable(),
   client: z.enum(["novnc", "frames"]).nullable(),
   terminalUrl: z.string().nullable(),
@@ -14904,7 +16465,9 @@ export const AcknowledgeStreamResponse = /* @__PURE__ */ z.object({
   acknowledged: z.boolean(),
   acknowledgedShared: z.boolean(),
 });
-export type AcknowledgeStreamResponse = z.infer<typeof AcknowledgeStreamResponse>;
+export type AcknowledgeStreamResponse = z.infer<
+  typeof AcknowledgeStreamResponse
+>;
 
 // POST .../viewers/:viewerId/heartbeat — refresh the holder TTL. Epoch-fenced:
 // a stale-epoch beat (a box re-established under a newer epoch) is rejected.
@@ -14960,7 +16523,9 @@ export const DeviceEnrollmentStartRequest = z.object({
   // authorized user later approves in.
   workspaceId: z.string().uuid(),
 });
-export type DeviceEnrollmentStartRequest = z.infer<typeof DeviceEnrollmentStartRequest>;
+export type DeviceEnrollmentStartRequest = z.infer<
+  typeof DeviceEnrollmentStartRequest
+>;
 
 // The DeviceAuthStart response (field names match the proto's JSON).
 export const DeviceEnrollmentStartResponse = z.object({
@@ -14971,7 +16536,9 @@ export const DeviceEnrollmentStartResponse = z.object({
   intervalSeconds: z.number().int().positive(),
   expiresInSeconds: z.number().int().positive(),
 });
-export type DeviceEnrollmentStartResponse = z.infer<typeof DeviceEnrollmentStartResponse>;
+export type DeviceEnrollmentStartResponse = z.infer<
+  typeof DeviceEnrollmentStartResponse
+>;
 
 // POST /enrollments/device/approve (USER-authenticated, workspace-gated). The
 // LOUD CONSENT step. whole-machine is mandatory (implicit); screen-control is
@@ -14983,7 +16550,9 @@ export const DeviceEnrollmentApproveRequest = z.object({
   // publication is an explicit consent choice at this same loud boundary.
   scope: ResourceAuthorityScope.default("user"),
 });
-export type DeviceEnrollmentApproveRequest = z.infer<typeof DeviceEnrollmentApproveRequest>;
+export type DeviceEnrollmentApproveRequest = z.infer<
+  typeof DeviceEnrollmentApproveRequest
+>;
 
 export const DeviceEnrollmentApproveResponse = z.object({
   approved: z.boolean(),
@@ -14991,13 +16560,17 @@ export const DeviceEnrollmentApproveResponse = z.object({
   sandboxId: z.string().uuid(),
   allowScreenControl: z.boolean(),
 });
-export type DeviceEnrollmentApproveResponse = z.infer<typeof DeviceEnrollmentApproveResponse>;
+export type DeviceEnrollmentApproveResponse = z.infer<
+  typeof DeviceEnrollmentApproveResponse
+>;
 
 // POST /enrollments/device/poll (agent-side). The poll state machine.
 export const DeviceEnrollmentPollRequest = z.object({
   deviceCode: z.string().min(1).max(256),
 });
-export type DeviceEnrollmentPollRequest = z.infer<typeof DeviceEnrollmentPollRequest>;
+export type DeviceEnrollmentPollRequest = z.infer<
+  typeof DeviceEnrollmentPollRequest
+>;
 
 export const DeviceEnrollmentState = z.enum([
   "pending",
@@ -15042,14 +16615,18 @@ export const EnrollmentCredentialsResponse = z.object({
   consentedWholeMachine: z.boolean(),
   consentedScreenControl: z.boolean(),
 });
-export type EnrollmentCredentialsResponse = z.infer<typeof EnrollmentCredentialsResponse>;
+export type EnrollmentCredentialsResponse = z.infer<
+  typeof EnrollmentCredentialsResponse
+>;
 
 export const DeviceEnrollmentPollResponse = z.object({
   state: DeviceEnrollmentState,
   // Present only when state === "authorized".
   credentials: EnrollmentCredentialsResponse.optional(),
 });
-export type DeviceEnrollmentPollResponse = z.infer<typeof DeviceEnrollmentPollResponse>;
+export type DeviceEnrollmentPollResponse = z.infer<
+  typeof DeviceEnrollmentPollResponse
+>;
 
 // GET /enrollments — a workspace's machines (the Machines dashboard surface).
 export const EnrollmentSummary = z.object({
@@ -15130,7 +16707,9 @@ export type RemoveEnrollmentRequest = z.infer<typeof RemoveEnrollmentRequest>;
 export const DeviceEnrollmentLookupRequest = z.object({
   userCode: z.string().min(1).max(64),
 });
-export type DeviceEnrollmentLookupRequest = z.infer<typeof DeviceEnrollmentLookupRequest>;
+export type DeviceEnrollmentLookupRequest = z.infer<
+  typeof DeviceEnrollmentLookupRequest
+>;
 
 // The presentational machine details the consent screen renders (a subset of the
 // pending request — NO secrets, NO device_code).
@@ -15141,7 +16720,9 @@ export const DeviceEnrollmentLookupMachine = z.object({
   canOfferDisplay: z.boolean(),
   requestsScreenControl: z.boolean(),
 });
-export type DeviceEnrollmentLookupMachine = z.infer<typeof DeviceEnrollmentLookupMachine>;
+export type DeviceEnrollmentLookupMachine = z.infer<
+  typeof DeviceEnrollmentLookupMachine
+>;
 
 export const DeviceEnrollmentLookupResponse = z.object({
   workspaceId: z.string().uuid(),
@@ -15149,19 +16730,25 @@ export const DeviceEnrollmentLookupResponse = z.object({
   machine: DeviceEnrollmentLookupMachine,
   expiresAt: z.string(),
 });
-export type DeviceEnrollmentLookupResponse = z.infer<typeof DeviceEnrollmentLookupResponse>;
+export type DeviceEnrollmentLookupResponse = z.infer<
+  typeof DeviceEnrollmentLookupResponse
+>;
 
 // POST /v1/workspaces/:workspaceId/enrollments/device/deny (USER-authenticated,
 // enrollments:manage). The explicit "no" at the approve page — mirrors approve.
 export const DeviceEnrollmentDenyRequest = z.object({
   userCode: z.string().min(1).max(64),
 });
-export type DeviceEnrollmentDenyRequest = z.infer<typeof DeviceEnrollmentDenyRequest>;
+export type DeviceEnrollmentDenyRequest = z.infer<
+  typeof DeviceEnrollmentDenyRequest
+>;
 
 export const DeviceEnrollmentDenyResponse = z.object({
   denied: z.boolean(),
 });
-export type DeviceEnrollmentDenyResponse = z.infer<typeof DeviceEnrollmentDenyResponse>;
+export type DeviceEnrollmentDenyResponse = z.infer<
+  typeof DeviceEnrollmentDenyResponse
+>;
 
 // POST /v1/workspaces/:workspaceId/enrollments/token (USER-authenticated,
 // enrollments:manage). Mints the short-TTL headless enroll token (the `oget_`
@@ -15198,14 +16785,18 @@ export const EnrollTokenExchangeRequest = z.object({
   // The agent's REQUEST; the token's allowScreenControl is the AUTHORITATIVE consent.
   requestsScreenControl: z.boolean().default(false),
 });
-export type EnrollTokenExchangeRequest = z.infer<typeof EnrollTokenExchangeRequest>;
+export type EnrollTokenExchangeRequest = z.infer<
+  typeof EnrollTokenExchangeRequest
+>;
 
 // The exchange wraps the EXISTING EnrollmentCredentialsResponse — IDENTICAL to the
 // poll authorized branch's `credentials` (NOT a redefined credential shape).
 export const EnrollTokenExchangeResponse = z.object({
   credentials: EnrollmentCredentialsResponse,
 });
-export type EnrollTokenExchangeResponse = z.infer<typeof EnrollTokenExchangeResponse>;
+export type EnrollTokenExchangeResponse = z.infer<
+  typeof EnrollTokenExchangeResponse
+>;
 
 // ── Machines dashboard + per-machine metrics (M10) ────────────
 //
@@ -15267,7 +16858,9 @@ export const MachineConnectionAuthority = z.object({
   duplicateRunnerDeniedCount: z.number().int().nonnegative(),
   duplicateRunnerDeniedAt: z.string().nullable(),
 });
-export type MachineConnectionAuthority = z.infer<typeof MachineConnectionAuthority>;
+export type MachineConnectionAuthority = z.infer<
+  typeof MachineConnectionAuthority
+>;
 
 export const MachineRuntimeCapabilities = z.object({
   exec: z.boolean(),
@@ -15280,7 +16873,9 @@ export const MachineRuntimeCapabilities = z.object({
   operationResourcePolicy: z.boolean(),
   operationCpuQuota: z.boolean(),
 });
-export type MachineRuntimeCapabilities = z.infer<typeof MachineRuntimeCapabilities>;
+export type MachineRuntimeCapabilities = z.infer<
+  typeof MachineRuntimeCapabilities
+>;
 
 export const MachineUpdateStatus = z.enum([
   "requested",
@@ -15320,7 +16915,14 @@ export const MachineRuntime = z.object({
     .nullable(),
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
-  versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  versionState: z.enum([
+    "unknown",
+    "current",
+    "outdated",
+    "ahead",
+    "updating",
+    "update_failed",
+  ]),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });
@@ -15331,10 +16933,22 @@ export const UpdateMachineAgentResponse = z.object({
   accepted: z.boolean(),
   targetVersion: z.string(),
 });
-export type UpdateMachineAgentResponse = z.infer<typeof UpdateMachineAgentResponse>;
+export type UpdateMachineAgentResponse = z.infer<
+  typeof UpdateMachineAgentResponse
+>;
 
-const OperationMemoryBytes = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).nullable();
-const OperationCpuMillicores = z.number().int().positive().max(0xffff_ffff).nullable();
+const OperationMemoryBytes = z
+  .number()
+  .int()
+  .positive()
+  .max(Number.MAX_SAFE_INTEGER)
+  .nullable();
+const OperationCpuMillicores = z
+  .number()
+  .int()
+  .positive()
+  .max(0xffff_ffff)
+  .nullable();
 
 function operationPolicyShape(
   value: {
@@ -15475,7 +17089,9 @@ export const SwapActiveSandboxResponse = z.object({
     ])
     .optional(),
 });
-export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse>;
+export type SwapActiveSandboxResponse = z.infer<
+  typeof SwapActiveSandboxResponse
+>;
 
 /**
  * GET /v1/workspaces/:ws/machines/:enrollmentId/metrics/series?window=1h — the
@@ -15484,7 +17100,9 @@ export type SwapActiveSandboxResponse = z.infer<typeof SwapActiveSandboxResponse
 export const MachineMetricsSeriesResponse = z.object({
   samples: z.array(MetricSample),
 });
-export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
+export type MachineMetricsSeriesResponse = z.infer<
+  typeof MachineMetricsSeriesResponse
+>;
 
 /**
  * Keep this server-facing schema graph eager when imported while allowing
@@ -15497,51 +17115,55 @@ function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
 }
 
 export const ModelCapabilitySupportV1 =
-  /* @__PURE__ */ defineModelContractSchema(() => z.enum(["supported", "unsupported", "unknown"]));
+  /* @__PURE__ */ defineModelContractSchema(() =>
+    z.enum(["supported", "unsupported", "unknown"]),
+  );
 export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
 
-export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    upstream: ModelCapabilitySupportV1,
-    runnable: z.boolean(),
-  }),
+export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(
+  () =>
+    z.object({
+      upstream: ModelCapabilitySupportV1,
+      runnable: z.boolean(),
+    }),
 );
 export type ModelCapabilityStateV1 = z.infer<typeof ModelCapabilityStateV1>;
 
-export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    reasoning: ModelCapabilityStateV1.extend({
-      efforts: z.array(ReasoningEffort),
-      defaultEffort: ReasoningEffort.nullable(),
-      required: z.boolean(),
-    }),
-    functionCalling: ModelCapabilityStateV1,
-    structuredOutput: ModelCapabilityStateV1,
-    hostedTools: z.object({
-      webSearch: ModelCapabilityStateV1,
-      xSearch: ModelCapabilityStateV1,
-      codeExecution: ModelCapabilityStateV1,
-    }),
-    inputModalities: z.array(z.enum(["text", "image", "audio"])),
-    inputFileMediaTypes: z.array(z.string()).optional(),
-    outputModalities: z.array(z.enum(["text", "image", "audio"])),
-    transports: z.object({
-      sse: ModelCapabilityStateV1,
-      responsesWebSocket: ModelCapabilityStateV1,
-      realtimeAudio: ModelCapabilityStateV1,
-    }),
-    promptCaching: ModelCapabilityStateV1.extend({
-      mode: z.enum(["implicit", "automatic", "none"]),
-    }).optional(),
-    latencyModes: z.array(
-      z.object({
-        id: z.enum(["standard", "priority", "fast"]),
-        upstream: ModelCapabilitySupportV1,
-        runnable: z.boolean(),
-        billingMultiplierBps: z.number().int().positive().optional(),
+export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(
+  () =>
+    z.object({
+      reasoning: ModelCapabilityStateV1.extend({
+        efforts: z.array(ReasoningEffort),
+        defaultEffort: ReasoningEffort.nullable(),
+        required: z.boolean(),
       }),
-    ),
-  }),
+      functionCalling: ModelCapabilityStateV1,
+      structuredOutput: ModelCapabilityStateV1,
+      hostedTools: z.object({
+        webSearch: ModelCapabilityStateV1,
+        xSearch: ModelCapabilityStateV1,
+        codeExecution: ModelCapabilityStateV1,
+      }),
+      inputModalities: z.array(z.enum(["text", "image", "audio"])),
+      inputFileMediaTypes: z.array(z.string()).optional(),
+      outputModalities: z.array(z.enum(["text", "image", "audio"])),
+      transports: z.object({
+        sse: ModelCapabilityStateV1,
+        responsesWebSocket: ModelCapabilityStateV1,
+        realtimeAudio: ModelCapabilityStateV1,
+      }),
+      promptCaching: ModelCapabilityStateV1.extend({
+        mode: z.enum(["implicit", "automatic", "none"]),
+      }).optional(),
+      latencyModes: z.array(
+        z.object({
+          id: z.enum(["standard", "priority", "fast"]),
+          upstream: ModelCapabilitySupportV1,
+          runnable: z.boolean(),
+          billingMultiplierBps: z.number().int().positive().optional(),
+        }),
+      ),
+    }),
 );
 export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
 
@@ -15584,32 +17206,50 @@ export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z
       .object({
-        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+        upstreamPayer: z.enum([
+          "deployment",
+          "workspace",
+          "connected_subscription",
+        ]),
         metering: z.enum(["opengeni_credits", "external"]),
       })
       .strict(),
   );
-export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
+export type ModelBillingAttributionV1 = z.infer<
+  typeof ModelBillingAttributionV1
+>;
 
-export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
+export const ModelCostClassV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["free", "credits", "subscription", "workspace"]),
+);
+export type ModelCostClassV1 = z.infer<typeof ModelCostClassV1>;
+
+export const TURN_EXECUTION_POLICY_METADATA_KEY =
+  "turnExecutionPolicyV1" as const;
 
 export const TurnExecutionModelSourceV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.enum(["explicit", "session", "deployment", "continuation"]),
   );
-export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
+export type TurnExecutionModelSourceV1 = z.infer<
+  typeof TurnExecutionModelSourceV1
+>;
 
 export const TurnExecutionReasoningSourceV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.enum(["explicit", "session", "deployment", "continuation"]),
   );
-export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
+export type TurnExecutionReasoningSourceV1 = z.infer<
+  typeof TurnExecutionReasoningSourceV1
+>;
 
 export const TurnExecutionLatencyModeSourceV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.enum(["explicit", "session", "deployment", "continuation"]),
   );
-export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLatencyModeSourceV1>;
+export type TurnExecutionLatencyModeSourceV1 = z.infer<
+  typeof TurnExecutionLatencyModeSourceV1
+>;
 
 /**
  * Secret-safe execution identity frozen onto one accepted logical turn.
@@ -15622,47 +17262,55 @@ export type TurnExecutionLatencyModeSourceV1 = z.infer<typeof TurnExecutionLaten
  * `latencyMode` / `latencyModeSource` default to standard/deployment so legacy
  * snapshots without those keys remain readable as Standard.
  */
-export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z
-    .object({
-      schemaVersion: z.literal(1),
-      productModelId: z.string().min(1),
-      requestedModelId: z.string().min(1).nullable(),
-      modelSource: TurnExecutionModelSourceV1,
-      reasoningEffort: ReasoningEffort,
-      reasoningSource: TurnExecutionReasoningSourceV1,
-      latencyMode: LatencyMode.default("standard"),
-      latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
-      providerId: z.string().min(1),
-      upstreamModelId: z.string().min(1),
-      wireApi: z.enum(["responses", "chat"]),
-      credentialSource: TurnExecutionCredentialSourceV1,
-      billing: ModelBillingAttributionV1,
-      definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
-    })
-    .strict()
-    .superRefine((policy, context) => {
-      if (policy.modelSource === "explicit" && policy.requestedModelId === null) {
-        context.addIssue({
-          code: "custom",
-          path: ["requestedModelId"],
-          message: "an explicit model source requires a requested model id",
-        });
-      }
-      if (policy.modelSource !== "explicit" && policy.requestedModelId !== null) {
-        context.addIssue({
-          code: "custom",
-          path: ["requestedModelId"],
-          message: "only an explicit model source may retain a requested model id",
-        });
-      }
-    }),
+export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(
+  () =>
+    z
+      .object({
+        schemaVersion: z.literal(1),
+        productModelId: z.string().min(1),
+        requestedModelId: z.string().min(1).nullable(),
+        modelSource: TurnExecutionModelSourceV1,
+        reasoningEffort: ReasoningEffort,
+        reasoningSource: TurnExecutionReasoningSourceV1,
+        latencyMode: LatencyMode.default("standard"),
+        latencyModeSource:
+          TurnExecutionLatencyModeSourceV1.default("deployment"),
+        providerId: z.string().min(1),
+        upstreamModelId: z.string().min(1),
+        wireApi: z.enum(["responses", "chat"]),
+        credentialSource: TurnExecutionCredentialSourceV1,
+        billing: ModelBillingAttributionV1,
+        definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+      })
+      .strict()
+      .superRefine((policy, context) => {
+        if (
+          policy.modelSource === "explicit" &&
+          policy.requestedModelId === null
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["requestedModelId"],
+            message: "an explicit model source requires a requested model id",
+          });
+        }
+        if (
+          policy.modelSource !== "explicit" &&
+          policy.requestedModelId !== null
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["requestedModelId"],
+            message:
+              "only an explicit model source may retain a requested model id",
+          });
+        }
+      }),
 );
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
 
 export type TurnExecutionPolicyReadV1 =
-  | { kind: "absent" }
-  | { kind: "valid"; policy: TurnExecutionPolicyV1 };
+  { kind: "absent" } | { kind: "valid"; policy: TurnExecutionPolicyV1 };
 
 /**
  * Read the policy from turn metadata. Only a literally absent key is legacy;
@@ -15670,18 +17318,29 @@ export type TurnExecutionPolicyReadV1 =
  * malformed present value fail closed. Error text reports paths only and never
  * reflects the untrusted value into logs or events.
  */
-export function readTurnExecutionPolicyV1(metadata: unknown): TurnExecutionPolicyReadV1 {
+export function readTurnExecutionPolicyV1(
+  metadata: unknown,
+): TurnExecutionPolicyReadV1 {
   if (metadata === null || metadata === undefined) {
     return { kind: "absent" };
   }
   if (typeof metadata !== "object" || Array.isArray(metadata)) {
-    throw new Error("Malformed turn execution policy metadata: turn metadata is not an object");
+    throw new Error(
+      "Malformed turn execution policy metadata: turn metadata is not an object",
+    );
   }
   const record = metadata as Record<string, unknown>;
-  if (!Object.prototype.hasOwnProperty.call(record, TURN_EXECUTION_POLICY_METADATA_KEY)) {
+  if (
+    !Object.prototype.hasOwnProperty.call(
+      record,
+      TURN_EXECUTION_POLICY_METADATA_KEY,
+    )
+  ) {
     return { kind: "absent" };
   }
-  const parsed = TurnExecutionPolicyV1.safeParse(record[TURN_EXECUTION_POLICY_METADATA_KEY]);
+  const parsed = TurnExecutionPolicyV1.safeParse(
+    record[TURN_EXECUTION_POLICY_METADATA_KEY],
+  );
   if (!parsed.success) {
     const paths = [
       ...new Set(
@@ -15690,7 +17349,9 @@ export function readTurnExecutionPolicyV1(metadata: unknown): TurnExecutionPolic
         ),
       ),
     ].join(", ");
-    throw new Error(`Malformed turn execution policy metadata at ${paths || "policy"}`);
+    throw new Error(
+      `Malformed turn execution policy metadata at ${paths || "policy"}`,
+    );
   }
   return { kind: "valid", policy: parsed.data };
 }
@@ -15740,25 +17401,30 @@ export function turnExecutionPolicyAuditMetadata(
 export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     inputMicrosPerMillionTokens: z.number().int().nonnegative(),
-    cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    cachedInputMicrosPerMillionTokens: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional(),
     outputMicrosPerMillionTokens: z.number().int().nonnegative(),
     marginBps: z.number().int().min(0).max(100_000).optional(),
   }),
 );
 export type ModelPricingV1 = z.infer<typeof ModelPricingV1>;
 
-export const ModelPricingScheduleV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    default: ModelPricingV1,
-    inputTokenTiers: z
-      .array(
-        z.object({
-          minimumInputTokens: z.number().int().nonnegative(),
-          pricing: ModelPricingV1,
-        }),
-      )
-      .optional(),
-  }),
+export const ModelPricingScheduleV1 = /* @__PURE__ */ defineModelContractSchema(
+  () =>
+    z.object({
+      default: ModelPricingV1,
+      inputTokenTiers: z
+        .array(
+          z.object({
+            minimumInputTokens: z.number().int().nonnegative(),
+            pricing: ModelPricingV1,
+          }),
+        )
+        .optional(),
+    }),
 );
 export type ModelPricingScheduleV1 = z.infer<typeof ModelPricingScheduleV1>;
 
@@ -15778,7 +17444,15 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     provider: z.string(), // provider id
     providerLabel: z.string(),
     api: z.enum(["responses", "chat"]),
-    source: z.enum(["opengeni", "codex", "supergrok", "workspace_gateway"]).optional(),
+    source: z
+      .enum([
+        "opengeni",
+        "codex",
+        "supergrok",
+        "workspace_gateway",
+        "openrouter",
+      ])
+      .optional(),
     contextWindowTokens: z.number().int().positive().optional(),
     // Additive normalized definition metadata. Optional so older server payloads
     // remain parseable; current servers project the complete V1 set.
@@ -15800,6 +17474,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
       .optional(),
     credentialSource: ModelCredentialSourceV1.optional(),
     billing: ModelBillingAttributionV1.optional(),
+    cost: ModelCostClassV1.optional(),
     capabilities: ModelCapabilitiesV1.optional(),
     pricing: ModelPricingScheduleV1.optional(),
     definitionVersion: z
@@ -15833,10 +17508,14 @@ export const ModelCredentialReadinessV1 =
           context.addIssue({
             code: "custom",
             path: ["reason"],
-            message: "ready credential state requires no reason; non-ready state requires a reason",
+            message:
+              "ready credential state requires no reason; non-ready state requires a reason",
           });
         }
-        if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+        if (
+          (readiness.status === "error") !==
+          (readiness.reason === "resolver_error")
+        ) {
           context.addIssue({
             code: "custom",
             path: ["reason"],
@@ -15855,7 +17534,10 @@ export const ModelCredentialReadinessV1 =
             message: "resolver readiness requires an observation timestamp",
           });
         }
-        if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+        if (
+          readiness.reason === "observation_stale" &&
+          readiness.checkedAt === null
+        ) {
           context.addIssue({
             code: "custom",
             path: ["checkedAt"],
@@ -15864,25 +17546,28 @@ export const ModelCredentialReadinessV1 =
         }
       }),
   );
-export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
+export type ModelCredentialReadinessV1 = z.infer<
+  typeof ModelCredentialReadinessV1
+>;
 
-export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.object({
-    status: z.enum(["available", "unavailable", "degraded", "unknown"]),
-    selectable: z.boolean(),
-    reason: z
-      .enum([
-        "missing_credential",
-        "needs_reauth",
-        "credential_not_ready",
-        "not_entitled",
-        "provider_unhealthy",
-        "policy_blocked",
-        "unsupported",
-      ])
-      .nullable(),
-    checkedAt: z.string().datetime().nullable(),
-  }),
+export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(
+  () =>
+    z.object({
+      status: z.enum(["available", "unavailable", "degraded", "unknown"]),
+      selectable: z.boolean(),
+      reason: z
+        .enum([
+          "missing_credential",
+          "needs_reauth",
+          "credential_not_ready",
+          "not_entitled",
+          "provider_unhealthy",
+          "policy_blocked",
+          "unsupported",
+        ])
+        .nullable(),
+      checkedAt: z.string().datetime().nullable(),
+    }),
 );
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
@@ -15895,7 +17580,9 @@ export const WorkspaceModelCatalogModel =
       availability: ModelAvailabilityV1,
     }),
   );
-export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
+export type WorkspaceModelCatalogModel = z.infer<
+  typeof WorkspaceModelCatalogModel
+>;
 
 export const WorkspaceModelCatalogResponse =
   /* @__PURE__ */ defineModelContractSchema(() =>
@@ -15903,7 +17590,9 @@ export const WorkspaceModelCatalogResponse =
       models: z.array(WorkspaceModelCatalogModel),
     }),
   );
-export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
+export type WorkspaceModelCatalogResponse = z.infer<
+  typeof WorkspaceModelCatalogResponse
+>;
 
 /**
  * Exact public HTTP protocol revision spoken by this release train.
@@ -15913,7 +17602,8 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-08-organization-recovery-custody-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION =
+  "2026-08-organization-recovery-custody-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
@@ -15968,7 +17658,9 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     productAccessMode: ProductAccessMode,
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
-    managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+    managedAuthSessionSetMode: z
+      .enum(["legacy", "dual", "broker"])
+      .default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
     analytics: z
       .object({
@@ -16022,7 +17714,10 @@ function base64UrlDecode(value: string): string {
   return Buffer.from(value, "base64url").toString("utf8");
 }
 
-async function hmacSha256Base64Url(secret: string, value: string): Promise<string> {
+async function hmacSha256Base64Url(
+  secret: string,
+  value: string,
+): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -16030,7 +17725,11 @@ async function hmacSha256Base64Url(secret: string, value: string): Promise<strin
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(value),
+  );
   return Buffer.from(signature).toString("base64url");
 }
 
@@ -16070,8 +17769,7 @@ export type WorkspaceModelPolicyContract = {
 };
 
 export type WorkspaceModelPolicyVerdict =
-  | { allowed: true }
-  | { allowed: false; reason: "provider" | "model" };
+  { allowed: true } | { allowed: false; reason: "provider" | "model" };
 
 export function evaluateWorkspaceModelPolicy(
   policy: WorkspaceModelPolicyContract | null | undefined,
@@ -16080,10 +17778,16 @@ export function evaluateWorkspaceModelPolicy(
   if (!policy) {
     return { allowed: true };
   }
-  if (policy.allowedProviders !== null && !policy.allowedProviders.includes(candidate.providerId)) {
+  if (
+    policy.allowedProviders !== null &&
+    !policy.allowedProviders.includes(candidate.providerId)
+  ) {
     return { allowed: false, reason: "provider" };
   }
-  if (policy.allowedModels !== null && !policy.allowedModels.includes(candidate.modelId)) {
+  if (
+    policy.allowedModels !== null &&
+    !policy.allowedModels.includes(candidate.modelId)
+  ) {
     return { allowed: false, reason: "model" };
   }
   return { allowed: true };

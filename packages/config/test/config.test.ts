@@ -126,6 +126,45 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("host MCP connection authority defaults off and parses the rollout flag", () => {
+    expect(getSettings().hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
+        .hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(true);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "false" }, () =>
+        getSettings(),
+      ).hostMcpAuthoritySourceAdmissionEnabled,
+    ).toBe(false);
+  });
+
+  test("configured host MCP refs require the completed fleet activation", () => {
+    const mcpServers = JSON.stringify([
+      {
+        id: "host-tools",
+        url: "https://host.example.test/mcp",
+        connectionRef: {
+          authoritySource: "host",
+          connectionId: "opaque-host-binding",
+          providerDomain: "host.example.test",
+        },
+      },
+    ]);
+    expect(() => withEnv({ OPENGENI_MCP_SERVERS: mcpServers }, () => getSettings())).toThrow(
+      /OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true/,
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_SERVERS: mcpServers,
+          OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
+        },
+        () => getSettings(),
+      ).mcpServers.find((server) => server.id === "host-tools")?.connectionRef,
+    ).toMatchObject({ authoritySource: "host", connectionId: "opaque-host-binding" });
+  });
+
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
     expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
     expect(

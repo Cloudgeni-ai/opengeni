@@ -1,6 +1,6 @@
 // Route assembly only — components live under src/routes, shared state in
 // src/context.tsx, logic in src/lib. Route map:
-//   /                                        → default-workspace redirect
+//   /                                        → remembered/default workspace redirect
 //   /workspaces/:id                          → sessions redirect
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
@@ -40,6 +40,13 @@ import { ROUTER_PENDING_OPTIONS } from "@/components/route-pending";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseComposerLaunchSearch, type ComposerLaunchSearch } from "@/lib/composer-launch";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
+import {
+  parseRootWorkspaceSearch,
+  readLastWorkspaceId,
+  resolveLandingWorkspaceId,
+  type RootWorkspaceSearch,
+  workspaceNavigationPreferenceStorageId,
+} from "@/lib/workspace-navigation-preference";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 
 type OrganizationAdminSection =
@@ -145,6 +152,8 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
+  validateSearch: (search: Record<string, unknown>): RootWorkspaceSearch =>
+    parseRootWorkspaceSearch(search),
   component: RootIndexRoute,
 });
 const sessionDeepLinkRoute = createRoute({
@@ -502,10 +511,15 @@ export function App() {
 
 function RootIndexRoute() {
   const context = useAppContext();
-  const workspaceId =
-    context.accessContext.defaultWorkspaceId ??
-    context.workspaces[0]?.id ??
-    context.accessContext.workspaceGrants[0]?.workspaceId;
+  const { workspaceId: requestedWorkspaceId } = indexRoute.useSearch();
+  const workspaceId = resolveLandingWorkspaceId({
+    requestedWorkspaceId,
+    rememberedWorkspaceId: readLastWorkspaceId(
+      workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
+    ),
+    workspaces: context.workspaces,
+    accessContext: context.accessContext,
+  });
   if (!workspaceId) {
     return (
       <ProblemPanel

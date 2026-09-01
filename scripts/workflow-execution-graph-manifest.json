@@ -18,7 +18,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "d5db0fa2598ff1784fcbc676e5debf184698a65a8af1f6fe6fb19104f94f0139"
+      "sha256": "40021a0593f096800af7a7091360ccb18b86a2c473a3520bb3f7f0243c14b956"
     },
     {
       "path": ".github/workflows/desktop-e2e.yml",
@@ -595,13 +595,13 @@
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Require every workload image build",
-      "sha256": "e71506956e77d0c0cb1eee25ae8b1895d284614c349a9aa062892a046923e606"
+      "sha256": "9a2431314e5cdf5185503a5d6bf04803d26eaeb185e0bd952615ba9c4d6910c2"
     },
     {
       "workflow": ".github/workflows/ci.yml",
       "job": "images",
       "step": "Write exact-main-SHA canary receipt",
-      "sha256": "b5030683a20f69f187a9ae6337e5359c45af4544112182c6f05b5cd9bba265b8"
+      "sha256": "af201a1f4f55151cc8f220d4f0911f1fc0bda4aece1fa5c17ed367a1db8a5962"
     },
     {
       "workflow": ".github/workflows/ci.yml",

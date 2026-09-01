@@ -45,7 +45,12 @@ const silentLogger: Required<EventLogger> = {
   warn: () => {},
 };
 
-export { SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES, coalesceSessionEventDeltas } from "./coalesce";
+export {
+  SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
+  type CoalescedSessionEventPage,
+} from "./coalesce";
 
 /**
  * Reconnect + keepalive defaults applied to EVERY long-lived NATS connection
@@ -889,9 +894,14 @@ function subscribeAgentEvents(
   };
 }
 
-export function formatSse<T extends { sequence: number; type: string }>(event: T): string {
+export function formatSse<T extends { sequence: number; type: string }>(
+  event: T,
+  idSequence = event.sequence,
+): string {
+  const trustedId =
+    Number.isSafeInteger(idSequence) && idSequence >= event.sequence ? idSequence : event.sequence;
   return [
-    `id: ${event.sequence}`,
+    `id: ${trustedId}`,
     `event: ${event.type}`,
     `data: ${JSON.stringify(event)}`,
     "",
@@ -929,9 +939,12 @@ export function formatWorkspaceControlEventSse(event: WorkspaceControlEvent): st
 }
 
 /** Defensively bounds historical rows before they become one SSE frame. */
-export function formatSessionEventSse(event: SessionEvent): string {
+export function formatSessionEventSse(
+  event: SessionEvent,
+  coveredThrough = event.sequence,
+): string {
   const bounded = boundSessionEventForSurface(event, "sse_legacy_guard");
-  const formatted = formatSse(bounded);
+  const formatted = formatSse(bounded, coveredThrough);
   if (new TextEncoder().encode(formatted).byteLength > SESSION_EVENT_SSE_FRAME_MAX_BYTES) {
     // The payload normalizer targets 60 KiB, so this fallback is reachable only
     // for a malformed legacy event with oversized non-payload envelope fields.
@@ -949,7 +962,7 @@ export function formatSessionEventSse(event: SessionEvent): string {
         { surface: "sse_legacy_guard", maxBytes: 4096 },
       ),
     };
-    return formatSse(minimal);
+    return formatSse(minimal, coveredThrough);
   }
   return formatted;
 }
@@ -1006,6 +1019,8 @@ export function boundSessionEventHttpPage(
     maxBytes?: number;
     /** Exact mode is restricted to already-canonical forensic REST rows. */
     eventProjection?: "bounded" | "exact";
+    /** Out-of-band raw coverage for events synthesized by trusted coalescing. */
+    coveredThroughBySequence?: ReadonlyMap<number, number>;
   },
 ): {
   events: SessionEvent[];
@@ -1043,7 +1058,10 @@ export function boundSessionEventHttpPage(
       edge === undefined
         ? null
         : options.direction === "after"
-          ? sessionEventResumeSequence(edge)
+          ? Math.max(
+              edge.sequence,
+              options.coveredThroughBySequence?.get(edge.sequence) ?? edge.sequence,
+            )
           : edge.sequence,
     bytes,
   };
@@ -1086,14 +1104,11 @@ export function boundWorkspaceControlHttpPage(
 
 /** Raw durable cursor covered by a possibly coalesced compact event. */
 export function sessionEventResumeSequence(event: SessionEvent): number {
-  if (!event.payload || typeof event.payload !== "object" || Array.isArray(event.payload)) {
-    return event.sequence;
-  }
-  const coalescedUntil = Number((event.payload as Record<string, unknown>).coalescedUntil);
-  return Math.max(
-    event.sequence,
-    Number.isFinite(coalescedUntil) ? Math.floor(coalescedUntil) : event.sequence,
-  );
+  return typeof event.coveredThrough === "number" &&
+    Number.isSafeInteger(event.coveredThrough) &&
+    event.coveredThrough >= event.sequence
+    ? event.coveredThrough
+    : event.sequence;
 }
 
 function boundSessionEventForSurface(

@@ -23,6 +23,7 @@ export type FileAttachment = Readonly<{
   status: "uploading" | "ready" | "failed";
   file?: FileAsset | undefined;
   previewUrl?: string | undefined;
+  errorCode?: "secure_context_required" | undefined;
   error?: string | undefined;
 }>;
 
@@ -33,16 +34,17 @@ export type FileAttachmentStoreSnapshot = Readonly<{
   hasUnresolved: boolean;
 }>;
 
-export type FileAttachmentStore = OpenGeniExternalStore<FileAttachmentStoreSnapshot> & {
-  addFiles(files: Iterable<SessionAttachmentSource | File>): void;
-  restoreReadyFiles(files: Iterable<FileAsset>): void;
-  retry(id: string): void;
-  retainPreview(id: string): (() => void) | undefined;
-  remove(id: string): void;
-  removeReadyFiles(fileIds: Iterable<string>): void;
-  clear(): void;
-  diagnostics(): OpenGeniStoreDiagnostics;
-};
+export type FileAttachmentStore =
+  OpenGeniExternalStore<FileAttachmentStoreSnapshot> & {
+    addFiles(files: Iterable<SessionAttachmentSource | File>): void;
+    restoreReadyFiles(files: Iterable<FileAsset>): void;
+    retry(id: string): void;
+    retainPreview(id: string): (() => void) | undefined;
+    remove(id: string): void;
+    removeReadyFiles(fileIds: Iterable<string>): void;
+    clear(): void;
+    diagnostics(): OpenGeniStoreDiagnostics;
+  };
 
 const EMPTY_SNAPSHOT: FileAttachmentStoreSnapshot = Object.freeze({
   attachments: Object.freeze([]),
@@ -83,17 +85,26 @@ export function createFileAttachmentStore(options: {
               : [],
           ),
         ),
-        uploading: frozen.some((attachment) => attachment.status === "uploading"),
-        hasUnresolved: frozen.some((attachment) => attachment.status !== "ready"),
+        uploading: frozen.some(
+          (attachment) => attachment.status === "uploading",
+        ),
+        hasUnresolved: frozen.some(
+          (attachment) => attachment.status !== "ready",
+        ),
       }),
     );
   };
 
-  const updateAttachment = (id: string, update: (current: FileAttachment) => FileAttachment) => {
+  const updateAttachment = (
+    id: string,
+    update: (current: FileAttachment) => FileAttachment,
+  ) => {
     publishAttachments(
       store
         .getSnapshot()
-        .attachments.map((attachment) => (attachment.id === id ? update(attachment) : attachment)),
+        .attachments.map((attachment) =>
+          attachment.id === id ? update(attachment) : attachment,
+        ),
     );
   };
 
@@ -123,7 +134,12 @@ export function createFileAttachmentStore(options: {
           contentType: source.type || "application/octet-stream",
           data: source.data,
         });
-        if (store.signal.aborted || generation !== ownedGeneration || !sources.has(id)) return;
+        if (
+          store.signal.aborted ||
+          generation !== ownedGeneration ||
+          !sources.has(id)
+        )
+          return;
         sources.delete(id);
         updateAttachment(id, (attachment) => ({
           ...attachment,
@@ -132,13 +148,20 @@ export function createFileAttachmentStore(options: {
           name: asset.filename,
           contentType: asset.contentType,
           sizeBytes: asset.sizeBytes,
+          errorCode: undefined,
           error: undefined,
         }));
       } catch (cause) {
-        if (store.signal.aborted || generation !== ownedGeneration || !sources.has(id)) return;
+        if (
+          store.signal.aborted ||
+          generation !== ownedGeneration ||
+          !sources.has(id)
+        )
+          return;
         updateAttachment(id, (attachment) => ({
           ...attachment,
           status: "failed",
+          errorCode: secureContextRequiredErrorCode(cause),
           error: cause instanceof Error ? cause.message : String(cause),
         }));
       }
@@ -166,7 +189,9 @@ export function createFileAttachmentStore(options: {
           ...store.getSnapshot().attachments,
           {
             id,
-            name: source.name || (source.type?.startsWith("image/") ? "image" : "file"),
+            name:
+              source.name ||
+              (source.type?.startsWith("image/") ? "image" : "file"),
             contentType: source.type || "application/octet-stream",
             sizeBytes: source.size ?? uploadDataSize(source.data),
             status: "uploading",
@@ -179,12 +204,17 @@ export function createFileAttachmentStore(options: {
     restoreReadyFiles(files: Iterable<FileAsset>) {
       const incoming = new Map<string, FileAsset>();
       for (const file of files) {
-        if (file.status === "ready" && file.workspaceId === options.workspaceId) {
+        if (
+          file.status === "ready" &&
+          file.workspaceId === options.workspaceId
+        ) {
           incoming.set(file.id, file);
         }
       }
       const current = store.getSnapshot().attachments;
-      const unresolved = current.filter((attachment) => attachment.status !== "ready");
+      const unresolved = current.filter(
+        (attachment) => attachment.status !== "ready",
+      );
       const existingReady = new Map(
         current.flatMap((attachment) =>
           attachment.status === "ready" && attachment.file
@@ -202,6 +232,7 @@ export function createFileAttachmentStore(options: {
               sizeBytes: file.sizeBytes,
               status: "ready",
               file,
+              errorCode: undefined,
               error: undefined,
             }
           : {
@@ -213,7 +244,9 @@ export function createFileAttachmentStore(options: {
               file,
             };
       });
-      const retainedIds = new Set([...unresolved, ...restored].map((attachment) => attachment.id));
+      const retainedIds = new Set(
+        [...unresolved, ...restored].map((attachment) => attachment.id),
+      );
       publishAttachments([...unresolved, ...restored]);
       for (const attachment of current) {
         if (!retainedIds.has(attachment.id)) revokePreview(attachment.id);
@@ -221,9 +254,17 @@ export function createFileAttachmentStore(options: {
     },
     retry(id: string) {
       const source = sources.get(id);
-      const attachment = store.getSnapshot().attachments.find((candidate) => candidate.id === id);
-      if (!source || attachment?.status !== "failed" || store.signal.aborted) return;
-      updateAttachment(id, (current) => ({ ...current, status: "uploading", error: undefined }));
+      const attachment = store
+        .getSnapshot()
+        .attachments.find((candidate) => candidate.id === id);
+      if (!source || attachment?.status !== "failed" || store.signal.aborted)
+        return;
+      updateAttachment(id, (current) => ({
+        ...current,
+        status: "uploading",
+        errorCode: undefined,
+        error: undefined,
+      }));
       startUpload(id, source);
     },
     retainPreview(id: string) {
@@ -245,7 +286,9 @@ export function createFileAttachmentStore(options: {
     remove(id: string) {
       sources.delete(id);
       publishAttachments(
-        store.getSnapshot().attachments.filter((attachment) => attachment.id !== id),
+        store
+          .getSnapshot()
+          .attachments.filter((attachment) => attachment.id !== id),
       );
       revokePreview(id);
     },
@@ -262,7 +305,9 @@ export function createFileAttachmentStore(options: {
       );
       if (removedIds.length === 0) return;
       const removed = new Set(removedIds);
-      publishAttachments(current.filter((attachment) => !removed.has(attachment.id)));
+      publishAttachments(
+        current.filter((attachment) => !removed.has(attachment.id)),
+      );
       for (const id of removed) revokePreview(id);
     },
     clear() {
@@ -274,13 +319,27 @@ export function createFileAttachmentStore(options: {
   });
 }
 
-function normalizeSource(input: SessionAttachmentSource | File): SessionAttachmentSource {
+function secureContextRequiredErrorCode(
+  error: unknown,
+): "secure_context_required" | undefined {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "secure_context_required"
+    ? error.code
+    : undefined;
+}
+
+function normalizeSource(
+  input: SessionAttachmentSource | File,
+): SessionAttachmentSource {
   if ("data" in input) return input;
   return { name: input.name, type: input.type, size: input.size, data: input };
 }
 
 function uploadDataSize(data: FileUploadData): number {
-  if (typeof data === "string") return new TextEncoder().encode(data).byteLength;
+  if (typeof data === "string")
+    return new TextEncoder().encode(data).byteLength;
   if (data instanceof Blob) return data.size;
   return data.byteLength;
 }

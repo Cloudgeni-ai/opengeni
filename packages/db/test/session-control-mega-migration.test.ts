@@ -1,11 +1,17 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
+import {
+  acquireBlankTestDatabase,
+  type BlankTestDatabase,
+} from "@opengeni/testing";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
+const migrationsDir = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "../drizzle",
+);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let blank: BlankTestDatabase | null = null;
 let available = true;
@@ -14,15 +20,19 @@ async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
   await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
 }
 
-async function applyContinuabilityProjectionRepair(sql: postgres.Sql): Promise<void> {
-  await applyFile(sql, "0387_continuability_projection_performance.sql");
+async function applyContinuabilityProjectionRepair(
+  sql: postgres.Sql,
+): Promise<void> {
+  await applyFile(sql, "0390_continuability_projection_performance.sql");
 }
 
 async function withPreMegaDatabase(
   label: string,
   callback: (sql: postgres.Sql) => Promise<void>,
 ): Promise<void> {
-  const database = await acquireBlankTestDatabase(`session-control-mega-${label}`);
+  const database = await acquireBlankTestDatabase(
+    `session-control-mega-${label}`,
+  );
   if (!database) {
     if (requireRealDatabase)
       throw new Error("real PostgreSQL is required for mega migration proof");
@@ -33,7 +43,9 @@ async function withPreMegaDatabase(
     const files = (await readdir(migrationsDir))
       .filter((migrationFile) => migrationFile.endsWith(".sql"))
       .sort();
-    for (const migrationFile of files.filter((candidate) => candidate < "0063_")) {
+    for (const migrationFile of files.filter(
+      (candidate) => candidate < "0063_",
+    )) {
       await applyFile(sql, migrationFile);
     }
     await callback(sql);
@@ -57,7 +69,11 @@ async function seedAccountWorkspace(
 
 async function seedSession(
   sql: postgres.Sql,
-  input: { accountId: string; workspaceId: string; parentSessionId?: string | null },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    parentSessionId?: string | null;
+  },
 ): Promise<string> {
   const id = crypto.randomUUID();
   await sql`
@@ -89,8 +105,12 @@ async function expectMegaMigrationRollback(
   }
   expect(failure).toBeInstanceOf(Error);
   expect((failure as Error).message).toContain(expectedMessage);
-  const [{ old_column: oldColumn, new_table: newTable } = { old_column: false, new_table: false }] =
-    await sql<Array<{ old_column: boolean; new_table: boolean }>>`
+  const [
+    { old_column: oldColumn, new_table: newTable } = {
+      old_column: false,
+      new_table: false,
+    },
+  ] = await sql<Array<{ old_column: boolean; new_table: boolean }>>`
       select
         exists (
           select 1 from information_schema.columns
@@ -123,7 +143,9 @@ describe("0063 session control mega migration", () => {
       const files = (await readdir(migrationsDir))
         .filter((migrationFile) => migrationFile.endsWith(".sql"))
         .sort();
-      for (const migrationFile of files.filter((candidate) => candidate < "0063_")) {
+      for (const migrationFile of files.filter(
+        (candidate) => candidate < "0063_",
+      )) {
         await applyFile(sql, migrationFile);
       }
 
@@ -272,7 +294,11 @@ describe("0063 session control mega migration", () => {
       await applyContinuabilityProjectionRepair(sql);
 
       const [parent] = await sql<
-        Array<{ status: string; direct: string; override_revision: string | null }>
+        Array<{
+          status: string;
+          direct: string;
+          override_revision: string | null;
+        }>
       >`select status, direct_control_state as direct,
                subtree_run_override_revision::text as override_revision
          from sessions where id = ${parentId}`;
@@ -281,10 +307,14 @@ describe("0063 session control mega migration", () => {
         direct: "paused",
         override_revision: null,
       });
-      const [parentMetadata] = await sql<Array<{ metadata: Record<string, unknown> }>>`
+      const [parentMetadata] = await sql<
+        Array<{ metadata: Record<string, unknown> }>
+      >`
         select metadata from sessions where id = ${parentId}`;
       expect(parentMetadata?.metadata).toEqual({ retained: true });
-      const [child] = await sql<Array<{ direct: string; override_revision: string | null }>>`
+      const [child] = await sql<
+        Array<{ direct: string; override_revision: string | null }>
+      >`
         select direct_control_state as direct,
                subtree_run_override_revision::text as override_revision
         from sessions where id = ${childId}`;
@@ -296,12 +326,20 @@ describe("0063 session control mega migration", () => {
         select status, paused_reason, auto_continuations as auto
         from session_goals where session_id = ${parentId}`;
       expect(goal).toEqual({ status: "active", paused_reason: null, auto: 0 });
-      const [attempt] = await sql<Array<{ state: string; outcome: string; turn_id: string }>>`
-        select state, outcome, turn_id from session_turn_attempts where id = ${attemptId}`;
-      expect(attempt).toEqual({ state: "closed", outcome: "pre_cutover_closed", turn_id: turnId });
-      const [{ active_attempt_id: activeAttemptId } = { active_attempt_id: "missing" }] = await sql<
-        Array<{ active_attempt_id: string | null }>
+      const [attempt] = await sql<
+        Array<{ state: string; outcome: string; turn_id: string }>
       >`
+        select state, outcome, turn_id from session_turn_attempts where id = ${attemptId}`;
+      expect(attempt).toEqual({
+        state: "closed",
+        outcome: "pre_cutover_closed",
+        turn_id: turnId,
+      });
+      const [
+        { active_attempt_id: activeAttemptId } = {
+          active_attempt_id: "missing",
+        },
+      ] = await sql<Array<{ active_attempt_id: string | null }>>`
           select active_attempt_id from session_turns where id = ${turnId}`;
       expect(activeAttemptId).toBeNull();
 
@@ -321,7 +359,10 @@ describe("0063 session control mega migration", () => {
       expect(scheduled).toEqual({ task_id: taskId, run_id: runId });
       const [outbox] = await sql<Array<{ kind: string; type: string }>>`
         select kind, payload ->> 'type' as type from session_system_update_outbox`;
-      expect(outbox).toEqual({ kind: "child_terminal_result", type: "child_terminal_result" });
+      expect(outbox).toEqual({
+        kind: "child_terminal_result",
+        type: "child_terminal_result",
+      });
 
       // Dropping the old exact workspace exception is deliberately hold-only:
       // the queued child is not wake-seeded until a real post-cutover Resume
@@ -338,7 +379,9 @@ describe("0063 session control mega migration", () => {
         update sessions
         set subtree_run_override_revision = 3, control_version = 3
         where id = ${childId}`;
-      const resumedContinuability = await sql<Array<{ session_id: string; reasons: string[] }>>`
+      const resumedContinuability = await sql<
+        Array<{ session_id: string; reasons: string[] }>
+      >`
         select session_id, reasons
         from opengeni_private.list_continuable_sessions(${workspaceId}, ${childId})`;
       expect([...resumedContinuability]).toEqual([
@@ -386,7 +429,10 @@ describe("0063 session control mega migration", () => {
         set status = 'paused', control_state = 'paused', control_generation = 1
         where id in (${explicitPausedId}, ${coupledPausedId})`;
 
-      const seedPausedGoal = async (sessionId: string, explicit: boolean): Promise<void> => {
+      const seedPausedGoal = async (
+        sessionId: string,
+        explicit: boolean,
+      ): Promise<void> => {
         const [{ id: goalId } = { id: "" }] = await sql<{ id: string }[]>`
           insert into session_goals (
             account_id, workspace_id, session_id, text, status, paused_reason
@@ -411,7 +457,11 @@ describe("0063 session control mega migration", () => {
       await applyFile(sql, "0063_session_control_mega_foundation.sql");
 
       const goals = await sql<
-        Array<{ session_id: string; status: string; paused_reason: string | null }>
+        Array<{
+          session_id: string;
+          status: string;
+          paused_reason: string | null;
+        }>
       >`
         select session_id, status, paused_reason
         from session_goals
@@ -493,13 +543,19 @@ describe("0063 session control mega migration", () => {
           ${scope.accountId}, ${scope.workspaceId}, ${sessionId}, 'ambiguous pause',
           'paused', 'user_pause'
         )`;
-      await expectMegaMigrationRollback(sql, "eventless user_pause goal outside paused session");
+      await expectMegaMigrationRollback(
+        sql,
+        "eventless user_pause goal outside paused session",
+      );
     });
   }, 180_000);
 
   test("fails closed and rolls back an unknown legacy internal-update shape", async () => {
     await withPreMegaDatabase("unknown-update", async (sql) => {
-      const { accountId, workspaceId } = await seedAccountWorkspace(sql, "unknown-update");
+      const { accountId, workspaceId } = await seedAccountWorkspace(
+        sql,
+        "unknown-update",
+      );
       const sessionId = await seedSession(sql, { accountId, workspaceId });
       await sql`
         insert into session_system_updates (
@@ -519,7 +575,10 @@ describe("0063 session control mega migration", () => {
 
   test("fails closed and rolls back when maintenance leaves a running turn", async () => {
     await withPreMegaDatabase("running-turn", async (sql) => {
-      const { accountId, workspaceId } = await seedAccountWorkspace(sql, "running-turn");
+      const { accountId, workspaceId } = await seedAccountWorkspace(
+        sql,
+        "running-turn",
+      );
       const sessionId = await seedSession(sql, { accountId, workspaceId });
       await sql`
         insert into session_turns (
@@ -531,14 +590,19 @@ describe("0063 session control mega migration", () => {
           ${`session-${sessionId}`}, 'running', 'user', 1, 'running',
           'codex/gpt-5.6-sol', 'high', 'none', 1, now()
         )`;
-      await expectMegaMigrationRollback(sql, "running turn survived maintenance drain");
+      await expectMegaMigrationRollback(
+        sql,
+        "running turn survived maintenance drain",
+      );
     });
   }, 180_000);
 
   test("fails closed and rolls back cross-workspace parentage", async () => {
     await withPreMegaDatabase("cross-workspace-parent", async (sql) => {
       const first = await seedAccountWorkspace(sql, "cross-parent-a");
-      const [{ id: secondWorkspaceId } = { id: "" }] = await sql<{ id: string }[]>`
+      const [{ id: secondWorkspaceId } = { id: "" }] = await sql<
+        { id: string }[]
+      >`
         insert into workspaces (account_id, name)
         values (${first.accountId}, 'cross-parent-b') returning id`;
       const parentId = await seedSession(sql, first);
@@ -555,7 +619,10 @@ describe("0063 session control mega migration", () => {
     await withPreMegaDatabase("cyclic-parent", async (sql) => {
       const scope = await seedAccountWorkspace(sql, "cyclic-parent");
       const firstId = await seedSession(sql, scope);
-      const secondId = await seedSession(sql, { ...scope, parentSessionId: firstId });
+      const secondId = await seedSession(sql, {
+        ...scope,
+        parentSessionId: firstId,
+      });
       await sql`update sessions set parent_session_id = ${secondId} where id = ${firstId}`;
       await expectMegaMigrationRollback(sql, "cyclic session ancestry");
     });

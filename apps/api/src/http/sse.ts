@@ -10,12 +10,11 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  coalesceSessionEventDeltas,
+  coalesceSessionEventDeltasWithCoverage,
   formatSessionEventSse,
   formatWorkspaceControlEventSse,
   requireSessionEventDurableFanoutCapability,
   SESSION_EVENT_SSE_FRAME_MAX_BYTES,
-  sessionEventResumeSequence,
   type EventBus,
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -295,8 +294,14 @@ export async function sseSessionStream(
       limit: SESSION_REPLAY_PAGE_SIZE,
     });
     await options.reauthorize?.();
+    const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
     return finiteSseBatchResponse(
-      coalesceSessionEventDeltas(events).map(formatSessionEventSse),
+      compactProjection.events.map((event) =>
+        formatSessionEventSse(
+          event,
+          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
+        ),
+      ),
       options,
     );
   }
@@ -378,9 +383,12 @@ export async function sseSessionStream(
       // adjacent text deltas into bounded frames carrying `coalescedUntil`, so
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
-      for (const projected of coalesceSessionEventDeltas(eligible)) {
-        await writeFrame(formatSessionEventSse(projected));
-        lastSent = sessionEventResumeSequence(projected);
+      const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      for (const projected of compactProjection.events) {
+        const coveredThrough =
+          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        await writeFrame(formatSessionEventSse(projected, coveredThrough));
+        lastSent = coveredThrough;
       }
       if (lastSent <= previousLastSent) {
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
@@ -432,7 +440,7 @@ export async function sseSessionStream(
     drainReconnectReconciliation();
   };
   const send = async (event: SessionEvent) => {
-    const targetSequence = sessionEventResumeSequence(event);
+    const targetSequence = event.sequence;
     if (targetSequence <= lastSent) return;
     await reconcileDurableThrough(targetSequence);
   };

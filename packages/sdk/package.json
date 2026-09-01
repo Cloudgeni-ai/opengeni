@@ -93,6 +93,10 @@
     "./gateway-realtime-transport": {
       "types": "./src/gateway-realtime-transport.ts",
       "default": "./src/gateway-realtime-transport.ts"
+    },
+    "./model-picker-order": {
+      "types": "./src/model-picker-order.ts",
+      "default": "./src/model-picker-order.ts"
     }
   },
   "publishConfig": {

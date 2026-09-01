@@ -57,6 +57,7 @@ import { hasPermission } from "../access";
 import { isFikenConnection, preferredFikenConnection } from "./fiken";
 import { listSkillLibraryEntries, type SkillLibraryEntry } from "@opengeni/runtime/skill-library";
 import { listCapabilityPacks, listWorkspaceCapabilityPacks } from "./packs";
+import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
 const officialMcpRegistryUrl = "https://registry.modelcontextprotocol.io";
 const firstPartyMcpServerIds = new Set(["opengeni", "files", "docs"]);
@@ -403,7 +404,7 @@ function normalizedMcpCredentialHeaders(
 }
 
 async function validateMcpCapabilityConnectionRef(
-  input: { db: Database; grant: AccessGrant; workspaceId: string },
+  input: { db: Database; grant: AccessGrant; workspaceId: string; settings: Settings },
   item: CapabilityCatalogItem,
   ref: McpServerConnectionRef,
 ): Promise<McpServerConnectionRef> {
@@ -426,6 +427,7 @@ async function validateMcpCapabilityConnectionRef(
     providerDomain: ref.providerDomain.trim(),
     subjectScope,
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.authoritySource === "host" ? { authoritySource: "host" as const } : {}),
     ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
@@ -448,6 +450,10 @@ async function validateMcpCapabilityConnectionRef(
       message:
         "MCP capabilities need a remote streamable HTTP endpoint before they can use a connectionRef",
     });
+  }
+  if (normalized.authoritySource === "host") {
+    assertHostMcpAuthoritySourceAdmissionEnabled(input.settings, normalized);
+    return normalized;
   }
 
   let connection = normalized.connectionId
@@ -1680,12 +1686,22 @@ function installationConnectionRef(
   if (!ref || typeof ref !== "object") {
     return null;
   }
-  const { connectionId, providerDomain, kind, subjectScope } = ref as Record<string, unknown>;
+  const { authoritySource, connectionId, providerDomain, kind, subjectScope } = ref as Record<
+    string,
+    unknown
+  >;
   if (typeof providerDomain !== "string" || typeof kind !== "string") {
     return null;
   }
+  if (authoritySource === "host") {
+    // The internal installation/runtime ref retains the exact host binding.
+    // Public capability catalogs use the existing null representation for an
+    // enabled capability without a native OpenGeni connection, so indefinitely
+    // open old browser bundles cannot treat a host UUID as native OAuth state.
+    return null;
+  }
   if (subjectScope === "subject") {
-    // Never project a personal connection UUID through workspace-visible
+    // Never project a native personal connection UUID through workspace-visible
     // capability configuration, including legacy rows that still contain one.
     return { providerDomain, kind, subjectScope: "subject" };
   }

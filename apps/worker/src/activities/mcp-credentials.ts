@@ -12,6 +12,9 @@ import {
 } from "@opengeni/db";
 import { recordTenancyCompatibilityLaneUse, type Observability } from "@opengeni/observability";
 
+const OPENGENI_CONNECTION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 export function connectionTokenResolverForTurn(input: {
   db: Database;
   settings: Settings;
@@ -44,6 +47,56 @@ export function connectionTokenResolverForTurn(input: {
       })
     : buildConnectionTokenResolver(input.db, input.settings);
   return async (request) => {
+    // Host-owned refs carry explicit provenance because their opaque ids may
+    // themselves be valid UUIDs. They never enter OpenGeni's native connection
+    // authority or PostgreSQL UUID lookup; the bound host authorizes the exact
+    // immutable turn context on every credential request.
+    if (request.connectionRef.authoritySource === "host") {
+      if (hostResolver) return await baseResolver(request);
+      return {
+        status: "auth_needed",
+        reason: "unsupported_auth",
+        providerDomain: request.connectionRef.providerDomain,
+        authoritySource: "host",
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.connectionId
+          ? { connectionId: request.connectionRef.connectionId }
+          : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.resource ? { resource: request.connectionRef.resource } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
+      };
+    }
+    // Before explicit provenance existed, the public embedding contract let a
+    // bound host use any non-UUID opaque id. Preserve those frozen/stored refs
+    // during upgrades while keeping every UUID-shaped omission on OpenGeni's
+    // native accepted-use authority. New host refs must carry authoritySource
+    // so UUID-shaped host ids are unambiguous.
+    if (
+      hostResolver &&
+      request.connectionRef.connectionId &&
+      !OPENGENI_CONNECTION_ID_PATTERN.test(request.connectionRef.connectionId)
+    ) {
+      try {
+        return await baseResolver(request);
+      } catch {
+        return {
+          status: "auth_needed",
+          reason: "refresh_failed",
+          providerDomain: request.connectionRef.providerDomain,
+          authoritySource: "host",
+          ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+          connectionId: request.connectionRef.connectionId,
+          ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+          ...(request.connectionRef.resource ? { resource: request.connectionRef.resource } : {}),
+          ...(request.connectionRef.selectedResources
+            ? { selectedResources: request.connectionRef.selectedResources }
+            : {}),
+        };
+      }
+    }
     const acceptedDelegation = input.turn.personalConnectionDelegations.find(
       (delegation) =>
         (delegation.connectionType === undefined ||

@@ -67,6 +67,10 @@ import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
+import {
+  SessionVariableSetPicker,
+  type SessionVariableSetPickerSharedState,
+} from "@/components/session/session-variable-set-picker";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
@@ -634,6 +638,15 @@ export function SessionRoute({
   // calm inline error on the reconnect card.
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
+      if (item.authoritySource === "host") {
+        if (!item.authorizationUrl) {
+          throw new Error(
+            "This connection is managed by the embedding host and has no recovery link.",
+          );
+        }
+        window.location.assign(item.authorizationUrl);
+        return;
+      }
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
         if (item.capability.id === "api:github-app") {
@@ -1260,6 +1273,14 @@ function SessionChatPane(props: {
   const onVoiceActiveChange = useCallback((active: boolean) => {
     setVoiceActive(active);
   }, []);
+  const [variableSetPickerState, setVariableSetPickerState] =
+    useState<SessionVariableSetPickerSharedState>({
+      saving: false,
+      committedSelection: null,
+    });
+  const variableSetComposerBlocked =
+    variableSetPickerState.saving ||
+    variableSetPickerState.committedSelection?.sessionId === props.session.id;
   // Per-approval decision state: an in-flight decision disables both buttons for
   // that approval and shows progress; a settled one can never double-submit even
   // if the strip lingers for a beat before the status flips.
@@ -1487,6 +1508,7 @@ function SessionChatPane(props: {
       attachments.hasUnresolved ||
       repositories.error !== null ||
       !composerPolicyValidRef.current ||
+      variableSetComposerBlocked ||
       personalAttachment.requiresDecision ||
       personalAttachment.loading ||
       personalAttachment.refreshing,
@@ -1979,22 +2001,48 @@ function SessionChatPane(props: {
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             transcriptionSuppressed={voiceActive}
             controlsLeading={
-              <ComposerMobilePlus
-                disabled={terminal || composer.sending}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={selectableSessionMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={durableToolSelection}
-                toolsDisabled={
-                  composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                }
-                onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
-                repositories={{
-                  selectedCount: repositories.selectionCount,
-                  disabled: terminal || composer.sending,
-                  panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
-                }}
-              />
+              <>
+                <ComposerMobilePlus
+                  disabled={terminal || composer.sending}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={selectableSessionMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={durableToolSelection}
+                  toolsDisabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                  repositories={{
+                    selectedCount: repositories.selectionCount,
+                    disabled: terminal || composer.sending,
+                    panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
+                  }}
+                />
+                <SessionVariableSetPicker
+                  session={props.session}
+                  canControl={workspacePermissions.includes("sessions:control")}
+                  canAttach={workspacePermissions.includes("variable-sets:attach")}
+                  canUse={workspacePermissions.includes("variable-sets:use")}
+                  canList={
+                    workspacePermissions.includes("variable-sets:list") &&
+                    workspacePermissions.includes("secrets:list")
+                  }
+                  disabled={terminal}
+                  busy={
+                    voiceActive ||
+                    composer.sending ||
+                    props.session.activeTurnId !== null ||
+                    props.queue.queue.length > 0
+                  }
+                  goalActive={props.goal.isActive}
+                  voiceActive={voiceActive}
+                  sharedState={variableSetPickerState}
+                  setSharedState={setVariableSetPickerState}
+                  compact
+                  triggerClassName="sm:hidden"
+                  onReloadSession={props.onReloadSession}
+                />
+              </>
             }
             actions={
               !terminal ? (
@@ -2061,6 +2109,29 @@ function SessionChatPane(props: {
                 <FollowUpRepositoryPicker
                   {...repositoryPickerProps}
                   triggerClassName="max-sm:hidden"
+                />
+                <SessionVariableSetPicker
+                  session={props.session}
+                  canControl={workspacePermissions.includes("sessions:control")}
+                  canAttach={workspacePermissions.includes("variable-sets:attach")}
+                  canUse={workspacePermissions.includes("variable-sets:use")}
+                  canList={
+                    workspacePermissions.includes("variable-sets:list") &&
+                    workspacePermissions.includes("secrets:list")
+                  }
+                  disabled={terminal}
+                  busy={
+                    voiceActive ||
+                    composer.sending ||
+                    props.session.activeTurnId !== null ||
+                    props.queue.queue.length > 0
+                  }
+                  goalActive={props.goal.isActive}
+                  voiceActive={voiceActive}
+                  sharedState={variableSetPickerState}
+                  setSharedState={setVariableSetPickerState}
+                  triggerClassName="max-sm:hidden"
+                  onReloadSession={props.onReloadSession}
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">

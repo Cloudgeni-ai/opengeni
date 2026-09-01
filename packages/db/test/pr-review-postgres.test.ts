@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { CapabilityPack, stableJson, type AutomationSessionTemplate } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   assertAutomationRunAuthorityInTransaction,
   claimAutomationRun,
@@ -11,6 +12,7 @@ import {
   createPrReviewAppRegistration,
   createPrReviewRepositoryBinding,
   createSession,
+  createWorkspaceGatewayCustomModel,
   deletePrReviewAppRegistration,
   deleteWorkspace,
   enablePackInstallation,
@@ -20,6 +22,7 @@ import {
   listAutomationTriggers,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
+  lockActiveWorkspaceGatewayCustomModelForAdmission,
   PrReviewDispatchAuthorityError,
   recordAutomationEvent,
   resolvePrReviewGitCredential,
@@ -28,6 +31,7 @@ import {
   updateAutomationTrigger,
   updatePackInstallationStatus,
   updatePrReviewRepositoryBinding,
+  type Database,
   type DbClient,
 } from "../src";
 import { migrate } from "../src/migrate";
@@ -61,8 +65,46 @@ const sessionTemplate: AutomationSessionTemplate = {
   metadata: { role: "pull_request_review" },
 };
 
+async function acquireDatabase(): Promise<SharedTestDatabase | null> {
+  const adminUrl = process.env.OPENGENI_TEST_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_TEST_POSTGRES_APP_URL;
+  if (!adminUrl && !appUrl) return await acquireSharedTestDatabase("pr-review-postgres");
+  if (!adminUrl || !appUrl) {
+    throw new Error(
+      "OPENGENI_TEST_POSTGRES_ADMIN_URL and OPENGENI_TEST_POSTGRES_APP_URL must be set together",
+    );
+  }
+  const admin = postgres(adminUrl, { max: 4 });
+  return {
+    admin,
+    adminUrl,
+    appUrl,
+    release: async () => await admin.end().catch(() => undefined),
+  };
+}
+
+async function waitForBlockedBackend(blockerPid: number, description: string): Promise<void> {
+  if (!shared) throw new Error("PR Review PostgreSQL fixture is unavailable");
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const [row] = await shared.admin<Array<{ waiting: boolean }>>`
+      select exists (
+        select 1
+        from pg_stat_activity activity
+        where activity.datname = current_database()
+          and activity.state = 'active'
+          and activity.wait_event_type = 'Lock'
+          and ${blockerPid} = any(pg_blocking_pids(activity.pid))
+      ) as waiting
+    `;
+    if (row?.waiting) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(`${description} did not block behind backend ${blockerPid}`);
+}
+
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("pr-review-postgres");
+  shared = await acquireDatabase();
   if (!shared) return;
   await migrate(shared.adminUrl);
   client = createDb(shared.appUrl);
@@ -79,6 +121,189 @@ afterAll(async () => {
 }, 180_000);
 
 describe("PR Review Pack persistence", () => {
+  test("serializes binding create and material update with custom-model retirement", async () => {
+    if (!client || !shared) return;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId: `pr-review-race-${crypto.randomUUID()}`,
+      email: `pr-review-race-${crypto.randomUUID()}@example.test`,
+      name: "PR Review race owner",
+    });
+    workspaceIds.push(...access.workspaceGrants.map((grant) => grant.workspaceId));
+    const grant = access.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === access.defaultWorkspaceId,
+    )!;
+    const pack = CapabilityPack.parse({
+      id: "pr-review",
+      name: "PR Review",
+      description: "Review pull requests.",
+      role: "software-engineering",
+      category: "code-review",
+      version: "1.0.0",
+      skills: [],
+      components: [],
+      tools: [],
+      connectors: [],
+      knowledge: [],
+      scheduledTaskTemplates: [],
+      automationTemplates: [
+        {
+          id: "review-pull-request",
+          name: "Review pull requests",
+          description: "Review exact pull-request heads.",
+          adapterId: "source-control.pull-request.v1",
+          eventTypes: ["pull_request.review_requested"],
+          sessionTemplate,
+          configuration: {},
+          connectionRequirement: "source-control-provider",
+        },
+      ],
+      metadata: {},
+    });
+    const installation = await enablePackInstallation(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      packId: pack.id,
+      manifestSnapshot: pack,
+      manifestDigest: createHash("sha256").update(stableJson(pack)).digest("hex"),
+      installedBySubjectId: grant.subjectId,
+      metadata: {},
+    });
+    const registration = await createPrReviewAppRegistration(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "OpenGeni Review Bot race fixture",
+      provider: "github",
+      providerBaseUrl: "https://github.com",
+      appId: "12345",
+      credentialKind: "github_app",
+      credentialEncrypted: "encrypted-private-key",
+      accessTokenExpiresAt: null,
+      webhookAuthKind: "hmac_sha256",
+      webhookSecretEncrypted: "encrypted-webhook-secret",
+      webhookUsername: null,
+      createdBySubjectId: grant.subjectId,
+      packInstallationId: installation.id,
+      packConnectorId: "github",
+    });
+    const customModelGuard = (productModelId: string) => async (tx: Database) => {
+      const active = await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        upstreamModelId: productModelId.slice("workspace-gateway/".length),
+      });
+      if (!active) throw new Error(`model is not available: ${productModelId}`);
+    };
+    const bindingInput = (model: string, providerRepositoryId: string) => ({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      registrationId: registration.id,
+      provider: "github" as const,
+      repositoryUri: `https://github.com/example/repository-${providerRepositoryId}.git`,
+      repositoryFullName: `example/repository-${providerRepositoryId}`,
+      providerRepositoryId,
+      installationId: "202",
+      projectId: null,
+      model,
+      additionalInstructions: null,
+      status: "active" as const,
+      createdBySubjectId: grant.subjectId,
+      packInstallationId: installation.id,
+      packTemplateId: "review-pull-request",
+      adapterId: "source-control.pull-request.v1",
+      eventTypes: ["pull_request.review_requested"],
+      configuration: {},
+      sessionTemplate,
+    });
+
+    const createUpstreamModelId = `race/pr-review-create-${crypto.randomUUID()}`;
+    const createProductModelId = `workspace-gateway/${createUpstreamModelId}`;
+    const createModel = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      upstreamModelId: createUpstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "1".repeat(64),
+      createdBySubjectId: grant.subjectId,
+    });
+    if (!createModel) throw new Error("PR Review create-race model unexpectedly conflicted");
+    let createPromise: ReturnType<typeof createPrReviewRepositoryBinding> | null = null;
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      createPromise = createPrReviewRepositoryBinding(client!.db, {
+        ...bindingInput(createProductModelId, "301"),
+        beforeCreateCommit: customModelGuard(createProductModelId),
+      });
+      await waitForBlockedBackend(backend.pid, "PR Review binding custom-model create");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${createModel.id}::uuid
+      `;
+    });
+    if (!createPromise) throw new Error("PR Review binding create was not started");
+    await expect(createPromise).rejects.toThrow(`model is not available: ${createProductModelId}`);
+    expect(
+      (await listPrReviewRepositoryBindings(client.db, grant.accountId, grant.workspaceId)).some(
+        (binding) => binding.providerRepositoryId === "301",
+      ),
+    ).toBe(false);
+
+    const updateUpstreamModelId = `race/pr-review-update-${crypto.randomUUID()}`;
+    const updateProductModelId = `workspace-gateway/${updateUpstreamModelId}`;
+    const updateModel = await createWorkspaceGatewayCustomModel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      upstreamModelId: updateUpstreamModelId,
+      operationId: crypto.randomUUID(),
+      requestHash: "2".repeat(64),
+      createdBySubjectId: grant.subjectId,
+    });
+    if (!updateModel) throw new Error("PR Review update-race model unexpectedly conflicted");
+    const binding = await createPrReviewRepositoryBinding(client.db, {
+      ...bindingInput(updateProductModelId, "302"),
+      beforeCreateCommit: customModelGuard(updateProductModelId),
+    });
+    let updatePromise: ReturnType<typeof updatePrReviewRepositoryBinding> | null = null;
+    await shared.admin.begin(async (barrier) => {
+      const [backend] = await barrier<Array<{ pid: number }>>`select pg_backend_pid() as pid`;
+      if (!backend) throw new Error("database barrier has no backend pid");
+      await barrier`
+        select pg_advisory_xact_lock(
+          hashtextextended(${"workspace-gateway-custom-models:" + grant.workspaceId}, 0)
+        )
+      `;
+      updatePromise = updatePrReviewRepositoryBinding(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        bindingId: binding.id,
+        subjectId: grant.subjectId,
+        additionalInstructions: "Material update after retirement",
+        beforeUpdateCommit: async (tx, context) => {
+          if (context.nextModel) await customModelGuard(context.nextModel)(tx);
+        },
+      });
+      await waitForBlockedBackend(backend.pid, "PR Review binding custom-model update");
+      await barrier`
+        update workspace_gateway_custom_models
+        set retired_at = clock_timestamp(), updated_at = clock_timestamp()
+        where id = ${updateModel.id}::uuid
+      `;
+    });
+    if (!updatePromise) throw new Error("PR Review binding update was not started");
+    await expect(updatePromise).rejects.toThrow(`model is not available: ${updateProductModelId}`);
+    expect(
+      (await listPrReviewRepositoryBindings(client.db, grant.accountId, grant.workspaceId)).find(
+        (candidate) => candidate.id === binding.id,
+      ),
+    ).toMatchObject({ additionalInstructions: null, model: updateProductModelId });
+  }, 60_000);
+
   test("creates generic source and trigger authority atomically with Pack setup", async () => {
     if (!client) return;
     const access = await ensureManagedAccessForUser(client.db, {

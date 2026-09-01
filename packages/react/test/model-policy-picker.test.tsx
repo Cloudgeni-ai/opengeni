@@ -3,6 +3,7 @@ import type { ClientModel } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
+  BillingClassMark,
   ModelPolicyPicker,
   ModelPolicyPickerMenu,
   useModelPolicyPickerState,
@@ -372,6 +373,67 @@ describe("ModelPolicyPicker", () => {
     ).toBeTruthy();
   });
 
+  test("preserves the Gateway billing rail for a removed custom-model selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-gateway/retired/provider-model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeNull();
+  });
+
+  test("preserves the workspace-provider rail for a removed OpenRouter selection", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="workspace-openrouter/retired/provider-model"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="billing-class-icon-byok"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
+  test("labels the shared BYOK rail as workspace-provider billing", async () => {
+    const container = await mount(<BillingClassMark billingClass="byok" />);
+
+    expect(container.querySelector('[aria-label="Workspace provider account"]')).toBeTruthy();
+  });
+
+  test("uses the credits-safe rail when a removed OpenRouter selection has no cost row", async () => {
+    const container = await mount(
+      <ModelPolicyPicker
+        rows={[]}
+        model="openrouter/retired/provider-model:free"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="billing-class-icon-opengeni_credits"]'),
+    ).toBeTruthy();
+    expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeNull();
+  });
+
   test("renders the External rail mark for an anonymous provider", async () => {
     const external: ClientModel = {
       id: "opencode/x-preview-f-free",
@@ -394,5 +456,46 @@ describe("ModelPolicyPicker", () => {
     );
 
     expect(container.querySelector('[data-testid="billing-class-icon-external"]')).toBeTruthy();
+  });
+
+  test("shows each deployment model's configured workspace-facing payment", async () => {
+    const freeModel: ClientModel = {
+      ...MODELS[0]!,
+      id: "deployment/free-model",
+      label: "Deployment Free",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "free",
+    };
+    const creditsModel: ClientModel = {
+      ...MODELS[1]!,
+      id: "deployment/credits-model",
+      label: "Deployment Credits",
+      provider: "openai",
+      providerLabel: "OpenAI",
+      source: "opengeni",
+      cost: "credits",
+    };
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={[freeModel, creditsModel]}
+        model="deployment/unavailable"
+        effort="low"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/free-model"]')
+        ?.textContent,
+    ).toContain("Free in this deployment");
+    expect(
+      container.querySelector('[data-testid="model-picker-choice-deployment/credits-model"]')
+        ?.textContent,
+    ).toContain("OpenGeni credits");
   });
 });
