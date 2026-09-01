@@ -50484,6 +50484,7 @@ export type SandboxCheckpointArtifactRegistration = {
 
 export type RigProviderImageCleanupObligationState =
   | "building"
+  | "outcome_unknown"
   | "build_failed"
   | "delete_pending"
   | "deleting"
@@ -50544,12 +50545,16 @@ export async function beginRigProviderImageCleanupObligation(
           provider_backend, provider_binding_key, build_request_id, source_instance_id
         ) do update set
           state = case
-            when rig_provider_image_cleanup_obligations.state = 'build_failed'
+            when rig_provider_image_cleanup_obligations.state in (
+              'outcome_unknown', 'build_failed'
+            )
               then 'building'
             else rig_provider_image_cleanup_obligations.state
           end,
           last_delete_error = case
-            when rig_provider_image_cleanup_obligations.state = 'build_failed'
+            when rig_provider_image_cleanup_obligations.state in (
+              'outcome_unknown', 'build_failed'
+            )
               then null
             else rig_provider_image_cleanup_obligations.last_delete_error
           end,
@@ -50612,7 +50617,7 @@ export async function beginRigProviderImageCleanupObligation(
   );
 }
 
-export async function failRigProviderImageCleanupObligationBuild(
+export async function markRigProviderImageCleanupObligationOutcomeUnknown(
   db: Database,
   input: {
     accountId: string;
@@ -50629,7 +50634,7 @@ export async function failRigProviderImageCleanupObligationBuild(
     async (scopedDb) => {
       const rows = await scopedDb.execute<{ id: string }>(sql`
         update rig_provider_image_cleanup_obligations set
-          state = 'build_failed',
+          state = 'outcome_unknown',
           last_delete_error = ${input.error?.slice(0, 4000) ?? null},
           updated_at = now()
         where id = ${input.obligationId}
@@ -50709,7 +50714,7 @@ export async function settleRigProviderImageCleanupObligation(
   );
 }
 
-export async function listBuildingRigProviderImageCleanupObligationsForSource(
+export async function listRecoverableRigProviderImageCleanupObligationsForSource(
   db: Database,
   input: {
     accountId: string;
@@ -50737,7 +50742,7 @@ export async function listBuildingRigProviderImageCleanupObligationsForSource(
         from rig_provider_image_cleanup_obligations
         where source_lease_id = ${input.sourceLeaseId}
           and source_instance_id = ${input.sourceInstanceId}
-          and state = 'building'
+          and state in ('building', 'outcome_unknown')
         order by created_at, id
       `);
       return rows.map(

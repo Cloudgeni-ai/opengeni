@@ -4,6 +4,10 @@ import { encodeNativeSnapshotRef } from "@opengeni/contracts";
 import { acquireBlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
 import { createDb } from "../src/database";
+import {
+  markRigProviderImageCleanupObligationOutcomeUnknown,
+  recordRigProviderImageCleanupObject,
+} from "../src/index";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import {
@@ -33,7 +37,9 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     expect(source).toContain(
       "provider_backend, provider_binding_key, build_request_id, source_instance_id",
     );
-    expect(source).toContain("state IN ('building', 'build_failed') AND object_id IS NULL");
+    expect(source).toContain(
+      "state IN ('building', 'outcome_unknown', 'build_failed') AND object_id IS NULL",
+    );
     expect(source).toContain("claim_rig_provider_image_cleanup_obligations");
     expect(source).toContain("artifact.object_id = obligation.object_id");
     expect(source).toContain("artifact.state <> 'deleted'");
@@ -41,7 +47,7 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
     expect(FORCE_RLS_TABLES).toContain("rig_provider_image_cleanup_obligations");
     expect(RUNTIME_FULL_DML_TABLES).toContain("rig_provider_image_cleanup_obligations");
 
-    const blank = await acquireBlankTestDatabase("migration-0389-rig-provider-image-cleanup");
+    const blank = await acquireBlankTestDatabase("migration-0391-rig-provider-image-cleanup");
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
@@ -129,18 +135,62 @@ describe("migration 0391 durable Rig provider image cleanup", () => {
       });
       const obligationId = crypto.randomUUID();
       const claimId = crypto.randomUUID();
+      const cleanupAccountId = crypto.randomUUID();
+      const cleanupWorkspaceId = crypto.randomUUID();
       await sql`
         insert into rig_provider_image_cleanup_obligations (
           id, account_id, workspace_id, sandbox_group_id, source_lease_id,
           source_lease_epoch, source_instance_id, source_workspace_generation,
-          provider_backend, provider_binding_key, provider_binding, build_request_id,
-          object_id, state, delete_after
+          provider_backend, provider_binding_key, provider_binding, build_request_id
         ) values (
-          ${obligationId}, ${crypto.randomUUID()}, ${crypto.randomUUID()},
+          ${obligationId}, ${cleanupAccountId}, ${cleanupWorkspaceId},
           ${crypto.randomUUID()}, ${crypto.randomUUID()}, 4, 'sb-source', 2,
           'modal', ${providerBindingKey}, ${JSON.stringify(providerBinding)}::jsonb,
-          'rig-provider-image-request', 'im-late', 'delete_pending', now()
+          'rig-provider-image-request'
         )
+      `;
+      const outcomeUnknownMarked = await markRigProviderImageCleanupObligationOutcomeUnknown(
+        runtimeClient.db,
+        {
+          accountId: cleanupAccountId,
+          workspaceId: cleanupWorkspaceId,
+          obligationId,
+          buildRequestId: "rig-provider-image-request",
+          providerBindingKey,
+          error: "Modal snapshot transport closed after admission",
+        },
+      );
+      expect(outcomeUnknownMarked).toBe(true);
+      const [outcomeUnknownRow] = await sql<
+        Array<{ state: string; last_delete_error: string | null }>
+      >`
+        select state, last_delete_error
+        from rig_provider_image_cleanup_obligations
+        where id = ${obligationId}
+      `;
+      expect(outcomeUnknownRow).toEqual({
+        state: "outcome_unknown",
+        last_delete_error: "Modal snapshot transport closed after admission",
+      });
+      const lateObjectRecorded = await recordRigProviderImageCleanupObject(runtimeClient.db, {
+        accountId: cleanupAccountId,
+        workspaceId: cleanupWorkspaceId,
+        obligationId,
+        buildRequestId: "rig-provider-image-request",
+        providerBindingKey,
+        objectId: "im-late",
+      });
+      expect(lateObjectRecorded).toBe(true);
+      const [recordedRow] = await sql<Array<{ object_id: string; state: string }>>`
+        select object_id, state
+        from rig_provider_image_cleanup_obligations
+        where id = ${obligationId}
+      `;
+      expect(recordedRow).toEqual({ object_id: "im-late", state: "delete_pending" });
+      await sql`
+        update rig_provider_image_cleanup_obligations
+        set delete_after = now()
+        where id = ${obligationId}
       `;
       const claimed = await sql<
         Array<{ id: string; object_id: string; delete_attempts: number }>

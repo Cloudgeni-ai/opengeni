@@ -15,7 +15,7 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
 });
 
 describe("durable Rig provider image cleanup reconciliation", () => {
-  test("a replacement worker discovers the exact request and persists the recovered image", async () => {
+  test("a replacement worker discovers an outcome-unknown request and persists its late image", async () => {
     const calls: string[] = [];
     const recovered = await reconcileRigProviderImageCleanupObligationsForSource(
       {
@@ -39,7 +39,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
           return [
             {
               id: OBLIGATION_ID,
-              state: "building",
+              state: "outcome_unknown",
               buildRequestId: "rig-provider-image-request",
               objectId: null,
               providerBindingKey: PROVIDER_BINDING_KEY,
@@ -100,7 +100,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
           list: async () => [
             {
               id: OBLIGATION_ID,
-              state: "building",
+              state: "outcome_unknown",
               buildRequestId: "rig-provider-image-request",
               objectId: null,
               providerBindingKey: PROVIDER_BINDING_KEY,

@@ -31,13 +31,13 @@ import {
   failWarmingToCold,
   finalizeRigVersionProviderImageBuild,
   failRigVersionVerification,
-  failRigProviderImageCleanupObligationBuild,
   getRig,
   getRigChange,
   getRigVersionById,
   isCurrentRigChangeVerificationAttempt,
   isCurrentRigVersionVerificationAttempt,
   markWarmLeaseInstanceLost,
+  markRigProviderImageCleanupObligationOutcomeUnknown,
   markSandboxCheckpointArtifactDeletePending,
   recordWarmingSandboxCreated,
   recordRigProviderImageCleanupObject,
@@ -1183,14 +1183,14 @@ export async function buildVerifiedRigProviderImage(
     beginCleanupObligation: typeof beginRigProviderImageCleanupObligation;
     recordCleanupObject: typeof recordRigProviderImageCleanupObject;
     settleCleanupObligation: typeof settleRigProviderImageCleanupObligation;
-    failCleanupBuild: typeof failRigProviderImageCleanupObligationBuild;
+    markCleanupOutcomeUnknown: typeof markRigProviderImageCleanupObligationOutcomeUnknown;
   } = {
     buildImmutableProviderImage,
     resolveProviderBinding: resolveModalCheckpointProviderBindingForSession,
     beginCleanupObligation: beginRigProviderImageCleanupObligation,
     recordCleanupObject: recordRigProviderImageCleanupObject,
     settleCleanupObligation: settleRigProviderImageCleanupObligation,
-    failCleanupBuild: failRigProviderImageCleanupObligationBuild,
+    markCleanupOutcomeUnknown: markRigProviderImageCleanupObligationOutcomeUnknown,
   },
 ): Promise<RigProviderImageBuildVerification> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
@@ -1414,7 +1414,7 @@ export async function buildVerifiedRigProviderImage(
     } catch (error) {
       if (providerBuildRejected && cleanupObligation?.state === "building") {
         await dependencies
-          .failCleanupBuild(input.db, {
+          .markCleanupOutcomeUnknown(input.db, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             obligationId: cleanupObligation.id,

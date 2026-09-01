@@ -59,11 +59,11 @@ CREATE TABLE rig_provider_image_cleanup_obligations (
   ),
   CONSTRAINT rig_provider_image_cleanup_obligations_state_check CHECK (
     state IN (
-      'building', 'build_failed', 'delete_pending', 'deleting',
-      'delete_failed', 'settled', 'deleted'
+      'building', 'outcome_unknown', 'build_failed', 'delete_pending',
+      'deleting', 'delete_failed', 'settled', 'deleted'
     )
-    AND ((state IN ('building', 'build_failed') AND object_id IS NULL)
-      OR (state NOT IN ('building', 'build_failed') AND object_id IS NOT NULL))
+    AND ((state IN ('building', 'outcome_unknown', 'build_failed') AND object_id IS NULL)
+      OR (state NOT IN ('building', 'outcome_unknown', 'build_failed') AND object_id IS NOT NULL))
   ),
   CONSTRAINT rig_provider_image_cleanup_obligations_delete_claim_check CHECK (
     (state = 'deleting' AND delete_claim_id IS NOT NULL AND delete_claimed_at IS NOT NULL)

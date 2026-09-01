@@ -126,6 +126,7 @@ describe("build-once rig provider image runtime", () => {
       | null = null;
     const events: string[] = [];
     const recorded: string[] = [];
+    const outcomeUnknown: string[] = [];
     const providerBinding = JSON.parse(PROVIDER_BINDING_KEY) as Record<string, unknown>;
     const startedAt = Date.now();
     await expect(
@@ -199,7 +200,10 @@ describe("build-once rig provider image runtime", () => {
             return true;
           },
           settleCleanupObligation: async () => true,
-          failCleanupBuild: async () => true,
+          markCleanupOutcomeUnknown: async (_db, input) => {
+            outcomeUnknown.push(input.error ?? "");
+            return true;
+          },
         },
       ),
     ).rejects.toBeInstanceOf(RigProviderImageBuildDeadlineError);
@@ -207,6 +211,7 @@ describe("build-once rig provider image runtime", () => {
     expect(providerTimeoutMs).toBeLessThanOrEqual(40);
     expect(Date.now() - startedAt).toBeLessThan(500);
     expect(events).toEqual(["obligation", "build"]);
+    expect(outcomeUnknown).toEqual([]);
 
     resolveBuild?.({
       provider: "modal",
@@ -221,6 +226,91 @@ describe("build-once rig provider image runtime", () => {
     }
     expect(recorded).toEqual(["im-late-build"]);
   });
+
+  for (const [failureKind, providerError] of [
+    ["timeout", new Error("Modal snapshot deadline exceeded after admission")],
+    ["transport", new Error("Modal snapshot transport closed after admission")],
+  ] as const) {
+    test(`keeps a ${failureKind} rejection outcome-unknown for deterministic recovery`, async () => {
+      const providerBinding = JSON.parse(PROVIDER_BINDING_KEY) as Record<string, unknown>;
+      const outcomeUnknown: string[] = [];
+      const result = await buildVerifiedRigProviderImage(
+        {
+          settings: platformSettings({ sandboxSnapshotTimeoutMs: 10_000 }),
+          db: {} as never,
+          observability: {} as never,
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          definition: version(),
+          target: { kind: "version", id: VERSION_ID },
+          verificationAttemptId: "55555555-5555-4555-8555-555555555555",
+          verificationExecutionGeneration: 1,
+          established: {
+            backendId: "modal",
+            instanceId: "sandbox-build",
+            client: {},
+            session: {},
+            sessionState: {},
+          },
+          ownership: {
+            leaseId: "66666666-6666-4666-8666-666666666666",
+            leaseEpoch: 1,
+            workspaceGeneration: 0,
+            instanceId: "sandbox-build",
+          },
+          lifecycle: {
+            signal: new AbortController().signal,
+            workDeadlineAtMs: Date.now() + 5_000,
+            cleanupDeadlineAtMs: Date.now() + 10_000,
+            dispose: () => undefined,
+          },
+          signal: new AbortController().signal,
+        },
+        {
+          resolveProviderBinding: async () => ({
+            key: PROVIDER_BINDING_KEY,
+            binding: providerBinding as never,
+          }),
+          beginCleanupObligation: async () => ({
+            id: "77777777-7777-4777-8777-777777777777",
+            state: "building",
+            buildRequestId: rigProviderImageBuildRequestId({
+              targetId: VERSION_ID,
+              backend: "modal",
+              contentHash: rigProviderImageContentHash({
+                backend: "modal",
+                sourceImage: PLATFORM_IMAGE,
+                definition: version(),
+              }),
+            }),
+            objectId: null,
+            providerBindingKey: PROVIDER_BINDING_KEY,
+            providerBinding,
+            sourceLeaseId: "66666666-6666-4666-8666-666666666666",
+            sourceInstanceId: "sandbox-build",
+          }),
+          buildImmutableProviderImage: async () => {
+            throw providerError;
+          },
+          recordCleanupObject: async () => {
+            throw new Error("a rejected build has no image id to record yet");
+          },
+          settleCleanupObligation: async () => true,
+          markCleanupOutcomeUnknown: async (_db, input) => {
+            outcomeUnknown.push(input.error ?? "");
+            return true;
+          },
+        },
+      );
+
+      expect(result.image.status).toBe("failed");
+      expect(result.image.error).toMatchObject({
+        code: "provider_image_build_failed",
+        retryable: true,
+      });
+      expect(outcomeUnknown).toEqual([providerError.message]);
+    });
+  }
 
   test("publishes cold-boot proof only after the exact image marker and checks pass", async () => {
     const commands: string[] = [];

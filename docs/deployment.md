@@ -322,7 +322,7 @@ version-1/version-2 Rig provider-image cold-boot proof and rejects any stale
 finalizer that tries to restore an obsolete ready image. New activation requires
 one version-3 receipt matched to the exact immutable provider image, backend,
 build request, and Rig version. Existing active versions and unrelated updates remain
-available after the cutover. Never restart a pre-0388 workload; remain in
+available after the cutover. Never restart a pre-0390 workload; remain in
 maintenance and fix forward instead of reversing the ledger, dropping either
 trigger, restoring the old active default, or fabricating verification JSON.
 
@@ -507,7 +507,7 @@ The migration validates the explicit role list before exclusive locks on
 A missing/malformed list or live listed session rejects the cutover with
 SQLSTATE `55000` and rolls the transaction back. Historical versions receive
 `status = unverified`; no migration backfill manufactures passing evidence.
-After commit, never restart a pre-0388 image or attempt mixed-version rollback;
+After commit, never restart a pre-0390 image or attempt mixed-version rollback;
 remain in maintenance and fix forward.
 
 ### Session-event raw-lane cutover (0379)

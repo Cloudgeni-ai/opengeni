@@ -1,19 +1,19 @@
 import type { Settings } from "@opengeni/config";
 import {
-  listBuildingRigProviderImageCleanupObligationsForSource,
+  listRecoverableRigProviderImageCleanupObligationsForSource,
   recordRigProviderImageCleanupObject,
   type Database,
 } from "@opengeni/db";
 import { recoverModalImmutableProviderImageBuild } from "@opengeni/runtime/sandbox";
 
 export type ReconcileRigProviderImageCleanupDependencies = {
-  list: typeof listBuildingRigProviderImageCleanupObligationsForSource;
+  list: typeof listRecoverableRigProviderImageCleanupObligationsForSource;
   recover: typeof recoverModalImmutableProviderImageBuild;
   record: typeof recordRigProviderImageCleanupObject;
 };
 
 const defaultDependencies: ReconcileRigProviderImageCleanupDependencies = {
-  list: listBuildingRigProviderImageCleanupObligationsForSource,
+  list: listRecoverableRigProviderImageCleanupObligationsForSource,
   recover: recoverModalImmutableProviderImageBuild,
   record: recordRigProviderImageCleanupObject,
 };

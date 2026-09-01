@@ -2,7 +2,7 @@
 -- Newly authored initial/direct Rig versions stay inactive until the worker
 -- publishes an exact native platform-surface validation receipt.
 -- This is a one-way writer-protocol cutover: stop every API, control worker,
--- and turn worker before applying it, and never restart a pre-0388 image. Old
+-- and turn worker before applying it, and never restart a pre-0390 image. Old
 -- writers create/activate versions without the mandatory receipt state.
 
 SET LOCAL lock_timeout = '5s';
