@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 3.4.1
+
+### Patch Changes
+
+- a8da2c5: Stabilize release admission checks under loaded CI runners.
+
 ## 3.4.0
 
 ### Minor Changes
