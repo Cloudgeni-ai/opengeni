@@ -26,6 +26,7 @@ registerDom();
 
 const ctx = { workspaceId: WORKSPACE_ID };
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const WARM_CAP_MESSAGE = "workspace sandbox warm allowance exhausted";
 
 describe("useSessionCapabilities", () => {
   test("a warm session negotiates to ready and exposes the doc as UI truth", async () => {
@@ -211,6 +212,78 @@ describe("useSessionCapabilities", () => {
     );
     await flush();
     expect(hook.result.current.viewerCapReached).toBe(true);
+    expect(hook.result.current.state).toBe("ready");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("Files attach 429 surfaces the admission failure without entering the warm poll", async () => {
+    let capabilityCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        capabilityCalls += 1;
+        return fakeColdCapabilities();
+      },
+      attachViewer: async () => {
+        throw new OpenGeniApiError(429, JSON.stringify({ message: WARM_CAP_MESSAGE }));
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachFiles: true,
+          warmingPollMs: 20,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.viewerCapReached).toBe(true);
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toContain(WARM_CAP_MESSAGE);
+    await flush(100);
+    expect(capabilityCalls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("a late Files 429 cannot poison the replacement session after cancellation", async () => {
+    let rejectFirstAttach: (cause: unknown) => void = () => {};
+    const firstAttach = new Promise<never>((_resolve, reject) => {
+      rejectFirstAttach = reject;
+    });
+    const warmCapabilities = fakeCapabilities();
+    const replacementCapabilities = fakeCapabilities({
+      FileSystem: { ...warmCapabilities.FileSystem, available: false },
+    });
+    const client = fakeClient({
+      getStreamCapabilities: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID ? fakeColdCapabilities() : replacementCapabilities,
+      attachViewer: async (_workspaceId, sessionId) => {
+        if (sessionId === SESSION_ID) return await firstAttach;
+        throw new Error("replacement session must not attach Files");
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useSessionCapabilities(props.sessionId, { ...ctx, client, attachFiles: true }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+    expect(hook.result.current.state).toBe("ready");
+    expect(hook.result.current.error).toBeNull();
+
+    await actRun(() =>
+      rejectFirstAttach(new OpenGeniApiError(429, JSON.stringify({ message: WARM_CAP_MESSAGE }))),
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("ready");
+    expect(hook.result.current.error).toBeNull();
+    expect(hook.result.current.viewerCapReached).toBe(false);
     await hook.unmount();
   });
 
