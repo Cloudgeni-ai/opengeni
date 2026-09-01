@@ -729,9 +729,15 @@ a skipped green result.
 
 The managed web console exposes this lifecycle as a bounded organization
 administration surface with separate Overview, People & invitations, Retention,
-and Billing sections. Overview projects the canonical organization name plus
-every shared workspace and its direct human/service access roster; the database
-excludes all Personal workspaces before JSON projection. Owners and
+and Billing sections. The global account menu at the bottom of the sidebar also
+lists incoming Organization invitations with a pending count and an acceptance
+dialog, so a human who already belongs to one or more organizations never has
+to discover an invitation through the inviting organization first. Invitation
+emails and the signed-out setup page direct existing users to that same control
+before presenting new-account setup. Overview projects the canonical
+organization name plus every shared workspace and its direct human/service
+access roster; the database excludes all Personal workspaces before JSON
+projection. Owners and
 administrators can rename the organization through a revision- and
 operation-fenced lifecycle function, and managed-access bootstrap never
 overwrites that deliberate name from the user's profile. It lists the

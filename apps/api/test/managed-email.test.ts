@@ -78,9 +78,13 @@ describe("managed email transport", () => {
     expect(rendered.text).toContain("Ada <Admin>");
     expect(rendered.text).toContain("Launch <Ops>: Viewer");
     expect(rendered.text).toContain("never shares anyone's Personal workspace");
+    expect(rendered.text).toContain("Review invitation:");
+    expect(rendered.text).toContain("Organization invitations");
     expect(rendered.html).toContain("Ada &lt;Admin&gt;");
     expect(rendered.html).toContain("R&amp;D &lt;Labs&gt;");
     expect(rendered.html).toContain("Launch &lt;Ops&gt;");
+    expect(rendered.html).toContain(">Review invitation</a>");
+    expect(rendered.html).toContain("<strong>Organization invitations</strong>");
     expect(rendered.html).not.toContain("Ada <Admin>");
     const digestInput = {
       ...rendered,
