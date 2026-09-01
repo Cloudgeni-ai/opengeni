@@ -1641,6 +1641,7 @@ async function projectManagedOrganizationAccess(
       accountId: organizationMembership.organizationId,
       workspaceId: null,
     });
+    // These authority tables are non-RLS, so the account GUC does not scope this query.
     const persistedMemberships = await db
       .select({
         membership: schema.workspaceMemberships,
@@ -1649,9 +1650,18 @@ async function projectManagedOrganizationAccess(
       .from(schema.workspaceMemberships)
       .innerJoin(
         schema.workspaces,
-        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        and(
+          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+          eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
+        ),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
+          eq(schema.workspaces.accountId, organizationMembership.organizationId),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     workspaceGrants.push(
       ...persistedMemberships.map((row) => ({
