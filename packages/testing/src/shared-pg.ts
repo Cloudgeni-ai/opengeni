@@ -192,6 +192,40 @@ async function dockerOk(args: string[]): Promise<boolean> {
   }
 }
 
+async function startSharedContainer(args: string[]): Promise<string | null> {
+  const attempts = process.env.OPENGENI_REQUIRE_REAL_DB === "1" ? 5 : 1;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const started = await docker(args).catch(() => null);
+    const startedId = started?.stdout.trim() ?? "";
+    if (/^[a-f0-9]{64}$/u.test(startedId)) {
+      return startedId;
+    }
+
+    // `docker run` is outcome-ambiguous when the daemon briefly stops
+    // answering: the named container may have been created despite the failed
+    // client call. Re-probe that exact name before attempting another create.
+    const probe = await probeContainer();
+    if (probe.available && probe.id) {
+      if (probe.status === "running" || probe.status === "restarting") {
+        return probe.id;
+      }
+      const resumed =
+        probe.status === "paused"
+          ? await dockerOk(["unpause", probe.id])
+          : await dockerOk(["start", probe.id]);
+      if (resumed) {
+        return probe.id;
+      }
+      await dockerOk(["rm", "-f", "-v", probe.id]);
+    }
+
+    if (attempt < attempts) {
+      await Bun.sleep(250 * attempt);
+    }
+  }
+  return null;
+}
+
 async function readLockOwner(): Promise<LockOwner | null> {
   try {
     const parsed = JSON.parse(await readFile(LOCK_OWNER_FILE, "utf8")) as Partial<LockOwner>;
@@ -489,7 +523,7 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
       // visible) rather than a clean error. Give the throwaway test server a
       // generous ceiling so the whole suite fits. `MAX_CONNECTIONS` keeps the
       // per-file pools small as a second line of defence.
-      const started = await docker([
+      generation = await startSharedContainer([
         "run",
         "-d",
         "-e",
@@ -503,9 +537,8 @@ async function ensureContainerAndAcquire(): Promise<ContainerHandle | null> {
         "max_connections=1000",
         "-c",
         "shared_buffers=256MB",
-      ]).catch(() => null);
-      generation = started?.stdout.trim() ?? null;
-      if (!generation || !/^[a-f0-9]{64}$/u.test(generation)) {
+      ]);
+      if (!generation) {
         return null; // Docker unavailable or unable to start the fixture.
       }
     }
