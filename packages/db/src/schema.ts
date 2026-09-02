@@ -3689,7 +3689,7 @@ export const toolGatewayApprovalCapabilities = pgTable(
     identityValid: check(
       "tool_gateway_approval_capabilities_identity_chk",
       sql`length(${table.serverId}) between 1 and 256
-        and length(${table.toolName}) between 1 and 256`,
+        and length(${table.toolName}) between 1 and 512`,
     ),
     expiryValid: check(
       "tool_gateway_approval_capabilities_expiry_chk",

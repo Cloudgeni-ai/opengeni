@@ -72,6 +72,7 @@ describe("migration 0401 tool gateway approval capabilities", () => {
     expect(source).toContain('"arguments_digest" text NOT NULL');
     expect(source).toContain('"site_version_id" uuid');
     expect(source).toContain('"tool_gateway_approval_capabilities_site_version_fk"');
+    expect(source).toContain('length("tool_name") BETWEEN 1 AND 512');
     expect(source).toContain("interval '10 minutes'");
     expect(source).toContain(
       'ALTER TABLE "tool_gateway_approval_capabilities" FORCE ROW LEVEL SECURITY',

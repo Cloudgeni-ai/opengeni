@@ -36,7 +36,7 @@ CREATE TABLE "tool_gateway_approval_capabilities" (
   CONSTRAINT "tool_gateway_approval_capabilities_identity_chk"
     CHECK (
       length("server_id") BETWEEN 1 AND 256
-      AND length("tool_name") BETWEEN 1 AND 256
+      AND length("tool_name") BETWEEN 1 AND 512
     ),
   CONSTRAINT "tool_gateway_approval_capabilities_expiry_chk"
     CHECK ("expires_at" > "created_at" AND "expires_at" <= "created_at" + interval '10 minutes')

@@ -44,7 +44,7 @@ describe("tool gateway approval capabilities", () => {
     const grant = access.workspaceGrants[0]!;
     const tokenHash = "a".repeat(64);
     const operationId = crypto.randomUUID();
-    const identity = { serverId: "docs", toolName: "search" };
+    const identity = { serverId: "docs", toolName: "t".repeat(512) };
     const site = await createWorkspaceArtifact(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
