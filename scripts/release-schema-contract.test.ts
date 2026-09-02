@@ -126,9 +126,15 @@ describe("release schema contract", () => {
 
   test("registers sandbox deadline rotation preemption before workspace management", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe(
-      "0398_organization_workspace_management_entry.sql",
+    expect(completeSourceContract.latestMigration).toBe("0400_mcp_oauth_authorization_server.sql");
+    const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
+      (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );
+    const workspaceManagementIndex = completeSourceContract.migrations.findIndex(
+      (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+    );
+    expect(sandboxDeadlineIndex).toBeGreaterThanOrEqual(0);
+    expect(workspaceManagementIndex).toBeGreaterThan(sandboxDeadlineIndex);
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
@@ -639,7 +645,7 @@ describe("release schema contract", () => {
         ? "0393_workspace_memory_and_learning_defaults.sql"
         : contextCompactionPendingObservability
           ? "0392_context_compaction_pending_observability.sql"
-          : completeSourceContract.latestMigration,
+          : completeSourceContractWithContextCompaction.latestMigration,
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
       scheduledTaskUnclaimedOccurrenceInvalidation
@@ -1288,7 +1294,7 @@ describe("release schema contract", () => {
         ? "0393_workspace_memory_and_learning_defaults.sql"
         : contextCompactionPendingObservability
           ? "0392_context_compaction_pending_observability.sql"
-          : completeSourceContract.latestMigration,
+          : completeSourceContractWithContextCompaction.latestMigration,
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
       scheduledTaskUnclaimedOccurrenceInvalidation

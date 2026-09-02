@@ -3499,9 +3499,18 @@ export const mcpOauthClients = pgTable(
       .$type<Array<"authorization_code" | "refresh_token">>()
       .notNull(),
     responseTypes: jsonb("response_types").$type<["code"]>().notNull(),
+    registrationScopeHash: text("registration_scope_hash").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   },
-  (table) => ({ created: index("mcp_oauth_clients_created_idx").on(table.createdAt) }),
+  (table) => ({
+    created: index("mcp_oauth_clients_created_idx").on(table.createdAt),
+    scopeCreated: index("mcp_oauth_clients_scope_created_idx").on(
+      table.registrationScopeHash,
+      table.createdAt,
+    ),
+    expires: index("mcp_oauth_clients_expires_idx").on(table.expiresAt, table.clientId),
+  }),
 );
 
 const mcpOauthGrantColumns = () => ({

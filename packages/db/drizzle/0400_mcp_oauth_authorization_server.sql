@@ -16,9 +16,15 @@ CREATE TABLE mcp_oauth_clients (
   token_endpoint_auth_method text NOT NULL DEFAULT 'none' CHECK (token_endpoint_auth_method = 'none'),
   grant_types jsonb NOT NULL CHECK (jsonb_typeof(grant_types) = 'array'),
   response_types jsonb NOT NULL CHECK (response_types = '["code"]'::jsonb),
-  created_at timestamptz NOT NULL DEFAULT now()
+  registration_scope_hash text NOT NULL CHECK (registration_scope_hash ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL DEFAULT (now() + interval '1 day'),
+  CHECK (expires_at > created_at)
 );
 CREATE INDEX mcp_oauth_clients_created_idx ON mcp_oauth_clients(created_at);
+CREATE INDEX mcp_oauth_clients_scope_created_idx
+  ON mcp_oauth_clients(registration_scope_hash, created_at);
+CREATE INDEX mcp_oauth_clients_expires_idx ON mcp_oauth_clients(expires_at, client_id);
 
 CREATE TABLE mcp_oauth_authorization_requests (
   request_hash text PRIMARY KEY CHECK (request_hash ~ '^[0-9a-f]{64}$'),
@@ -112,8 +118,158 @@ CREATE INDEX mcp_oauth_access_tokens_family_idx
   ON mcp_oauth_access_tokens(refresh_family_id, refresh_generation);
 CREATE INDEX mcp_oauth_access_tokens_expires_idx ON mcp_oauth_access_tokens(expires_at);
 
+-- Public dynamic client registration must remain bounded across every API
+-- replica. Untouched registrations expire after one day; a successful client
+-- lookup extends the client through the maximum refresh-token lifetime plus a
+-- one-day grace period. The reaper is deliberately batch-bounded and is invoked
+-- by registration and client lookup, so normal OAuth traffic continuously
+-- removes expired protocol state without a separate scheduler.
+CREATE FUNCTION opengeni_private.reap_mcp_oauth_state(p_limit integer DEFAULT 128)
+RETURNS integer
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  bounded_limit integer := least(greatest(coalesce(p_limit, 128), 1), 1000);
+  removed integer := 0;
+  affected integer;
+BEGIN
+  WITH expired AS (
+    SELECT request_hash
+    FROM mcp_oauth_authorization_requests
+    WHERE expires_at <= pg_catalog.clock_timestamp()
+    ORDER BY expires_at, request_hash
+    FOR UPDATE SKIP LOCKED
+    LIMIT bounded_limit
+  )
+  DELETE FROM mcp_oauth_authorization_requests target
+  USING expired
+  WHERE target.request_hash = expired.request_hash;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  removed := removed + affected;
+
+  WITH expired AS (
+    SELECT code_hash
+    FROM mcp_oauth_authorization_codes
+    WHERE expires_at <= pg_catalog.clock_timestamp()
+    ORDER BY expires_at, code_hash
+    FOR UPDATE SKIP LOCKED
+    LIMIT bounded_limit
+  )
+  DELETE FROM mcp_oauth_authorization_codes target
+  USING expired
+  WHERE target.code_hash = expired.code_hash;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  removed := removed + affected;
+
+  WITH expired AS (
+    SELECT token_hash
+    FROM mcp_oauth_access_tokens
+    WHERE expires_at <= pg_catalog.clock_timestamp()
+      OR revoked_at <= pg_catalog.clock_timestamp() - interval '1 day'
+    ORDER BY expires_at, token_hash
+    FOR UPDATE SKIP LOCKED
+    LIMIT bounded_limit
+  )
+  DELETE FROM mcp_oauth_access_tokens target
+  USING expired
+  WHERE target.token_hash = expired.token_hash;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  removed := removed + affected;
+
+  WITH expired AS (
+    SELECT token_hash
+    FROM mcp_oauth_refresh_tokens
+    WHERE expires_at <= pg_catalog.clock_timestamp()
+      OR revoked_at <= pg_catalog.clock_timestamp() - interval '1 day'
+    ORDER BY expires_at, token_hash
+    FOR UPDATE SKIP LOCKED
+    LIMIT bounded_limit
+  )
+  DELETE FROM mcp_oauth_refresh_tokens target
+  USING expired
+  WHERE target.token_hash = expired.token_hash;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  removed := removed + affected;
+
+  WITH expired AS (
+    SELECT client_id
+    FROM mcp_oauth_clients
+    WHERE expires_at <= pg_catalog.clock_timestamp()
+    ORDER BY expires_at, client_id
+    FOR UPDATE SKIP LOCKED
+    LIMIT bounded_limit
+  )
+  DELETE FROM mcp_oauth_clients target
+  USING expired
+  WHERE target.client_id = expired.client_id;
+  GET DIAGNOSTICS affected = ROW_COUNT;
+  RETURN removed + affected;
+END
+$body$;
+
+CREATE FUNCTION opengeni_private.register_mcp_oauth_client(
+  p_client_id text,
+  p_redirect_uris jsonb,
+  p_client_name text,
+  p_grant_types jsonb,
+  p_response_types jsonb,
+  p_registration_scope_hash text
+)
+RETURNS SETOF mcp_oauth_clients
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  now_value timestamptz := pg_catalog.clock_timestamp();
+  global_count bigint;
+  scoped_count bigint;
+BEGIN
+  IF p_registration_scope_hash !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'invalid MCP OAuth registration scope'
+      USING ERRCODE = '22023';
+  END IF;
+
+  -- One short global transaction lock makes the count-and-insert quota exact
+  -- across replicas. Registration is rare and the lock is held only for this
+  -- bounded cleanup/count/insert command.
+  PERFORM pg_catalog.pg_advisory_xact_lock(
+    pg_catalog.hashtextextended('opengeni:mcp-oauth:registration', 0)
+  );
+  PERFORM opengeni_private.reap_mcp_oauth_state(128);
+
+  SELECT count(*) INTO global_count
+  FROM mcp_oauth_clients
+  WHERE created_at > now_value - interval '10 minutes';
+
+  SELECT count(*) INTO scoped_count
+  FROM mcp_oauth_clients
+  WHERE registration_scope_hash = p_registration_scope_hash
+    AND created_at > now_value - interval '10 minutes';
+
+  IF global_count >= 600 OR scoped_count >= 20 THEN
+    RAISE EXCEPTION 'MCP OAuth client registration rate limited'
+      USING ERRCODE = 'P0004';
+  END IF;
+
+  RETURN QUERY
+  INSERT INTO mcp_oauth_clients (
+    client_id, redirect_uris, client_name, grant_types, response_types,
+    registration_scope_hash, expires_at
+  ) VALUES (
+    p_client_id, p_redirect_uris, p_client_name, p_grant_types, p_response_types,
+    p_registration_scope_hash, now_value + interval '1 day'
+  )
+  RETURNING *;
+END
+$body$;
+
 REVOKE ALL ON mcp_oauth_clients, mcp_oauth_authorization_requests,
   mcp_oauth_authorization_codes, mcp_oauth_refresh_tokens, mcp_oauth_access_tokens FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.reap_mcp_oauth_state(integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION opengeni_private.register_mcp_oauth_client(
+  text, jsonb, text, jsonb, jsonb, text
+) FROM PUBLIC;
 
 DO $application_grants$
 DECLARE
@@ -132,6 +288,14 @@ BEGIN
     EXECUTE format(
       'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %1$I.mcp_oauth_clients, %1$I.mcp_oauth_authorization_requests, %1$I.mcp_oauth_authorization_codes, %1$I.mcp_oauth_refresh_tokens, %1$I.mcp_oauth_access_tokens TO %2$I',
       data_schema, application_role
+    );
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.reap_mcp_oauth_state(integer) TO %I',
+      application_role
+    );
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION opengeni_private.register_mcp_oauth_client(text, jsonb, text, jsonb, jsonb, text) TO %I',
+      application_role
     );
   END LOOP;
 END

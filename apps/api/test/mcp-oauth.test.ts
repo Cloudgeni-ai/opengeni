@@ -92,10 +92,39 @@ describe("MCP OAuth protocol", () => {
     const rejected = await app.request("/oauth/register", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ redirect_uris: ["http://attacker.example/callback"] }),
+      body: JSON.stringify({
+        redirect_uris: ["http://attacker.example/callback"],
+      }),
     });
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "invalid_redirect_uri" });
+  });
+
+  test("maps durable dynamic-registration admission failures to a retryable OAuth error", async () => {
+    const app = new Hono();
+    registerMcpOAuthRoutes(app, {
+      ...depsWithRows(),
+      db: {
+        execute: async () => {
+          throw Object.assign(new Error("registration rate limited"), {
+            code: "P0004",
+          });
+        },
+      } as ApiRouteDeps["db"],
+    } as ApiRouteDeps);
+    const response = await app.request("/oauth/register", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-forwarded-for": "203.0.113.7, 10.0.0.1",
+      },
+      body: JSON.stringify({
+        redirect_uris: ["http://127.0.0.1:4567/callback"],
+      }),
+    });
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("600");
+    expect(await response.json()).toEqual({ error: "temporarily_unavailable" });
   });
 
   test("returns OAuth protocol errors for invalid token resources", async () => {
@@ -135,7 +164,9 @@ describe("MCP OAuth protocol", () => {
       }),
     });
     expect(unsupportedGrant.status).toBe(400);
-    expect(await unsupportedGrant.json()).toEqual({ error: "unsupported_grant_type" });
+    expect(await unsupportedGrant.json()).toEqual({
+      error: "unsupported_grant_type",
+    });
 
     const invalidScope = await app.request("/oauth/token", {
       method: "POST",

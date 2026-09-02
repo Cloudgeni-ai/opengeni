@@ -26,6 +26,13 @@ runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
 because it is the issuer and part of every exact resource identifier. See
 [`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
 
+Dynamic client registration is durably limited to 20 registrations per source
+and 600 registrations globally per ten-minute window. Registrations that are
+never used expire after one day; successful client use extends retention
+through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
+removes expired clients, consent requests, authorization codes, access tokens,
+and refresh tokens without requiring a separate scheduler.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use

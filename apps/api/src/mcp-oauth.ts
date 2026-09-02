@@ -20,6 +20,7 @@ import {
   exchangeMcpOAuthAuthorizationCode,
   getMcpOAuthAuthorizationRequest,
   getMcpOAuthClient,
+  McpOAuthClientRegistrationRateLimitError,
   registerMcpOAuthClient,
   resolveLiveMcpOAuthGrant,
   resolveMcpOAuthAccessToken,
@@ -104,13 +105,23 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch {
       return oauthError(c, "invalid_redirect_uri", 400);
     }
-    const client = await registerMcpOAuthClient(deps.db, {
-      clientId: opaque(CLIENT_PREFIX),
-      redirectUris,
-      clientName: parsed.data.client_name ?? null,
-      grantTypes: parsed.data.grant_types,
-      responseTypes: ["code"],
-    });
+    let client;
+    try {
+      client = await registerMcpOAuthClient(deps.db, {
+        clientId: opaque(CLIENT_PREFIX),
+        redirectUris,
+        clientName: parsed.data.client_name ?? null,
+        grantTypes: parsed.data.grant_types,
+        responseTypes: ["code"],
+        registrationScopeHash: tokenHash(mcpOAuthRegistrationClientKey(c)),
+      });
+    } catch (error) {
+      if (error instanceof McpOAuthClientRegistrationRateLimitError) {
+        c.header("retry-after", "600");
+        return oauthError(c, "temporarily_unavailable", 429);
+      }
+      throw error;
+    }
     c.header("cache-control", "no-store");
     return c.json(
       McpOAuthClientRegistrationResponse.parse({
@@ -183,7 +194,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const grant = requireWorkspaceToolGatewayAuthorization(authorization);
     if (grant.subjectId !== request.subjectId || grant.accountId !== request.accountId) {
-      throw new HTTPException(403, { message: "OAuth consent authority changed" });
+      throw new HTTPException(403, {
+        message: "OAuth consent authority changed",
+      });
     }
     if (form.get("decision") !== "approve") {
       await deleteMcpOAuthAuthorizationRequest(deps.db, request.requestHash);
@@ -296,7 +309,10 @@ export async function resolveMcpOAuthRouteAccess(
     throw new HTTPException(401, { message: "invalid MCP OAuth access token" });
   }
   const grant = await resolveLiveMcpOAuthGrant(deps.db, access);
-  if (!grant) throw new HTTPException(401, { message: "MCP OAuth authority is no longer active" });
+  if (!grant)
+    throw new HTTPException(401, {
+      message: "MCP OAuth authority is no longer active",
+    });
   const allowedToolIdentities = access.toolIdentities.filter((identity) =>
     requestResource.kind === "all" ? true : identity.serverId === requestResource.kind,
   );
@@ -358,7 +374,9 @@ function parseMcpOAuthResource(deps: ApiRouteDeps, value: string): McpOAuthResou
 
 async function requireAuthorizationClient(deps: ApiRouteDeps, query: URLSearchParams) {
   if (query.get("response_type") !== "code" || query.get("scope") !== MCP_OAUTH_SCOPE) {
-    throw new HTTPException(400, { message: "unsupported OAuth authorization request" });
+    throw new HTTPException(400, {
+      message: "unsupported OAuth authorization request",
+    });
   }
   const clientId = query.get("client_id") ?? "";
   const client = await getMcpOAuthClient(deps.db, clientId);
@@ -382,7 +400,9 @@ function requireAuthorizationResource(
 
 function requireRedirectUri(registered: string[], value: string | null): string {
   if (!value || !registered.includes(value)) {
-    throw new HTTPException(400, { message: "OAuth redirect_uri is not registered" });
+    throw new HTTPException(400, {
+      message: "OAuth redirect_uri is not registered",
+    });
   }
   return value;
 }
@@ -451,7 +471,9 @@ function validateRedirectUri(value: string): string {
   const loopback =
     url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
   if (url.username || url.password || url.hash || (url.protocol !== "https:" && !loopback)) {
-    throw new HTTPException(400, { message: "invalid public OAuth redirect URI" });
+    throw new HTTPException(400, {
+      message: "invalid public OAuth redirect URI",
+    });
   }
   return url.toString();
 }
@@ -476,6 +498,12 @@ function tokenHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function mcpOAuthRegistrationClientKey(c: Context): string {
+  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  const address = forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
+  return `mcp-oauth-registration:${address.slice(0, 128)}`;
+}
+
 function expiresIn(seconds: number): Date {
   return new Date(Date.now() + seconds * 1_000);
 }
@@ -498,7 +526,7 @@ function escapeHtml(value: string): string {
   );
 }
 
-function oauthError(c: Context, error: string, status: 400 | 401) {
+function oauthError(c: Context, error: string, status: 400 | 401 | 429) {
   c.header("cache-control", "no-store");
   c.header("pragma", "no-cache");
   return c.json({ error }, status);

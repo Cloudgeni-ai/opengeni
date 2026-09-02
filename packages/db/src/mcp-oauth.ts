@@ -1,7 +1,13 @@
 import { Permission, ToolGatewayIdentity, type AccessGrant } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
+import { nestedPostgresSqlState } from "./persistence-errors";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
+
+export class McpOAuthClientRegistrationRateLimitError extends Error {
+  readonly name = "McpOAuthClientRegistrationRateLimitError";
+  readonly code = "mcp_oauth_client_registration_rate_limited";
+}
 
 export type McpOAuthClient = {
   clientId: string;
@@ -64,19 +70,27 @@ export async function registerMcpOAuthClient(
     clientName: string | null;
     grantTypes: Array<"authorization_code" | "refresh_token">;
     responseTypes: ["code"];
+    registrationScopeHash: string;
   },
 ): Promise<McpOAuthClient> {
-  const [row] = await rawRows<ClientRow>(
-    db,
-    sql`insert into mcp_oauth_clients (
-      client_id, redirect_uris, client_name, grant_types, response_types
-    ) values (
-      ${input.clientId}, ${JSON.stringify(input.redirectUris)}::jsonb, ${input.clientName},
-      ${JSON.stringify(input.grantTypes)}::jsonb, ${JSON.stringify(input.responseTypes)}::jsonb
-    ) returning client_id, redirect_uris, client_name, grant_types, response_types, created_at`,
-  );
-  if (!row) throw new Error("MCP OAuth client registration was not persisted");
-  return mapClient(row);
+  try {
+    const [row] = await rawRows<ClientRow>(
+      db,
+      sql`select client_id, redirect_uris, client_name, grant_types, response_types, created_at
+        from opengeni_private.register_mcp_oauth_client(
+          ${input.clientId}, ${JSON.stringify(input.redirectUris)}::jsonb, ${input.clientName},
+          ${JSON.stringify(input.grantTypes)}::jsonb, ${JSON.stringify(input.responseTypes)}::jsonb,
+          ${input.registrationScopeHash}
+        )`,
+    );
+    if (!row) throw new Error("MCP OAuth client registration was not persisted");
+    return mapClient(row);
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "P0004") {
+      throw new McpOAuthClientRegistrationRateLimitError();
+    }
+    throw error;
+  }
 }
 
 export async function getMcpOAuthClient(
@@ -85,8 +99,19 @@ export async function getMcpOAuthClient(
 ): Promise<McpOAuthClient | null> {
   const [row] = await rawRows<ClientRow>(
     db,
-    sql`select client_id, redirect_uris, client_name, grant_types, response_types, created_at
-      from mcp_oauth_clients where client_id = ${clientId}`,
+    sql`with reaped as (
+        select opengeni_private.reap_mcp_oauth_state(128)
+      )
+      update mcp_oauth_clients client
+      set expires_at = greatest(
+        client.expires_at,
+        clock_timestamp() + interval '31 days'
+      )
+      from reaped
+      where client.client_id = ${clientId}
+        and client.expires_at > clock_timestamp()
+      returning client.client_id, client.redirect_uris, client.client_name,
+        client.grant_types, client.response_types, client.created_at`,
   );
   return row ? mapClient(row) : null;
 }
@@ -150,7 +175,12 @@ export async function deleteMcpOAuthAuthorizationRequest(
 
 export async function consumeMcpOAuthAuthorizationRequest(
   db: Database,
-  input: { requestHash: string; subjectId: string; codeHash: string; codeExpiresAt: Date },
+  input: {
+    requestHash: string;
+    subjectId: string;
+    codeHash: string;
+    codeExpiresAt: Date;
+  },
 ): Promise<McpOAuthAuthorizationRequest | null> {
   return await db.transaction(async (tx) => {
     const [row] = await rawRows<
@@ -358,7 +388,10 @@ export async function resolveLiveMcpOAuthGrant(
     access.subjectId,
     async (scopedDb) => {
       if (!(await subjectHasLiveWorkspaceAuthorityInScope(scopedDb, access))) return null;
-      const [membership] = await rawRows<{ permissions: unknown; account_id: string }>(
+      const [membership] = await rawRows<{
+        permissions: unknown;
+        account_id: string;
+      }>(
         scopedDb,
         sql`select membership.permissions, workspace.account_id
           from workspace_memberships membership
