@@ -1130,8 +1130,15 @@ global lifecycle reaper marks each exact controller resource `lost`, settles a
 prepared operation as a deterministic deadline failure or a dispatched operation
 as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
 then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
-This deadline override is batch-bounded and does not impose a maximum duration on
-healthy interaction sessions before the provider identity itself expires.
+The deadline batch admits only leases that still carry interaction holders, so
+unrelated overdue turn/direct/process-held leases cannot starve it, and includes
+an exact lease that entered `draining` before the deadline. The same global
+reaper inventories due lease-free Connected Machine and attached-device
+transitions under its owner-only FORCE-RLS capability, acquires every affected
+workspace advisory fence in canonical UUID order, and only then opens mutation
+visibility. This deadline override remains batch-bounded and does not impose a
+maximum duration on healthy interaction sessions before the provider identity
+itself expires.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
