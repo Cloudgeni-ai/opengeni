@@ -1,12 +1,14 @@
 import {
   GitHubAppManifestCreate,
-  ListGitHubRepositoryBranchesQuery,
-  parseCanonicalGitHubRepositoryUrl,
-  VerifyPublicGitHubRepositoryRefRequest,
   type AccessGrant,
   type GitHubInstallationBindingCandidate,
   type GitHubInstallationBindingProof,
 } from "@opengeni/contracts";
+import {
+  ListGitHubRepositoryBranchesQuery,
+  VerifyPublicGitHubRepositoryRefRequest,
+} from "@opengeni/contracts/github-repository-contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts/github-repository";
 import {
   bindAuthorizedGitHubInstallationRepositories,
   deleteGitHubInstallationBinding,
@@ -186,7 +188,8 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/github/public-repositories/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    requirePublicGitHubRepositoryVerificationPermission(grant);
     const request = VerifyPublicGitHubRepositoryRefRequest.parse(await c.req.json());
     let repository: ReturnType<typeof parseCanonicalGitHubRepositoryUrl>;
     try {
@@ -839,6 +842,20 @@ function githubRepositoryBranchesRouteError(error: unknown): Error {
     return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
   }
   return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
+}
+
+export function requirePublicGitHubRepositoryVerificationPermission(
+  grant: Pick<AccessGrant, "permissions">,
+): void {
+  if (
+    hasPermission(grant.permissions, "sessions:create") ||
+    hasPermission(grant.permissions, "sessions:control")
+  ) {
+    return;
+  }
+  throw new HTTPException(403, {
+    message: "missing permission: sessions:create or sessions:control",
+  });
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {

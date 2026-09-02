@@ -2077,7 +2077,7 @@ export function RootRouteComponent() {
       ) {
         return false;
       }
-      void refreshGitHub(workspaceId, undefined, { sync: true }).catch(() => undefined);
+      await refreshGitHub(workspaceId, undefined, { sync: true });
       if (
         !ownsWorkspaceOperation(
           activeGitHubDisconnectOperation.current,

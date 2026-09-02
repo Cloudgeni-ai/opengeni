@@ -110,6 +110,7 @@ describe("manual repository attachment", () => {
       expect.objectContaining({
         url: "https://github.com/acme/public.git",
         ref: "refs/tags/v1",
+        expectedCommitSha: "a".repeat(40),
         attached: true,
       }),
     );
@@ -118,7 +119,12 @@ describe("manual repository attachment", () => {
   test("attaches other HTTPS hosts with an anonymous-clone warning", async () => {
     const attach = mock(() => {});
     const result = await attachManualRepository({
-      repository: { id: 1, url: "https://git.example.com/acme/app.git", ref: "main" },
+      repository: {
+        id: 1,
+        url: "https://git.example.com/acme/app.git",
+        ref: "main",
+        expectedCommitSha: "b".repeat(40),
+      },
       workspaceRepositories: [],
       personalRepositories: [],
       selectWorkspaceRepository: () => {},
@@ -130,6 +136,8 @@ describe("manual repository attachment", () => {
       remove: () => {},
     });
     expect(result).toEqual({ warning: ANONYMOUS_REPOSITORY_WARNING });
-    expect(attach).toHaveBeenCalledWith(expect.objectContaining({ attached: true }));
+    expect(attach).toHaveBeenCalledWith(
+      expect.objectContaining({ attached: true, expectedCommitSha: undefined }),
+    );
   });
 });

@@ -19,7 +19,13 @@ import {
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 
-export type RepoDraft = { id: number; url: string; ref: string; attached?: boolean };
+export type RepoDraft = {
+  id: number;
+  url: string;
+  ref: string;
+  expectedCommitSha?: string;
+  attached?: boolean;
+};
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
 // the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
 // whose default is one of those was overridden to "low" on every web turn
@@ -224,7 +230,8 @@ export function buildResources(
       .filter((repo) => selected.has(repo.id))
       .map((repo) => ({
         url: repo.cloneUrl,
-        ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim() || repo.defaultBranch,
+        ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.id,
         installationId: repo.installationId,
         private: repo.private,
@@ -240,9 +247,8 @@ export function buildResources(
       )
       .map((repo) => ({
         url: repo.canonicalUrl,
-        ref:
-          (selectedPersonalRepositoryRefs[repo.repositoryId] ?? repo.defaultBranch).trim() ||
-          repo.defaultBranch,
+        ref: (selectedPersonalRepositoryRefs[repo.repositoryId] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.repositoryId,
         installationId: null,
         private: repo.private,
@@ -256,6 +262,7 @@ export function buildResources(
       .map((repo) => ({
         url: repo.url.trim(),
         ref: repo.ref.trim(),
+        expectedCommitSha: repo.expectedCommitSha ?? null,
         repositoryId: null,
         installationId: null,
         private: false,
@@ -301,6 +308,7 @@ export function buildResources(
       ref: repo.ref,
       mountPath,
       ...(repo.provider ? { provider: repo.provider } : {}),
+      ...(repo.expectedCommitSha ? { expectedCommitSha: repo.expectedCommitSha } : {}),
       // Every catalog repository is in the workspace's GitHub App allowlist,
       // public or private, so every selection carries the stable ids that
       // mint the scoped installation token. Manual URLs stay bare.
@@ -473,6 +481,7 @@ export function repositorySelectionFromResources(
         id: nextManualId++,
         url: resource.uri,
         ref: resource.ref,
+        ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
         attached: true,
       });
     }

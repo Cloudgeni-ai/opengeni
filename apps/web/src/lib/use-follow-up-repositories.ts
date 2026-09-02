@@ -4,7 +4,6 @@ import { toast } from "sonner";
 
 import type { RepositoryContextPickerProps } from "@/components/repository-picker";
 import { useAppContext } from "@/context";
-import { attachManualRepository, attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
   buildAdditionalRepositoryResources,
   repositorySelectionFromResources,
@@ -37,6 +36,8 @@ export function useFollowUpRepositories(session: Session): {
   const [manualReposOpen, setManualReposOpen] = useState(false);
   const [optimisticMountedRepos, setOptimisticMountedRepos] = useState<ResourceRef[]>([]);
   const nextManualRepoId = useRef(1);
+  const currentSessionId = useRef(session.id);
+  currentSessionId.current = session.id;
 
   const mountedResources = useMemo(
     () => mergeResourceRefs(session.resources, optimisticMountedRepos),
@@ -137,7 +138,9 @@ export function useFollowUpRepositories(session: Session): {
   const selectionCount =
     selectedRepoIds.size +
     selectedPersonalRepoIds.size +
-    attachedManualRepositoryCount([...mountedManualRepos, ...pendingManualRepos]);
+    [...mountedManualRepos, ...pendingManualRepos].filter(
+      (repository) => repository.attached !== false && repository.url.trim().length > 0,
+    ).length;
 
   const togglePendingRepository = useCallback(
     (repo: GitHubRepository) => {
@@ -298,26 +301,48 @@ export function useFollowUpRepositories(session: Session): {
       onToggleRepo: togglePendingRepository,
       onRefChange: (repoId, ref) =>
         setPendingRepoRefs((current) => ({ ...current, [repoId]: ref })),
-      onLoadGitHubBranches: async (repository) =>
-        (
-          await context.client.listGitHubRepositoryBranches(
-            session.workspaceId,
-            repository.installationId,
-            repository.id,
-            { limit: 100 },
-          )
-        ).branches,
+      onLoadGitHubBranches: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; refresh and try again.");
+        const { listGitHubRepositoryBranches } = await import("@opengeni/sdk/github-repositories");
+        const response = await listGitHubRepositoryBranches(
+          context.client,
+          session.workspaceId,
+          repository.installationId,
+          repository.id,
+          { limit: 100 },
+        );
+        if (
+          currentSessionId.current !== acceptedSessionId ||
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          throw new Error("The session changed; refresh and try again.");
+        }
+        return response.branches;
+      },
       onLoadPersonalGitHubBranches: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; refresh and try again.");
         const connectionId = context.personalGitHubStatus?.connection?.id;
         if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
-        return (
-          await context.client.listPersonalGitHubRepositoryBranches(
-            session.workspaceId,
-            connectionId,
-            repository.repositoryId,
-            { limit: 100 },
-          )
-        ).branches;
+        const { listPersonalGitHubRepositoryBranches } =
+          await import("@opengeni/sdk/github-repositories");
+        const response = await listPersonalGitHubRepositoryBranches(
+          context.client,
+          session.workspaceId,
+          connectionId,
+          repository.repositoryId,
+          { limit: 100 },
+        );
+        if (
+          currentSessionId.current !== acceptedSessionId ||
+          !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          throw new Error("The session changed; refresh and try again.");
+        }
+        return response.branches;
       },
       onManualOpenChange: setManualReposOpen,
       onManualAdd: () => {
@@ -334,12 +359,27 @@ export function useFollowUpRepositories(session: Session): {
         ),
       onManualRemove: (id) =>
         setPendingManualRepos((current) => current.filter((repo) => repo.id !== id)),
-      onManualAttach: async (repository) =>
-        await attachManualRepository({
+      onManualAttach: async (repository) => {
+        const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+        const acceptedSessionId = session.id;
+        if (!acceptedTransition) throw new Error("The session changed; try again.");
+        const assertCurrent = () => {
+          if (
+            currentSessionId.current !== acceptedSessionId ||
+            !context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+          ) {
+            throw new Error("The session changed; try again.");
+          }
+        };
+        assertCurrent();
+        const { attachManualRepository } = await import("@/lib/manual-repositories");
+        assertCurrent();
+        return await attachManualRepository({
           repository,
           workspaceRepositories: context.githubRepos,
           personalRepositories: context.personalGitHubRepositories,
           selectWorkspaceRepository: (matched, ref) => {
+            assertCurrent();
             const mountedPersonalConflict = context.personalGitHubRepositories.some(
               (candidate) =>
                 mountedPersonalRepoIds.has(candidate.repositoryId) &&
@@ -392,6 +432,7 @@ export function useFollowUpRepositories(session: Session): {
             if (!(await context.ensurePersonalGitHubAuthority(session.workspaceId))) {
               throw new Error("Your GitHub identity could not be authorized for this workspace.");
             }
+            assertCurrent();
             setPendingRepoIds(
               (current) =>
                 new Set(
@@ -409,15 +450,29 @@ export function useFollowUpRepositories(session: Session): {
               [matched.repositoryId]: ref,
             }));
           },
-          verifyPublicGitHubRepository: async (request) =>
-            await context.client.verifyPublicGitHubRepositoryRef(session.workspaceId, request),
-          attach: (attached) =>
+          verifyPublicGitHubRepository: async (request) => {
+            const { verifyPublicGitHubRepositoryRef } =
+              await import("@opengeni/sdk/github-repositories");
+            const verified = await verifyPublicGitHubRepositoryRef(
+              context.client,
+              session.workspaceId,
+              request,
+            );
+            assertCurrent();
+            return verified;
+          },
+          attach: (attached) => {
+            assertCurrent();
             setPendingManualRepos((current) =>
               current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
-            ),
-          remove: (id) =>
-            setPendingManualRepos((current) => current.filter((candidate) => candidate.id !== id)),
-        }),
+            );
+          },
+          remove: (id) => {
+            assertCurrent();
+            setPendingManualRepos((current) => current.filter((candidate) => candidate.id !== id));
+          },
+        });
+      },
       newChatUrl: `/workspaces/${session.workspaceId}`,
       onGitHubAppOpenChange: context.setGithubAppOpen,
       onOrgChange: context.setGithubOrg,
@@ -439,6 +494,7 @@ export function useFollowUpRepositories(session: Session): {
       selectedPersonalRepoRefs,
       selectedRepoIds,
       selectedRepoRefs,
+      session.id,
       session.workspaceId,
       togglePendingRepository,
       togglePendingPersonalRepository,

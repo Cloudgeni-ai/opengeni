@@ -134,7 +134,7 @@ export function ManualRepositoryEditor(props: {
     <div
       className="space-y-2 rounded-lg border border-border bg-bg/25 p-2.5"
       onKeyDown={(event) => {
-        if (event.key === "Enter") {
+        if (event.key === "Enter" && event.target instanceof HTMLInputElement) {
           event.preventDefault();
           void attach();
         }

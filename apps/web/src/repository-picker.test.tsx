@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
-import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-menu-body";
 import {
   RepositoryContextPicker,
   repositoryBindingPresentation,

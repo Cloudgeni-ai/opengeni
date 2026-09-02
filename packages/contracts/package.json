@@ -34,6 +34,14 @@
       "types": "./src/personal-github.ts",
       "default": "./src/personal-github.ts"
     },
+    "./github-repository": {
+      "types": "./src/github-repository.ts",
+      "default": "./src/github-repository.ts"
+    },
+    "./github-repository-contracts": {
+      "types": "./src/github-repository-contracts.ts",
+      "default": "./src/github-repository-contracts.ts"
+    },
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"

@@ -16,13 +16,28 @@ import {
   listWorkspaceGitHubRepositoryBranches,
   type WorkspaceGitHubRepositoryBranchServices,
 } from "../src/github-access";
-import { registerGitHubRoutes } from "../src/routes/github";
+import {
+  registerGitHubRoutes,
+  requirePublicGitHubRepositoryVerificationPermission,
+} from "../src/routes/github";
 
 const stateSecret = "github-binding-authority-test-secret";
 const accountId = "00000000-0000-4000-8000-000000000101";
 const workspaceId = "00000000-0000-4000-8000-000000000102";
 const otherWorkspaceId = "00000000-0000-4000-8000-000000000103";
 const subjectId = "configured-owner";
+
+test("public GitHub verification accepts create or follow-up session authority", () => {
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["sessions:create"] }),
+  ).not.toThrow();
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["sessions:control"] }),
+  ).not.toThrow();
+  expect(() =>
+    requirePublicGitHubRepositoryVerificationPermission({ permissions: ["workspace:read"] }),
+  ).toThrow("sessions:create or sessions:control");
+});
 
 function appWithProvider(
   provider: NonNullable<ApiRouteDeps["githubAppApi"]> = {},

@@ -1,5 +1,5 @@
 import { CheckIcon, GitBranchIcon, Loader2Icon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,7 @@ export function RepositoryRefInput(props: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [branches, setBranches] = useState<GitHubRepositoryBranch[]>([]);
+  const containerRef = useRef<HTMLDivElement>(null);
   const query = props.value.trim().toLowerCase();
   const matches = useMemo(
     () =>
@@ -42,16 +43,27 @@ export function RepositoryRefInput(props: {
 
   const showMenu = focused && Boolean(props.loadBranches) && (loading || error || loaded);
   return (
-    <div className="relative min-w-0 flex-1">
+    <div
+      ref={containerRef}
+      className="relative min-w-0 flex-1"
+      onFocusCapture={() => {
+        setFocused(true);
+        void load();
+      }}
+      onBlurCapture={(event) => {
+        if (
+          event.relatedTarget instanceof Node &&
+          containerRef.current?.contains(event.relatedTarget)
+        ) {
+          return;
+        }
+        setFocused(false);
+      }}
+    >
       <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
       <Input
         value={props.value}
         onChange={(event) => props.onChange(event.target.value)}
-        onFocus={() => {
-          setFocused(true);
-          void load();
-        }}
-        onBlur={() => window.setTimeout(() => setFocused(false), 100)}
         onClick={(event) => event.stopPropagation()}
         disabled={props.disabled}
         placeholder={props.defaultRef}

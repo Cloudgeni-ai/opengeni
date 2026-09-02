@@ -1,6 +1,5 @@
 import type { Settings } from "@opengeni/config";
 import type {
-  CanonicalGitHubRepository,
   GitHubAppRepositoryBranchPage,
   GitHubInstallationBindingCandidate,
   GitHubInstallationBindingProof,
@@ -8,9 +7,12 @@ import type {
   GitHubRepositoryPermissions,
   GitHubUserInstallationAccess,
   GitHubUserRepositoryAccess,
-  VerifyPublicGitHubRepositoryRefResponse,
 } from "@opengeni/contracts";
-import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts";
+import type { VerifyPublicGitHubRepositoryRefResponse } from "@opengeni/contracts/github-repository-contracts";
+import {
+  parseCanonicalGitHubRepositoryUrl,
+  type CanonicalGitHubRepository,
+} from "@opengeni/contracts/github-repository";
 import { readResponseTextBounded } from "@opengeni/network";
 import {
   createCipheriv,

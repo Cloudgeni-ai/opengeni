@@ -2119,14 +2119,6 @@ describe("OpenGeniClient github", () => {
       returnPath: `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     });
     await client.listGitHubRepositories(WORKSPACE_ID);
-    await client.verifyPublicGitHubRepositoryRef(WORKSPACE_ID, {
-      url: "https://github.com/acme/public",
-      ref: "main",
-    });
-    await client.listGitHubRepositoryBranches(WORKSPACE_ID, 123, 456, {
-      cursor: 3,
-      limit: 40,
-    });
     await client.syncGitHubRepositories(WORKSPACE_ID);
     await client.unlinkGitHubInstallation(WORKSPACE_ID, 123);
     await client.createGitHubAppManifest(WORKSPACE_ID, {
@@ -2136,8 +2128,6 @@ describe("OpenGeniClient github", () => {
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/github/app`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/repositories`,
-        `POST /v1/workspaces/${WORKSPACE_ID}/github/public-repositories/verify`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/github/installations/123/repositories/456/branches`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/repositories/sync`,
         `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/app-manifest`,
@@ -2146,8 +2136,6 @@ describe("OpenGeniClient github", () => {
     expect(new URL(requests[0]!.url).searchParams.get("returnPath")).toBe(
       `/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}`,
     );
-    expect(new URL(requests[3]!.url).searchParams.get("cursor")).toBe("3");
-    expect(new URL(requests[3]!.url).searchParams.get("limit")).toBe("40");
     expect(client.githubConnectUrl(WORKSPACE_ID, "signed-state")).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/github/connect?state=signed-state`,
     );
@@ -2431,17 +2419,8 @@ describe("OpenGeniClient connections", () => {
         },
       ],
     };
-    const { client, requests } = makeClient((request) => {
-      if (new URL(request.url).pathname.endsWith("/branches")) {
-        return jsonResponse({
-          branches: [
-            { name: "feature/picker", isDefault: false },
-            { name: "main", isDefault: true },
-          ],
-          nextCursor: null,
-        });
-      }
-      return jsonResponse(
+    const { client, requests } = makeClient((request) =>
+      jsonResponse(
         request.method === "GET"
           ? {
               repositories: [{ ...repository, selectedAccess: "write" }],
@@ -2449,8 +2428,8 @@ describe("OpenGeniClient connections", () => {
               selection,
             }
           : selection,
-      );
-    });
+      ),
+    );
 
     expect(
       await client.listPersonalGitHubRepositories(WORKSPACE_ID, connectionId, {
@@ -2458,14 +2437,6 @@ describe("OpenGeniClient connections", () => {
         limit: 50,
       }),
     ).toMatchObject({ nextCursor: 3, selection });
-    expect(
-      await client.listPersonalGitHubRepositoryBranches(
-        WORKSPACE_ID,
-        connectionId,
-        repository.repositoryId,
-        { cursor: 2, limit: 25 },
-      ),
-    ).toMatchObject({ nextCursor: null });
     expect(
       await client.replacePersonalGitHubRepositorySelections(WORKSPACE_ID, connectionId, {
         expectedConnectionAuthorityGeneration: 4,
@@ -2491,7 +2462,6 @@ describe("OpenGeniClient connections", () => {
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories`,
-        `GET /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories/${repository.repositoryId}/branches`,
         `PUT /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories`,
         `POST /v1/workspaces/${WORKSPACE_ID}/connections/${connectionId}/github/repositories/verify`,
       ],
@@ -2499,10 +2469,7 @@ describe("OpenGeniClient connections", () => {
     const listUrl = new URL(requests[0]!.url);
     expect(listUrl.searchParams.get("cursor")).toBe("2");
     expect(listUrl.searchParams.get("limit")).toBe("50");
-    const branchesUrl = new URL(requests[1]!.url);
-    expect(branchesUrl.searchParams.get("cursor")).toBe("2");
-    expect(branchesUrl.searchParams.get("limit")).toBe("25");
-    expect(JSON.parse(requests[2]!.body!)).toMatchObject({
+    expect(JSON.parse(requests[1]!.body!)).toMatchObject({
       expectedConnectionAuthorityGeneration: 4,
       expectedSelectionGeneration: 1,
       idempotencyKey: "github-repositories-1",

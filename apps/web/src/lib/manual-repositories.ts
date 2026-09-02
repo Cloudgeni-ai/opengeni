@@ -1,4 +1,4 @@
-import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts/github-repository";
 
 import type { ManualRepositoryAttachResult } from "@/components/manual-repository-editor";
 import type { RepoDraft } from "@/lib/session-tools";
@@ -113,6 +113,7 @@ export async function attachManualRepository(input: {
       ...input.repository,
       url: verified.cloneUrl,
       ref: verified.ref,
+      expectedCommitSha: verified.commitSha,
       attached: true,
     });
     return;
@@ -121,6 +122,7 @@ export async function attachManualRepository(input: {
     ...input.repository,
     url: target.url,
     ref: target.ref,
+    expectedCommitSha: undefined,
     attached: true,
   });
   return { warning: ANONYMOUS_REPOSITORY_WARNING };

@@ -11,7 +11,7 @@ import {
 import {
   ListGitHubRepositoryBranchesQuery,
   GitHubRepositoryBranchesResponse,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/github-repository-contracts";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,

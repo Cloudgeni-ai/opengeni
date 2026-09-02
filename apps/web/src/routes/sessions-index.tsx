@@ -1617,26 +1617,40 @@ function workspaceRepositoryPickerProps(
     onToggleRepo: context.toggleGitHubRepository,
     onRefChange: (repoId: number, ref: string) =>
       context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
-    onLoadGitHubBranches: async (repository) =>
-      (
-        await context.client.listGitHubRepositoryBranches(
-          workspaceId,
-          repository.installationId,
-          repository.id,
-          { limit: 100 },
-        )
-      ).branches,
+    onLoadGitHubBranches: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; refresh and try again.");
+      const { listGitHubRepositoryBranches } = await import("@opengeni/sdk/github-repositories");
+      const response = await listGitHubRepositoryBranches(
+        context.client,
+        workspaceId,
+        repository.installationId,
+        repository.id,
+        { limit: 100 },
+      );
+      if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        throw new Error("The workspace changed; refresh and try again.");
+      }
+      return response.branches;
+    },
     onLoadPersonalGitHubBranches: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; refresh and try again.");
       const connectionId = context.personalGitHubStatus?.connection?.id;
       if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
-      return (
-        await context.client.listPersonalGitHubRepositoryBranches(
-          workspaceId,
-          connectionId,
-          repository.repositoryId,
-          { limit: 100 },
-        )
-      ).branches;
+      const { listPersonalGitHubRepositoryBranches } =
+        await import("@opengeni/sdk/github-repositories");
+      const response = await listPersonalGitHubRepositoryBranches(
+        context.client,
+        workspaceId,
+        connectionId,
+        repository.repositoryId,
+        { limit: 100 },
+      );
+      if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        throw new Error("The workspace changed; refresh and try again.");
+      }
+      return response.branches;
     },
     onManualOpenChange: context.setManualReposOpen,
     onManualAdd: context.addManualRepository,
@@ -1646,12 +1660,21 @@ function workspaceRepositoryPickerProps(
       ),
     onManualRemove: (id: number) =>
       context.setManualRepos((current) => current.filter((repo) => repo.id !== id)),
-    onManualAttach: async (repository) =>
-      await attachManualRepository({
+    onManualAttach: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; try again.");
+      const assertCurrent = () => {
+        if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+          throw new Error("The workspace changed; try again.");
+        }
+      };
+      assertCurrent();
+      return await attachManualRepository({
         repository,
         workspaceRepositories: context.githubRepos,
         personalRepositories: context.personalGitHubRepositories,
         selectWorkspaceRepository: (matched, ref) => {
+          assertCurrent();
           context.setSelectedRepoIds((current) => {
             const next =
               context.selectedInstallationId !== null &&
@@ -1678,6 +1701,7 @@ function workspaceRepositoryPickerProps(
           if (!(await context.ensurePersonalGitHubAuthority(workspaceId))) {
             throw new Error("Your GitHub identity could not be authorized for this workspace.");
           }
+          assertCurrent();
           context.setSelectedRepoIds(
             (current) =>
               new Set(
@@ -1697,15 +1721,29 @@ function workspaceRepositoryPickerProps(
             [matched.repositoryId]: ref,
           }));
         },
-        verifyPublicGitHubRepository: async (request) =>
-          await context.client.verifyPublicGitHubRepositoryRef(workspaceId, request),
-        attach: (attached) =>
+        verifyPublicGitHubRepository: async (request) => {
+          const { verifyPublicGitHubRepositoryRef } =
+            await import("@opengeni/sdk/github-repositories");
+          const verified = await verifyPublicGitHubRepositoryRef(
+            context.client,
+            workspaceId,
+            request,
+          );
+          assertCurrent();
+          return verified;
+        },
+        attach: (attached) => {
+          assertCurrent();
           context.setManualRepos((current) =>
             current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
-          ),
-        remove: (id) =>
-          context.setManualRepos((current) => current.filter((candidate) => candidate.id !== id)),
-      }),
+          );
+        },
+        remove: (id) => {
+          assertCurrent();
+          context.setManualRepos((current) => current.filter((candidate) => candidate.id !== id));
+        },
+      });
+    },
     validationError: context.repositoryValidationError,
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,

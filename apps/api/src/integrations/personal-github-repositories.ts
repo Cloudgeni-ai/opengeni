@@ -12,7 +12,7 @@ import {
   GitHubRepositoryBranchesResponse,
   type GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseContract,
   type ListGitHubRepositoryBranchesQuery,
-} from "@opengeni/contracts";
+} from "@opengeni/contracts/github-repository-contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,

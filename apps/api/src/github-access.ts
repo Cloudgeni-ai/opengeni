@@ -3,10 +3,12 @@ import type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubRepository,
-  GitHubRepositoryBranchesResponse,
-  ListGitHubRepositoryBranchesQuery,
 } from "@opengeni/contracts";
-import { GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseSchema } from "@opengeni/contracts";
+import {
+  GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseSchema,
+  type GitHubRepositoryBranchesResponse,
+  type ListGitHubRepositoryBranchesQuery,
+} from "@opengeni/contracts/github-repository-contracts";
 import {
   areGitHubRepositoriesAllowedForWorkspace,
   hasAuditableGitHubInstallationAuthority,

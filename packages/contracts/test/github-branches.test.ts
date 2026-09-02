@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
+import { ResourceRef } from "../src";
 import {
   GitHubRepositoryBranchesResponse,
   ListGitHubRepositoryBranchesQuery,
-  parseCanonicalGitHubRepositoryUrl,
-  ResourceRef,
   VerifyPublicGitHubRepositoryRefRequest,
-} from "../src";
+} from "../src/github-repository-contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "../src/github-repository";
 
 describe("GitHub repository branch contracts", () => {
   test("defaults to one bounded provider page", () => {
