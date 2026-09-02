@@ -35,6 +35,7 @@ export {
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveAutomaticSessionTitlePreview,
   deriveSessionDisplayTitle,
   sessionTitleIsPending,
 } from "./session-titles";

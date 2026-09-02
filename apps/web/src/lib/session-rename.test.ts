@@ -108,8 +108,24 @@ describe("sessionDisplayTitle", () => {
       ),
     ).toBe("Please investigate automatic session title generation failures");
     expect(
-      sessionDisplayTitle(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" })),
-    ).toBe("New conversation");
+      sessionDisplayTitle(
+        session({
+          title: "New conversation",
+          titleSource: "agent",
+          initialMessage:
+            "https://homeserver.example.test/workspaces/one/sessions/two\nFix default session naming behavior",
+        }),
+      ),
+    ).toBe("Fix default session naming behavior");
+    expect(
+      sessionDisplayTitle(
+        session({
+          id: "123e4567-e89b-42d3-a456-426614174000",
+          title: null,
+          initialMessage: "SECRET_TOKEN=hunter2",
+        }),
+      ),
+    ).toBe("Conversation 123e4567");
     expect(
       sessionDisplayTitle(
         session({
@@ -120,8 +136,14 @@ describe("sessionDisplayTitle", () => {
       ),
     ).toBe("New conversation");
     expect(
-      sessionDisplayTitle(session({ title: "   ", initialMessage: null as unknown as string })),
-    ).toBe("New conversation");
+      sessionDisplayTitle(
+        session({
+          id: "123e4567-e89b-42d3-a456-426614174000",
+          title: "   ",
+          initialMessage: null as unknown as string,
+        }),
+      ),
+    ).toBe("Conversation 123e4567");
   });
 });
 
@@ -132,9 +154,15 @@ describe("renameSeedValue", () => {
       "Inspect the repo",
     );
     expect(renameSeedValue(session({ title: null }))).toBe("Inspect the repo");
-    expect(renameSeedValue(session({ title: null, initialMessage: "SECRET_TOKEN=hunter2" }))).toBe(
-      "",
-    );
+    expect(
+      renameSeedValue(
+        session({
+          id: "123e4567-e89b-42d3-a456-426614174000",
+          title: null,
+          initialMessage: "SECRET_TOKEN=hunter2",
+        }),
+      ),
+    ).toBe("");
     expect(renameSeedValue(session({ title: "New conversation", titleSource: "user" }))).toBe(
       "New conversation",
     );

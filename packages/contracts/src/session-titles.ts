@@ -15,6 +15,14 @@ export const AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES = 80;
  */
 export const AUTOMATIC_SESSION_TITLE_FALLBACK = "New conversation";
 
+// Session creation accepts a body far larger than a navigation label. Bound
+// the source before any replace/split/normalization so a persisted large prompt
+// cannot amplify memory or CPU on every client render.
+const PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS = 4_096;
+
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 let titleSegmenter: Intl.Segmenter | null | undefined;
 
 const KNOWN_SENSITIVE_VALUE_PATTERNS = [
@@ -328,4 +336,96 @@ export function normalizeAutomaticSessionTitle(value: string): string | null {
     .trim();
   if (!title || !hasVisibleAutomaticTitleContent(title)) return null;
   return title;
+}
+
+export type SessionDisplayTitleInput = {
+  id?: string | null | undefined;
+  title?: string | null | undefined;
+  titleSource?: "user" | "agent" | null | undefined;
+  initialMessage?: string | null | undefined;
+  metadata?: Readonly<Record<string, unknown>> | undefined;
+};
+
+export type SessionDisplayTitleOptions = {
+  /** Optional metadata fields to try before the opening-prompt preview. */
+  metadataKeys?: readonly string[] | undefined;
+};
+
+/**
+ * Derive a bounded, sensitive-safe preview from the opening prompt.
+ *
+ * Unsafe leading lines are skipped instead of forcing the whole session back
+ * to a generic label. This covers prompts that begin with a pasted URL or
+ * identifier followed by an ordinary natural-language request on the next
+ * line, without putting the rejected value into navigation surfaces.
+ */
+export function deriveAutomaticSessionTitlePreview(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  const lines = value
+    .slice(0, PROMPT_PREVIEW_SCAN_MAX_CODE_UNITS)
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, "\n")
+    .split(/\n+/u);
+
+  for (const candidate of lines) {
+    const line = candidate.trim();
+    if (!line || containsSensitiveAutomaticSessionTitleValue(line)) continue;
+
+    const preview = boundAutomaticSessionTitle(line.replace(/\s+/gu, " "))
+      .replace(/[\s.!?,;:\-–—]+$/u, "")
+      .trim();
+    if (preview) return preview;
+  }
+
+  return null;
+}
+
+function automaticSessionReferenceTitle(id: unknown): string {
+  const sessionId = typeof id === "string" ? id.trim() : "";
+  return SESSION_ID_PATTERN.test(sessionId)
+    ? `Conversation ${sessionId.slice(0, 8)}`
+    : AUTOMATIC_SESSION_TITLE_FALLBACK;
+}
+
+/**
+ * Whether the durable title still represents the automatic-title pending state.
+ * A user-authored title always wins, even when its literal value is the marker.
+ */
+export function sessionTitleIsPending(input: SessionDisplayTitleInput): boolean {
+  const title = input.title?.trim() ?? "";
+  return input.titleSource !== "user" && (!title || title === AUTOMATIC_SESSION_TITLE_FALLBACK);
+}
+
+/**
+ * Derive the title a human-facing client should display for a session.
+ *
+ * A semantic agent title or human rename wins. While automatic naming is still
+ * pending, clients show a short, sensitive-safe preview of the opening prompt.
+ * If no safe prompt text exists, a UUID-derived reference keeps real sessions
+ * distinguishable without exposing prompt bytes. The durable pending marker is
+ * therefore an internal lifecycle value rather than the ordinary visible name.
+ */
+export function deriveSessionDisplayTitle(
+  input: SessionDisplayTitleInput,
+  options: SessionDisplayTitleOptions = {},
+): string {
+  const title = input.title?.trim() ?? "";
+  if (input.titleSource === "user") {
+    return title || automaticSessionReferenceTitle(input.id);
+  }
+  if (title && !sessionTitleIsPending(input)) {
+    return title;
+  }
+
+  for (const key of options.metadataKeys ?? []) {
+    const value = input.metadata?.[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+
+  return (
+    deriveAutomaticSessionTitlePreview(input.initialMessage) ??
+    automaticSessionReferenceTitle(input.id)
+  );
 }

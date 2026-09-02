@@ -48,6 +48,15 @@ describe("session display titles", () => {
         initialMessage: "A later prompt preview must not replace durable metadata",
       }),
     ).toBe("Automatic Session Naming");
+
+    expect(
+      deriveSessionDisplayTitle({
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage:
+          "https://homeserver.example.test/workspaces/one/sessions/two\nFix default session naming behavior",
+      }),
+    ).toBe("Fix default session naming behavior");
   });
 
   test("preserves metadata precedence when a host requests it", () => {
@@ -64,7 +73,7 @@ describe("session display titles", () => {
     ).toBe("Nightly drift check");
   });
 
-  test("keeps the generic fallback for sensitive prompt prefixes and honors a user-set fallback", () => {
+  test("uses a session reference for unsafe prompts and honors a user-set fallback", () => {
     for (const initialMessage of [
       "SECRET_TOKEN=hunter2 investigate the failed deployment",
       "Open https://example.com/private?token=hunter2 and inspect the failure",
@@ -76,11 +85,12 @@ describe("session display titles", () => {
     ]) {
       expect(
         deriveSessionDisplayTitle({
+          id: "123e4567-e89b-42d3-a456-426614174000",
           title: AUTOMATIC_SESSION_TITLE_FALLBACK,
           titleSource: "agent",
           initialMessage,
         }),
-      ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
+      ).toBe("Conversation 123e4567");
     }
 
     expect(
@@ -93,9 +103,18 @@ describe("session display titles", () => {
 
     expect(
       deriveSessionDisplayTitle({
+        id: "123e4567-e89b-42d3-a456-426614174000",
         title: "   ",
         titleSource: "user",
         initialMessage: "Inspect the workspace",
+      }),
+    ).toBe("Conversation 123e4567");
+
+    expect(
+      deriveSessionDisplayTitle({
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage: "API_TOKEN=hunter2",
       }),
     ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
   });

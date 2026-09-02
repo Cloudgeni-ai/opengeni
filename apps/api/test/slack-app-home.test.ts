@@ -105,7 +105,7 @@ describe("Slack App Home projection", () => {
     expect(blocks.at(-1)).toMatchObject({ type: "actions", block_id: "opengeni_home_actions" });
   });
 
-  test("uses a prompt-free fallback when an older session has no durable title", () => {
+  test("uses a prompt-free session reference when an older session has no durable title", () => {
     const untitled = {
       ...session("00000000-0000-4000-8000-000000000005", "running", "ignored"),
       title: null,
@@ -119,8 +119,27 @@ describe("Slack App Home projection", () => {
         nowMs: Date.parse("2026-08-14T12:00:00.000Z"),
       }),
     );
-    expect(serialized).toContain("New conversation");
+    expect(serialized).toContain("Conversation 00000000");
     expect(serialized).not.toContain("super-secret-value");
+  });
+
+  test("skips an unsafe leading URL and shows the next safe prompt line", () => {
+    const untitled = {
+      ...session("123e4567-e89b-42d3-a456-426614174000", "running", "ignored"),
+      title: null,
+      initialMessage:
+        "https://homeserver.example.test/workspaces/one/sessions/two\nFix default session naming behavior",
+    };
+    const serialized = JSON.stringify(
+      buildSlackAppHomeBlocks({
+        sessions: [untitled],
+        workspaceUrl: null,
+        sessionUrl: () => null,
+        nowMs: Date.parse("2026-08-14T12:00:00.000Z"),
+      }),
+    );
+    expect(serialized).toContain("Fix default session naming behavior");
+    expect(serialized).not.toContain("homeserver.example.test");
   });
 
   test("access views contain no stale task content", () => {

@@ -418,6 +418,60 @@ describe("responsive production session header", () => {
       await context.close();
     }
   }, 30_000);
+
+  test("pending titles use safe prompt text or a unique session reference", async () => {
+    const safePromptLine = "Fix default session naming behavior";
+    const urlLeading = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: `https://homeserver.example.test/workspaces/one/sessions/two\n${safePromptLine}`,
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const sensitiveOnly = await createSession(dbClient.db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      initialMessage: "API_TOKEN=super-secret-value",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    const context = await configuredContext(browser, {
+      viewport: { width: 1440, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(sessionUrl({ ...fixture, sessionId: urlLeading.id }));
+
+      const titleButton = page.locator("header button[title$='click to rename']");
+      await titleButton.waitFor();
+      expect((await titleButton.textContent())?.trim()).toBe(safePromptLine);
+      expect(await page.getByText(safePromptLine, { exact: true }).count()).toBeGreaterThan(0);
+      expect(await page.getByText("New conversation", { exact: true }).count()).toBe(0);
+
+      await page.goto(sessionUrl({ ...fixture, sessionId: sensitiveOnly.id }));
+      await titleButton.waitFor();
+      expect((await titleButton.textContent())?.trim()).toBe(
+        `Conversation ${sensitiveOnly.id.slice(0, 8)}`,
+      );
+      expect(await page.getByText("New conversation", { exact: true }).count()).toBe(0);
+      const displayedTitles = await page
+        .locator("[data-session-row-title], header button[title$='click to rename']")
+        .allTextContents();
+      expect(displayedTitles.join(" ")).not.toContain("super-secret-value");
+      expect(pageErrors.get(context)).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
 });
 
 function sessionUrl(value: HeaderFixture): string {

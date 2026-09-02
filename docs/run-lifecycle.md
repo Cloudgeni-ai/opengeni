@@ -31,13 +31,15 @@ OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
 Session display titles are durable session metadata, not a truncation of model
-history. Creation and migration use `New conversation` as the durable marker
-that semantic naming is still pending. Human-facing clients may render a short,
-sensitive-safe opening-prompt preview while that marker (or a legacy null title)
-remains; the preview is display-only, never persisted or searched as title
-metadata, and obvious credential-, URL-, or identifier-shaped prefixes retain
-the generic marker. When the durable title changes, the client naturally yields
-to it.
+history. Creation and migration use `New conversation` only as the durable
+marker that semantic naming is still pending. Human-facing clients render a
+short, sensitive-safe opening-prompt preview while that marker (or a legacy null
+title) remains. Unsafe leading lines are skipped, so a pasted URL followed by a
+normal request still gets a useful immediate label; if no safe prompt line
+exists, a short session reference keeps rows distinguishable without exposing
+prompt bytes. The preview/reference is display-only, never persisted or searched
+as title metadata, and the client naturally yields when `session.title_set`
+arrives.
 
 The first-party `session_create` tool is the bounded exception for an
 agent-created child: the manager may provide a concise semantic title, and an
