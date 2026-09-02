@@ -58,6 +58,7 @@ import {
 } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 
+import { ApiHttpError } from "./http/api-error";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer } from "./mcp/server";
@@ -429,7 +430,7 @@ export async function callWorkspaceToolGateway(
   } catch (error) {
     observation.end(workspaceToolGatewayOutcome(error));
     if (error instanceof ToolGatewayCatalogStaleError) {
-      throw new HTTPException(409, { message: error.code, cause: error });
+      throw catalogStaleHttpError();
     }
     if (error instanceof ToolGatewayToolNotFoundError) {
       throw new HTTPException(404, { message: error.code, cause: error });
@@ -455,7 +456,7 @@ export async function approveWorkspaceToolGatewayCall(
 ) {
   const request = ToolGatewayApprovalRequest.parse(input);
   if (request.catalogDigest !== prepared.toolGatewayCatalog.digest) {
-    throw new HTTPException(409, { message: "catalog_stale" });
+    throw catalogStaleHttpError();
   }
   const entry = prepared.toolGatewayCatalog.entries.find(
     (candidate) =>
@@ -509,6 +510,15 @@ export async function approveWorkspaceToolGatewayCall(
     operationId: request.operationId,
     approvalToken,
     expiresAt: expiresAt.toISOString(),
+  });
+}
+
+function catalogStaleHttpError(): ApiHttpError {
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: "The workspace tool catalog changed; retry with the current catalog.",
+    retryable: true,
+    details: { code: "catalog_stale" },
   });
 }
 

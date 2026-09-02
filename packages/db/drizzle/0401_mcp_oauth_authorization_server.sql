@@ -178,11 +178,22 @@ BEGIN
   removed := removed + affected;
 
   WITH expired AS (
-    SELECT token_hash
-    FROM mcp_oauth_refresh_tokens
-    WHERE expires_at <= pg_catalog.clock_timestamp()
-      OR revoked_at <= pg_catalog.clock_timestamp() - interval '1 day'
-    ORDER BY expires_at, token_hash
+    SELECT candidate.token_hash
+    FROM mcp_oauth_refresh_tokens candidate
+    WHERE (
+      candidate.expires_at <= pg_catalog.clock_timestamp()
+      OR candidate.revoked_at <= pg_catalog.clock_timestamp() - interval '1 day'
+    )
+      -- A rotated generation is the durable replay detector for its family.
+      -- Keep every tombstone until no descendant refresh token can remain live.
+      AND NOT EXISTS (
+        SELECT 1
+        FROM mcp_oauth_refresh_tokens live_family
+        WHERE live_family.family_id = candidate.family_id
+          AND live_family.revoked_at IS NULL
+          AND live_family.expires_at > pg_catalog.clock_timestamp()
+      )
+    ORDER BY candidate.expires_at, candidate.token_hash
     FOR UPDATE SKIP LOCKED
     LIMIT bounded_limit
   )

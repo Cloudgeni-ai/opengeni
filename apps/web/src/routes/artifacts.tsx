@@ -1,6 +1,4 @@
 import type {
-  ToolGatewayCallResponse,
-  ToolGatewayCatalog,
   ToolGatewayIdentity,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -44,6 +42,7 @@ import {
   artifactEditInstructions,
   artifactEditOpeningMessage,
 } from "@/lib/artifact-authoring";
+import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -55,10 +54,6 @@ function asError(error: unknown): Error {
 }
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
-
-function toolIdentityKey(identity: ToolGatewayIdentity): string {
-  return `${identity.serverId}\u0000${identity.toolName}`;
-}
 
 function useArtifacts(workspaceId: string) {
   const [data, setData] = useState<WorkspaceArtifactListResponse | null>(null);
@@ -229,53 +224,13 @@ export function ArtifactDetailRoute({
   const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
     if (requestedTools.length === 0 || !siteVersionId) return undefined;
-    const allowed = new Set(requestedTools.map(toolIdentityKey));
-    const workspaceTools = context.client.tools.forWorkspace(workspaceId);
-    let projectedCatalog: ToolGatewayCatalog | null = null;
-    const catalog: PublishedHtmlArtifactToolBridge["catalog"] = async ({ signal }) => {
-      if (projectedCatalog) return projectedCatalog;
-      const current = await workspaceTools.$catalog({ signal });
-      projectedCatalog = {
-        ...current,
-        entries: current.entries.filter((entry) => allowed.has(toolIdentityKey(entry.identity))),
-      };
-      return projectedCatalog;
-    };
-    return {
-      catalog,
-      approve: async (toolRequest, { signal }) => {
-        if (!allowed.has(toolIdentityKey(toolRequest.identity))) {
-          throw new Error("This tool is not available to the Site");
-        }
-        return await workspaceTools.$approve(toolRequest.identity, toolRequest.arguments, {
-          operationId: toolRequest.operationId,
-          site: { artifactId, versionId: siteVersionId },
-          signal,
-        });
-      },
-      call: async (toolRequest, { signal }) => {
-        if (!allowed.has(toolIdentityKey(toolRequest.identity))) {
-          throw new Error("This tool is not available to the Site");
-        }
-        const current = await catalog({ signal });
-        if (
-          !current.entries.some(
-            (entry) => toolIdentityKey(entry.identity) === toolIdentityKey(toolRequest.identity),
-          )
-        ) {
-          throw new Error("This requested tool is not enabled in the workspace");
-        }
-        return await request<ToolGatewayCallResponse>(`/v1/workspaces/${workspaceId}/tools/calls`, {
-          method: "POST",
-          signal,
-          body: JSON.stringify({
-            ...toolRequest,
-            siteArtifactId: artifactId,
-            siteVersionId,
-          }),
-        });
-      },
-    };
+    return createSiteToolBridge({
+      workspaceTools: context.client.tools.forWorkspace(workspaceId),
+      workspaceId,
+      artifactId,
+      siteVersionId,
+      requestedTools,
+    });
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
   const editWithGeni = async () => {
     const currentVersion = detail?.artifact.currentVersion;

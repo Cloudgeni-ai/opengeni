@@ -95,6 +95,8 @@ describe("migration 0401 MCP OAuth authorization server", () => {
     expect(source).toContain("expires_at timestamptz NOT NULL DEFAULT (now() + interval '1 day')");
     expect(source).toContain("CREATE FUNCTION opengeni_private.reap_mcp_oauth_state");
     expect(source).toContain("FOR UPDATE SKIP LOCKED");
+    expect(source).toContain("live_family.family_id = candidate.family_id");
+    expect(source).toContain("live_family.revoked_at IS NULL");
     expect(source).toContain("CREATE FUNCTION opengeni_private.register_mcp_oauth_client");
     expect(source).toContain("pg_advisory_xact_lock");
     expect(source).toContain("global_count >= 600 OR scoped_count >= 20");
@@ -118,8 +120,9 @@ describe("migration 0401 MCP OAuth authorization server", () => {
         )`;
       expect(registered?.client_id).toBe(`ogmcp_client_smoke_${index.toString().padStart(4, "0")}`);
     }
-    await expect(
-      app`
+    let quotaError: unknown = null;
+    try {
+      await app`
         select client_id
         from opengeni_private.register_mcp_oauth_client(
           'ogmcp_client_smoke_0021',
@@ -128,8 +131,11 @@ describe("migration 0401 MCP OAuth authorization server", () => {
           ${app.json(["authorization_code", "refresh_token"])},
           ${app.json(["code"])},
           ${registrationScopeHash}
-        )`,
-    ).rejects.toMatchObject({ code: "P0004" });
+        )`;
+    } catch (error) {
+      quotaError = error;
+    }
+    expect(quotaError).toMatchObject({ code: "P0004" });
 
     await admin`
       insert into mcp_oauth_clients (
@@ -170,8 +176,8 @@ describe("migration 0401 MCP OAuth authorization server", () => {
     );
   });
 
-  test("revokes the whole rotated family when an older refresh token is replayed", async () => {
-    if (!admin || !client) return;
+  test("retains rotated tombstones and revokes the family when an older token is replayed", async () => {
+    if (!admin || !app || !client) return;
     const accountId = crypto.randomUUID();
     const workspaceId = crypto.randomUUID();
     const familyId = crypto.randomUUID();
@@ -208,6 +214,16 @@ describe("migration 0401 MCP OAuth authorization server", () => {
       refreshExpiresAt: new Date(Date.now() + 24 * 60 * 60_000),
     });
     expect(rotated?.refreshGeneration).toBe(2);
+
+    await admin`update mcp_oauth_refresh_tokens
+      set revoked_at = clock_timestamp() - interval '2 days',
+          expires_at = clock_timestamp() - interval '1 hour'
+      where token_hash = ${oldTokenHash}`;
+    await app`select opengeni_private.reap_mcp_oauth_state(128)`;
+    const [retainedTombstone] = await admin<{ count: number }[]>`
+      select count(*)::integer as count from mcp_oauth_refresh_tokens
+      where token_hash = ${oldTokenHash}`;
+    expect(retainedTombstone?.count).toBe(1);
 
     expect(
       await rotateMcpOAuthRefreshToken(client.db, {

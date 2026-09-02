@@ -153,7 +153,12 @@ describe("workspace tool gateway adapters", () => {
         ...base,
         catalogDigest: "a".repeat(64),
       }),
-    ).rejects.toMatchObject({ status: 409 });
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: true,
+      details: { code: "catalog_stale" },
+    });
     await expect(
       callWorkspaceToolGateway(prepared, access, {
         ...base,
@@ -203,6 +208,23 @@ describe("workspace tool gateway adapters", () => {
       subjectId,
       operationId: response.operationId,
       identity: { serverId: "inventory", toolName: "lookup" },
+    });
+  });
+
+  test("returns a typed retryable conflict when approval uses a stale catalog", async () => {
+    const prepared = preparedGateway([], "human");
+    await expect(
+      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: "a".repeat(64),
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "SKU-2" },
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: true,
+      details: { code: "catalog_stale" },
     });
   });
 
