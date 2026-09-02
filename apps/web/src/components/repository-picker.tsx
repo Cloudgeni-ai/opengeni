@@ -9,11 +9,15 @@ import {
   PlusIcon,
   RefreshCwIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
+import {
+  ManualRepositoryEditor,
+  type ManualRepositoryAttachResult,
+} from "@/components/manual-repository-editor";
+import { RepositoryRefInput } from "@/components/repository-ref-input";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
@@ -26,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { repoCountLabel } from "@/lib/format";
+import { attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
   gitHubRepositoryResource,
   isRepositoryResourceForGitHubRepo,
@@ -65,10 +70,7 @@ export function repositoryBindingPresentation(
       emptyDescription:
         "This workspace has an active GitHub App binding, but none of its explicitly allowed repositories are currently shared by GitHub. Reconfigure the installation or refresh after policy approval.",
       connectUrl: installUrl,
-      connectLabel:
-        setupMode === "platform"
-          ? "Connect another GitHub account"
-          : "Configure another installation",
+      connectLabel: "Connect another account",
       healthy: true,
       canRefresh: true,
     };
@@ -84,7 +86,7 @@ export function repositoryBindingPresentation(
           ? "Connect as the personal account owner or an organization owner. GitHub repository administrators and collaborators cannot connect an installation."
           : "GitHub App server credentials exist, but this workspace has no active installation binding. Connect as the personal owner or an organization owner; repository administrators and collaborators cannot bind.",
       connectUrl: installUrl,
-      connectLabel: setupMode === "platform" ? "Install or connect GitHub" : "Connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     };
@@ -139,6 +141,13 @@ export type RepositoryContextPickerProps = {
   onManualAdd: () => void;
   onManualUpdate: (id: number, patch: Partial<RepoDraft>) => void;
   onManualRemove: (id: number) => void;
+  onManualAttach?: (repository: RepoDraft) => Promise<ManualRepositoryAttachResult>;
+  onLoadGitHubBranches?: (
+    repository: GitHubRepository,
+  ) => Promise<import("@/types").GitHubRepositoryBranch[]>;
+  onLoadPersonalGitHubBranches?: (
+    repository: PersonalGitHubRepositoryCatalogItem,
+  ) => Promise<import("@/types").GitHubRepositoryBranch[]>;
   onGitHubAppOpenChange: (open: boolean) => void;
   onOrgChange: (value: string) => void;
   onStartGitHubApp: () => void;
@@ -151,6 +160,8 @@ export type RepositoryContextPickerProps = {
   lockedManualRepoIds?: ReadonlySet<number>;
   /** Inline validation for pending manual repository additions. */
   validationError?: string | null;
+  /** New-chat route used to explain immutable mounted follow-up resources. */
+  newChatUrl?: string;
   /** Optional back control when embedded in the mobile “+” drill-in. */
   leading?: ReactNode;
   /** Extra classes on the bar trigger (e.g. `max-sm:hidden` when opened from +). */
@@ -164,7 +175,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     (repository) => repository.selectedAccess !== null,
   );
   const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
-  const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
+  const manualCount = attachedManualRepositoryCount(props.manualRepos);
   const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
   const hasRepos = props.repositories.length > 0;
   const bindingPresentation = repositoryBindingPresentation(
@@ -173,9 +184,6 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     props.setupMode,
   );
   const canRefresh = bindingPresentation.canRefresh || props.personalGitHubStatus?.enabled === true;
-  // Two-step inline confirm for removing a manual repo, so a stray click in a
-  // dense picker doesn't drop a repo the user typed out.
-  const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
   const [confirmDisconnectInstallationId, setConfirmDisconnectInstallationId] = useState<
     number | null
   >(null);
@@ -440,21 +448,19 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                           </button>
                           {checked ? (
                             <div className="mt-2 flex items-center gap-2 pl-6">
-                              <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                              <Input
+                              <RepositoryRefInput
                                 value={
                                   props.selectedPersonalGitHubRepoRefs?.[repo.repositoryId] ??
                                   repo.defaultBranch
                                 }
-                                onChange={(event) =>
-                                  props.onPersonalGitHubRefChange?.(
-                                    repo.repositoryId,
-                                    event.target.value,
-                                  )
+                                defaultRef={repo.defaultBranch}
+                                label={`${repo.fullName} ref`}
+                                compact
+                                onChange={(value) =>
+                                  props.onPersonalGitHubRefChange?.(repo.repositoryId, value)
                                 }
                                 disabled={props.pending || locked}
-                                aria-label={`${repo.fullName} ref`}
-                                className="h-7 text-xs"
+                                loadBranches={props.onLoadPersonalGitHubBranches?.bind(null, repo)}
                               />
                             </div>
                           ) : null}
@@ -612,17 +618,14 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                               </button>
                               {checked ? (
                                 <div className="mt-2 flex items-center gap-2 pl-6">
-                                  <GitBranchIcon className="size-3.5 shrink-0 text-fg-subtle" />
-                                  <Input
+                                  <RepositoryRefInput
                                     value={props.selectedRepoRefs[repo.id] ?? repo.defaultBranch}
-                                    onChange={(event) =>
-                                      props.onRefChange(repo.id, event.target.value)
-                                    }
-                                    onClick={(event) => event.stopPropagation()}
+                                    defaultRef={repo.defaultBranch}
+                                    label={`${repo.fullName} ref`}
+                                    compact
+                                    onChange={(value) => props.onRefChange(repo.id, value)}
                                     disabled={props.pending || locked}
-                                    placeholder={repo.defaultBranch}
-                                    aria-label={`${repo.fullName} ref`}
-                                    className="h-7 text-xs"
+                                    loadBranches={props.onLoadGitHubBranches?.bind(null, repo)}
                                   />
                                 </div>
                               ) : null}
@@ -674,87 +677,26 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
                 <div className="space-y-2 border-t border-border p-3">
                   {props.manualRepos.length === 0 ? (
                     <p className="text-xs leading-5 text-fg-muted">
-                      Add HTTPS Git repositories that don't use the GitHub app token.
+                      Public HTTPS repositories only. Private GitHub repositories require the
+                      workspace App or your personal identity.
                     </p>
                   ) : (
-                    props.manualRepos.map((repo) => {
-                      const locked = props.lockedManualRepoIds?.has(repo.id) === true;
-                      return (
-                        <div
-                          key={repo.id}
-                          className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]"
-                        >
-                          <Input
-                            value={repo.url}
-                            onChange={(event) =>
-                              props.onManualUpdate(repo.id, { url: event.target.value })
-                            }
-                            disabled={props.pending || locked}
-                            placeholder="https://github.com/org/repo"
-                            className="h-8 text-xs"
-                          />
-                          <div className="relative">
-                            <GitBranchIcon className="pointer-events-none absolute left-2.5 top-2 size-3.5 text-fg-subtle" />
-                            <Input
-                              value={repo.ref}
-                              onChange={(event) =>
-                                props.onManualUpdate(repo.id, { ref: event.target.value })
-                              }
-                              disabled={props.pending || locked}
-                              placeholder="main"
-                              className="h-8 pl-7 text-xs"
-                            />
-                          </div>
-                          {locked ? (
-                            <MetaChip dot="idle" rounded="full" className="self-center">
-                              Mounted
-                            </MetaChip>
-                          ) : confirmRemoveId === repo.id ? (
-                            <div className="flex items-center gap-1">
-                              <Button
-                                type="button"
-                                variant="destructive"
-                                size="icon-sm"
-                                onClick={() => {
-                                  props.onManualRemove(repo.id);
-                                  setConfirmRemoveId(null);
-                                }}
-                                disabled={props.pending}
-                                aria-label="Confirm remove repository"
-                                title="Remove"
-                                className="size-8"
-                              >
-                                <CheckIcon className="size-3.5" />
-                              </Button>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                onClick={() => setConfirmRemoveId(null)}
-                                aria-label="Keep repository"
-                                title="Cancel"
-                                className="size-8"
-                              >
-                                <XIcon className="size-3.5" />
-                              </Button>
-                            </div>
-                          ) : (
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={() => setConfirmRemoveId(repo.id)}
-                              disabled={props.pending}
-                              aria-label="Remove repository"
-                              title="Remove"
-                              className="size-8"
-                            >
-                              <Trash2Icon className="size-3.5" />
-                            </Button>
-                          )}
-                        </div>
-                      );
-                    })
+                    props.manualRepos.map((repo) => (
+                      <ManualRepositoryEditor
+                        key={repo.id}
+                        repository={repo}
+                        mounted={props.lockedManualRepoIds?.has(repo.id) === true}
+                        pending={props.pending}
+                        onUpdate={(patch) => props.onManualUpdate(repo.id, patch)}
+                        onRemove={() => props.onManualRemove(repo.id)}
+                        onAttach={
+                          props.onManualAttach ??
+                          (async () => {
+                            throw new Error("Repository attachment is unavailable.");
+                          })
+                        }
+                      />
+                    ))
                   )}
                   {props.validationError ? (
                     <p className="text-xs leading-5 text-status-failed" role="alert">
@@ -774,7 +716,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
 export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   const selectedInstalledCount = props.selectedRepoIds.size;
   const selectedPersonalCount = props.selectedPersonalGitHubRepoIds?.size ?? 0;
-  const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
+  const manualCount = attachedManualRepositoryCount(props.manualRepos);
   const selectedCount = selectedInstalledCount + selectedPersonalCount + manualCount;
   const bindingPresentation = repositoryBindingPresentation(
     props.status,
@@ -783,7 +725,9 @@ export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   );
   const personalGitHubActive = props.personalGitHubStatus?.connection?.status === "active";
   const selectedInstalled = props.repositories.filter((repo) => props.selectedRepoIds.has(repo.id));
-  const selectedManual = props.manualRepos.filter((repo) => repo.url.trim().length > 0);
+  const selectedManual = props.manualRepos.filter(
+    (repo) => repo.attached !== false && repo.url.trim().length > 0,
+  );
   const selectedNames = [
     ...selectedInstalled.map((repo) => repo.fullName),
     ...selectedManual.map((repo) => repo.url.trim()),

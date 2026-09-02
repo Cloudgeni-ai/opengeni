@@ -1,6 +1,7 @@
 export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
@@ -561,6 +562,7 @@ export type {
   PersonalGitHubDisconnectRequest,
   PersonalGitHubOAuthStartRequest,
   PersonalGitHubOAuthStartResponse,
+  ListGitHubRepositoryBranchesOptions,
   ListPersonalGitHubRepositoriesOptions,
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubRepository,
@@ -663,6 +665,10 @@ export type {
   GitHubBindingStatus,
   GitHubInstallationBinding,
   GitHubInstallationLifecycle,
+  GitHubRepositoryBranch,
+  GitHubRepositoryBranchesResponse,
+  VerifyPublicGitHubRepositoryRefRequest,
+  VerifyPublicGitHubRepositoryRefResponse,
   GitHubRepositoriesResponse,
   GoogleDriveBrowseItem,
   GoogleDriveBrowseResponse,

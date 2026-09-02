@@ -151,7 +151,9 @@ async function stageTarball(
   return { manifest, tarball: join(tarballRoot, basename(filename)) };
 }
 
-const tempRoot = await mkdtemp(join(tmpdir(), "opengeni-publish-consumer-"));
+const temporaryBase = process.env.OPENGENI_PUBLISH_CONSUMER_TEMP_ROOT?.trim() || tmpdir();
+await mkdir(temporaryBase, { recursive: true });
+const tempRoot = await mkdtemp(join(temporaryBase, "opengeni-publish-consumer-"));
 let passed = false;
 
 try {
@@ -178,6 +180,8 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifacts-worker.js",
     "package/dist/editable-artifacts-worker.d.ts",
+    "package/dist/github-repositories.js",
+    "package/dist/github-repositories.d.ts",
     "package/dist/interaction.js",
     "package/dist/interaction.d.ts",
   ]) {
@@ -193,6 +197,15 @@ try {
     sdkEditableExport.import !== "./dist/editable-artifacts.js"
   ) {
     throw new Error("SDK tarball has an invalid ./editable-artifacts export");
+  }
+  const sdkGitHubRepositoriesExport = sdk.manifest.exports?.["./github-repositories"];
+  if (
+    !sdkGitHubRepositoriesExport ||
+    typeof sdkGitHubRepositoriesExport === "string" ||
+    sdkGitHubRepositoriesExport.types !== "./dist/github-repositories.d.ts" ||
+    sdkGitHubRepositoriesExport.import !== "./dist/github-repositories.js"
+  ) {
+    throw new Error("SDK tarball has an invalid ./github-repositories export");
   }
   const core = await stageTarball("packages/core", stagingRoot, tarballRoot, versions);
   const coreTarballContents = await run(["tar", "-tzf", core.tarball], consumerRoot, true);
@@ -419,6 +432,10 @@ try {
     "package/dist/editable-artifact-live.d.ts",
     "package/dist/rig-platform-surface-validation.js",
     "package/dist/rig-platform-surface-validation.d.ts",
+    "package/dist/github-repository.js",
+    "package/dist/github-repository.d.ts",
+    "package/dist/github-repository-contracts.js",
+    "package/dist/github-repository-contracts.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
   ]) {
@@ -453,6 +470,17 @@ try {
     contractsSessionTitlesExport.import !== "./dist/session-titles.js"
   ) {
     throw new Error("contracts tarball has an invalid ./session-titles export");
+  }
+  for (const subpath of ["github-repository", "github-repository-contracts"] as const) {
+    const entry = contracts.manifest.exports?.[`./${subpath}`];
+    if (
+      !entry ||
+      typeof entry === "string" ||
+      entry.types !== `./dist/${subpath}.d.ts` ||
+      entry.import !== `./dist/${subpath}.js`
+    ) {
+      throw new Error(`contracts tarball has an invalid ./${subpath} export`);
+    }
   }
   const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
   for (const artifact of [

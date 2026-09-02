@@ -192,6 +192,8 @@ async function waitFor(condition: () => boolean, message: string): Promise<void>
   const deadline = Date.now() + 3_000;
   while (!condition()) {
     if (Date.now() >= deadline) throw new Error(message);
+    // The developer section is loaded through React.lazy. On a busy runner,
+    // StrictMode's two effect passes may settle after more than one tick.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     });

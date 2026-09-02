@@ -5,6 +5,7 @@ import {
   type BrowserAccountTransition,
 } from "@opengeni/react/accounts";
 import { createBrowserAccountsClient } from "@opengeni/sdk/accounts";
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Loader2Icon, UserRoundPlusIcon } from "lucide-react";
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -17,12 +18,17 @@ import {
 } from "@/api";
 import { Button } from "@/components/ui/button";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { useBrowserAccountPopup } from "@/components/use-browser-account-popup";
 import {
   browserAccountBridgeBlockersSnapshot,
   installBrowserAccountBridgeOperations,
   subscribeBrowserAccountBridgeBlockers,
 } from "@/lib/browser-account-bridge";
+import {
+  clearOrganizationInvitationContinuation,
+  type OrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
 
 export type BrowserAccountsRuntimeProps = {
   bootstrapLegacySession: boolean;
@@ -110,12 +116,24 @@ function ExternalActorInvalidation() {
   return null;
 }
 
-export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel?: ReactNode }) {
+export function BrowserAccountsSignedOutPanel(props: {
+  emptySetRegistrationPanel?: ReactNode;
+  invitation?: OrganizationInvitationContinuation | null;
+}) {
   const accounts = useBrowserAccounts();
   const popup = useBrowserAccountPopup();
   const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [invitationDismissed, setInvitationDismissed] = useState(false);
   const busy = accounts.phase === "committing" || accounts.phase === "loading";
   const slots = accounts.projection?.slots ?? [];
+  const invitation = invitationDismissed ? null : (props.invitation ?? null);
+  const invitedSlot = invitation
+    ? (slots.find(
+        (slot) =>
+          normalizeEmail(slot.verifiedClaim.value) === normalizeEmail(invitation.targetEmail),
+      ) ?? null)
+    : null;
+  const visibleSlots = invitation ? (invitedSlot ? [invitedSlot] : []) : slots;
 
   function authenticate(kind: "add" | "reauth", slotId?: string) {
     popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
@@ -130,6 +148,11 @@ export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel
     });
   }
 
+  function dismissInvitation() {
+    clearOrganizationInvitationContinuation();
+    setInvitationDismissed(true);
+  }
+
   return (
     <section className="flex flex-1 items-center justify-center px-4">
       <div className="w-full max-w-sm rounded-lg border border-border bg-surface p-5 shadow-sm forced-colors:border-[CanvasText]">
@@ -139,12 +162,18 @@ export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel
           </span>
           <div>
             <h1 className="text-base font-semibold">
-              {slots.length > 0 ? "Choose an account" : "Sign in to OpenGeni"}
+              {invitation
+                ? "Continue your invitation"
+                : slots.length > 0
+                  ? "Choose an account"
+                  : "Sign in to OpenGeni"}
             </h1>
             <p className="mt-1 text-sm text-fg-subtle">
-              {slots.length > 0
-                ? "No browser account is active. Choose one explicitly before OpenGeni loads account data."
-                : "Authentication opens in an isolated window so an existing account is never replaced implicitly."}
+              {invitation
+                ? `Use the account for ${invitation.targetEmail} to continue joining ${invitation.organizationName}.`
+                : slots.length > 0
+                  ? "No browser account is active. Choose one explicitly before OpenGeni loads account data."
+                  : "Authentication opens in an isolated window so an existing account is never replaced implicitly."}
             </p>
           </div>
         </div>
@@ -154,7 +183,7 @@ export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel
           </p>
         ) : null}
         <div className="grid gap-2">
-          {slots.map((slot) =>
+          {visibleSlots.map((slot) =>
             slot.state === "active" ? (
               <Button
                 key={slot.id}
@@ -191,19 +220,36 @@ export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel
               </Button>
             ),
           )}
-          <Button
-            type="button"
-            className="min-h-11 w-full"
-            variant={slots.length > 0 ? "outline" : "default"}
-            disabled={busy}
-            onClick={() => authenticate("add")}
-          >
-            {busy ? (
-              <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
-            ) : null}
-            {slots.length > 0 ? "Use another account" : "Continue with email"}
-          </Button>
-          {slots.length === 0 && props.emptySetRegistrationPanel ? (
+          {!invitation || !invitedSlot ? (
+            <Button
+              type="button"
+              className="min-h-11 w-full"
+              variant={!invitation && slots.length > 0 ? "outline" : "default"}
+              disabled={busy}
+              onClick={() => authenticate("add")}
+            >
+              {busy ? (
+                <Loader2Icon className="size-4 animate-spin motion-reduce:animate-none" />
+              ) : null}
+              {invitation
+                ? `Sign in as ${invitation.targetEmail}`
+                : slots.length > 0
+                  ? "Use another account"
+                  : "Continue with email"}
+            </Button>
+          ) : null}
+          {invitation ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full"
+              disabled={busy}
+              onClick={dismissInvitation}
+            >
+              Continue without this invitation
+            </Button>
+          ) : null}
+          {!invitation && slots.length === 0 && props.emptySetRegistrationPanel ? (
             <div className="mt-2 border-t border-border pt-4">
               {registrationOpen ? (
                 <>
@@ -237,6 +283,52 @@ export function BrowserAccountsSignedOutPanel(props: { emptySetRegistrationPanel
   );
 }
 
+export function BrowserAccountsOrganizationOnboardingPanel(props: {
+  client: OpenGeniBrowserClient;
+  activeEmail: string | null;
+  invitation: OrganizationInvitationContinuation | null;
+  onComplete: () => void;
+}) {
+  const accounts = useBrowserAccounts();
+  const popup = useBrowserAccountPopup();
+
+  function authenticate(kind: "add" | "reauth", slotId?: string) {
+    popup.open(() => (kind === "add" ? accounts.beginAdd() : accounts.beginReauth(slotId!)), {
+      onError: (error) =>
+        toast.error("Couldn't start account authentication", {
+          description: String(error),
+        }),
+    });
+  }
+
+  function useInvitedAccount(targetEmail: string) {
+    const targetSlot = accounts.projection?.slots.find(
+      (slot) => normalizeEmail(slot.verifiedClaim.value) === normalizeEmail(targetEmail),
+    );
+    if (!targetSlot) {
+      authenticate("add");
+      return;
+    }
+    if (targetSlot.state === "reauth_required") {
+      authenticate("reauth", targetSlot.id);
+      return;
+    }
+    void accounts
+      .selectSlot(targetSlot.id)
+      .catch((error) => toast.error("Couldn't switch accounts", { description: String(error) }));
+  }
+
+  return (
+    <OrganizationOnboardingPanel
+      client={props.client}
+      activeEmail={props.activeEmail}
+      invitation={props.invitation}
+      onUseInvitedAccount={useInvitedAccount}
+      onComplete={props.onComplete}
+    />
+  );
+}
+
 export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode }) {
   const accounts = useBrowserAccounts();
   if (accounts.phase === "recoverable_error") {
@@ -260,4 +352,8 @@ export function BrowserAccountsLoadingGate({ children }: { children?: ReactNode 
     return <LoadingPanel label="Loading browser accounts" />;
   }
   return children;
+}
+
+function normalizeEmail(value: string): string {
+  return value.trim().toLowerCase();
 }

@@ -2233,6 +2233,39 @@ describe("GitHub repository resources", () => {
     ).toBe(false);
   });
 
+  test("keeps verified manual commits immutable and rejects cleared authenticated refs", () => {
+    const commitSha = "a".repeat(40);
+    expect(
+      buildResources(
+        [
+          {
+            id: 1,
+            url: "https://github.com/acme/public.git",
+            ref: "refs/tags/v1",
+            expectedCommitSha: commitSha,
+            attached: true,
+          },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toEqual([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/public.git",
+        ref: "refs/tags/v1",
+        expectedCommitSha: commitSha,
+        mountPath: "repos/github.com/acme/public.git",
+      },
+    ]);
+
+    const repository = githubRepository();
+    expect(() =>
+      buildResources([], [repository], new Set([repository.id]), { [repository.id]: " " }),
+    ).toThrow("Repository ref is required.");
+  });
+
   test("keeps installation metadata for private GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: true }), "main")).toEqual({
       kind: "repository",
@@ -2330,6 +2363,7 @@ describe("GitHub repository resources", () => {
         kind: "repository",
         uri: "https://git.example.com/acme/manual.git",
         ref: "main",
+        expectedCommitSha: "b".repeat(40),
       },
     ];
 
@@ -2339,7 +2373,15 @@ describe("GitHub repository resources", () => {
     expect(hydrated).toEqual([privateResource, manualResource]);
     expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
-      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      manualRepos: [
+        {
+          id: 1,
+          url: manualResource.uri,
+          ref: "main",
+          expectedCommitSha: "b".repeat(40),
+          attached: true,
+        },
+      ],
       selectedRepoIds: new Set([privateRepo.id]),
       selectedRepoRefs: { [privateRepo.id]: "develop" },
       selectedPersonalRepoIds: new Set(),

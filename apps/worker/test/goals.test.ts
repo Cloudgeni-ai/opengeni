@@ -65,10 +65,13 @@ describe("goalContinuationPrompt", () => {
     // when a human decision is the blocker.
     expect(withWait).toContain("opengeni__goal_wait");
     expect(withWait).toContain("do not sleep, loop, or poll");
+    expect(withWait).toContain("do not restate it or produce another equivalent final answer");
+    expect(withWait).toContain("Report only material new state or a newly discovered blocker");
     expect(withWait).toContain("blocked on a human decision, use opengeni__goal_pause");
     expect(withWait).toContain("Blocked audit:");
     const withoutWait = goalContinuationPrompt(goal, 1, null, { goalWaitAvailable: false });
     expect(withoutWait).not.toContain("goal_wait");
+    expect(withoutWait).not.toContain("another equivalent final answer");
     expect(withoutWait).toContain("Blocked audit:");
     expect(withWait).not.toContain("Ship the fix");
   });

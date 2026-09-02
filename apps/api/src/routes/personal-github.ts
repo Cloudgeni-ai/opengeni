@@ -3,10 +3,15 @@ import {
   ListPersonalGitHubRepositoriesResponse,
   PersonalGitHubConnectionStatusResponse,
   PersonalGitHubOAuthStartRequest,
+  PersonalGitHubRepositoryId,
   PersonalGitHubRepositorySelectionState,
   ReplacePersonalGitHubRepositorySelectionsRequest,
   VerifyPersonalGitHubRepositorySelectionsRequest,
 } from "@opengeni/contracts/personal-github";
+import {
+  ListGitHubRepositoryBranchesQuery,
+  GitHubRepositoryBranchesResponse,
+} from "@opengeni/contracts/github-repository-contracts";
 import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
@@ -31,6 +36,7 @@ import {
   startPersonalGitHubOAuth,
 } from "../integrations/personal-github";
 import {
+  listLivePersonalGitHubRepositoryBranches,
   listLivePersonalGitHubRepositories,
   personalGitHubRepositoryProviderHttpError,
   PersonalGitHubRepositoryProviderError,
@@ -181,6 +187,39 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
           repositories: verified.map((repository) => ({ ...repository, lastVerifiedAt })),
         });
         return c.json(PersonalGitHubRepositorySelectionState.parse(selection));
+      } catch (error) {
+        throw personalGitHubRepositoryRouteError(error);
+      }
+    },
+  );
+
+  app.get(
+    "/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/:repositoryId/branches",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const connectionId = c.req.param("connectionId");
+      const access = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "connections:read",
+      );
+      assertPersonalConnectionOwnerPrincipal(access, "My GitHub repositories");
+      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      const repositoryId = PersonalGitHubRepositoryId.parse(c.req.param("repositoryId"));
+      try {
+        return c.json(
+          GitHubRepositoryBranchesResponse.parse(
+            await listLivePersonalGitHubRepositoryBranches(deps, {
+              accountId: access.grant.accountId,
+              workspaceId,
+              subjectId: access.grant.subjectId,
+              connectionId,
+              repositoryId,
+              query,
+            }),
+          ),
+        );
       } catch (error) {
         throw personalGitHubRepositoryRouteError(error);
       }

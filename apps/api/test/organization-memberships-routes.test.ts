@@ -661,7 +661,7 @@ describe("organization membership routes", () => {
       expect(failedMessage.text).toContain("never shares anyone's Personal workspace");
       expect(failedMessage.idempotencyKey).toBeTruthy();
 
-      const setupUrl = failedMessage.text.match(/Set up your account: (\S+)/)?.[1];
+      const setupUrl = failedMessage.text.match(/Accept invitation to .*: (https?:\/\/\S+)/)?.[1];
       expect(setupUrl).toBeTruthy();
       const token = new URL(setupUrl!).hash.slice("#token=".length);
       const previewApp = new Hono();

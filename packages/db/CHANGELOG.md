@@ -1,5 +1,28 @@
 # @opengeni/db
 
+## 3.8.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+- 9fe5c5b: Add organization-scoped Vercel AI Gateway and OpenRouter BYOK/custom models for shared workspaces while preserving independent workspace connections.
+
+### Patch Changes
+
+- f5e2dfc: Keep canonical large session-event payloads lossless while exporting an explicit bounded host projection, so optional host export cannot roll back session lifecycle settlement.
+- bcacd54: Release durable BrowserSession and ComputerSession holders when a requested finite-lifetime Modal lease reaches its hard provider deadline, preserve honest operation outcomes, and expose interaction-blocked rotation telemetry.
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- 5ef0757: Allow zero-holder sandbox drains to use a separate extended provider snapshot timeout without lengthening ordinary periodic or turn-end snapshot finalization, while keeping current and historical Modal rotation admission inside provider-deadline headroom and making opted-in lifecycle waiters honor an in-flight child's persisted bounded capture deadline across rolling configuration changes.
+- 9af1666: Keep backward session-history pagination advancing across oversized legacy events by applying the canonical bounded read projection instead of failing the page, and report when a forensic response is no longer byte-for-byte exact.
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+  - @opengeni/codemode@0.4.23
+
 ## 3.7.4
 
 ### Patch Changes

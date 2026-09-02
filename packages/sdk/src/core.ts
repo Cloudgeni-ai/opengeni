@@ -2,6 +2,7 @@
 export { OpenGeniDocumentAuthorityClient as OpenGeniCoreClient } from "./document-authority-client";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,

@@ -1,4 +1,5 @@
 import { OpenGeniDocumentAuthorityClient } from "./document-authority-client";
+import type { FetchResponse } from "./client";
 import type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -132,7 +133,7 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
     artifactId: string,
     jobId: string,
     options: ReadEditableArtifactMaterializationOptions,
-  ): Promise<Response> {
+  ): Promise<FetchResponse> {
     return await this.requestResponse(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/materializations/${encodeURIComponent(jobId)}/download`,

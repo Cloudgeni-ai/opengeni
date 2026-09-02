@@ -5,6 +5,11 @@ import {
   type GitHubInstallationBindingProof,
 } from "@opengeni/contracts";
 import {
+  ListGitHubRepositoryBranchesQuery,
+  VerifyPublicGitHubRepositoryRefRequest,
+} from "@opengeni/contracts/github-repository-contracts";
+import { parseCanonicalGitHubRepositoryUrl } from "@opengeni/contracts/github-repository";
+import {
   bindAuthorizedGitHubInstallationRepositories,
   deleteGitHubInstallationBinding,
   GitHubInstallationAuthorityCommitError,
@@ -19,12 +24,14 @@ import {
   GitHubAppApiError,
   GitHubAppConfigurationError,
   GitHubInstallationAuthorityError,
+  GitHubPublicRepositoryVerificationError,
   githubAppMissingSettings,
   githubOAuthAuthorizeUrl,
   organizationAppManifestUrl,
   personalAppManifestUrl,
   readSignedState,
   stateMaxAgeSeconds,
+  verifyPublicGitHubRepositoryRef,
   type GitHubSignedStatePayload,
   verifySignedState,
 } from "@opengeni/github";
@@ -42,7 +49,9 @@ import {
 } from "../github-browser-flow";
 import {
   githubBindingStatus,
+  GitHubRepositoryBranchAuthorityError,
   listWorkspaceGitHubInstallationBindings,
+  listWorkspaceGitHubRepositoryBranches,
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 
@@ -177,6 +186,65 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   });
 
+  app.post("/v1/workspaces/:workspaceId/github/public-repositories/verify", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    requirePublicGitHubRepositoryVerificationPermission(grant);
+    const request = VerifyPublicGitHubRepositoryRefRequest.parse(await c.req.json());
+    let repository: ReturnType<typeof parseCanonicalGitHubRepositoryUrl>;
+    try {
+      repository = parseCanonicalGitHubRepositoryUrl(request.url);
+    } catch (error) {
+      throw new HTTPException(422, {
+        message: error instanceof Error ? error.message : "GitHub repository URL is invalid.",
+      });
+    }
+    try {
+      return c.json(
+        await verifyPublicGitHubRepositoryRef(
+          { repository, ref: request.ref },
+          deps.githubAnonymousFetch ?? fetch,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof GitHubPublicRepositoryVerificationError) {
+        throw new HTTPException(error.code === "provider_unavailable" ? 503 : 422, {
+          message: error.message,
+        });
+      }
+      throw new HTTPException(503, {
+        message: "GitHub public repository verification is temporarily unavailable.",
+      });
+    }
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/github/installations/:installationId/repositories/:repositoryId/branches",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
+      const installationId = parsePositiveInteger(c.req.param("installationId"));
+      const repositoryId = parsePositiveInteger(c.req.param("repositoryId"));
+      if (installationId === null || repositoryId === null) {
+        throw new HTTPException(400, { message: "invalid GitHub repository identity" });
+      }
+      const query = ListGitHubRepositoryBranchesQuery.parse(c.req.query());
+      try {
+        return c.json(
+          await listWorkspaceGitHubRepositoryBranches(deps, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            installationId,
+            repositoryId,
+            query,
+          }),
+        );
+      } catch (error) {
+        throw githubRepositoryBranchesRouteError(error);
+      }
+    },
+  );
+
   app.delete("/v1/workspaces/:workspaceId/github/installations/:installationId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "github:manage");
@@ -184,14 +252,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (installationId === null) {
       throw new HTTPException(400, { message: "invalid GitHub installation id" });
     }
-    const deleted = await deleteGitHubInstallationBinding(db, {
+    await deleteGitHubInstallationBinding(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       installationId,
     });
-    if (!deleted) {
-      throw new HTTPException(404, { message: "GitHub installation binding not found" });
-    }
     return c.body(null, 204);
   });
 
@@ -749,6 +814,50 @@ function githubAuthorityHttpError(error: unknown): HTTPException {
   return new HTTPException(502, { message: "GitHub authority verification failed" });
 }
 
+function githubRepositoryBranchesRouteError(error: unknown): Error {
+  if (error instanceof HTTPException) {
+    return error;
+  }
+  if (error instanceof GitHubRepositoryBranchAuthorityError) {
+    return error.code === "not_authorized"
+      ? new HTTPException(404, {
+          message: "GitHub repository is not authorized for this workspace",
+        })
+      : new HTTPException(409, {
+          message: "GitHub repository authorization changed; refresh and try again",
+        });
+  }
+  if (error instanceof GitHubAppConfigurationError) {
+    return new HTTPException(409, { message: "GitHub App is not configured" });
+  }
+  if (error instanceof GitHubAppApiError) {
+    if (error.status === 429) {
+      return new HTTPException(503, { message: "GitHub is temporarily rate limited" });
+    }
+    if (error.status === 401 || error.status === 403 || error.status === 404) {
+      return new HTTPException(409, {
+        message: "GitHub repository access changed; refresh and try again",
+      });
+    }
+    return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
+  }
+  return new HTTPException(502, { message: "GitHub branch discovery is unavailable" });
+}
+
+export function requirePublicGitHubRepositoryVerificationPermission(
+  grant: Pick<AccessGrant, "permissions">,
+): void {
+  if (
+    hasPermission(grant.permissions, "sessions:create") ||
+    hasPermission(grant.permissions, "sessions:control")
+  ) {
+    return;
+  }
+  throw new HTTPException(403, {
+    message: "missing permission: sessions:create or sessions:control",
+  });
+}
+
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
   return (
     deps.settings.publicBaseUrl?.startsWith("https://") ||
@@ -775,15 +884,15 @@ function githubInstallationChooserHtml(
 ): string {
   const action = `${baseUrl}/v1/workspaces/${encodeURIComponent(workspaceId)}/github/installations/select`;
   const options = candidates
-    .map(({ installation, authorityKind }) => {
+    .map(({ installation, authorityKind }, index) => {
       const account = escapeHtml(
         installation.accountLogin ?? `installation ${installation.installationId}`,
       );
       const label = authorityKind === "personal_owner" ? "Personal account" : "Organization owner";
-      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required><span><strong>${account}</strong><small>${label}</small></span></label>`;
+      return `<label class="option"><input type="radio" name="installation_id" value="${installation.installationId}" required${candidates.length === 1 && index === 0 ? " checked" : ""}><span><strong>${account}</strong><small>${label}</small></span></label>`;
     })
     .join("");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>Only installations where GitHub proved you are the personal owner or an active organization owner are shown.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Choose GitHub installation</title><style>body{font-family:system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0b0d;color:#f4f4f5}main{width:min(640px,calc(100vw - 32px));border:1px solid #27272a;border-radius:12px;padding:28px;background:#111114}h1{margin:0 0 10px;font-size:24px}p{margin:0 0 18px;color:#d4d4d8}.options{display:grid;gap:8px;margin-bottom:18px}.option{display:flex;align-items:center;gap:12px;border:1px solid #3f3f46;border-radius:8px;padding:12px;cursor:pointer}.option span{display:grid;gap:2px}.option small{color:#a1a1aa}button{min-height:38px;border-radius:7px;border:1px solid #3f3f46;padding:0 14px;background:#f4f4f5;color:#09090b;font:600 14px system-ui,sans-serif;cursor:pointer}.secondary{margin-left:8px;background:transparent;color:#f4f4f5}</style></head><body><main><h1>Choose a GitHub account</h1><p>These accounts already have the OpenGeni GitHub App installed and GitHub proved you are the personal owner or an active organization owner.</p><form method="get" action="${escapeHtml(action)}"><input type="hidden" name="state" value="${escapeHtml(state)}"><div class="options">${options}</div><button type="submit">Connect selected</button><button class="secondary" type="submit" name="installation_id" value="new" formnovalidate>Install on another account</button></form></main></body></html>`;
 }
 
 function githubSetupPendingHtml(): string {

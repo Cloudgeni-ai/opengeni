@@ -58,6 +58,11 @@ import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
+import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
+import {
+  clearOrganizationInvitationContinuation,
+  readOrganizationInvitationContinuation,
+} from "@/lib/organization-invitation-continuation";
 import {
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
@@ -174,6 +179,12 @@ const BrowserAccountsLoadingGate = lazy(() =>
   })),
 );
 
+const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
+  import("@/components/browser-accounts-runtime").then((module) => ({
+    default: module.BrowserAccountsOrganizationOnboardingPanel,
+  })),
+);
+
 function captureProductAnalyticsEvent(
   name: AnalyticsEventName,
   properties: AnalyticsProperties = {},
@@ -267,6 +278,7 @@ export type AppContextValue = {
   /** The authoritative workspace catalog, shared by tool policy and timeline presentation. */
   workspaceCapabilityCatalog: CapabilityCatalogItem[];
   currentResources: ResourceRef[];
+  repositoryValidationError: string | null;
   /**
    * Workspace whose mutable console state is currently safe to render.
    * This is a display fence only; server access grants remain authoritative.
@@ -1059,29 +1071,43 @@ export function RootRouteComponent() {
       ? configured.filter((id) => available.has(id))
       : toolMcpServers.map((server) => server.id);
   }, [configuredWorkspaceToolDefaults, toolMcpServers]);
-  const currentResources = useMemo(
-    () =>
-      buildResources(
-        manualRepos,
-        githubRepos,
-        selectedRepoIds,
-        selectedRepoRefs,
-        personalGitHubRepositories,
-        selectedPersonalGitHubRepoIds,
-        selectedPersonalGitHubRepoRefs,
-        personalGitHubSelection?.credentialBindingId ?? null,
-      ),
-    [
-      manualRepos,
-      githubRepos,
-      selectedRepoIds,
-      selectedRepoRefs,
-      personalGitHubRepositories,
-      selectedPersonalGitHubRepoIds,
-      selectedPersonalGitHubRepoRefs,
-      personalGitHubSelection?.credentialBindingId,
-    ],
-  );
+  const lastValidResources = useRef<ResourceRef[]>([]);
+  const repositoryBuild = useMemo(() => {
+    try {
+      return {
+        resources: buildResources(
+          manualRepos,
+          githubRepos,
+          selectedRepoIds,
+          selectedRepoRefs,
+          personalGitHubRepositories,
+          selectedPersonalGitHubRepoIds,
+          selectedPersonalGitHubRepoRefs,
+          personalGitHubSelection?.credentialBindingId ?? null,
+        ),
+        error: null,
+      };
+    } catch (error) {
+      return {
+        resources: lastValidResources.current,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }, [
+    manualRepos,
+    githubRepos,
+    selectedRepoIds,
+    selectedRepoRefs,
+    personalGitHubRepositories,
+    selectedPersonalGitHubRepoIds,
+    selectedPersonalGitHubRepoRefs,
+    personalGitHubSelection?.credentialBindingId,
+  ]);
+  useEffect(() => {
+    if (!repositoryBuild.error) lastValidResources.current = repositoryBuild.resources;
+  }, [repositoryBuild]);
+  const currentResources = repositoryBuild.resources;
+  const repositoryValidationError = repositoryBuild.error;
 
   useEffect(() => {
     if (!clientConfig) {
@@ -1793,6 +1819,10 @@ export function RootRouteComponent() {
     let attempted: ReturnType<typeof prepareCreateSessionAttempt> | null = null;
     setBusy(true);
     try {
+      if (repositoryValidationError) {
+        toast.error("Fix repository details", { description: repositoryValidationError });
+        return null;
+      }
       const sessionTools = options?.sessionTools;
       if (!workspaceMcpCatalogReady && !sessionTools) {
         toast.error("Tools are still loading", {
@@ -2000,13 +2030,51 @@ export function RootRouteComponent() {
     githubDisconnectOperationSequence.current = started.sequence;
     const operation = started.operation;
     activeGitHubDisconnectOperation.current = operation;
+    const previousStatus = githubStatus;
+    const previousRepositories = githubRepos;
+    const previousSelectedIds = selectedRepoIds;
+    const previousSelectedRefs = selectedRepoRefs;
+    const removedRepositoryIds = new Set(
+      githubRepos
+        .filter((repository) => repository.installationId === installationId)
+        .map((repository) => repository.id),
+    );
+    setGithubRepos((current) =>
+      current.filter((repository) => repository.installationId !== installationId),
+    );
+    setGithubStatus((current) =>
+      current
+        ? {
+            ...current,
+            installations: current.installations.filter(
+              (installation) => installation.installationId !== installationId,
+            ),
+          }
+        : current,
+    );
+    setSelectedRepoIds(
+      (current) =>
+        new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
+    );
+    setSelectedRepoRefs((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([repositoryId]) => !removedRepositoryIds.has(Number(repositoryId)),
+        ),
+      ),
+    );
     try {
       const unlink = await runCurrentWorkspaceOperation({
         activeOperation: () => activeGitHubDisconnectOperation.current,
         currentTransition: () => workspaceTransitionIdentity.current,
         operation,
         workspaceId,
-        request: async () => await client.unlinkGitHubInstallation(workspaceId, installationId),
+        request: async () =>
+          await unlinkGitHubInstallationWithReconciliation({
+            installationId,
+            unlink: async () => await client.unlinkGitHubInstallation(workspaceId, installationId),
+            readStatus: async () => await client.getGitHubApp(workspaceId),
+          }),
       });
       if (
         unlink.status === "stale" ||
@@ -2019,22 +2087,6 @@ export function RootRouteComponent() {
       ) {
         return false;
       }
-      const removedRepositoryIds = new Set(
-        githubRepos
-          .filter((repository) => repository.installationId === installationId)
-          .map((repository) => repository.id),
-      );
-      setSelectedRepoIds(
-        (current) =>
-          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
-      );
-      setSelectedRepoRefs((current) =>
-        Object.fromEntries(
-          Object.entries(current).filter(
-            ([repositoryId]) => !removedRepositoryIds.has(Number(repositoryId)),
-          ),
-        ),
-      );
       await refreshGitHub(workspaceId, undefined, { sync: true });
       if (
         !ownsWorkspaceOperation(
@@ -2057,6 +2109,10 @@ export function RootRouteComponent() {
           workspaceId,
         )
       ) {
+        setGithubStatus(previousStatus);
+        setGithubRepos(previousRepositories);
+        setSelectedRepoIds(previousSelectedIds);
+        setSelectedRepoRefs(previousSelectedRefs);
         toast.error("Failed to unlink GitHub installation", {
           description: error instanceof Error ? error.message : String(error),
         });
@@ -2110,7 +2166,10 @@ export function RootRouteComponent() {
   }
 
   function addManualRepository() {
-    setManualRepos((current) => [...current, { id: nextRepoId, url: "", ref: "main" }]);
+    setManualRepos((current) => [
+      ...current,
+      { id: nextRepoId, url: "", ref: "main", attached: false },
+    ]);
     setNextRepoId((value) => value + 1);
     setManualReposOpen(true);
   }
@@ -2424,6 +2483,7 @@ export function RootRouteComponent() {
           workspaceMcpCatalogReady,
           workspaceCapabilityCatalog,
           currentResources,
+          repositoryValidationError,
           workspaceStateOwnerId,
           prepareWorkspaceTransition,
           captureWorkspaceInvocation,
@@ -2490,6 +2550,7 @@ export function RootRouteComponent() {
     contextUpdateSessionTitle,
     contextUpdateWorkspaceSettings,
     currentResources,
+    repositoryValidationError,
     githubAppBusy,
     githubAppOpen,
     githubOrg,
@@ -2544,6 +2605,10 @@ export function RootRouteComponent() {
     workspaces,
   ]);
 
+  const organizationInvitationContinuation = managedAuthRequired
+    ? readOrganizationInvitationContinuation()
+    : null;
+
   const applicationSurface = isPublicAuthRoute ? (
     // Self-contained public pages render before config/auth gates and outside
     // AppContext. The isolated account-auth popup is intentionally included.
@@ -2565,6 +2630,7 @@ export function RootRouteComponent() {
     <Suspense fallback={<LoadingPanel label="Loading sign in" />}>
       {browserAccountsEnabled ? (
         <BrowserAccountsSignedOutPanel
+          invitation={organizationInvitationContinuation}
           emptySetRegistrationPanel={
             clientConfig?.managedAuthSessionSetMode === "broker" ||
             clientConfig?.managedAuthSessionSetMode === "dual" ? (
@@ -2580,6 +2646,8 @@ export function RootRouteComponent() {
         />
       ) : (
         <ManagedAuthPanel
+          invitation={organizationInvitationContinuation}
+          onDismissInvitation={clearOrganizationInvitationContinuation}
           onSubmit={handleManagedAuth}
           emailVerificationRequired={managedEmailVerificationRequired}
           socialProviders={managedSocialProviders}
@@ -2606,7 +2674,26 @@ export function RootRouteComponent() {
     accessContext &&
     !defaultWorkspaceId &&
     !slackLinkContinuationWorkspaceId ? (
-    <OrganizationOnboardingPanel client={client} onComplete={revalidatePrincipalAccess} />
+    browserAccountsEnabled ? (
+      <BrowserAccountsOrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onComplete={revalidatePrincipalAccess}
+      />
+    ) : (
+      <OrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onUseInvitedAccount={() => {
+          void handleManagedSignOut().catch((error) =>
+            toast.error("Sign out failed", { description: String(error) }),
+          );
+        }}
+        onComplete={revalidatePrincipalAccess}
+      />
+    )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (

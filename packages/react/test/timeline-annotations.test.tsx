@@ -77,6 +77,14 @@ function firstTextNode(element: Element): Text {
   return node;
 }
 
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
+  }
+}
+
 describe("timeline annotations", () => {
   test("turns one same-message text selection into one exact draft annotation", async () => {
     await import("../src/components/timeline-annotation-selection");
@@ -93,7 +101,13 @@ describe("timeline annotations", () => {
     const text = firstTextNode(source!);
     selectText(text, 6, 10);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    await flush();
+    await waitFor(
+      () =>
+        [...document.body.querySelectorAll("button")].some(
+          (button) => button.textContent?.trim() === "Annotate",
+        ),
+      "annotation action did not appear",
+    );
     const action = [...document.body.querySelectorAll("button")].find(
       (button) => button.textContent?.trim() === "Annotate",
     );
@@ -168,6 +182,12 @@ describe("timeline annotations", () => {
       button.textContent?.includes("view source"),
     );
     await act(async () => sourceButton?.click());
+    await waitFor(
+      () =>
+        document.body.textContent?.includes("Source is outside the loaded timeline window.") ===
+        true,
+      "source-unavailable feedback did not appear",
+    );
     expect(document.body.textContent).toContain("Source is outside the loaded timeline window.");
     await rendered.unmount();
   });

@@ -145,7 +145,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           ? {
               kind: "actions",
               primary: {
-                label: broken ? "Repair workspace App" : "Reconnect workspace App",
+                label: broken ? "Repair workspace App" : "Connect another account",
                 onClick: reconnect,
                 disabled: connectUrl === null,
               },

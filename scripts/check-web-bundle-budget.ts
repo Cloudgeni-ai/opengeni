@@ -393,6 +393,12 @@ const budgets = {
   // production build. Advance only the policy-derived direct-session raw and
   // gzip envelopes; the existing 33-file allowance and every initial,
   // per-file, lazy-chunk, and CSS cap remain fixed.
+  // Invited-account continuation adds the bounded account-menu fallback and
+  // exact invited-email handoff to the shared authenticated shell. The three
+  // Linux/x64 Bun 1.4 release paths measure 2,277,604-2,277,646 raw bytes
+  // across 31 files. Advance only the raw whole-KiB envelope, retaining 1,778
+  // bytes of headroom; gzip, file count, initial, per-file, lazy, and CSS caps
+  // remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,

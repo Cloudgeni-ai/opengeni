@@ -394,7 +394,23 @@ that resumes a box receives a non-owned handle and must not terminate it when
 the request ends. Provider create/restore identity is persisted before setup,
 and workspace capture is fenced against every live writer. A provider loss may
 retire only the exact matching instance and must never cause an ambiguous
-operation to be replayed.
+operation to be replayed. Ordinary periodic and turn-end snapshots keep the
+short `OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS` provider budget. Zero-holder drain
+and rotation captures may use the independent
+`OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` budget; when unset it inherits the
+ordinary timeout. Deployment admission always reserves provider-deadline
+rotation headroom for the larger configured capture budget plus one reaper
+period, including after the default backend changes because historical Modal
+leases remain durable. A drain timeout therefore cannot outlive the rotation
+window. An explicit drain budget is also admitted only when one reaper period,
+the full durable capture, and retry handoff fit inside the lifecycle transition
+wait ceiling. A caller's current configuration supplies only its initial wait:
+after it observes an active capture, PostgreSQL's remaining
+`archive_capture_deadline_at` plus the fixed handoff grace extends that wait up
+to the same one-hour ceiling. Lowering the timeout or rolling the setting across
+processes therefore cannot make an opted-in viewer, turn, or mutation caller
+abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
+probes remain immediate.
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
@@ -1136,8 +1152,15 @@ global lifecycle reaper marks each exact controller resource `lost`, settles a
 prepared operation as a deterministic deadline failure or a dispatched operation
 as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
 then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
-This deadline override is batch-bounded and does not impose a maximum duration on
-healthy interaction sessions before the provider identity itself expires.
+The deadline batch admits only leases that still carry interaction holders, so
+unrelated overdue turn/direct/process-held leases cannot starve it, and includes
+an exact lease that entered `draining` before the deadline. The same global
+reaper inventories due lease-free Connected Machine and attached-device
+transitions under its owner-only FORCE-RLS capability, acquires every affected
+workspace advisory fence in canonical UUID order, and only then opens mutation
+visibility. This deadline override remains batch-bounded and does not impose a
+maximum duration on healthy interaction sessions before the provider identity
+itself expires.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the

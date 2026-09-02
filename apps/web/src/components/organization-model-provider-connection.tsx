@@ -534,7 +534,7 @@ export function OrganizationModelProviderConnection({
         open={disconnectPending}
         onOpenChange={setDisconnectPending}
         title={`Disconnect organization ${meta.title}?`}
-        description="Its models stop being available for new selections in every shared workspace. Existing sessions keep their retained model definition."
+        description="Its models stop working in every shared workspace. Existing sessions keep their model identity, but cannot make new calls until this provider is reconnected."
         confirmLabel={`Disconnect ${meta.shortName}`}
         restoreFocusRef={disconnectButtonRef}
         onConfirm={disconnect}

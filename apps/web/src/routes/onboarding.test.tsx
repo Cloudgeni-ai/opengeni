@@ -54,7 +54,11 @@ mock.module("@/api", () => ({
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#signin">{children}</a>,
+  Link: ({ children, onClick }: { children: ReactNode; onClick?: () => void }) => (
+    <a href="#signin" onClick={onClick}>
+      {children}
+    </a>
+  ),
 }));
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
@@ -117,6 +121,56 @@ describe("organization onboarding UI", () => {
         email: "ada@example.test",
         password: "password1234",
       });
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("anchors invitation sign-in to the invited email until the user dismisses it", async () => {
+    const onDismissInvitation = mock(() => undefined);
+    const onSocialSubmit = mock(async () => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ManagedAuthPanel
+            invitation={{
+              organizationName: "Northwind Research",
+              targetEmail: "invited@example.test",
+            }}
+            onDismissInvitation={onDismissInvitation}
+            socialProviders={["google", "github"]}
+            onSocialSubmit={onSocialSubmit}
+            onSubmit={async () => undefined}
+          />,
+        ),
+      );
+      const email = container.querySelector<HTMLInputElement>("#managed-auth-email")!;
+      expect(email.value).toBe("invited@example.test");
+      expect(email.readOnly).toBeTrue();
+      expect(container.textContent).toContain(
+        "Sign in as invited@example.test to continue joining Northwind Research",
+      );
+      expect(container.textContent).not.toContain("Continue with Google");
+      expect(container.textContent).not.toContain("Continue with GitHub");
+
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find(
+            (button) =>
+              button.textContent?.trim() === "Use another account without this invitation",
+          )!
+          .click(),
+      );
+      expect(onDismissInvitation).toHaveBeenCalledTimes(1);
+      expect(email.value).toBe("");
+      expect(email.readOnly).toBeFalse();
+      expect(container.textContent).toContain("Continue with Google");
+      expect(container.textContent).toContain("Continue with GitHub");
     } finally {
       await act(async () => root.unmount());
       container.remove();
@@ -374,19 +428,180 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("focuses the exact continued invitation across every page before the onboarding gate", async () => {
+    sessionStorage.clear();
+    const exactId = crypto.randomUUID();
+    const exactOrganizationId = crypto.randomUUID();
+    const unrelatedOrganizationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const exactInvitation = {
+      id: exactId,
+      organizationId: exactOrganizationId,
+      organizationName: "Northwind Research",
+      targetEmail: "grace@example.test",
+      targetName: "Grace",
+      initialWorkspaceIds: [],
+      role: "member" as const,
+      status: "pending" as const,
+      revision: 2,
+      expiresAt: "2026-09-08T00:00:00.000Z",
+      acceptedMembershipId: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const listOrganizationInvitations = mock(async (options: { cursor?: string; limit?: number }) =>
+      options.cursor
+        ? { invitations: [exactInvitation], nextCursor: null }
+        : {
+            invitations: [
+              {
+                ...exactInvitation,
+                id: crypto.randomUUID(),
+                organizationId: unrelatedOrganizationId,
+                organizationName: "Contoso Engineering",
+              },
+            ],
+            nextCursor: "page-2",
+          },
+    );
+    const client = {
+      listOrganizationInvitations,
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={client as never}
+            previewState="required"
+            activeEmail="grace@example.test"
+            invitation={{
+              organizationId: exactOrganizationId,
+              organizationName: exactInvitation.organizationName,
+              targetEmail: exactInvitation.targetEmail,
+              expiresAt: exactInvitation.expiresAt,
+              createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+            }}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      expect(listOrganizationInvitations.mock.calls).toEqual([
+        [{ limit: 100 }],
+        [{ cursor: "page-2", limit: 100 }],
+      ]);
+      expect(container.textContent).toContain("Join Northwind Research");
+      expect(container.textContent).not.toContain("Contoso Engineering");
+      expect(
+        Array.from(container.querySelectorAll("button")).filter(
+          (button) => button.textContent?.trim() === "Join organization",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
+  test("keeps unrelated invitations hidden while a no-workspace user switches accounts", async () => {
+    sessionStorage.clear();
+    const onUseInvitedAccount = mock(() => undefined);
+    const targetOrganizationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    const client = {
+      listOrganizationInvitations: mock(async () => ({
+        invitations: [
+          {
+            id: crypto.randomUUID(),
+            organizationId: crypto.randomUUID(),
+            organizationName: "Unrelated Organization",
+            targetEmail: "other@example.test",
+            targetName: null,
+            initialWorkspaceIds: [],
+            role: "member" as const,
+            status: "pending" as const,
+            revision: 1,
+            expiresAt: "2026-09-08T00:00:00.000Z",
+            acceptedMembershipId: null,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ],
+        nextCursor: null,
+      })),
+      acceptOrganizationInvitation: mock(async () => ({ status: "complete" as const })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={client as never}
+            previewState="required"
+            activeEmail="other@example.test"
+            invitation={{
+              organizationId: targetOrganizationId,
+              organizationName: "Northwind Research",
+              targetEmail: "grace@example.test",
+              expiresAt: "2026-09-08T00:00:00.000Z",
+              createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
+            }}
+            onUseInvitedAccount={onUseInvitedAccount}
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await flush();
+      expect(container.textContent).toContain("This invitation is for grace@example.test");
+      expect(container.textContent).toContain("You're signed in as other@example.test");
+      expect(container.textContent).not.toContain("Unrelated Organization");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Switch account")!
+          .click(),
+      );
+      expect(onUseInvitedAccount).toHaveBeenCalledWith("grace@example.test");
+      expect(
+        sessionStorage.getItem("opengeni:organization-invitation-continuation:v1"),
+      ).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      sessionStorage.clear();
+    }
+  });
+
   test("invited-user setup requires confirmation and creates no implicit sign-in UI", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
     try {
       await act(async () => root.render(<SetupAccountRoute token="setup-token" />));
-      expect(container.textContent).toContain("Create your login for the organization");
+      await flush();
+      expect(container.textContent).toContain("Join Test Organization");
+      expect(container.textContent).toContain("create an account to accept this invitation");
+      expect(container.textContent).toContain("This invitation is for invitee@example.test");
+      expect(container.textContent).toContain("you don't need to enter the email again");
+      const existingAccountLink = Array.from(container.querySelectorAll("a")).find(
+        (link) => link.textContent?.trim() === "Sign in as invitee@example.test",
+      )!;
+      await act(async () => existingAccountLink.click());
+      expect(sessionStorage.getItem("opengeni:organization-invitation-continuation:v1")).toContain(
+        "Test Organization",
+      );
       await enter(container.querySelector("#setup-account-name")!, "Grace Hopper");
       await enter(container.querySelector("#setup-account-password")!, "password1234");
       await enter(container.querySelector("#setup-account-confirm")!, "password1234");
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
-          .find((button) => button.textContent?.trim() === "Create account")!
+          .find((button) => button.textContent?.trim() === "Create account and join")!
           .click(),
       );
       await flush();
@@ -401,6 +616,7 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+      sessionStorage.clear();
     }
   });
 

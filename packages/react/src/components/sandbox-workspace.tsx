@@ -424,6 +424,11 @@ export function useSandboxWorkspaceTabs(
   const warmIntents =
     storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
   const { warmTerminal, warmFiles } = warmIntents;
+  // A host-requested file is itself explicit live-file intent. Derive the wake
+  // directly from the request instead of relying on a follow-up effect to copy
+  // it into local state; otherwise a missing or delayed effect leaves the file
+  // waiting for a sandbox that this hook never asks to start.
+  const filesWarmRequested = warmFiles || Boolean(requestedFilePath);
   const requestWarmIntent = useCallback(
     (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
       setStoredWarmIntents((previous) => {
@@ -433,10 +438,6 @@ export function useSandboxWorkspaceTabs(
     },
     [sessionId],
   );
-  useEffect(() => {
-    if (requestedFilePath) requestWarmIntent("warmFiles");
-  }, [requestWarmIntent, requestedFilePath, requestedFileRequestId]);
-
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Shares the session list poll.
   const machines = useMachines({
@@ -457,7 +458,7 @@ export function useSandboxWorkspaceTabs(
     attachTerminal: terminalEnabled && warmTerminal,
     // Explicit live-file intent only — NOT "the Files tab is open". A cold edit
     // or guarded-file open wakes the box; a glance at the tree/diff does not.
-    attachFiles: workspaceDataEnabled && warmFiles,
+    attachFiles: workspaceDataEnabled && filesWarmRequested,
   });
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
@@ -665,7 +666,7 @@ export function useSandboxWorkspaceTabs(
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && warmFiles),
+    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && filesWarmRequested),
     capturedAt: captureState.capturedAt,
   });
   const workspaceWaking = chip.state === "waking";

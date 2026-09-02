@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "2.9.2",
+  "version": "2.10.0",
   "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -33,6 +33,14 @@
     "./personal-github": {
       "types": "./src/personal-github.ts",
       "default": "./src/personal-github.ts"
+    },
+    "./github-repository": {
+      "types": "./src/github-repository.ts",
+      "default": "./src/github-repository.ts"
+    },
+    "./github-repository-contracts": {
+      "types": "./src/github-repository-contracts.ts",
+      "default": "./src/github-repository-contracts.ts"
     },
     "./atlassian": {
       "types": "./src/atlassian.ts",

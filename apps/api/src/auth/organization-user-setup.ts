@@ -107,9 +107,9 @@ export function renderOrganizationUserSetupEmail(input: OrganizationUserSetupEma
   return {
     from: input.senderEmail,
     to: input.recipientEmail,
-    subject: `Join ${input.organizationName} on OpenGeni`,
-    text: `${greeting}\n\nYou have been invited to ${input.organizationName} as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nSet up your account: ${input.setupUrl}\n\nIf you already have an OpenGeni account, sign in and accept the invitation instead.`,
-    html: `<p>${escapeHtml(greeting)}</p><p>You have been invited to <strong>${escapeHtml(input.organizationName)}</strong> as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Set up your account</a></p><p>If you already have an OpenGeni account, sign in and accept the invitation instead.</p>`,
+    subject: `You're invited to join ${input.organizationName} on OpenGeni`,
+    text: `${greeting}\n\nYou've been invited to join ${input.organizationName} on OpenGeni as ${role}.\n\n${workspaceSummary}\n\nThis invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.\n\nAccept invitation to ${input.organizationName}: ${input.setupUrl}\n\nYou'll sign in or create an account before joining. Already use OpenGeni? Open this invitation and choose Sign in as ${input.recipientEmail}. OpenGeni will show the invitation immediately after you sign in.`,
+    html: `<p>${escapeHtml(greeting)}</p><p>You've been invited to join <strong>${escapeHtml(input.organizationName)}</strong> on OpenGeni as ${escapeHtml(role)}.</p>${workspaceHtml}<p>This invitation grants only the organization role and shared workspace access listed above. It never shares anyone's Personal workspace.</p><p><a href="${escapeHtml(input.setupUrl)}">Accept invitation to ${escapeHtml(input.organizationName)}</a></p><p>You'll sign in or create an account before joining. Already use OpenGeni? Open this invitation and choose <strong>Sign in as ${escapeHtml(input.recipientEmail)}</strong>. OpenGeni will show the invitation immediately after you sign in.</p>`,
   };
 }
 
