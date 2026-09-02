@@ -5819,6 +5819,7 @@ export type InstallPortableSkillInput = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode?: "workspace_managed" | "session_selected";
   category?: string;
   tags?: string[];
   provenance?: "platform" | "deployment" | "registry" | "workspace";
@@ -5859,6 +5860,7 @@ export type PortableSkillRuntime = {
   version: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   sourceUrl: string;
   sourceCommit: string;
   sourcePath: string;
@@ -8295,6 +8297,7 @@ export async function installPortableSkill(
         }
         if (!pluginVersion) throw new Error("Failed to create portable Skill plugin version");
 
+        const activationMode = input.activationMode ?? "workspace_managed";
         let [facet] = await tx
           .select()
           .from(schema.capabilityFacets)
@@ -8312,12 +8315,17 @@ export async function installPortableSkill(
               pluginVersionId: pluginVersion.id,
               facetKey: "skill",
               kind: "skill",
-              activationMode: "workspace_managed",
+              activationMode,
               required: true,
             })
             .returning();
         }
         if (!facet) throw new Error("Failed to create portable Skill facet");
+        if (facet.activationMode !== activationMode) {
+          throw new Error(
+            `Portable Skill ${input.capabilityId} activation mode conflicts with immutable stored content`,
+          );
+        }
 
         const [existingSkill] = await tx
           .select()
@@ -8521,16 +8529,22 @@ export async function installPortableSkill(
   );
 }
 
-/** Return exact text artifacts for active authoritative Skill installations. */
+/**
+ * Return exact text artifacts for active authoritative Skill installations.
+ * Session-selected Skills are excluded from ambient runtime resolution unless
+ * the caller is explicitly materializing one during session admission.
+ */
 export async function listInstalledPortableSkills(
   db: Database,
   workspaceId: string,
+  options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
         facetId: schema.capabilitySkillFacets.facetId,
+        activationMode: schema.capabilityFacets.activationMode,
         manifest: schema.capabilityPluginVersions.manifest,
         version: schema.capabilityPluginVersions.version,
         name: schema.capabilitySkillFacets.name,
@@ -8558,6 +8572,10 @@ export async function listInstalledPortableSkills(
         ),
       )
       .innerJoin(
+        schema.capabilityFacets,
+        eq(schema.capabilityFacets.id, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
         schema.capabilitySkillFacets,
         eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
       )
@@ -8581,6 +8599,14 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
+        throw new Error(
+          `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
+        );
+      }
+      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+        continue;
+      }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
       const existing = skills.get(row.facetId);
       if (existing) {
@@ -8593,6 +8619,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
+        activationMode: row.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,
@@ -29870,6 +29897,8 @@ export type SessionCreateInput = {
   policyRole?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
+  /** Exact explicit installed-Skill selection used for keyed-create replay. */
+  selectedInstalledSkillIds?: string[];
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -30161,8 +30190,36 @@ type SessionCreateReplayIdentity = {
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
+  selectedInstalledSkillIds: string[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
 };
+
+// Session metadata is immutable after creation and already participates in
+// every historical schema fixture. Keep this reserved request-identity fact
+// there instead of making current code require a post-fixture sessions column.
+// Create admission always replaces a caller-supplied value for this key.
+const SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY =
+  "_opengeni_session_create_selected_installed_skill_ids_v1";
+
+function metadataWithSelectedInstalledSkillCreateIdentity(
+  metadata: Record<string, unknown>,
+  selectedInstalledSkillIds: string[],
+): Record<string, unknown> {
+  const next = { ...metadata };
+  delete next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY];
+  if (selectedInstalledSkillIds.length > 0) {
+    next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY] = [...selectedInstalledSkillIds];
+  }
+  return next;
+}
+
+function selectedInstalledSkillCreateIdentity(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const value = (metadata as Record<string, unknown>)[
+    SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY
+  ];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : [];
+}
 
 function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
@@ -30178,6 +30235,12 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (
+    stableJson(selectedInstalledSkillCreateIdentity(existing.metadata)) !==
+    stableJson(input.selectedInstalledSkillIds)
+  ) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
@@ -30274,6 +30337,11 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
   const variableSetId = variableSetIds.at(-1) ?? null;
+  const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
+  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
+    input.metadata,
+    selectedInstalledSkillIds,
+  );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private") {
@@ -30324,6 +30392,7 @@ async function createSessionInTransaction(
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
+        selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
       });
@@ -30451,7 +30520,7 @@ async function createSessionInTransaction(
               mode: "explicit",
               inheritedFromSessionId: input.parentSessionId ?? null,
             },
-            metadata: input.metadata,
+            metadata: sessionMetadata,
             ...creatorColumns(frozenCreator),
             ...(privateCreateOwnerMembershipId
               ? {
@@ -30529,6 +30598,7 @@ async function createSessionInTransaction(
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
+          selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
         });
@@ -30719,6 +30789,7 @@ export async function getInitializedSessionCreateReplay(
     requestedSessionId?: string;
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
+    selectedInstalledSkillIds: string[];
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },

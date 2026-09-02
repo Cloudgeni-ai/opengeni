@@ -109,6 +109,7 @@ describe("buildCreateSessionRequest", () => {
     const tools = [{ kind: "mcp" as const, id: "opengeni" }];
     const result = build(currentResources, submissionResources, {
       instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:pack-inline/opengeni-product-integration@abc"],
       selectedTools: tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",
@@ -121,6 +122,7 @@ describe("buildCreateSessionRequest", () => {
     expect(result).toMatchObject({
       resources: [...currentBefore, ...submissionBefore],
       instructions: "Hidden session guidance",
+      installedSkillIds: ["skill:pack-inline/opengeni-product-integration@abc"],
       tools,
       targetSandboxId: "00000000-0000-4000-8000-0000000000c3",
       workingDir: "/workspace/opengeni",

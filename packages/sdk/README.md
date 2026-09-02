@@ -84,6 +84,16 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
+Installed Pack Skills normally remain workspace-managed. A Pack may instead
+mark guidance as `session_selected`; installation then exposes it to no agent
+until `createSession` names the reviewed immutable component in
+`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+so omitting the field from customer-facing creates is a real contamination
+boundary rather than a prompt convention.
+The ordered selection is part of keyed-create identity: reusing an
+`idempotencyKey` with a different selection returns a conflict instead of the
+session configured by the earlier request.
+
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
 shows the first short, sensitive-safe line of the opening prompt, skipping an

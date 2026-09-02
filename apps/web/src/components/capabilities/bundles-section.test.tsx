@@ -209,6 +209,7 @@ async function renderSection(
       onPreviewPackUninstall={async () => null}
       onUninstallPack={async () => true}
       onUnregisterPack={async () => true}
+      onStartPackSession={() => {}}
       onChanged={() => {}}
     />,
   );

@@ -541,6 +541,7 @@ describe("Pack installation ownership", () => {
       key: `inline-skill/${skill.name}`,
       capabilityId: `skill:pack-inline/${skill.name}@${skill.contentSha256}`,
       name: skill.name.toUpperCase(),
+      activationMode: "workspace_managed" as const,
       contentSha256: skill.contentSha256,
     };
 
@@ -555,6 +556,22 @@ describe("Pack installation ownership", () => {
     ]);
 
     const conflictingDigest = sha256("different inline Skill content");
+    expect(
+      await resolvePackInlineSkillReferences(client.db, first.workspaceId, [
+        {
+          ...requirement,
+          capabilityId: `skill:pack-inline/session-selected/${skill.name}@${skill.contentSha256}`,
+          activationMode: "session_selected",
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        status: "mismatch",
+        actualDigest: skill.contentSha256,
+        resolvedId: null,
+      }),
+    ]);
+
     expect(
       await resolvePackInlineSkillReferences(client.db, first.workspaceId, [
         { ...requirement, contentSha256: conflictingDigest },

@@ -1090,13 +1090,20 @@ identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
 The built-in `opengeni-product-integration` Pack is an opt-in implementation
-aid for those standalone integrations. Its immutable Skill adds no executable
-tools, credentials, or compute, but it is visible to every session in the
-workspace where the Pack is installed. Install it only in a dedicated
-implementation workspace and create customer-facing runtime sessions in
-separate workspaces. The Skill teaches the implementation agent to derive the
-workspace isolation unit, UI surface, data-tool boundary, runtime profile, and
-delivery workflow from the host product. The Pack lives in
+aid for those standalone integrations. Installing it adds no executable tools,
+credentials, compute, or customer-facing agent behavior. Its Skill teaches an
+implementation agent to derive the workspace isolation unit, UI surface, data
+tool boundary, runtime profile, and delivery workflow from the host product.
+The Skill uses the existing `capability_facets.activation_mode` authority as
+`session_selected`: ordinary workspace Skill resolution excludes it, and an
+explicit create-time `installedSkillIds` selection freezes the verified
+artifact into exactly one session. The web Pack action carries that immutable
+capability ID into the new-session composer; Pack installation alone cannot add
+the guidance to customer-facing chats. The activation value enters storage at
+maintenance migration 0394; old workers must be fully drained because they do
+not filter this mode. A dedicated implementation workspace
+remains an optional additional operational boundary, not a prerequisite for
+this activation guarantee. The Pack lives in
 `packages/core/src/domain/product-integration-pack.ts`, while the exact customer
 integration contract remains
 [`product-integration.md`](product-integration.md).

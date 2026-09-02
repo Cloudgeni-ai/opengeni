@@ -360,6 +360,7 @@ export type InlinePackSkillInstall = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   contentSha256: string;
   totalBytes: number;
   files: Array<{ path: string; content: string; byteSize: number; contentSha256: string }>;
@@ -377,19 +378,22 @@ export function inlinePackSkillInstall(
     });
   }
   const normalizedName = skill.name.toLowerCase();
+  const activationMode = skill.activationMode ?? "workspace_managed";
+  const activationIdentity = activationMode === "session_selected" ? "session-selected/" : "";
   const encodedSkill = encodeURIComponent(normalizedName);
-  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${encodedSkill}/${artifact.contentSha256}`;
-  const capabilityId = `skill:pack-inline/${normalizedName}@${artifact.contentSha256}`;
+  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${activationIdentity}${encodedSkill}/${artifact.contentSha256}`;
+  const capabilityId = `skill:pack-inline/${activationIdentity}${normalizedName}@${artifact.contentSha256}`;
   return {
     componentKey: `inline-skill/${normalizedName}`,
     capabilityId,
-    pluginKey: `pack-skill/${normalizedName}/${artifact.contentSha256}`,
+    pluginKey: `pack-skill/${activationIdentity}${normalizedName}/${artifact.contentSha256}`,
     sourceUrl,
     repositoryUrl: "https://opengeni.invalid/pack-inline-skills",
     sourceCommit: artifact.contentSha256,
     sourcePath: normalizedName,
     name: artifact.name,
     description: artifact.description,
+    activationMode,
     contentSha256: artifact.contentSha256,
     totalBytes: artifact.totalBytes,
     files: artifact.files.map((file) => ({
@@ -410,21 +414,42 @@ export async function previewCapabilityPackInstallation(
   const { workspaceId } = access;
   const installation = await getPackInstallation(db, workspaceId, pack.id);
   const inlineInstalls = pack.skills.map((skill) => inlinePackSkillInstall(pack, skill));
-  const [referencedComponents, inlineComponents] = await Promise.all([
-    resolvePackComponentReferences(db, workspaceId, pack.components),
-    resolvePackInlineSkillReferences(
-      db,
-      workspaceId,
-      inlineInstalls.map((inline) => ({
-        key: inline.componentKey,
-        capabilityId: inline.capabilityId,
-        name: inline.name,
-        contentSha256: inline.contentSha256,
-      })),
-      installation?.id,
-    ),
-  ]);
   const manifestDigest = capabilityPackManifestDigest(pack);
+  const inlineRequirements = inlineInstalls.map((inline) => ({
+    key: inline.componentKey,
+    capabilityId: inline.capabilityId,
+    name: inline.name,
+    activationMode: inline.activationMode,
+    contentSha256: inline.contentSha256,
+  }));
+  const [referencedComponents, plannedInlineComponents, installedSessionSelectedComponents] =
+    await Promise.all([
+      resolvePackComponentReferences(db, workspaceId, pack.components),
+      resolvePackInlineSkillReferences(db, workspaceId, inlineRequirements, installation?.id),
+      installation?.status === "active" && installation.manifestDigest === manifestDigest
+        ? resolvePackInlineSkillReferences(
+            db,
+            workspaceId,
+            inlineRequirements.filter(
+              (requirement) => requirement.activationMode === "session_selected",
+            ),
+          )
+        : Promise.resolve([]),
+    ]);
+  const installedSessionSelectedByKey = new Map(
+    installedSessionSelectedComponents.map((component) => [component.key, component]),
+  );
+  // Installation planning excludes the Pack's own current ownership so an
+  // update can replace old inline content. For launch affordances, preserve an
+  // independently resolved active facet-installation id on an exact installed
+  // manifest. A missing facet retains the future capability id and therefore
+  // cannot be mistaken for something a new session can select right now.
+  const inlineComponents = plannedInlineComponents.map((component) => {
+    const installed = installedSessionSelectedByKey.get(component.key);
+    return installed?.status === "ready" && installed.resolvedId
+      ? { ...component, resolvedId: installed.resolvedId }
+      : component;
+  });
   const components: PackComponentResolution[] = [...referencedComponents, ...inlineComponents];
   const blockers = components
     .filter((component) => component.required && component.status !== "ready")
