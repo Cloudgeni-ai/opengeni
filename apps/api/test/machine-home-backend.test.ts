@@ -39,7 +39,11 @@ import {
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import type { AccessGrant } from "@opengeni/contracts";
-import { createAndStartSessionWithOutcome, createSessionForRequest } from "@opengeni/core";
+import {
+  createAndStartSessionWithOutcome,
+  createSessionForRequest,
+  swapActiveSandbox,
+} from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
 
@@ -642,6 +646,100 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
       sandbox_backend: "selfhosted",
       sandbox_os: "macos",
     });
+  }, 60_000);
+
+  test("an omitted child placement inherits a backend:'none' parent's active machine route", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager with an attachable machine route",
+        sandboxBackend: "none",
+      },
+    );
+    expect(parent.sandboxBackend).toBe("none");
+
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: parent.id,
+        sessionBackend: parent.sandboxBackend,
+        sessionGroupId: parent.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+      "workers/manager",
+    );
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandboxId });
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "continue on the manager's active route",
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "none",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: "/srv/project/workers/manager",
+    });
+    const [turnRow] = await admin<{ sandbox_backend: string }[]>`
+      select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
+    expect(turnRow?.sandbox_backend).toBe("none");
+  }, 60_000);
+
+  test("a rejected inherited machine route leaves no keyed child shell", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollmentId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager whose machine route will be revoked",
+        sandboxBackend: "none",
+      },
+    );
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: parent.id,
+        sessionBackend: parent.sandboxBackend,
+        sessionGroupId: parent.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+      "workers/manager",
+    );
+    expect(attached.swapped).toBe(true);
+    await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
+
+    const [before] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "do not persist a child for the revoked route",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("not found in this workspace"),
+    });
+    const [after] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    expect(after?.count).toBe(before?.count);
   }, 60_000);
 
   test("a targetless top-level selfhosted session is rejected before its first turn", async () => {

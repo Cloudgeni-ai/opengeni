@@ -17,12 +17,7 @@ import {
 } from "@opengeni/config";
 import { createRuntimeBatcher, currentActivityContext } from "../streaming";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
-import {
-  maybePersistWarmWorkspaceSnapshot,
-  persistSandboxDeadlineRotationCheckpoint,
-  waitForWarmSnapshot,
-  type ResumedTurnSandbox,
-} from "../../sandbox-resume";
+import { maybePersistWarmWorkspaceSnapshot, type ResumedTurnSandbox } from "../../sandbox-resume";
 import { recordCreditMicros } from "../../observability-metrics";
 import { ChannelAPartialMutationError } from "@opengeni/runtime/sandbox";
 
@@ -50,6 +45,27 @@ export type SandboxTurnRuntimeDeps = {
 };
 
 export type SandboxTurnRuntime = ReturnType<typeof createSandboxTurnRuntime>;
+
+/**
+ * Provider-deadline rotation is a preemption boundary, not a cooperative
+ * snapshot boundary. Snapshotting while this attempt still owns active tools
+ * can deadlock on its own unsettled mutation admission or on an earlier native
+ * capture. Abort first; the ordinary attempt finalizer then drains every writer
+ * and releases the holder, after which the zero-holder reaper owns the exact
+ * generation capture and same-request takeover protocol.
+ */
+export function preemptSandboxTurnForDeadlineRotation(input: {
+  controller: AbortController;
+  sandboxState: Pick<SandboxRuntimeState, "deadlineRotationRequested">;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  cancellationSignal?: AbortSignal;
+}): boolean {
+  if (input.controller.signal.aborted || input.cancellationSignal?.aborted) return false;
+  input.sandboxState.deadlineRotationRequested = true;
+  input.controller.abort(new SandboxDeadlineRotationError(input.sandboxGroupId, input.leaseEpoch));
+  return true;
+}
 
 export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
   const {
@@ -235,11 +251,12 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         sandboxState.sandboxGroupId
       ) {
         // The lease still matches this turn's exact epoch/instance but a
-        // rotation was requested. Start the same orderly checkpoint the
-        // heartbeat would start on its next tick, so the model is not fed
-        // retry errors until then. Best-effort and single-flight; the
-        // admission failure itself is still surfaced to the caller.
-        void beginRotationCheckpoint(
+        // rotation was requested. Start the same immediate preemption the
+        // heartbeat would start on its next tick, so this attempt cannot keep
+        // the provider generation pinned behind its own blocked mutation.
+        // Best-effort and single-flight; the admission failure itself is still
+        // surfaced to the caller.
+        void beginRotationPreemption(
           sandbox,
           sandbox.leaseEpoch,
           sandboxState.sandboxGroupId,
@@ -387,85 +404,60 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       });
   };
   /**
-   * Start (single-flight) the orderly provider-deadline rotation checkpoint for
-   * the established box. Entered from the lease heartbeat once the lease is
-   * rotation-fenced, and from a workspace-mutation admission that observed
-   * `rotation_in_progress` at the same epoch/instance, so the model is not fed
-   * retry errors for a whole heartbeat interval before the checkpoint runs.
+   * Start (single-flight) provider-deadline preemption for the established box.
+   * Entered from the lease heartbeat once the lease is rotation-fenced, and
+   * from a workspace-mutation admission that observed `rotation_in_progress` at
+   * the same epoch/instance. The active attempt is aborted immediately instead
+   * of waiting behind a turn-side snapshot: finalization first drains every
+   * writer and then releases the holder, licensing the zero-holder reaper's
+   * authoritative capture/takeover/termination protocol.
+   *
    * `not_rotating` means the exact epoch/instance no longer carries a requested
    * rotation (holder reaped, attempt closed, epoch superseded, or draining).
    */
-  const beginRotationCheckpoint = async (
+  const beginRotationPreemption = async (
     sandbox: ResumedTurnSandbox,
     rotationEpoch: number,
     rotationGroupId: string,
   ): Promise<"started" | "busy" | "not_rotating"> => {
-    // A cancelled attempt never starts (or reinstates a holder for) a
-    // checkpoint; its cancellation settlement owns the holder from here.
+    // A cancelled attempt never starts another preemption check; its
+    // cancellation settlement owns the holder from here.
     if (
-      sandboxState.rotationInFlight ||
+      sandboxState.rotationPreemptionInFlight ||
       sandboxRotationController.signal.aborted ||
       cancellationSignal?.aborted
     ) {
       return "busy";
     }
-    const rotatingLease = await readLease(db, input.workspaceId, rotationGroupId).catch(() => null);
-    if (
-      !rotatingLease ||
-      rotatingLease.leaseEpoch !== rotationEpoch ||
-      rotatingLease.instanceId !== sandbox.established.instanceId ||
-      rotatingLease.rotationRequestedAt === null
-    ) {
-      return "not_rotating";
+    if (sandboxState.rotationPreemptionInFlight || sandboxRotationController.signal.aborted) {
+      return "busy";
     }
-    if (sandboxState.rotationInFlight || sandboxRotationController.signal.aborted) return "busy";
-    sandboxState.rotationInFlight = (async () => {
-      // Rotation admission already fenced all new workspace mutations.
-      // Wait for an earlier periodic capture, then produce the exact
-      // generation-complete checkpoint that licenses aborting this run.
-      if (sandboxState.snapshotInFlight) {
-        await waitForWarmSnapshot(
-          sandboxState.snapshotInFlight,
-          settings.sandboxSnapshotTimeoutMs,
-          cancellationSignal,
-        );
-      }
-      const snapshotSession = sandboxState.setupBoxSession;
-      const snapshotTurnId = attempt.turnId;
-      if (!snapshotSession || !snapshotTurnId) return;
-      // The checkpoint helper first reinstates this turn's exact holder
-      // when it was lost at the same epoch/instance (defense in depth:
-      // the warm capture requires it), then forces the capture and
-      // reports whether the established epoch now carries a complete
-      // archive under its requested rotation.
-      const checkpoint = await persistSandboxDeadlineRotationCheckpoint(
-        { db, settings, objectStorage, observability },
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: snapshotTurnId,
-          attemptId: input.attemptId,
-          sandboxGroupId: rotationGroupId,
-        },
-        snapshotSession,
-        { leaseEpoch: rotationEpoch, instanceId: sandbox.established.instanceId },
-        cancellationSignal,
-      );
-      if (checkpoint.checkpointed) {
-        sandboxRotationController.abort(
-          new SandboxDeadlineRotationError(rotationGroupId, rotationEpoch),
-        );
+    let disposition: "started" | "not_rotating" = "started";
+    sandboxState.rotationPreemptionInFlight = (async () => {
+      const rotatingLease = await readLease(db, input.workspaceId, rotationGroupId);
+      if (
+        rotatingLease?.leaseEpoch !== rotationEpoch ||
+        rotatingLease.instanceId !== sandbox.established.instanceId ||
+        rotatingLease.rotationRequestedAt === null
+      ) {
+        disposition = "not_rotating";
         return;
       }
-      if (checkpoint.holder === "attempt_fenced" || checkpoint.holder === "lease_fenced") {
-        // This attempt is no longer the active writer, or the exact
-        // epoch/instance is gone. Nothing left to checkpoint here.
-        stopLeaseHeartbeat();
-      }
+
+      // Close the periodic producer before marking the turn for preemption.
+      // A tick that already launched a capture is joined by finalization via
+      // the capture promise's physical-settlement handle.
+      stopLeaseHeartbeat();
+      preemptSandboxTurnForDeadlineRotation({
+        controller: sandboxRotationController,
+        sandboxState,
+        sandboxGroupId: rotationGroupId,
+        leaseEpoch: rotationEpoch,
+        ...(cancellationSignal ? { cancellationSignal } : {}),
+      });
     })()
       .catch((error) => {
-        observability.warn("sandbox deadline rotation checkpoint failed; retrying", {
+        observability.warn("sandbox deadline rotation preemption check failed; retrying", {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           sandboxGroupId: rotationGroupId,
@@ -474,10 +466,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
         });
       })
       .finally(() => {
-        sandboxState.rotationInFlight = null;
+        sandboxState.rotationPreemptionInFlight = null;
       });
-    await sandboxState.rotationInFlight;
-    return "started";
+    await sandboxState.rotationPreemptionInFlight;
+    return disposition;
   };
   const startLeaseHeartbeat = (
     sandbox: ResumedTurnSandbox,
@@ -525,7 +517,7 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
       })
         .then(async (alive) => {
           if (alive) return;
-          const rotation = await beginRotationCheckpoint(sandbox, heartbeatEpoch, heartbeatGroupId);
+          const rotation = await beginRotationPreemption(sandbox, heartbeatEpoch, heartbeatGroupId);
           if (rotation === "not_rotating") {
             // The holder was reaped, the exact attempt closed, the epoch was
             // superseded, or the lease began draining. Do not leave a dead
@@ -562,9 +554,10 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
           firstProviderRequestStarted: sandboxState.firstProviderRequestStarted,
           snapshotInFlight: Boolean(sandboxState.snapshotInFlight),
           turnEndCaptureInProgress: sandboxState.turnEndCaptureInProgress,
+          deadlineRotationRequested: sandboxState.deadlineRotationRequested,
         })
       ) {
-        sandboxState.snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
+        const snapshot = maybePersistWarmWorkspaceSnapshot(
           { db, settings, objectStorage },
           {
             accountId: input.accountId,
@@ -577,7 +570,9 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
           snapshotSession,
           heartbeatEpoch,
           activityContext?.cancellationSignal,
-        )
+        );
+        sandboxState.snapshotInFlight = snapshot.settled;
+        void snapshot
           .then(async (persisted) => {
             if (persisted && eventing.publish) {
               await eventing.publish([
@@ -588,10 +583,12 @@ export function createSandboxTurnRuntime(deps: SandboxTurnRuntimeDeps) {
               ]);
             }
           })
-          .catch(() => undefined)
-          .finally(() => {
+          .catch(() => undefined);
+        void snapshot.settled.then(() => {
+          if (sandboxState.snapshotInFlight === snapshot.settled) {
             sandboxState.snapshotInFlight = null;
-          });
+          }
+        });
       }
     }, 10_000);
     if (

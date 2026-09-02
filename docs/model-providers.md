@@ -446,14 +446,16 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product                | Approved provider order      | Supplier input / cache read / output                                                                   | Conservative retail fallback (+25%)                     |
-| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
-| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.175 / $0.035 / $0.35 per 1M (highest approved route) |
-| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $15 per 1M on both routes                                                                 | $3.75 / $0.375 / $18.75 per 1M                          |
+| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                                  | Conservative retail fallback (+5%)                                 |
+| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.13 / $0.26; Novita $0.14 / $0.028 / $0.14 / $0.28; DeepInfra $0.09 / $0.018 / $0.09 / $0.18 per 1M | $0.147 / $0.0294 / $0.147 / $0.294 per 1M (highest approved route) |
+| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $3 / $15 per 1M on both routes                                                                                        | $3.15 / $0.315 / $3.15 / $15.75 per 1M                            |
 
-Prices are a reviewed 2026-08-03 snapshot from public Gateway endpoint metadata.
+Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.
+Gateway does not publish a separate cache-write rate for these routes, so the
+static fallback prices cache writes at the route's uncached-input rate.
 Managed turns normally debit the exact Gateway-reported inference cost for the
-provider that actually served the response, plus 25%. The static token rates
+provider that actually served the response, plus 5%. The static token rates
 above are only a conservative fallback if that response metadata is absent.
 Adding or changing a model requires reviewing the provider order, Responses
 tool/vision transport, cache reporting, pricing, definition, and tests together.
@@ -952,7 +954,33 @@ Pricing is keyed by product model ID. A tiered schedule selects the greatest
 `minimumInputTokens` threshold not exceeding the current input count. Billing
 classification comes from the accepted policy: `external` usage must not spend
 OpenGeni model credits; `opengeni_credits` usage follows configured pricing and
-margin rules.
+margin rules. Each price entry can distinguish uncached input, cache reads,
+cache writes, and output through `inputMicrosPerMillionTokens`,
+`cachedInputMicrosPerMillionTokens`, `cacheWriteMicrosPerMillionTokens`, and
+`outputMicrosPerMillionTokens`. Cache writes fall back to the ordinary input
+rate only when an older override omits the dedicated field.
+
+The built-in schedules use a 5% OpenGeni markup (`marginBps: 500`). Insights
+keeps three amounts separate for every authoritative model call:
+
+- estimated provider USD is the upstream list price or Gateway-reported cost,
+  before OpenGeni markup;
+- equivalent OpenGeni credit price is the same captured rate with markup,
+  including a comparison for externally billed Codex-subscription calls;
+- OpenGeni credit price is the actual credits-path price and remains zero for
+  externally billed calls.
+
+GPT-5.6 Sol uses OpenAI's current promotional list price ($4 input, $0.40
+cached input, $5 cache write, and $20 output per million tokens), guaranteed
+through at least 2026-11-21. Its >272K-input tier applies OpenAI's 2x input and
+1.5x output multipliers to the whole request. Re-run the price audit and review
+the official rate before that date.
+
+`OPENGENI_MODEL_PRICING_JSON` accepts either a flat price or a complete
+`{ default, inputTokenTiers }` schedule. Use the complete schedule when an Azure
+deployment uses Data Zone or another SKU whose rates differ from the built-in
+Global Standard defaults. Historical facts retain the price known at call time;
+they are not recomputed after an operator changes the override.
 
 ### Price audit (llm-prices canary)
 
@@ -972,8 +1000,9 @@ compares Standard short- and long-context rates for the allow-listed GPT-5.6
 product ids. Treat mismatches as a prompt to re-check OpenAI (or the provider)
 and update `defaultModelPricing` — not as automatic truth to import.
 
-Not covered by the llm-prices canary: Fast/priority multipliers, Fireworks GLM
-defaults, the provider-pinned Gateway snapshots, and the `marginBps` markup.
+Not covered by the llm-prices canary: cache-write rates, Azure SKU-specific
+overrides, Fast/priority multipliers, Fireworks GLM defaults, the provider-pinned
+Gateway snapshots, and the `marginBps` markup.
 Gateway catalogue tests pin the exact Baseten/Wafer rates and caching claims;
 offline llm-prices coverage uses
 `scripts/fixtures/llm-prices-current-v1.sample.json`.

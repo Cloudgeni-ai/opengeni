@@ -10167,13 +10167,11 @@ describe("API component integration", () => {
     const plain = await requireSession(dbClient.db, grant.workspaceId, plainReceipt.resource.id);
     expect(plain.sandboxBackend).toBe("none");
 
-    // The fix: targetSandboxId is now declared on the session_create inputSchema,
-    // so the MCP SDK no longer strips it before the handler runs — it reaches
-    // createSessionForRequest's seedTargetSandbox path. With backend:"none" the
-    // seed guard rejects (you cannot pin a machine for a sandbox-less session),
-    // which PROVES the value flowed end-to-end. Before the fix the unknown key
-    // was dropped and this create would have succeeded, silently swallowing the
-    // agent's machine-targeting request.
+    // targetSandboxId is declared on the session_create inputSchema, so the MCP
+    // SDK does not strip it before the handler runs. The synthetic unknown id
+    // reaches createSessionForRequest's ordinary workspace-scoped route
+    // validator, which proves the value flowed end-to-end. A backend:"none"
+    // home does not bypass target ownership or liveness checks.
     await expectMcpOrchestrationFailure(
       mcp,
       "session_create",
@@ -10184,7 +10182,7 @@ describe("API component integration", () => {
         machineTarget: { targetSandboxId: crypto.randomUUID() },
       },
       "session_create_rejected",
-      "cannot target a machine for a session with no sandbox",
+      "not found in this workspace",
     );
   });
 

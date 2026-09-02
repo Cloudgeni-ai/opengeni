@@ -10994,6 +10994,9 @@ export const modelCallFacts = pgTable(
     estimatedProviderCostMicros: bigint("estimated_provider_cost_micros", {
       mode: "number",
     }),
+    equivalentCreditCostMicros: bigint("equivalent_credit_cost_micros", {
+      mode: "number",
+    }),
     pricingSource: text("pricing_source"),
     contextContributions:
       jsonb("context_contributions").$type<readonly ModelContextContributionSummary[]>(),
@@ -11037,6 +11040,10 @@ export const modelCallFacts = pgTable(
     estimatedProviderCostValid: check(
       "model_call_facts_estimated_provider_cost_check",
       sql`${table.estimatedProviderCostMicros} is null or ${table.estimatedProviderCostMicros} >= 0`,
+    ),
+    equivalentCreditCostValid: check(
+      "model_call_facts_equivalent_credit_cost_check",
+      sql`${table.equivalentCreditCostMicros} is null or (${table.equivalentCreditCostMicros} >= 0 and ${table.estimatedProviderCostMicros} is not null)`,
     ),
     pricingSourceValid: check(
       "model_call_facts_pricing_source_check",

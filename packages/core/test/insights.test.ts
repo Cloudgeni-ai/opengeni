@@ -302,6 +302,8 @@ describe("getWorkspaceInsights", () => {
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 8,
           estimatedProviderCostKnownCalls: 1,
+          equivalentCreditCostMicros: 9,
+          equivalentCreditCostKnownCalls: 1,
         },
       ],
       factBuckets: new Map([
@@ -311,6 +313,8 @@ describe("getWorkspaceInsights", () => {
             costMicros: 0,
             estimatedProviderCostMicros: 8,
             estimatedProviderCostKnownCalls: 1,
+            equivalentCreditCostMicros: 9,
+            equivalentCreditCostKnownCalls: 1,
             inputTokens: 100,
             outputTokens: 50,
             cachedTokens: 10,
@@ -345,6 +349,7 @@ describe("getWorkspaceInsights", () => {
           totalTokens: 150,
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 8,
+          equivalentCreditCostMicros: 9,
           pricingSource: "configured_list_price",
         },
       ],
@@ -359,24 +364,29 @@ describe("getWorkspaceInsights", () => {
     expect(snapshot.creditUsd).toBe(0);
     expect(snapshot.estimatedProviderUsd).toBe(0.000008);
     expect(snapshot.estimatedProviderCostKnownCalls).toBe(1);
+    expect(snapshot.equivalentCreditUsd).toBe(0.000009);
+    expect(snapshot.equivalentCreditCostKnownCalls).toBe(1);
     expect(snapshot.modelCalls).toBe(2);
     expect(snapshot.models[0]).toMatchObject({
       totalTokens: 150,
       cacheInputTokens: 20,
       creditUsd: 0,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
     });
     expect(snapshot.series[11]).toMatchObject({
       label: "11:00",
       totalTokens: 150,
       cacheHitPct: 50,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
     });
     expect(snapshot.recentCalls[0]).toMatchObject({
       occurredAt: "2026-07-15T11:00:00.000Z",
       billing: "external",
       creditUsd: 0,
       estimatedProviderUsd: 0.000008,
+      equivalentCreditUsd: 0.000009,
       pricingSource: "configured_list_price",
     });
   });
@@ -392,6 +402,8 @@ describe("getWorkspaceInsights", () => {
           pricedCostMicros: 0,
           estimatedProviderCostMicros: 0,
           estimatedProviderCostKnownCalls: 0,
+          equivalentCreditCostMicros: 0,
+          equivalentCreditCostKnownCalls: 0,
           totalTokens: 10,
           cachedTokens: 0,
           cacheInputTokens: 0,
@@ -418,6 +430,7 @@ describe("getWorkspaceInsights", () => {
           totalTokens: 10,
           pricedCostMicros: 0,
           estimatedProviderCostMicros: null,
+          equivalentCreditCostMicros: null,
           pricingSource: null,
         },
       ],

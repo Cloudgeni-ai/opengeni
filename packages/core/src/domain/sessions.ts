@@ -843,32 +843,26 @@ export async function createAndStartSessionWithOutcome(input: {
     input.retainWorkspaceCustomModel !== true &&
     input.retainWorkspaceGatewayModel !== true;
   const seedTargetForNewSession = input.seedTargetSandbox ?? null;
-  const unsupportedTargetBackendMessage =
-    seedTargetForNewSession && input.sandboxBackend === "none"
-      ? "cannot target a machine for a session with no sandbox (backend: none)"
-      : null;
-  const preflightTarget =
-    seedTargetForNewSession && !unsupportedTargetBackendMessage
-      ? await preflightCreateTimeSandboxTarget(
-          {
-            db: input.db,
-            settings: seedTargetForNewSession.settings,
-            bus: input.bus,
-          },
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            ...(seedTargetForNewSession.resourceSubjectId
-              ? { subjectId: seedTargetForNewSession.resourceSubjectId }
-              : {}),
-          },
-          seedTargetForNewSession.sandboxId,
-          seedTargetForNewSession.workingDir ?? null,
-        )
-      : null;
-  const targetPreflightFailureMessage = unsupportedTargetBackendMessage
-    ? unsupportedTargetBackendMessage
-    : preflightTarget && !preflightTarget.ok
+  const preflightTarget = seedTargetForNewSession
+    ? await preflightCreateTimeSandboxTarget(
+        {
+          db: input.db,
+          settings: seedTargetForNewSession.settings,
+          bus: input.bus,
+        },
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(seedTargetForNewSession.resourceSubjectId
+            ? { subjectId: seedTargetForNewSession.resourceSubjectId }
+            : {}),
+        },
+        seedTargetForNewSession.sandboxId,
+        seedTargetForNewSession.workingDir ?? null,
+      )
+    : null;
+  const targetPreflightFailureMessage =
+    preflightTarget && !preflightTarget.ok
       ? `cannot target sandbox ${seedTargetForNewSession!.sandboxId}: ${preflightTarget.reason}`
       : null;
   let targetSeededBeforeCreateCommit = false;
@@ -1166,15 +1160,12 @@ async function finishStartSession(
 ): Promise<{ session: CreateSessionResponse; changed: boolean }> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
-  // machine. swapActiveSandbox does
+  // machine. Home backend and active route are independent: a backend:none
+  // session has no managed home but may still attach a valid Connected Machine.
+  // swapActiveSandbox does
   // the same ownership+liveness validation as the live swap; an invalid/unowned/
   // offline target FAILS the create (422) — never a silent fall-back to the box.
   if (input.seedTargetSandbox) {
-    if (session.sandboxBackend === "none") {
-      throw new HTTPException(422, {
-        message: "cannot target a machine for a session with no sandbox (backend: none)",
-      });
-    }
     const ctx: FleetContext = {
       accountId: session.accountId,
       workspaceId: session.workspaceId,

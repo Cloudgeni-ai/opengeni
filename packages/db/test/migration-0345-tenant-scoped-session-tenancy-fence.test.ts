@@ -259,7 +259,8 @@ describe("migration 0345 tenant-scoped session-tenancy fence", () => {
           ('0374_session_event_cursors.sql'),
           ('0379_session_event_raw_lane_activation.sql'),
           ('0388_sandbox_provider_deadline_interactions.sql'),
-          ('0391_sandbox_provider_deadline_interaction_followup.sql')
+          ('0391_sandbox_provider_deadline_interaction_followup.sql'),
+          ('0397_sandbox_deadline_rotation_preemption.sql')
       `);
       await migrate(driftOwned.ownerUrl);
       const migration = await readFile(migrationUrl, "utf8");
