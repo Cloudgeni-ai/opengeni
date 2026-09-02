@@ -423,6 +423,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
       workspaceGeneration: 3,
       sandboxGroupId: GROUP_ID,
       rigVersionId: VERSION_ID,
+      runtimeManifestDigest: `sha256:${"a".repeat(64)}`,
     },
     runTerminalProbe: async (options: { timeoutMs: number; signal?: AbortSignal }) => {
       events.push("terminal:command");

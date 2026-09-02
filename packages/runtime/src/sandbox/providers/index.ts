@@ -293,7 +293,8 @@ export async function attachProviderTrustedRigPlatformSurface(
     binding.leaseEpoch !== input.leaseEpoch ||
     binding.workspaceGeneration !== input.workspaceGeneration ||
     binding.sandboxGroupId !== input.sandboxGroupId ||
-    binding.rigVersionId !== input.rigVersionId
+    binding.rigVersionId !== input.rigVersionId ||
+    binding.runtimeManifestDigest !== input.runtimeManifest.digest
   ) {
     throw new Error("provider returned a trusted Rig platform surface for another binding");
   }
@@ -353,4 +354,6 @@ export {
   captureTrustedRigPlatformRuntimeManifest,
   type TrustedRigPlatformRuntimeManifest,
   type TrustedRigPlatformRuntimeManifestEntry,
+  type TrustedRigPlatformRuntimePathMetadata,
+  type TrustedRigPlatformRuntimePathType,
 } from "./trusted-rig-platform-runtime-integrity";

@@ -125,6 +125,8 @@ export {
   captureTrustedRigPlatformRuntimeManifest,
   type TrustedRigPlatformRuntimeManifest,
   type TrustedRigPlatformRuntimeManifestEntry,
+  type TrustedRigPlatformRuntimePathMetadata,
+  type TrustedRigPlatformRuntimePathType,
 } from "./providers";
 export {
   ModalImmutableProviderImageBuildError,

@@ -37,11 +37,14 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
 });
 const PLATFORM_IMAGE = "registry.example.com/opengeni-desktop@sha256:platform";
 const RUNTIME_MANIFEST = {
-  version: 1,
+  version: 2,
   digest: `sha256:${"a".repeat(64)}`,
   entries: [
     {
       path: "/usr/local/bin/opengeni-browserd-up",
+      resolvedPath: "/usr/local/bin/opengeni-browserd-up",
+      fileType: "regular",
+      mode: 0o100755,
       sizeBytes: 1,
       sha256: `sha256:${"b".repeat(64)}`,
     },

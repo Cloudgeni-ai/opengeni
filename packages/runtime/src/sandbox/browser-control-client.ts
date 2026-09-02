@@ -415,6 +415,7 @@ export type TrustedRigPlatformSurfaceBinding = {
   workspaceGeneration: number;
   sandboxGroupId: string;
   rigVersionId: string;
+  runtimeManifestDigest: string;
 };
 
 export type TrustedRigPlatformSurfaceOperation = {

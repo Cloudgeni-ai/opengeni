@@ -12,6 +12,7 @@ import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
 } from "../src/sandbox/providers/trusted-rig-platform-surface";
+import { dockerTrustedRigPlatformPathMetadataFromHeader } from "../src/sandbox/providers/docker-trusted-rig-platform-surface";
 
 const PROVIDER_IMAGE = "registry.example.com/opengeni@sha256:platform";
 const IMAGE_ID = "im-platform-immutable";
@@ -48,6 +49,22 @@ function textStream(value: string): ReadableStream<string> {
 }
 
 const BROWSER_ENGINE = "/usr/lib/chromium/chromium";
+const RUNTIME_DIRECTORIES = new Set([
+  "/bin",
+  "/etc",
+  "/etc/opengeni",
+  "/opt",
+  "/opt/noVNC",
+  "/opt/noVNC/utils",
+  "/usr",
+  "/usr/bin",
+  "/usr/lib",
+  "/usr/lib/chromium",
+  "/usr/local",
+  "/usr/local/bin",
+  "/usr/local/lib",
+  "/usr/local/lib/opengeni",
+]);
 
 function pristineRuntimeBytes(path: string): Uint8Array {
   return new TextEncoder().encode(
@@ -55,11 +72,64 @@ function pristineRuntimeBytes(path: string): Uint8Array {
   );
 }
 
+function pristineRuntimeMetadata(path: string) {
+  const directory = RUNTIME_DIRECTORIES.has(path);
+  return {
+    name: path.slice(path.lastIndexOf("/") + 1),
+    path,
+    type: directory ? ("directory" as const) : ("file" as const),
+    size: directory ? 0 : pristineRuntimeBytes(path).byteLength,
+    mode: directory ? 0o040755 : 0o100755,
+    permissions: directory ? "rwxr-xr-x" : "rwxr-xr-x",
+    owner: "root",
+    group: "root",
+    modifiedTime: 0,
+    symlinkTarget: null,
+  };
+}
+
+function pristineTrustedRuntimeMetadata(path: string) {
+  const metadata = pristineRuntimeMetadata(path);
+  return {
+    path: metadata.path,
+    type: metadata.type,
+    sizeBytes: metadata.size,
+    mode: metadata.mode,
+    symlinkTarget: metadata.symlinkTarget,
+  };
+}
+
+function dockerPathMetadataHeader(input: {
+  path: string;
+  type: "file" | "directory" | "symlink" | "other";
+  size?: number;
+  symlinkTarget?: string;
+}): string {
+  const mode =
+    input.type === "directory"
+      ? 0x8000_0000 | 0o755
+      : input.type === "symlink"
+        ? 0x0800_0000 | 0o777
+        : input.type === "other"
+          ? 0x0200_0000 | 0o600
+          : 0o755;
+  return Buffer.from(
+    JSON.stringify({
+      name: input.path.slice(input.path.lastIndexOf("/") + 1),
+      size: input.size ?? 0,
+      mode: mode >>> 0,
+      mtime: "2026-09-02T00:00:00Z",
+      linkTarget: input.symlinkTarget ?? "",
+    }),
+  ).toString("base64");
+}
+
 async function runtimeManifest(
   settings = testSettings({ sandboxBackend: "modal", sandboxDesktopEnabled: false }),
 ): Promise<TrustedRigPlatformRuntimeManifest> {
   return await captureTrustedRigPlatformRuntimeManifest({
     settings,
+    inspectPath: async (path) => pristineTrustedRuntimeMetadata(path),
     readBytes: async (path) => pristineRuntimeBytes(path),
   });
 }
@@ -76,7 +146,14 @@ describe("provider-owned trusted Rig platform surfaces", () => {
     expect(source).toContain('child.kill("SIGKILL")');
     expect(source).toContain("if (stopPromise) await stopPromise;");
     expect(source).toContain("options?.signal,\n        terminate,");
-    expect(source).toContain('args: ["cp", "--follow-link"');
+    expect(source).toContain('method: "HEAD"');
+    expect(source).toContain('response.headers["x-docker-container-path-stat"]');
+    expect(source).toContain('args: ["cp", `${input.containerId}:${path}`, localPath]');
+    expect(source).toContain("const copied = await lstat(localPath)");
+    expect(source).not.toContain('"--follow-link"');
+    expect(source.indexOf("const actualRuntimeManifest = await captureDocker")).toBeLessThan(
+      source.indexOf("const execute = async"),
+    );
   });
 
   test("the production Modal adapter uses the exact immutable sidecar and ignores root session exec", async () => {
@@ -105,7 +182,11 @@ describe("provider-owned trusted Rig platform surfaces", () => {
           wait: async () => 0,
         };
       },
-      filesystem: { writeBytes: async () => undefined },
+      filesystem: {
+        readBytes: async (path: string) => pristineRuntimeBytes(path),
+        stat: async (path: string) => pristineRuntimeMetadata(path),
+        writeBytes: async () => undefined,
+      },
       terminate: async () => 0,
     };
     const session = {
@@ -124,7 +205,10 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         },
       },
       sandbox: {
-        filesystem: { readBytes: async (path: string) => pristineRuntimeBytes(path) },
+        filesystem: {
+          readBytes: async (path: string) => pristineRuntimeBytes(path),
+          stat: async (path: string) => pristineRuntimeMetadata(path),
+        },
         experimentalSidecars: {
           create: async (_name: string, _image: unknown, options?: { timeoutMs?: number }) => {
             const name = _name;
@@ -186,6 +270,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       workspaceGeneration: 3,
       sandboxGroupId: GROUP_ID,
       rigVersionId: VERSION_ID,
+      runtimeManifestDigest: inspected!.digest,
     });
     await expect(surface.runTerminalProbe(operation())).resolves.toEqual({
       cwd: "/workspace",
@@ -235,6 +320,16 @@ describe("provider-owned trusted Rig platform surfaces", () => {
               path === replacedPath
                 ? new TextEncoder().encode("#!/bin/sh\nprintf forged-evidence\\n")
                 : pristineRuntimeBytes(path),
+            stat: async (path: string) => {
+              const metadata = pristineRuntimeMetadata(path);
+              return path === replacedPath
+                ? {
+                    ...metadata,
+                    size: new TextEncoder().encode("#!/bin/sh\nprintf forged-evidence\\n")
+                      .byteLength,
+                  }
+                : metadata;
+            },
           },
           experimentalSidecars: {
             create: async () => {
@@ -261,6 +356,277 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       expect(sidecarCreateCalls).toBe(0);
     });
   }
+
+  for (const replacedPath of [
+    "/usr/local/bin/bun",
+    "/usr/local/bin/opengeni-desktop-up",
+    "/usr/local/bin/opengeni-browserd-up",
+  ]) {
+    for (const replacementType of ["symlink", "directory"] as const) {
+      test(`Modal metadata rejects a ${replacementType} replacement of ${replacedPath} before bytes, root exec, or sidecar creation`, async () => {
+        const settings = testSettings({
+          sandboxBackend: "modal",
+          sandboxDesktopEnabled: true,
+          sandboxTerminalEnabled: true,
+        });
+        const expectedRuntimeManifest = await runtimeManifest(settings);
+        let replacedReadCalls = 0;
+        let rootExecCalls = 0;
+        let sidecarCreateCalls = 0;
+        const session = {
+          state: { sandboxId: INSTANCE_ID, imageId: IMAGE_ID },
+          exec: async () => {
+            rootExecCalls += 1;
+            throw new Error("candidate root exec must not run before metadata rejection");
+          },
+          sandbox: {
+            filesystem: {
+              readBytes: async (path: string) => {
+                if (path === replacedPath) replacedReadCalls += 1;
+                return pristineRuntimeBytes(path);
+              },
+              stat: async (path: string) => {
+                const metadata = pristineRuntimeMetadata(path);
+                if (path !== replacedPath) return metadata;
+                return replacementType === "symlink"
+                  ? {
+                      ...metadata,
+                      type: "symlink" as const,
+                      size: pristineRuntimeBytes(path).byteLength,
+                      mode: 0o120777,
+                      symlinkTarget: "/workspace/forged-runtime",
+                    }
+                  : {
+                      ...metadata,
+                      type: "directory" as const,
+                      size: 0,
+                      mode: 0o040755,
+                    };
+              },
+            },
+            experimentalSidecars: {
+              create: async () => {
+                sidecarCreateCalls += 1;
+                throw new Error("sidecar creation must not run before metadata rejection");
+              },
+            },
+          },
+        };
+
+        await expect(
+          inspectProviderTrustedRigPlatformRuntime({
+            backend: "modal",
+            settings,
+            session,
+            instanceId: INSTANCE_ID,
+            providerImage: PROVIDER_IMAGE,
+            expectedProviderImageId: IMAGE_ID,
+            expectedRuntimeManifest,
+            timeoutMs: 5_000,
+          }),
+        ).rejects.toThrow(`runtime path must be a regular non-symlink file: ${replacedPath}`);
+        expect(replacedReadCalls).toBe(0);
+        expect(rootExecCalls).toBe(0);
+        expect(sidecarCreateCalls).toBe(0);
+      });
+    }
+  }
+
+  test("Modal metadata rejects a symlinked protected-path parent before reading its leaf", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: true,
+      sandboxTerminalEnabled: true,
+    });
+    let descendantReads = 0;
+    const session = {
+      state: { sandboxId: INSTANCE_ID, imageId: IMAGE_ID },
+      sandbox: {
+        filesystem: {
+          readBytes: async (path: string) => {
+            if (path.startsWith("/usr/local/")) descendantReads += 1;
+            return pristineRuntimeBytes(path);
+          },
+          stat: async (path: string) =>
+            path === "/usr/local"
+              ? {
+                  ...pristineRuntimeMetadata(path),
+                  type: "symlink" as const,
+                  mode: 0o120777,
+                  symlinkTarget: "/workspace/local",
+                }
+              : pristineRuntimeMetadata(path),
+        },
+      },
+    };
+    await expect(
+      inspectProviderTrustedRigPlatformRuntime({
+        backend: "modal",
+        settings,
+        session,
+        instanceId: INSTANCE_ID,
+        providerImage: PROVIDER_IMAGE,
+        expectedProviderImageId: IMAGE_ID,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow("runtime path component must be a real directory: /usr/local");
+    expect(descendantReads).toBe(0);
+  });
+
+  test("runtime capture rejects a leaf rebound to a symlink while its bytes are read", async () => {
+    const target = "/bin/bash";
+    let targetStatCalls = 0;
+    let targetReadCalls = 0;
+    await expect(
+      captureTrustedRigPlatformRuntimeManifest({
+        settings: testSettings({
+          sandboxBackend: "modal",
+          sandboxDesktopEnabled: false,
+          sandboxTerminalEnabled: false,
+        }),
+        inspectPath: async (path) => {
+          if (path !== target) return pristineTrustedRuntimeMetadata(path);
+          targetStatCalls += 1;
+          if (targetStatCalls === 1) return pristineTrustedRuntimeMetadata(path);
+          return {
+            ...pristineTrustedRuntimeMetadata(path),
+            type: "symlink" as const,
+            mode: 0o120777,
+            symlinkTarget: "/workspace/rebound-bash",
+          };
+        },
+        readBytes: async (path) => {
+          if (path === target) targetReadCalls += 1;
+          return pristineRuntimeBytes(path);
+        },
+      }),
+    ).rejects.toThrow(`runtime path must be a regular non-symlink file: ${target}`);
+    expect(targetReadCalls).toBe(1);
+    expect(targetStatCalls).toBe(2);
+  });
+
+  for (const replacedPath of [
+    "/usr/local/bin/bun",
+    "/usr/local/bin/opengeni-desktop-up",
+    "/usr/local/bin/opengeni-browserd-up",
+  ]) {
+    for (const replacementType of ["symlink", "other"] as const) {
+      test(`Docker daemon metadata rejects a ${replacementType} replacement of ${replacedPath} before copying the leaf`, async () => {
+        const settings = testSettings({
+          sandboxBackend: "docker",
+          sandboxDesktopEnabled: true,
+          sandboxTerminalEnabled: true,
+        });
+        let replacedReadCalls = 0;
+        await expect(
+          captureTrustedRigPlatformRuntimeManifest({
+            settings,
+            inspectPath: async (path) => {
+              const pristine = pristineRuntimeMetadata(path);
+              const type = path === replacedPath ? replacementType : pristine.type;
+              return dockerTrustedRigPlatformPathMetadataFromHeader(
+                path,
+                dockerPathMetadataHeader({
+                  path,
+                  type,
+                  size: type === "file" ? pristineRuntimeBytes(path).byteLength : 0,
+                  ...(type === "symlink" ? { symlinkTarget: "/workspace/forged-runtime" } : {}),
+                }),
+              );
+            },
+            readBytes: async (path) => {
+              if (path === replacedPath) replacedReadCalls += 1;
+              return pristineRuntimeBytes(path);
+            },
+          }),
+        ).rejects.toThrow(`runtime path must be a regular non-symlink file: ${replacedPath}`);
+        expect(replacedReadCalls).toBe(0);
+      });
+    }
+  }
+
+  test("Modal revalidates a post-activation sidecar mutation before its first protected command", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: false,
+      sandboxTerminalEnabled: true,
+    });
+    const expectedRuntimeManifest = await runtimeManifest(settings);
+    let sidecarCreateCalls = 0;
+    let sidecarExecCalls = 0;
+    let sidecarTerminateCalls = 0;
+    const sidecar = {
+      containerId: "container-mutated-after-activation",
+      containerName: "",
+      exec: async () => {
+        sidecarExecCalls += 1;
+        throw new Error("protected sidecar command must not run before revalidation");
+      },
+      filesystem: {
+        readBytes: async (path: string) => pristineRuntimeBytes(path),
+        stat: async (path: string) =>
+          path === "/usr/local/bin/bun"
+            ? {
+                ...pristineRuntimeMetadata(path),
+                type: "symlink" as const,
+                mode: 0o120777,
+                symlinkTarget: "/workspace/bun",
+              }
+            : pristineRuntimeMetadata(path),
+        writeBytes: async () => undefined,
+      },
+      terminate: async () => {
+        sidecarTerminateCalls += 1;
+        return 0;
+      },
+    };
+    const session = {
+      state: { sandboxId: INSTANCE_ID, imageId: IMAGE_ID },
+      modal: { images: { fromId: async () => ({ imageId: IMAGE_ID }) } },
+      sandbox: {
+        filesystem: {
+          readBytes: async (path: string) => pristineRuntimeBytes(path),
+          stat: async (path: string) => pristineRuntimeMetadata(path),
+        },
+        experimentalSidecars: {
+          create: async (name: string) => {
+            sidecarCreateCalls += 1;
+            sidecar.containerName = name;
+            return sidecar;
+          },
+          get: async () => sidecar,
+        },
+      },
+      resolveExposedPort: async () => ({
+        baseUrl: "http://127.0.0.1:7682",
+        hostFetchAllowed: true,
+      }),
+    };
+    await expect(
+      attachProviderTrustedRigPlatformSurface({
+        backend: "modal",
+        settings,
+        session,
+        instanceId: INSTANCE_ID,
+        providerImage: PROVIDER_IMAGE,
+        expectedProviderImageId: IMAGE_ID,
+        leaseId: LEASE_ID,
+        leaseEpoch: 7,
+        workspaceGeneration: 3,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+        runtimeManifest: expectedRuntimeManifest,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      (session as BrowserControlPlacementSession).trustedRigPlatformSurface!.runTerminalProbe(
+        operation(),
+      ),
+    ).rejects.toThrow("runtime path must be a regular non-symlink file: /usr/local/bin/bun");
+    expect(sidecarCreateCalls).toBe(1);
+    expect(sidecarExecCalls).toBe(0);
+    expect(sidecarTerminateCalls).toBeGreaterThan(0);
+  });
 
   test("unsupported providers remain explicit and fail closed", async () => {
     const session = {};
@@ -295,6 +661,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 3,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifestDigest: `sha256:${"c".repeat(64)}`,
       },
       desktopEnabled: false,
       createSidecar: async () => await new Promise<TrustedRigPlatformSidecar>(() => undefined),
@@ -319,6 +686,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 3,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifestDigest: `sha256:${"c".repeat(64)}`,
       },
       desktopEnabled: false,
       createSidecar: async () => {
@@ -346,6 +714,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         workspaceGeneration: 3,
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
+        runtimeManifestDigest: `sha256:${"c".repeat(64)}`,
       },
       desktopEnabled: false,
       createSidecar: async () =>

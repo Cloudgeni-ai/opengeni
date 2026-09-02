@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExposedPortEndpoint } from "@openai/agents/sandbox";
@@ -13,7 +14,13 @@ import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
 } from "./trusted-rig-platform-surface";
-import { captureTrustedRigPlatformRuntimeManifest } from "./trusted-rig-platform-runtime-integrity";
+import {
+  assertTrustedRigPlatformRuntimeMatches,
+  captureTrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimePathMetadata,
+  type TrustedRigPlatformRuntimePathType,
+} from "./trusted-rig-platform-runtime-integrity";
 import type {
   ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
@@ -21,10 +28,20 @@ import type {
 
 const DOCKER_IMAGE_ID = /^sha256:[0-9a-f]{64}$/u;
 const DOCKER_NOT_FOUND = /No such (?:object|container|network):|network .* not found/iu;
+const DOCKER_CONTAINER_ID = /^[0-9a-f]{12,64}$/u;
+const DOCKER_API_VERSION = /^[0-9]+\.[0-9]+$/u;
+const DOCKER_MODE_DIRECTORY = 0x8000_0000;
+const DOCKER_MODE_SYMLINK = 0x0800_0000;
+const DOCKER_MODE_TYPE = 0x8f28_0000;
 
 type DockerRigSession = BrowserControlPlacementSession & {
   state?: { containerId?: string };
 };
+
+type DockerDaemonConnection = Readonly<{
+  apiVersion: string;
+  socketPath: string;
+}>;
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
@@ -136,6 +153,210 @@ async function dockerCommand(input: {
   } finally {
     clearTimeout(timer);
     input.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+function dockerPathType(mode: number): TrustedRigPlatformRuntimePathType {
+  const unsignedMode = mode >>> 0;
+  if ((unsignedMode & DOCKER_MODE_DIRECTORY) !== 0) return "directory";
+  if ((unsignedMode & DOCKER_MODE_SYMLINK) !== 0) return "symlink";
+  if ((unsignedMode & DOCKER_MODE_TYPE) === 0) return "file";
+  return "other";
+}
+
+export function dockerTrustedRigPlatformPathMetadataFromHeader(
+  path: string,
+  encodedHeader: string,
+): TrustedRigPlatformRuntimePathMetadata {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(encodedHeader, "base64").toString("utf8"));
+  } catch {
+    throw new Error(`Docker returned invalid trusted Rig runtime metadata for ${path}`);
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Docker returned invalid trusted Rig runtime metadata for ${path}`);
+  }
+  const stat = value as Record<string, unknown>;
+  if (
+    typeof stat.name !== "string" ||
+    !stat.name ||
+    !Number.isSafeInteger(stat.size) ||
+    (stat.size as number) < 0 ||
+    !Number.isSafeInteger(stat.mode) ||
+    (stat.mode as number) < 0 ||
+    (stat.mode as number) > 0xffff_ffff ||
+    typeof stat.linkTarget !== "string"
+  ) {
+    throw new Error(`Docker returned invalid trusted Rig runtime metadata for ${path}`);
+  }
+  const mode = stat.mode as number;
+  return {
+    path,
+    type: dockerPathType(mode),
+    sizeBytes: stat.size as number,
+    mode,
+    symlinkTarget: stat.linkTarget ? stat.linkTarget : null,
+  };
+}
+
+async function resolveDockerDaemonConnection(input: {
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+}): Promise<DockerDaemonConnection> {
+  const commandInput = {
+    timeoutMs: Math.min(inspectionRemainingMs(input.deadlineAtMs), 10_000),
+    ...(input.signal ? { signal: input.signal } : {}),
+  };
+  const [context, version] = await Promise.all([
+    dockerCommand({
+      args: ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
+      ...commandInput,
+    }),
+    dockerCommand({
+      args: ["version", "--format", "{{.Server.APIVersion}}"],
+      ...commandInput,
+    }),
+  ]);
+  let host: unknown;
+  try {
+    host = JSON.parse(context.stdout.trim());
+  } catch {
+    throw new Error("Docker trusted Rig runtime inspection resolved no daemon endpoint");
+  }
+  const apiVersion = version.stdout.trim();
+  if (typeof host !== "string" || !DOCKER_API_VERSION.test(apiVersion)) {
+    throw new Error("Docker trusted Rig runtime inspection resolved no daemon endpoint");
+  }
+  let endpoint: URL;
+  try {
+    endpoint = new URL(host);
+  } catch {
+    throw new Error("Docker trusted Rig runtime inspection resolved no daemon endpoint");
+  }
+  if (endpoint.protocol !== "unix:" || !endpoint.pathname) {
+    throw new Error(
+      "Docker trusted Rig runtime inspection requires a local Unix-socket daemon endpoint",
+    );
+  }
+  return { apiVersion, socketPath: decodeURIComponent(endpoint.pathname) };
+}
+
+async function inspectDockerContainerPath(input: {
+  connection: DockerDaemonConnection;
+  containerId: string;
+  path: string;
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+}): Promise<TrustedRigPlatformRuntimePathMetadata> {
+  input.signal?.throwIfAborted();
+  if (!DOCKER_CONTAINER_ID.test(input.containerId)) {
+    throw new Error("Docker trusted Rig runtime inspection requires an exact container id");
+  }
+  const timeoutMs = inspectionRemainingMs(input.deadlineAtMs);
+  return await new Promise<TrustedRigPlatformRuntimePathMetadata>((resolve, reject) => {
+    let settled = false;
+    const finish = (
+      result:
+        | { ok: true; value: TrustedRigPlatformRuntimePathMetadata }
+        | { ok: false; error: unknown },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", onAbort);
+      if (result.ok) resolve(result.value);
+      else reject(result.error);
+    };
+    const request = httpRequest(
+      {
+        method: "HEAD",
+        socketPath: input.connection.socketPath,
+        path: `/v${input.connection.apiVersion}/containers/${encodeURIComponent(input.containerId)}/archive?path=${encodeURIComponent(input.path)}`,
+      },
+      (response) => {
+        response.resume();
+        if (response.statusCode !== 200) {
+          finish({
+            ok: false,
+            error: new Error(
+              `Docker trusted Rig runtime metadata request failed (${response.statusCode ?? "unknown"}) for ${input.path}`,
+            ),
+          });
+          return;
+        }
+        const encoded = response.headers["x-docker-container-path-stat"];
+        if (typeof encoded !== "string") {
+          finish({
+            ok: false,
+            error: new Error(`Docker returned no trusted Rig runtime metadata for ${input.path}`),
+          });
+          return;
+        }
+        try {
+          finish({
+            ok: true,
+            value: dockerTrustedRigPlatformPathMetadataFromHeader(input.path, encoded),
+          });
+        } catch (error) {
+          finish({ ok: false, error });
+        }
+      },
+    );
+    const onAbort = (): void => {
+      request.destroy(
+        input.signal?.reason ?? new Error("Docker trusted Rig runtime inspection aborted"),
+      );
+    };
+    const timer = setTimeout(
+      () =>
+        request.destroy(new Error("Docker trusted Rig runtime inspection deadline was reached")),
+      timeoutMs,
+    );
+    request.once("error", (error) => finish({ ok: false, error }));
+    if (input.signal?.aborted) onAbort();
+    else input.signal?.addEventListener("abort", onAbort, { once: true });
+    request.end();
+  });
+}
+
+async function captureDockerTrustedRigPlatformRuntime(input: {
+  settings: ProviderTrustedRigPlatformRuntimeInspectionInput["settings"];
+  containerId: string;
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+}): Promise<TrustedRigPlatformRuntimeManifest> {
+  const connection = await resolveDockerDaemonConnection(input);
+  const directory = await mkdtemp(join(tmpdir(), "opengeni-rig-runtime-"));
+  let nextFile = 0;
+  try {
+    return await captureTrustedRigPlatformRuntimeManifest({
+      settings: input.settings,
+      ...(input.signal ? { signal: input.signal } : {}),
+      inspectPath: async (path) =>
+        await inspectDockerContainerPath({
+          connection,
+          containerId: input.containerId,
+          path,
+          deadlineAtMs: input.deadlineAtMs,
+          ...(input.signal ? { signal: input.signal } : {}),
+        }),
+      readBytes: async (path) => {
+        const localPath = join(directory, String(nextFile++).padStart(3, "0"));
+        await dockerCommand({
+          args: ["cp", `${input.containerId}:${path}`, localPath],
+          timeoutMs: inspectionRemainingMs(input.deadlineAtMs),
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        const copied = await lstat(localPath);
+        if (!copied.isFile() || copied.isSymbolicLink()) {
+          throw new Error(`Docker copied a non-regular trusted Rig runtime path for ${path}`);
+        }
+        return await readFile(localPath);
+      },
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 
@@ -312,9 +533,24 @@ async function createDockerSidecar(
     throw error;
   }
   const sidecarId = created.stdout.trim();
-  if (!/^[0-9a-f]{12,64}$/u.test(sidecarId)) {
+  if (!DOCKER_CONTAINER_ID.test(sidecarId)) {
     await terminate().catch(() => undefined);
     throw new Error("Docker trusted Rig sidecar returned no container identity");
+  }
+  try {
+    const actualRuntimeManifest = await captureDockerTrustedRigPlatformRuntime({
+      settings: input.settings,
+      containerId: sidecarId,
+      deadlineAtMs: Math.min(
+        Date.now() + operation.timeoutMs,
+        operation.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+      ),
+      ...(operation.signal ? { signal: operation.signal } : {}),
+    });
+    assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, actualRuntimeManifest);
+  } catch (error) {
+    await terminate().catch(() => undefined);
+    throw error;
   }
 
   const execute = async (
@@ -426,25 +662,12 @@ export async function inspectDockerTrustedRigPlatformRuntime(
     throw new Error("Docker trusted Rig runtime inspection resolved another immutable image id");
   }
 
-  const directory = await mkdtemp(join(tmpdir(), "opengeni-rig-runtime-"));
-  let nextFile = 0;
-  try {
-    return await captureTrustedRigPlatformRuntimeManifest({
-      settings: input.settings,
-      ...(input.signal ? { signal: input.signal } : {}),
-      readBytes: async (path) => {
-        const localPath = join(directory, String(nextFile++).padStart(3, "0"));
-        await dockerCommand({
-          args: ["cp", "--follow-link", `${input.instanceId}:${path}`, localPath],
-          timeoutMs: inspectionRemainingMs(deadlineAtMs),
-          ...(input.signal ? { signal: input.signal } : {}),
-        });
-        return await readFile(localPath);
-      },
-    });
-  } finally {
-    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
-  }
+  return await captureDockerTrustedRigPlatformRuntime({
+    settings: input.settings,
+    containerId: input.instanceId,
+    deadlineAtMs,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
 }
 
 export async function createDockerTrustedRigPlatformSurface(
@@ -476,6 +699,7 @@ export async function createDockerTrustedRigPlatformSurface(
       workspaceGeneration: input.workspaceGeneration,
       sandboxGroupId: input.sandboxGroupId,
       rigVersionId: input.rigVersionId,
+      runtimeManifestDigest: input.runtimeManifest.digest,
     },
     desktopEnabled: input.settings.sandboxDesktopEnabled,
     createSidecar: async (operation) => await createDockerSidecar(input, operation),

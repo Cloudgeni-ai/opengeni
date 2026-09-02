@@ -30,11 +30,14 @@ const HOLDER_ID = rigVerificationLeaseHolderId({
 });
 const db = {} as Database;
 const runtimeManifest = {
-  version: 1,
+  version: 2,
   digest: `sha256:${"a".repeat(64)}`,
   entries: [
     {
       path: "/usr/local/bin/opengeni-browserd-up",
+      resolvedPath: "/usr/local/bin/opengeni-browserd-up",
+      fileType: "regular",
+      mode: 0o100755,
       sizeBytes: 1,
       sha256: `sha256:${"b".repeat(64)}`,
     },
@@ -249,6 +252,7 @@ function harness(options: HarnessOptions = {}) {
             workspaceGeneration: 0,
             sandboxGroupId: GROUP_ID,
             rigVersionId: VERSION_ID,
+            runtimeManifestDigest: runtimeManifest.digest,
           },
         },
         configurable: false,

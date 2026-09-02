@@ -9,7 +9,12 @@ import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
 } from "./trusted-rig-platform-surface";
-import { captureTrustedRigPlatformRuntimeManifest } from "./trusted-rig-platform-runtime-integrity";
+import {
+  assertTrustedRigPlatformRuntimeMatches,
+  captureTrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimePathMetadata,
+} from "./trusted-rig-platform-runtime-integrity";
 import type {
   ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
@@ -36,6 +41,8 @@ type ModalSidecar = {
     },
   ): Promise<ModalProcess>;
   filesystem: {
+    readBytes(path: string): Promise<Uint8Array>;
+    stat(path: string): Promise<ModalFileInfo>;
     writeBytes(data: Uint8Array | ArrayBuffer | Buffer, path: string): Promise<void>;
   };
   terminate(): Promise<void>;
@@ -44,6 +51,17 @@ type ModalSidecar = {
 
 type ModalImage = { imageId?: string };
 type ModalDeadlineOptions = { timeoutMs?: number; signal?: AbortSignal };
+type ModalFileInfo = {
+  readonly path: string;
+  readonly type: "file" | "directory" | "symlink";
+  readonly size: number;
+  readonly mode: number;
+  readonly symlinkTarget: string | null;
+};
+type ModalFilesystem = {
+  readBytes(path: string): Promise<Uint8Array>;
+  stat(path: string): Promise<ModalFileInfo>;
+};
 
 type ModalRigSession = BrowserControlPlacementSession & {
   modal?: {
@@ -55,9 +73,7 @@ type ModalRigSession = BrowserControlPlacementSession & {
     };
   };
   sandbox?: {
-    filesystem?: {
-      readBytes(path: string): Promise<Uint8Array>;
-    };
+    filesystem?: ModalFilesystem;
     experimentalSidecars?: {
       create(
         name: string,
@@ -171,6 +187,37 @@ async function modalFilesystemOperation<T>(input: {
     if (timer) clearTimeout(timer);
     removeAbort();
   }
+}
+
+function modalPathMetadata(info: ModalFileInfo): TrustedRigPlatformRuntimePathMetadata {
+  return {
+    path: info.path,
+    type: info.type,
+    sizeBytes: info.size,
+    mode: info.mode,
+    symlinkTarget: info.symlinkTarget,
+  };
+}
+
+async function captureModalTrustedRigPlatformRuntime(input: {
+  settings: ProviderTrustedRigPlatformRuntimeInspectionInput["settings"];
+  filesystem: ModalFilesystem;
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+}): Promise<TrustedRigPlatformRuntimeManifest> {
+  const run = async <T>(operation: () => Promise<T>): Promise<T> =>
+    await modalFilesystemOperation({
+      operation,
+      deadlineAtMs: input.deadlineAtMs,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+  return await captureTrustedRigPlatformRuntimeManifest({
+    settings: input.settings,
+    ...(input.signal ? { signal: input.signal } : {}),
+    inspectPath: async (path) =>
+      modalPathMetadata(await run(async () => await input.filesystem.stat(path))),
+    readBytes: async (path) => await run(async () => await input.filesystem.readBytes(path)),
+  });
 }
 
 function modalSidecarName(input: ProviderTrustedRigPlatformSurfaceInput): string {
@@ -301,6 +348,18 @@ async function createModalSidecar(
       }
       await terminatePromise;
     };
+    try {
+      const actualRuntimeManifest = await captureModalTrustedRigPlatformRuntime({
+        settings: input.settings,
+        filesystem: container.filesystem,
+        deadlineAtMs,
+        ...(operation.signal ? { signal: operation.signal } : {}),
+      });
+      assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, actualRuntimeManifest);
+    } catch (error) {
+      await terminate({ deadlineAtMs }).catch(() => undefined);
+      throw error;
+    }
     const execute = async (
       args: Parameters<NonNullable<BrowserControlPlacementSession["exec"]>>[0],
     ) => {
@@ -376,7 +435,8 @@ export async function inspectModalTrustedRigPlatformRuntime(
     !providerImageId ||
     (input.expectedProviderImageId !== undefined &&
       input.expectedProviderImageId !== providerImageId) ||
-    typeof filesystem?.readBytes !== "function"
+    typeof filesystem?.readBytes !== "function" ||
+    typeof filesystem?.stat !== "function"
   ) {
     throw new Error(
       "Modal trusted Rig runtime inspection requires the exact live provider filesystem",
@@ -386,15 +446,11 @@ export async function inspectModalTrustedRigPlatformRuntime(
     Date.now() + input.timeoutMs,
     input.deadlineAtMs ?? Number.POSITIVE_INFINITY,
   );
-  return await captureTrustedRigPlatformRuntimeManifest({
+  return await captureModalTrustedRigPlatformRuntime({
     settings: input.settings,
+    filesystem,
+    deadlineAtMs,
     ...(input.signal ? { signal: input.signal } : {}),
-    readBytes: async (path) =>
-      await modalFilesystemOperation({
-        operation: async () => await filesystem.readBytes(path),
-        deadlineAtMs,
-        ...(input.signal ? { signal: input.signal } : {}),
-      }),
   });
 }
 
@@ -422,6 +478,7 @@ export async function createModalTrustedRigPlatformSurface(
       workspaceGeneration: input.workspaceGeneration,
       sandboxGroupId: input.sandboxGroupId,
       rigVersionId: input.rigVersionId,
+      runtimeManifestDigest: input.runtimeManifest.digest,
     },
     desktopEnabled: input.settings.sandboxDesktopEnabled,
     createSidecar: async (operation) => await createModalSidecar(input, operation),
