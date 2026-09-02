@@ -32,7 +32,7 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
 
 function preparedGateway(
   calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }>,
-  approval: "human" | "none" = "human",
+  approval: "human" | "none" = "none",
 ): PreparedWorkspaceToolGateway {
   const { catalog, gateway } = createWorkspaceToolGateway({
     accountId,
@@ -79,7 +79,7 @@ function preparedGateway(
 }
 
 describe("workspace tool gateway adapters", () => {
-  test("publishes and executes the exact same catalog through MCP and HTTP", async () => {
+  test("publishes and executes the same callable catalog through MCP and HTTP", async () => {
     const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
     const prepared = preparedGateway(calls);
     const access = grant();
@@ -97,44 +97,44 @@ describe("workspace tool gateway adapters", () => {
         _meta: {
           "opengeni/identity": { serverId: "inventory", toolName: "lookup" },
           "opengeni/path": ["inventory", "lookup"],
-          "opengeni/approval": "human",
+          "opengeni/approval": "none",
           "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
         },
       });
+      const mcpResponse = await client.callTool({
+        name: "inventory__lookup",
+        arguments: { sku: "SKU-1" },
+      });
+      expect(mcpResponse).toMatchObject({ structuredContent: { count: 7 } });
+
+      const response = await callWorkspaceToolGateway(prepared, access, {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "SKU-2" },
+      });
+      expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+      expect(calls).toEqual([
+        { kind: "mcp", argumentsValue: { sku: "SKU-1" } },
+        { kind: "http", argumentsValue: { sku: "SKU-2" } },
+      ]);
+    } finally {
+      await Promise.allSettled([client.close(), server.close()]);
+    }
+  });
+
+  test("does not advertise approval-required tools on MCP without an approval transport", async () => {
+    const prepared = preparedGateway([], "human");
+    const server = buildWorkspaceToolGatewayMcpServer(prepared, grant());
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "workspace-tool-gateway-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      expect((await client.listTools()).tools).toEqual([]);
       await expect(
         client.callTool({ name: "inventory__lookup", arguments: { sku: "SKU-1" } }),
-      ).rejects.toThrow("Tool requires human approval");
-
-      await expect(
-        callWorkspaceToolGateway(prepared, access, {
-          operationId: "33333333-3333-4333-8333-333333333333",
-          catalogDigest: prepared.toolGatewayCatalog.digest,
-          identity: { serverId: "inventory", toolName: "lookup" },
-          arguments: { sku: "SKU-2" },
-        }),
-      ).rejects.toMatchObject({ status: 409 });
-
-      const response = await callWorkspaceToolGateway(
-        prepared,
-        access,
-        {
-          operationId: "33333333-3333-4333-8333-333333333333",
-          catalogDigest: prepared.toolGatewayCatalog.digest,
-          identity: { serverId: "inventory", toolName: "lookup" },
-          arguments: { sku: "SKU-2" },
-          approvalToken: `ogta_${"a".repeat(43)}`,
-        },
-        {} as never,
-        async (_db, input) => {
-          expect(input).toMatchObject({
-            operationId: "33333333-3333-4333-8333-333333333333",
-            identity: { serverId: "inventory", toolName: "lookup" },
-          });
-          return true;
-        },
-      );
-      expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
-      expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SKU-2" } }]);
+      ).rejects.toThrow("Tool is not present in the active gateway catalog");
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }
@@ -177,7 +177,7 @@ describe("workspace tool gateway adapters", () => {
   });
 
   test("issues an opaque approval capability bound to the exact operation", async () => {
-    const prepared = preparedGateway([]);
+    const prepared = preparedGateway([], "human");
     const access = grant();
     const issued: unknown[] = [];
     const response = await approveWorkspaceToolGatewayCall(

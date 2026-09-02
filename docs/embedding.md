@@ -263,7 +263,10 @@ the ordinary tool approval classification, with the capability also bound to
 the exact immutable Site version. The opaque-origin Site iframe never receives
 the token. External MCP clients use the aggregate workspace MCP route;
 deployments may opt into its resource-bound OAuth authorization server as
-documented in `docs/deployment.md`.
+documented in `docs/deployment.md`. Because that MCP adapter has no
+server-verifiable one-shot approval exchange, it omits tools classified for
+human approval and rejects direct calls to their projected names. OAuth consent
+does not satisfy that separate per-call approval requirement.
 
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the

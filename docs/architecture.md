@@ -1094,7 +1094,10 @@ Consent freezes the current human's permissions and tool identities; every MCP
 request intersects that snapshot with live workspace authority and the current
 gateway catalog. Reuse of a rotated refresh-token generation revokes every
 refresh and access token in that family. OAuth bearer tokens are never accepted
-as REST credentials.
+as REST credentials. Because MCP currently has no server-verifiable one-shot
+human approval capability, the MCP projection omits entries classified for
+human approval and rejects direct calls to their projected names; those entries
+remain available through the current-human HTTP/SDK and Site approval paths.
 
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit

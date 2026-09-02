@@ -44,4 +44,7 @@ human approval and every publisher-controlled Site call use a server-issued,
 hash-only, single-use capability; Site capabilities are additionally bound to
 the exact immutable Site version. Agent attempts keep their existing durable
 approval and operation lifecycle. The gateway receives only the resulting
-trusted transport metadata.
+trusted transport metadata. The external/current-human MCP adapter has no
+server-verifiable one-shot approval exchange, so it projects only entries whose
+classification is not `human`; a direct call to a hidden projected name is
+rejected instead of advertising a tool that can never execute.

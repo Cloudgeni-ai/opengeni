@@ -302,12 +302,15 @@ export function buildWorkspaceToolGatewayMcpServer(
   grant: AccessGrant,
   observability?: Observability,
 ): Server {
+  const callableEntries = prepared.toolGatewayCatalog.entries.filter(
+    (entry) => entry.approval !== "human",
+  );
   const server = new Server(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
     { capabilities: { tools: {} } },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: prepared.toolGatewayCatalog.entries.map((entry) => ({
+    tools: callableEntries.map((entry) => ({
       name: entry.modelName,
       ...(entry.title ? { title: entry.title } : {}),
       ...(entry.description ? { description: entry.description } : {}),
@@ -325,9 +328,7 @@ export function buildWorkspaceToolGatewayMcpServer(
     })),
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const entry = prepared.toolGatewayCatalog.entries.find(
-      (candidate) => candidate.modelName === request.params.name,
-    );
+    const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",

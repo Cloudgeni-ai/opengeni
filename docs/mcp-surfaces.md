@@ -6,7 +6,7 @@ page exists so you pick the right one in one read.
 
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
-| **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the complete tool surface without provider-specific wrappers |
+| **Unified workspace tool MCP** (`/v1/workspaces/:id/mcp`) | Workspace enables integrations; session policy may narrow agent attempts | Current-human requests expose the enabled first-party, Files, Docs, capability, API-integration, and Codex Apps tools through one canonical gateway; entries requiring one-shot human approval stay in the canonical catalog but are omitted from this adapter until MCP has a server-verifiable approval transport. Agent attempts retain their exact frozen selection | Existing OpenGeni bearer or standard MCP OAuth `mcp:access`, always intersected with live workspace authority | An MCP client needs the callable unified tool surface without provider-specific wrappers |
 | **Codemode** (`/v1/workspaces/:id/codemode`) | OpenGeni worker, from the exact tools prepared for one attempt | Immutable attempt-frozen projection of every admitted model tool; approval-required entries remain visible but cannot execute programmatically | Exact `agent_attempt` bearer: protected renewable file in managed sandboxes; in-memory, per-exec snapshot on Connected Machines. Execution stays in the owning worker and reuses the same resolved credentials/executor as model MCP | Attempt code needs typed, idempotent tool calls without a model round trip |
 | **Workspace HTTP/SDK tools** (`/v1/workspaces/:id/tools/*`) | Current authenticated human | Live projection of the same unified gateway; `client.tools.forWorkspace(id)` provides catalog, direct typed calls, and declarations | Current human's ordinary authenticated browser/API request | A browser or host application needs typed tools without speaking MCP |
 | **Site tool bridge** (`@opengeni/sdk/site`) | Immutable Site version requests exact identities; the current viewer remains authoritative | Parent-filtered projection over the live workspace HTTP/SDK gateway, carried on one exact iframe `MessagePort` | No credential enters the iframe; the parent uses its current authenticated session | Publisher-controlled Site code needs direct typed tools inside the opaque-origin renderer |
@@ -22,6 +22,8 @@ RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope
 `mcp:access`, opaque 15-minute access tokens, and rotating 30-day refresh
 tokens. Consent requires the existing managed or local current-human session. OAuth
 tokens are accepted only by MCP routes and never become REST credentials.
+OAuth consent grants MCP access; it does not silently satisfy a tool's separate
+one-shot human-approval classification.
 
 First-party OpenGeni MCP memory tools:
 
