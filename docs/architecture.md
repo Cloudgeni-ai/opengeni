@@ -1087,12 +1087,15 @@ identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
 The built-in `opengeni-product-integration` Pack is an opt-in implementation
-aid for those standalone integrations. Its immutable Skill adds no runtime
-tools, credentials, compute, or customer-facing agent behavior; it teaches the
-implementation agent to derive the workspace isolation unit, UI surface, data
-tool boundary, runtime profile, and delivery workflow from the host product.
-The Pack lives in `packages/core/src/domain/product-integration-pack.ts`, while
-the exact customer integration contract remains
+aid for those standalone integrations. Its immutable Skill adds no executable
+tools, credentials, or compute, but it is visible to every session in the
+workspace where the Pack is installed. Install it only in a dedicated
+implementation workspace and create customer-facing runtime sessions in
+separate workspaces. The Skill teaches the implementation agent to derive the
+workspace isolation unit, UI surface, data-tool boundary, runtime profile, and
+delivery workflow from the host product. The Pack lives in
+`packages/core/src/domain/product-integration-pack.ts`, while the exact customer
+integration contract remains
 [`product-integration.md`](product-integration.md).
 
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),

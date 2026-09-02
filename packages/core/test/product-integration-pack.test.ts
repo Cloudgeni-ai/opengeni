@@ -13,7 +13,7 @@ import {
 } from "../src/domain/packs";
 
 describe("OpenGeni Product Integration Pack", () => {
-  test("is a built-in implementation-only Pack that grants no runtime capability", () => {
+  test("is a built-in implementation Pack with honest workspace-wide Skill scope", () => {
     const pack = getCapabilityPack(OPENGENI_PRODUCT_INTEGRATION_PACK_ID);
 
     expect(pack).toBe(OPENGENI_PRODUCT_INTEGRATION_PACK);
@@ -24,9 +24,9 @@ describe("OpenGeni Product Integration Pack", () => {
       metadata: {
         audience: "integration-agent",
         purpose: "implementation-guidance",
-        implementationOnly: true,
-        grantsRuntimeCapabilities: false,
-        customerRuntimeProfile: "generated-during-integration",
+        skillExposure: "all-sessions-in-installation-workspace",
+        separationModel: "dedicated-implementation-workspace",
+        grantsExecutableCapabilities: false,
       },
     });
     expect(pack?.skills.map((skill) => skill.name)).toEqual(["opengeni-product-integration"]);
@@ -40,6 +40,8 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(pack?.sandboxImage).toBeUndefined();
     expect(pack?.sandboxProviderImages).toBeUndefined();
     expect(capabilityPackRequiresInstallationPlan(pack!)).toBe(true);
+    expect(pack?.description).toContain("dedicated implementation workspace");
+    expect(pack?.skills[0]?.description).toContain("available to every session");
   });
 
   test("materializes one valid immutable Skill with complete progressive-disclosure references", () => {
@@ -91,7 +93,8 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(data).toContain("OpenAPI 3.0 or 3.1");
     expect(data).toContain("distinct control-plane resources");
     expect(data).toContain("credential brokerage, not zero-knowledge storage");
-    expect(runtime).toContain("Do not attach this generic implementation Skill");
+    expect(runtime).toContain("installed Skill is workspace-wide");
+    expect(runtime).toContain("dedicated implementation workspace");
     expect(runtime).toContain("not retransmitted on every turn");
     expect(runtime).toContain("same account balance");
     expect(autonomy).toContain("technical capability, not permission");

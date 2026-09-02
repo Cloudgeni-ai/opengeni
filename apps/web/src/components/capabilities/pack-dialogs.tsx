@@ -835,7 +835,7 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
               <div key={skill.name} className="min-w-0">
                 <div className="truncate text-xs font-medium">{skill.name}</div>
                 <div className="text-2xs text-fg-subtle">
-                  Installs as an immutable Skill · {skill.files.length} reviewed file
+                  Installs as an immutable Skill · {skill.files.length} included file
                   {skill.files.length === 1 ? "" : "s"}
                 </div>
               </div>

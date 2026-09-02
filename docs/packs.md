@@ -20,12 +20,13 @@ provider registration and repository binding remain separate credential and
 resource authorities. See [`pr-review-pack.md`](pr-review-pack.md).
 
 The built-in `opengeni-product-integration` Pack installs implementation-agent
-guidance for adding OpenGeni to an external product. It deliberately declares
-no runtime tools, connectors, credentials, knowledge, compute, automations, or
-customer-agent persona. The implementation agent derives a customer-specific
-runtime profile from the host product; the generic integration Skill must not
-be attached to those customer-facing sessions. Its canonical product contract
-is [`product-integration.md`](product-integration.md).
+guidance for adding OpenGeni to an external product. It declares no executable
+tools, connectors, credentials, knowledge, compute, automations, or
+customer-agent persona, but its installed Skill is available to every session
+in the installation workspace. Use a dedicated implementation workspace and
+create customer-facing runtime sessions elsewhere. The implementation agent
+derives a customer-specific runtime profile from the host product. Its
+canonical product contract is [`product-integration.md`](product-integration.md).
 
 ## Product model
 
@@ -247,9 +248,11 @@ setup, exact-head fencing, and webhook semantics are documented in
 
 The instruction-only `opengeni-product-integration` Pack uses the reviewed
 preview/install lifecycle because its Skill becomes an ordinary immutable
-workspace Skill component. Install it in the workspace used to implement a
-customer integration, not in the isolated workspaces provisioned for end-user
-runtime chats.
+workspace Skill component. Ordinary installed Skills enter every session's
+runtime Skill index in that workspace; Pack metadata does not create a runtime
+filter or security boundary. Install this Pack only in a dedicated workspace
+used to implement a customer integration, and provision end-user runtime chats
+in separate workspaces.
 
 The Skill is version-aligned with the OpenGeni release and teaches adaptive
 repository discovery, workspace isolation decisions, explicit tool policy,

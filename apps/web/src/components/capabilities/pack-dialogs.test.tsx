@@ -96,7 +96,9 @@ describe("PackDetailDialog", () => {
     const contents = await render(<PackContents pack={pack()} />);
     try {
       expect(contents.container.textContent).toContain("Compute requirement");
-      expect(contents.container.textContent).toContain("Installs as an immutable Skill");
+      expect(contents.container.textContent).toContain(
+        "Installs as an immutable Skill · 1 included file",
+      );
       expect(contents.container.textContent).toContain("Configuration requirements");
       expect(contents.container.textContent).toContain(
         "Values come from an encrypted Variable Set",
