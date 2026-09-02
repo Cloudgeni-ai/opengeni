@@ -1202,7 +1202,10 @@ async function planForegroundCatchup(
   options: { signal?: AbortSignal } = {},
 ): Promise<ForegroundCatchupPlan> {
   if (options.signal?.aborted) throw abortError();
-  const session = await client.getSession(workspaceId, sessionId);
+  const session = await client.getSession(workspaceId, sessionId, {
+    fresh: true,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
   if (options.signal?.aborted) throw abortError();
   const durableHead = Math.max(cursor, session.lastSequence);
   const rawGap = durableHead - cursor;

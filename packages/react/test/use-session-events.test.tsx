@@ -1,5 +1,5 @@
 import { describe, expect, jest, test } from "bun:test";
-import type { SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
+import type { GetSessionOptions, SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
@@ -150,10 +150,12 @@ describe("useSessionEvents", () => {
     let store = [event(1), event(2)];
     let durableHead = 2;
     let failHeadRead = false;
+    const headReadCalls: GetSessionOptions[] = [];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
     const client = fakeClient({
-      getSession: async () => {
+      getSession: async (_workspaceId, _sessionId, options = {}) => {
+        headReadCalls.push(options);
         if (failHeadRead) throw new TypeError("session head unavailable");
         return { lastSequence: durableHead } as never;
       },
@@ -310,6 +312,11 @@ describe("useSessionEvents", () => {
       expect(streamCalls).toEqual([2, 2, 200, 400, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
+      expect(headReadCalls).toHaveLength(5);
+      for (const options of headReadCalls) {
+        expect(options.fresh).toBe(true);
+        expect(options.signal).toBeDefined();
+      }
     } finally {
       await hook.unmount();
       jest.useRealTimers();
