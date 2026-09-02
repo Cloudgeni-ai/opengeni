@@ -136,12 +136,12 @@ describe("release schema contract", () => {
     };
     const organizationWorkspaceManagementEntry =
       completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
-        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+        (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
       );
     if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
       const organizationWorkspaceManagementEntryIndex =
         completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
-          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
         );
       completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
         completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
@@ -338,7 +338,7 @@ describe("release schema contract", () => {
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
-      "0397_organization_workspace_management_entry.sql",
+      "0398_organization_workspace_management_entry.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
@@ -394,7 +394,7 @@ describe("release schema contract", () => {
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (organizationWorkspaceManagementEntry &&
         completeSourceContract.migrations.some(
-          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
         )
           ? 1
           : 0) +
@@ -539,7 +539,7 @@ describe("release schema contract", () => {
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationWorkspaceManagementEntry
-        ? "0397_organization_workspace_management_entry.sql"
+        ? "0398_organization_workspace_management_entry.sql"
         : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -600,12 +600,12 @@ describe("release schema contract", () => {
     };
     const organizationWorkspaceManagementEntry =
       completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
-        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+        (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
       );
     if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
       const organizationWorkspaceManagementEntryIndex =
         completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
-          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
         );
       completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
         completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
@@ -664,7 +664,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0397_organization_workspace_management_entry.sql",
+      "0398_organization_workspace_management_entry.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
@@ -961,7 +961,7 @@ describe("release schema contract", () => {
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (organizationWorkspaceManagementEntry &&
         completeSourceContract.migrations.some(
-          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
         )
           ? 1
           : 0) +
@@ -1121,7 +1121,7 @@ describe("release schema contract", () => {
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationWorkspaceManagementEntry
-        ? "0397_organization_workspace_management_entry.sql"
+        ? "0398_organization_workspace_management_entry.sql"
         : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(

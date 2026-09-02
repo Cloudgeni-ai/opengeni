@@ -17,10 +17,10 @@ import { provisionRoles } from "../src/provision-roles";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const migrationsDirectoryUrl = new URL("../drizzle/", import.meta.url);
 
-test("preserves legacy create outcomes and custom runtime-role access across migration 0397", async () => {
+test("preserves legacy create outcomes and custom runtime-role access across migration 0398", async () => {
   const blank = await acquireBlankTestDatabase("organization-workspace-management-rolling");
   if (!blank) {
-    if (requireRealDatabase) throw new Error("migration 0397 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0398 requires real PostgreSQL");
     return;
   }
 
@@ -46,7 +46,7 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
       (file) =>
         Buffer.compare(
           Buffer.from(file, "utf8"),
-          Buffer.from("0397_organization_workspace_management_entry.sql", "utf8"),
+          Buffer.from("0398_organization_workspace_management_entry.sql", "utf8"),
         ) >= 0,
     );
     for (const file of heldMigrations) {
@@ -89,7 +89,7 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
 
     await admin`
       delete from schema_migrations
-      where name = '0397_organization_workspace_management_entry.sql'`;
+      where name = '0398_organization_workspace_management_entry.sql'`;
     await migrate(blank.databaseUrl, undefined, {
       applicationDatabaseRoles: [customRole],
     });
