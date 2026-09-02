@@ -90,7 +90,7 @@ describe("session display titles", () => {
           titleSource: "agent",
           initialMessage,
         }),
-      ).toBe("Conversation 123e4567");
+      ).toBe("Conversation 123e4567-e89b");
     }
 
     expect(
@@ -108,7 +108,7 @@ describe("session display titles", () => {
         titleSource: "user",
         initialMessage: "Inspect the workspace",
       }),
-    ).toBe("Conversation 123e4567");
+    ).toBe("Conversation 123e4567-e89b");
 
     expect(
       deriveSessionDisplayTitle({

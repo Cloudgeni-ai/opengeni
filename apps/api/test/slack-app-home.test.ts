@@ -119,7 +119,7 @@ describe("Slack App Home projection", () => {
         nowMs: Date.parse("2026-08-14T12:00:00.000Z"),
       }),
     );
-    expect(serialized).toContain("Conversation 00000000");
+    expect(serialized).toContain("Conversation 00000000-0000");
     expect(serialized).not.toContain("super-secret-value");
   });
 

@@ -383,7 +383,7 @@ export function deriveAutomaticSessionTitlePreview(value: unknown): string | nul
 function automaticSessionReferenceTitle(id: unknown): string {
   const sessionId = typeof id === "string" ? id.trim() : "";
   return SESSION_ID_PATTERN.test(sessionId)
-    ? `Conversation ${sessionId.slice(0, 8)}`
+    ? `Conversation ${sessionId.slice(0, 13)}`
     : AUTOMATIC_SESSION_TITLE_FALLBACK;
 }
 

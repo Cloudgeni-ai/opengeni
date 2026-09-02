@@ -125,7 +125,7 @@ describe("sessionDisplayTitle", () => {
           initialMessage: "SECRET_TOKEN=hunter2",
         }),
       ),
-    ).toBe("Conversation 123e4567");
+    ).toBe("Conversation 123e4567-e89b");
     expect(
       sessionDisplayTitle(
         session({
@@ -143,7 +143,7 @@ describe("sessionDisplayTitle", () => {
           initialMessage: null as unknown as string,
         }),
       ),
-    ).toBe("Conversation 123e4567");
+    ).toBe("Conversation 123e4567-e89b");
   });
 });
 

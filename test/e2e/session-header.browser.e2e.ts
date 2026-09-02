@@ -460,7 +460,7 @@ describe("responsive production session header", () => {
       await page.goto(sessionUrl({ ...fixture, sessionId: sensitiveOnly.id }));
       await titleButton.waitFor();
       expect((await titleButton.textContent())?.trim()).toBe(
-        `Conversation ${sensitiveOnly.id.slice(0, 8)}`,
+        `Conversation ${sensitiveOnly.id.slice(0, 13)}`,
       );
       expect(await page.getByText("New conversation", { exact: true }).count()).toBe(0);
       const displayedTitles = await page

@@ -260,7 +260,15 @@ describe("automatic session titles", () => {
         titleSource: "agent",
         initialMessage: "API_TOKEN=super-secret-value",
       }),
-    ).toBe("Conversation 123e4567");
+    ).toBe("Conversation 123e4567-e89b");
+    expect(
+      deriveSessionDisplayTitle({
+        id: "123e4567-f012-42d3-a456-426614174000",
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage: "API_TOKEN=super-secret-value",
+      }),
+    ).toBe("Conversation 123e4567-f012");
     expect(
       deriveSessionDisplayTitle({
         id: "not-a-session-id",
