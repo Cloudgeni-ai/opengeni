@@ -355,6 +355,8 @@ export type AppContextValue = {
     submission: TurnSubmission,
     options?: {
       instructions?: string;
+      /** Installed session-selected Skills to freeze onto this exact session. */
+      installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
@@ -1796,6 +1798,7 @@ export function RootRouteComponent() {
     submission: TurnSubmission,
     options?: {
       instructions?: string;
+      installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
@@ -1863,6 +1866,7 @@ export function RootRouteComponent() {
           currentResources,
           submission: effectiveSubmission,
           instructions: options?.instructions,
+          installedSkillIds: options?.installedSkillIds,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           defaultModel: model,

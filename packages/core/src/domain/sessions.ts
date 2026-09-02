@@ -20,6 +20,7 @@ import {
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  SessionSkills,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -77,6 +78,7 @@ import {
   getWorkspaceDefaultRigId,
   listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
+  listInstalledPortableSkills,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -770,6 +772,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // session. Every caller repairs or re-delivers the winner's one atomic start;
   // the durable initializer prevents duplicate events or turns.
   createIdempotencyKey?: string | null;
+  // Exact explicit installed-Skill selection. The database stores this only as
+  // keyed-create identity; runtime behavior comes from the frozen Skill content.
+  selectedInstalledSkillIds?: string[];
   // The shared-sandbox group this session's box joins (addendum 05 §D). Null/
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
   // shared/{groupId} spawn passes the resolved group so both run in ONE box.
@@ -972,6 +977,7 @@ export async function createAndStartSessionWithOutcome(input: {
       policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
+      selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
@@ -1944,6 +1950,7 @@ export async function createSessionForRequestWithOutcome(
           ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
+        selectedInstalledSkillIds: payload.installedSkillIds ?? [],
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
         variableSetIds: payload.variableSetIds ?? [],
@@ -2106,9 +2113,43 @@ export async function createSessionForRequestWithOutcome(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
-  const skills = hasOwnProperty(rawPayload, "skills")
+  const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills
     : (parentSession?.skills ?? payload.skills);
+  const selectedInstalledSkillIds = payload.installedSkillIds ?? [];
+  const selectedInstalledSkills: SessionSkill[] = [];
+  if (selectedInstalledSkillIds.length > 0) {
+    const installedSkills = await listInstalledPortableSkills(db, workspaceId, {
+      includeSessionSelected: true,
+    });
+    const installedById = new Map(installedSkills.map((skill) => [skill.capabilityId, skill]));
+    for (const capabilityId of selectedInstalledSkillIds) {
+      const installed = installedById.get(capabilityId);
+      if (!installed) {
+        throw new HTTPException(422, {
+          message: `Session-selected Skill is not installed in this workspace: ${capabilityId}`,
+        });
+      }
+      if (installed.activationMode !== "session_selected") {
+        throw new HTTPException(422, {
+          message: `Installed Skill does not require explicit session selection: ${capabilityId}`,
+        });
+      }
+      selectedInstalledSkills.push({
+        name: installed.name,
+        description: installed.description,
+        files: installed.files.map((file) => ({ path: file.path, content: file.content })),
+      });
+    }
+  }
+  let skills: SessionSkill[];
+  try {
+    skills = SessionSkills.parse([...inheritedOrSubmittedSkills, ...selectedInstalledSkills]);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid session Skill selection",
+    });
+  }
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
   // Visibility became durable draft state after older clients had already
   // written rows without it. Compare it only when the create request supplied
@@ -2798,6 +2839,7 @@ export async function createSessionForRequestWithOutcome(
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
+      selectedInstalledSkillIds,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
       allowNestedAgentDepthIncrease: hasPermission(grant.permissions, "workspace:admin"),
       subjectId: grant.subjectId,

@@ -111,21 +111,57 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0395_model_call_equivalent_credit_cost.sql",
+    );
+    const completeSourceContractWithModelCallEquivalentCreditCost = completeSourceContract;
+    const modelCallEquivalentCreditCostMigrationIndex =
+      completeSourceContractWithModelCallEquivalentCreditCost.migrations.findIndex(
+        (migration) => migration.path === "0395_model_call_equivalent_credit_cost.sql",
+      );
+    completeSourceContract = modelCallEquivalentCreditCost
+      ? {
+          ...completeSourceContractWithModelCallEquivalentCreditCost,
+          latestMigration:
+            completeSourceContractWithModelCallEquivalentCreditCost.migrations[
+              modelCallEquivalentCreditCostMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+        }
+      : completeSourceContractWithModelCallEquivalentCreditCost;
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+    );
+    const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    const sessionSelectedSkillActivationMigrationIndex =
+      completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
+        (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+      );
+    completeSourceContract = sessionSelectedSkillActivation
+      ? {
+          ...completeSourceContractWithSessionSelectedSkillActivation,
+          latestMigration:
+            completeSourceContractWithSessionSelectedSkillActivation.migrations[
+              sessionSelectedSkillActivationMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+        }
+      : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
     );
     const completeSourceContractWithContextCompaction = completeSourceContract;
-    completeSourceContract =
-      contextCompactionPendingObservability &&
-      completeSourceContractWithContextCompaction.latestMigration ===
-        "0392_context_compaction_pending_observability.sql"
-        ? {
-            ...completeSourceContractWithContextCompaction,
-            latestMigration:
-              completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
-              completeSourceContractWithContextCompaction.latestMigration,
-          }
-        : completeSourceContractWithContextCompaction;
+    const contextCompactionMigrationIndex =
+      completeSourceContractWithContextCompaction.migrations.findIndex(
+        (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+      );
+    completeSourceContract = contextCompactionPendingObservability
+      ? {
+          ...completeSourceContractWithContextCompaction,
+          latestMigration:
+            completeSourceContractWithContextCompaction.migrations[
+              contextCompactionMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithContextCompaction.latestMigration,
+        }
+      : completeSourceContractWithContextCompaction;
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
       (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
     );
@@ -254,10 +290,26 @@ describe("release schema contract", () => {
     const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
     );
-    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0394_model_call_equivalent_credit_cost.sql",
-    );
+    if (workspaceMemoryAndLearningDefaults) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0393_workspace_memory_and_learning_defaults.sql",
+      };
+    }
+    if (sessionSelectedSkillActivation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0394_session_selected_skill_activation.sql",
+      };
+    }
+    if (modelCallEquivalentCreditCost) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0395_model_call_equivalent_credit_cost.sql",
+      };
+    }
     const automaticSessionTitleMigrationPaths = new Set([
+      "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -299,7 +351,7 @@ describe("release schema contract", () => {
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
-      "0394_model_call_equivalent_credit_cost.sql",
+      "0395_model_call_equivalent_credit_cost.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -307,6 +359,7 @@ describe("release schema contract", () => {
 
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionSelectedSkillActivation ? 1 : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         migrationsBeforeAutomaticSessionTitles.length +
         (automaticSessionTitlePolicyFence ? 1 : 0) +
@@ -436,18 +489,29 @@ describe("release schema contract", () => {
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
         : {}),
+      ...(sessionSelectedSkillActivation
+        ? { latestMigration: "0394_session_selected_skill_activation.sql" }
+        : {}),
       ...(modelCallEquivalentCreditCost
-        ? { latestMigration: "0394_model_call_equivalent_credit_cost.sql" }
+        ? { latestMigration: "0395_model_call_equivalent_credit_cost.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
+      workspaceMemoryAndLearningDefaults
+        ? "0393_workspace_memory_and_learning_defaults.sql"
+        : contextCompactionPendingObservability
+          ? "0392_context_compaction_pending_observability.sql"
+          : completeSourceContract.latestMigration,
+    );
+    expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
+      sessionSelectedSkillActivation
+        ? "0394_session_selected_skill_activation.sql"
+        : completeSourceContractWithContextCompaction.latestMigration,
+    );
+    expect(completeSourceContractWithModelCallEquivalentCreditCost.latestMigration).toBe(
       modelCallEquivalentCreditCost
-        ? "0394_model_call_equivalent_credit_cost.sql"
-        : workspaceMemoryAndLearningDefaults
-          ? "0393_workspace_memory_and_learning_defaults.sql"
-          : contextCompactionPendingObservability
-            ? "0392_context_compaction_pending_observability.sql"
-            : completeSourceContract.latestMigration,
+        ? "0395_model_call_equivalent_credit_cost.sql"
+        : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
   });
 
@@ -463,21 +527,57 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0395_model_call_equivalent_credit_cost.sql",
+    );
+    const completeSourceContractWithModelCallEquivalentCreditCost = completeSourceContract;
+    const modelCallEquivalentCreditCostMigrationIndex =
+      completeSourceContractWithModelCallEquivalentCreditCost.migrations.findIndex(
+        (migration) => migration.path === "0395_model_call_equivalent_credit_cost.sql",
+      );
+    completeSourceContract = modelCallEquivalentCreditCost
+      ? {
+          ...completeSourceContractWithModelCallEquivalentCreditCost,
+          latestMigration:
+            completeSourceContractWithModelCallEquivalentCreditCost.migrations[
+              modelCallEquivalentCreditCostMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+        }
+      : completeSourceContractWithModelCallEquivalentCreditCost;
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+    );
+    const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    const sessionSelectedSkillActivationMigrationIndex =
+      completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
+        (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+      );
+    completeSourceContract = sessionSelectedSkillActivation
+      ? {
+          ...completeSourceContractWithSessionSelectedSkillActivation,
+          latestMigration:
+            completeSourceContractWithSessionSelectedSkillActivation.migrations[
+              sessionSelectedSkillActivationMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+        }
+      : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
     );
     const completeSourceContractWithContextCompaction = completeSourceContract;
-    completeSourceContract =
-      contextCompactionPendingObservability &&
-      completeSourceContractWithContextCompaction.latestMigration ===
-        "0392_context_compaction_pending_observability.sql"
-        ? {
-            ...completeSourceContractWithContextCompaction,
-            latestMigration:
-              completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
-              completeSourceContractWithContextCompaction.latestMigration,
-          }
-        : completeSourceContractWithContextCompaction;
+    const contextCompactionMigrationIndex =
+      completeSourceContractWithContextCompaction.migrations.findIndex(
+        (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+      );
+    completeSourceContract = contextCompactionPendingObservability
+      ? {
+          ...completeSourceContractWithContextCompaction,
+          latestMigration:
+            completeSourceContractWithContextCompaction.migrations[
+              contextCompactionMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithContextCompaction.latestMigration,
+        }
+      : completeSourceContractWithContextCompaction;
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
@@ -496,6 +596,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -594,7 +695,7 @@ describe("release schema contract", () => {
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
-      "0394_model_call_equivalent_credit_cost.sql",
+      "0395_model_call_equivalent_credit_cost.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -757,11 +858,27 @@ describe("release schema contract", () => {
     const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
     );
-    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0394_model_call_equivalent_credit_cost.sql",
-    );
+    if (workspaceMemoryAndLearningDefaults) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0393_workspace_memory_and_learning_defaults.sql",
+      };
+    }
+    if (sessionSelectedSkillActivation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0394_session_selected_skill_activation.sql",
+      };
+    }
+    if (modelCallEquivalentCreditCost) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0395_model_call_equivalent_credit_cost.sql",
+      };
+    }
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionSelectedSkillActivation ? 1 : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
         (documentAuthorityReclassification ? 1 : 0) +
@@ -906,18 +1023,29 @@ describe("release schema contract", () => {
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
         : {}),
+      ...(sessionSelectedSkillActivation
+        ? { latestMigration: "0394_session_selected_skill_activation.sql" }
+        : {}),
       ...(modelCallEquivalentCreditCost
-        ? { latestMigration: "0394_model_call_equivalent_credit_cost.sql" }
+        ? { latestMigration: "0395_model_call_equivalent_credit_cost.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
+      workspaceMemoryAndLearningDefaults
+        ? "0393_workspace_memory_and_learning_defaults.sql"
+        : contextCompactionPendingObservability
+          ? "0392_context_compaction_pending_observability.sql"
+          : completeSourceContract.latestMigration,
+    );
+    expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
+      sessionSelectedSkillActivation
+        ? "0394_session_selected_skill_activation.sql"
+        : completeSourceContractWithContextCompaction.latestMigration,
+    );
+    expect(completeSourceContractWithModelCallEquivalentCreditCost.latestMigration).toBe(
       modelCallEquivalentCreditCost
-        ? "0394_model_call_equivalent_credit_cost.sql"
-        : workspaceMemoryAndLearningDefaults
-          ? "0393_workspace_memory_and_learning_defaults.sql"
-          : contextCompactionPendingObservability
-            ? "0392_context_compaction_pending_observability.sql"
-            : completeSourceContract.latestMigration,
+        ? "0395_model_call_equivalent_credit_cost.sql"
+        : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(

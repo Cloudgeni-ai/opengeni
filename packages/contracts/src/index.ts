@@ -9727,6 +9727,12 @@ export const CapabilityPackSkill = z
         message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
       }),
     description: z.string().min(1).max(2048).optional(),
+    // Workspace-managed Skills are available to every session in the
+    // workspace. Session-selected Skills remain installed and inspectable, but
+    // enter model context only when their immutable definition is attached to
+    // a session explicitly. This is the hard contamination boundary for Packs
+    // that guide implementation agents rather than customer-facing agents.
+    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
     files: z.array(CapabilityPackSkillFile).min(1).max(64),
   })
   .superRefine((skill, ctx) => {
@@ -9754,8 +9760,11 @@ export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 // Inline skill content fixed onto one session at creation. It intentionally
 // uses the exact same validated directory shape as a pack skill, but has a
 // different semantic owner and lifecycle. Session readers can inspect it; it
-// is configuration, never a secret store.
-export const SessionSkill = CapabilityPackSkill;
+// is configuration, never a secret store. Pack activation policy is consumed
+// at admission and cannot become part of the session-owned artifact.
+export const SessionSkill = CapabilityPackSkill.transform(
+  ({ activationMode: _activationMode, ...skill }) => skill,
+);
 export type SessionSkill = z.infer<typeof SessionSkill>;
 
 export const SessionSkills = z
@@ -14402,6 +14411,17 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // Inline skills are fixed onto the session. Child omission inherits the
     // trusted parent's selection; an explicit array, including [], wins.
     skills: SessionSkills.default([]),
+    // Immutable workspace Skill identities to copy onto this session at
+    // creation. This is the explicit opt-in path for session-selected Pack
+    // Skills: installation alone never exposes them to model context. Child
+    // omission still inherits the parent's already-materialized session Skills.
+    installedSkillIds: z
+      .array(z.string().min(1).max(512))
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "installed Skill identities must be unique",
+      })
+      .optional(),
     // The same child omission rule applies to selected MCP tool refs. Top-level
     // omission still applies workspace-default capability MCP tools; explicit []
     // suppresses those defaults (the first-party OpenGeni server remains added).

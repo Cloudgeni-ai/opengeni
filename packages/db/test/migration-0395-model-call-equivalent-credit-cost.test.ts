@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 
 const migrationPath = join(
   dirname(fileURLToPath(import.meta.url)),
-  "../drizzle/0394_model_call_equivalent_credit_cost.sql",
+  "../drizzle/0395_model_call_equivalent_credit_cost.sql",
 );
 
-describe("migration 0394 model-call equivalent credit cost", () => {
+describe("migration 0395 model-call equivalent credit cost", () => {
   test("adds nullable comparison truth without repricing historical calls", async () => {
     const sql = await readFile(migrationPath, "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
