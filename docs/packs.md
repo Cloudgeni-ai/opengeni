@@ -72,7 +72,7 @@ The manifest `skills` field is retained for compatibility, but v2 installation c
 - its complete normalized file artifact receives one SHA-256;
 - its canonical identity is based on activation mode, case-insensitive Skill name, and exact content hash, not Pack ID; the legacy workspace-managed form keeps its existing identity;
 - two Packs declaring the same activation mode, name, and exact content share one Skill installation with two Pack owners;
-- an effective Skill with the same case-insensitive name but different content is a preview-time mismatch;
+- an effective Skill with the same case-insensitive name but different content or activation mode is a preview-time mismatch, because a workspace-managed twin would defeat a session-selected boundary;
 - uninstalling one Pack retains the Skill while another effective owner remains;
 - uninstalling the final owner removes the Skill from later turns.
 

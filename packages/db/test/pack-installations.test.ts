@@ -566,9 +566,9 @@ describe("Pack installation ownership", () => {
       ]),
     ).toEqual([
       expect.objectContaining({
-        status: "ready",
+        status: "mismatch",
         actualDigest: skill.contentSha256,
-        resolvedId: `skill:pack-inline/session-selected/${skill.name}@${skill.contentSha256}`,
+        resolvedId: null,
       }),
     ]);
 

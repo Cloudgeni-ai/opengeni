@@ -152,17 +152,21 @@ export async function resolvePackInlineSkillReferences(
           candidate.activationMode === requirement.activationMode,
       );
       const mismatch =
-        candidates.find((candidate) => candidate.contentSha256 !== requirement.contentSha256) ??
-        null;
+        candidates.find(
+          (candidate) =>
+            candidate.contentSha256 !== requirement.contentSha256 ||
+            candidate.activationMode !== requirement.activationMode,
+        ) ?? null;
       return {
         key: requirement.key,
         kind: "inline_skill" as const,
         capabilityId: requirement.capabilityId,
         required: true,
-        status: !mismatch || exact ? "ready" : "mismatch",
+        status: candidates.length === 0 || exact ? "ready" : "mismatch",
         expectedDigest: requirement.contentSha256,
         actualDigest: exact?.contentSha256 ?? mismatch?.contentSha256 ?? requirement.contentSha256,
-        resolvedId: exact?.facetInstallationId ?? (mismatch ? null : requirement.capabilityId),
+        resolvedId:
+          candidates.length === 0 ? requirement.capabilityId : (exact?.facetInstallationId ?? null),
         label: requirement.name,
       };
     });

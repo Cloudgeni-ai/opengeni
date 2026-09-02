@@ -14398,7 +14398,13 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // creation. This is the explicit opt-in path for session-selected Pack
     // Skills: installation alone never exposes them to model context. Child
     // omission still inherits the parent's already-materialized session Skills.
-    installedSkillIds: z.array(z.string().min(1).max(512)).max(32).optional(),
+    installedSkillIds: z
+      .array(z.string().min(1).max(512))
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "installed Skill identities must be unique",
+      })
+      .optional(),
     // The same child omission rule applies to selected MCP tool refs. Top-level
     // omission still applies workspace-default capability MCP tools; explicit []
     // suppresses those defaults (the first-party OpenGeni server remains added).
