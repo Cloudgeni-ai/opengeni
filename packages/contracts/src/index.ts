@@ -3375,6 +3375,9 @@ export const InsightsModelUsageRow = z.object({
   /** Hypothetical provider-rate USD; never an OpenGeni charge. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** OpenGeni credit price at the captured rate, whether or not credits paid for the call. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
 });
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
@@ -3385,6 +3388,9 @@ export const InsightsSeriesPoint = z.object({
   /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** UTC hour/day-bucketed equivalent OpenGeni credit price for calls with captured pricing. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
@@ -3419,6 +3425,8 @@ export const InsightsSpendDriver = z.object({
   creditUsd: z.number().nonnegative(),
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
@@ -3471,6 +3479,8 @@ export const InsightsScheduleRow = z.object({
   creditUsd: z.number().nonnegative().nullable(),
   estimatedProviderUsd: z.number().nonnegative().nullable(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative().nullable(),
   tokens: z.number().nonnegative().nullable(),
   cacheHitPct: z.number().int().min(0).max(100).nullable(),
   billing: InsightsBillingPath.nullable(),
@@ -3498,6 +3508,8 @@ export const InsightsModelCallRow = z.object({
   creditUsd: z.number().nonnegative(),
   /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
   estimatedProviderUsd: z.number().nonnegative().nullable(),
+  /** Equivalent OpenGeni credit price; null when historical pricing is unavailable. */
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
   pricingSource: InsightsPricingSource.nullable(),
 });
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
@@ -3546,6 +3558,11 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorEstimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** Equivalent OpenGeni credit price across calls whose historical price was captured. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  priorEquivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+  priorEquivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
@@ -15955,6 +15972,7 @@ export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     inputMicrosPerMillionTokens: z.number().int().nonnegative(),
     cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    cacheWriteMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
     outputMicrosPerMillionTokens: z.number().int().nonnegative(),
     marginBps: z.number().int().min(0).max(100_000).optional(),
   }),

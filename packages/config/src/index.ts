@@ -1625,6 +1625,7 @@ export type TemporalConnectionOptions = {
 export type ModelPricing = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -1658,6 +1659,7 @@ export type EntitlementsConfig = Entitlements;
 const ModelPricingSchema = z.object({
   inputMicrosPerMillionTokens: z.number().int().nonnegative(),
   cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+  cacheWriteMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
   outputMicrosPerMillionTokens: z.number().int().nonnegative(),
   marginBps: z.number().int().min(0).max(100_000).optional(),
 });
@@ -2597,12 +2599,13 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
  * Built-in OpenGeni credit pricing schedules.
  *
  * Rates are provider list prices in USD micros per 1M tokens. Debit applies
- * `marginBps` (2_500 = +25%) on top. Long-context tiers follow OpenAI's
+ * `marginBps` (500 = +5%) on top. Long-context tiers follow OpenAI's
  * ">272K input tokens" rule (threshold exclusive of 272_000).
  *
  * GPT-5.4 and older families are intentionally omitted — they are no longer
- * offered. Codex / connected-subscription turns use `metering: external` and
- * never consult this map.
+ * offered. Codex / connected-subscription turns use `metering: external`, so
+ * this map never debits them, but it does provide their equivalent OpenGeni
+ * credit price when a matching product model is configured.
  *
  * When adding or changing a billed model, run `bun run check:model-pricing`
  * (see docs/model-providers.md § Price audit). That compares this map to
@@ -2613,8 +2616,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     default: {
       inputMicrosPerMillionTokens: 5_000_000,
       cachedInputMicrosPerMillionTokens: 500_000,
+      cacheWriteMicrosPerMillionTokens: 6_250_000,
       outputMicrosPerMillionTokens: 30_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
@@ -2623,8 +2627,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         pricing: {
           inputMicrosPerMillionTokens: 10_000_000,
           cachedInputMicrosPerMillionTokens: 1_000_000,
+          cacheWriteMicrosPerMillionTokens: 12_500_000,
           outputMicrosPerMillionTokens: 45_000_000,
-          marginBps: 2_500,
+          marginBps: 500,
         },
       },
     ],
@@ -2633,8 +2638,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     default: {
       inputMicrosPerMillionTokens: 2_000_000,
       cachedInputMicrosPerMillionTokens: 200_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
       outputMicrosPerMillionTokens: 12_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
@@ -2642,8 +2648,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         pricing: {
           inputMicrosPerMillionTokens: 4_000_000,
           cachedInputMicrosPerMillionTokens: 400_000,
+          cacheWriteMicrosPerMillionTokens: 5_000_000,
           outputMicrosPerMillionTokens: 18_000_000,
-          marginBps: 2_500,
+          marginBps: 500,
         },
       },
     ],
@@ -2652,8 +2659,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
     default: {
       inputMicrosPerMillionTokens: 200_000,
       cachedInputMicrosPerMillionTokens: 20_000,
+      cacheWriteMicrosPerMillionTokens: 250_000,
       outputMicrosPerMillionTokens: 1_200_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
     inputTokenTiers: [
       {
@@ -2661,8 +2669,9 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         pricing: {
           inputMicrosPerMillionTokens: 400_000,
           cachedInputMicrosPerMillionTokens: 40_000,
+          cacheWriteMicrosPerMillionTokens: 500_000,
           outputMicrosPerMillionTokens: 1_800_000,
-          marginBps: 2_500,
+          marginBps: 500,
         },
       },
     ],
@@ -2677,7 +2686,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 140_000,
       cachedInputMicrosPerMillionTokens: 28_000,
       outputMicrosPerMillionTokens: 280_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
   [OPENGENI_GATEWAY_MODELS.kimi.productId]: {
@@ -2685,7 +2694,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
   // Fireworks AI / GLM 5.2 — the first shipped non-OpenAI registry model. A
@@ -2697,7 +2706,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
       inputMicrosPerMillionTokens: 1_400_000,
       cachedInputMicrosPerMillionTokens: 140_000,
       outputMicrosPerMillionTokens: 4_400_000,
-      marginBps: 2_500,
+      marginBps: 500,
     },
   },
 };
@@ -5162,10 +5171,9 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
 
 /**
  * Effective per-model pricing schedules. Merge order (later wins): built-in
- * flat defaults → registry model flat/scheduled pricing → explicit legacy flat
- * OPENGENI_MODEL_PRICING_JSON. The explicit legacy map intentionally replaces
- * a registry schedule with one flat default so its historical precedence stays
- * exact.
+ * flat defaults → registry model flat/scheduled pricing → explicit
+ * OPENGENI_MODEL_PRICING_JSON. Explicit entries may be legacy flat prices or a
+ * complete schedule, and always replace the lower-precedence schedule.
  */
 export function configuredModelPricingSchedules(
   settings: Settings,
@@ -5187,7 +5195,7 @@ export function configuredModelPricingSchedules(
   const configured = Object.fromEntries(
     Object.entries(parseModelPricingJson(settings.modelPricingJson)).map(([model, pricing]) => [
       model,
-      { default: pricing },
+      normalizeModelPricingSchedule(pricing),
     ]),
   );
   return {
@@ -5870,7 +5878,9 @@ export function parseMcpServers(raw: string | undefined): unknown[] | undefined 
   }
 }
 
-export function parseModelPricingJson(raw: string): Record<string, ModelPricing> {
+export function parseModelPricingJson(
+  raw: string,
+): Record<string, ModelPricing | ModelPricingScheduleV1> {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
   }
@@ -5884,12 +5894,12 @@ export function parseModelPricingJson(raw: string): Record<string, ModelPricing>
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("OPENGENI_MODEL_PRICING_JSON must be a JSON object keyed by model name");
   }
-  const out: Record<string, ModelPricing> = {};
+  const out: Record<string, ModelPricing | ModelPricingScheduleV1> = {};
   for (const [model, value] of Object.entries(parsed)) {
     if (!model.trim()) {
       throw new Error("OPENGENI_MODEL_PRICING_JSON contains an empty model name");
     }
-    out[model] = ModelPricingSchema.parse(value);
+    out[model] = z.union([ModelPricingSchema, ModelPricingScheduleSchema]).parse(value);
   }
   return out;
 }
@@ -6100,12 +6110,19 @@ function calculateEntryCostMicros(pricing: ModelPricing, entry: ModelUsageInput)
   const inputTokens = positiveInt(entry.inputTokens);
   const outputTokens = positiveInt(entry.outputTokens);
   const cachedTokens = Math.min(inputTokens, cachedInputTokens(entry));
-  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens);
+  const cacheWriteTokens = Math.min(
+    Math.max(0, inputTokens - cachedTokens),
+    cacheWriteInputTokens(entry),
+  );
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedTokens - cacheWriteTokens);
   const cachedInputRate =
     pricing.cachedInputMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
+  const cacheWriteRate =
+    pricing.cacheWriteMicrosPerMillionTokens ?? pricing.inputMicrosPerMillionTokens;
   return (
     Math.ceil((uncachedInputTokens * pricing.inputMicrosPerMillionTokens) / 1_000_000) +
     Math.ceil((cachedTokens * cachedInputRate) / 1_000_000) +
+    Math.ceil((cacheWriteTokens * cacheWriteRate) / 1_000_000) +
     Math.ceil((outputTokens * pricing.outputMicrosPerMillionTokens) / 1_000_000)
   );
 }
@@ -6122,6 +6139,19 @@ function cachedInputTokens(entry: ModelUsageInput): number {
       positiveInt(detail.cached_tokens) +
       positiveInt(detail.cachedInputTokens) +
       positiveInt(detail.cached_input_tokens);
+  }
+  return total;
+}
+
+function cacheWriteInputTokens(entry: ModelUsageInput): number {
+  const details = Array.isArray(entry.inputTokensDetails)
+    ? entry.inputTokensDetails
+    : entry.inputTokensDetails
+      ? [entry.inputTokensDetails]
+      : [];
+  let total = 0;
+  for (const detail of details) {
+    total += positiveInt(detail.cache_write_tokens ?? detail.cacheWriteTokens);
   }
   return total;
 }

@@ -24,7 +24,7 @@ function billedSettings() {
         inputMicrosPerMillionTokens: 5_000_000,
         cachedInputMicrosPerMillionTokens: 500_000,
         outputMicrosPerMillionTokens: 30_000_000,
-        marginBps: 2_500,
+        marginBps: 500,
       },
     }),
   });
@@ -69,6 +69,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 1000,
         estimatedProviderCostMicros: 800,
+        equivalentCreditCostMicros: 1000,
         pricingSource: "configured_list_price",
         normalizedUsage: {
           telemetry: {
@@ -130,6 +131,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "opengeni_credits",
         pricedCostMicros: 5,
         estimatedProviderCostMicros: 4,
+        equivalentCreditCostMicros: 5,
         pricingSource: "gateway_reported",
         upstreamProvider: "baseten",
         normalizedUsage: {
@@ -178,6 +180,7 @@ describe("recordAuthoritativeModelCallFact", () => {
     expect(billing.billingPath).toBe("external");
     expect(billing.pricedCostMicros).toBe(0);
     expect(billing.estimatedProviderCostMicros).toBe(20_000);
+    expect(billing.equivalentCreditCostMicros).toBe(21_000);
     expect(billing.pricingSource).toBe("configured_list_price");
     expect(debitSpy).not.toHaveBeenCalled();
   });
@@ -307,6 +310,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: 60_000,
+      equivalentCreditCostMicros: 63_000,
       pricingSource: "configured_list_price",
     });
   });
@@ -344,6 +348,7 @@ describe("recordAuthoritativeModelCallFact", () => {
         billingPath: "external",
         pricedCostMicros: 0,
         estimatedProviderCostMicros: null,
+        equivalentCreditCostMicros: null,
         pricingSource: null,
       });
     }
@@ -385,8 +390,9 @@ describe("recordAuthoritativeModelCallFact", () => {
 
     expect(billing).toMatchObject({
       billingPath: "opengeni_credits",
-      pricedCostMicros: 5,
+      pricedCostMicros: 4,
       estimatedProviderCostMicros: 4,
+      equivalentCreditCostMicros: 4,
       pricingSource: "gateway_reported",
       upstreamProvider: "baseten",
     });
@@ -411,6 +417,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros: null,
+      equivalentCreditCostMicros: null,
       pricingSource: null,
     });
   });

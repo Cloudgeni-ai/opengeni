@@ -855,6 +855,9 @@ billing path and any validated Gateway endpoint provider so the additive
 Insights fact can be repaired exactly after a soft writer failure; repair
 prefers those authorities over the logical Gateway provider and legacy
 inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
+Each new fact also freezes provider cost and equivalent OpenGeni credit price as
+separate nullable comparisons, while `priced_cost_micros` remains the actual
+credits-path price and is zero for externally billed calls.
 
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their

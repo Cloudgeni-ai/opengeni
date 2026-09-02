@@ -136,13 +136,17 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         },
       );
 
-      expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 5 });
+      expect(recorded).toContainEqual({ eventType: "model.cost", quantity: 4 });
       expect(debitInputs).toHaveLength(1);
       expect(debitInputs[0]).toMatchObject({
-        requestedAmountMicros: 5,
+        requestedAmountMicros: 4,
         metadata: { gatewayProvider: "baseten", cachedTokens: 3 },
       });
-      expect(billing).toMatchObject({ pricedCostMicros: 5, upstreamProvider: "baseten" });
+      expect(billing).toMatchObject({
+        pricedCostMicros: 4,
+        equivalentCreditCostMicros: 4,
+        upstreamProvider: "baseten",
+      });
     } finally {
       recordSpy.mockRestore();
       debitSpy.mockRestore();

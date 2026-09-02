@@ -4637,6 +4637,7 @@ export type ModelCallFact = {
   totalTokens: number | null;
   pricedCostMicros: number;
   estimatedProviderCostMicros: number | null;
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   contextContributions: readonly ModelContextContributionSummary[] | null;
   occurredAt: Date;
@@ -4672,6 +4673,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
     totalTokens: row.totalTokens,
     pricedCostMicros: row.pricedCostMicros,
     estimatedProviderCostMicros: row.estimatedProviderCostMicros,
+    equivalentCreditCostMicros: row.equivalentCreditCostMicros,
     pricingSource:
       row.pricingSource === "configured_list_price" || row.pricingSource === "gateway_reported"
         ? row.pricingSource
@@ -4738,6 +4740,7 @@ export async function recordModelCallFact(
     billingPath: ModelCallBillingPath;
     pricedCostMicros: number;
     estimatedProviderCostMicros?: number | null;
+    equivalentCreditCostMicros?: number | null;
     pricingSource?: "configured_list_price" | "gateway_reported" | null;
     contextContributions?: readonly ModelContextContributionSummary[] | null;
     inputTokens?: number | null;
@@ -4759,6 +4762,20 @@ export async function recordModelCallFact(
   ) {
     throw new Error(
       "recordModelCallFact: estimatedProviderCostMicros must be null or a non-negative safe integer",
+    );
+  }
+  if (
+    input.equivalentCreditCostMicros != null &&
+    (input.equivalentCreditCostMicros < 0 ||
+      !Number.isSafeInteger(input.equivalentCreditCostMicros))
+  ) {
+    throw new Error(
+      "recordModelCallFact: equivalentCreditCostMicros must be null or a non-negative safe integer",
+    );
+  }
+  if (input.equivalentCreditCostMicros != null && input.estimatedProviderCostMicros == null) {
+    throw new Error(
+      "recordModelCallFact: equivalentCreditCostMicros requires estimatedProviderCostMicros",
     );
   }
   if ((input.estimatedProviderCostMicros == null) !== (input.pricingSource == null)) {
@@ -4822,6 +4839,7 @@ export async function recordModelCallFact(
           totalTokens: input.totalTokens ?? null,
           pricedCostMicros: input.pricedCostMicros,
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
+          equivalentCreditCostMicros: input.equivalentCreditCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
           contextContributions,
           occurredAt,
@@ -4839,6 +4857,7 @@ export async function recordModelCallFact(
             initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
             turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
             estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
+            equivalentCreditCostMicros: sql`coalesce(${schema.modelCallFacts.equivalentCreditCostMicros}, excluded.equivalent_credit_cost_micros)`,
             pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
           },

@@ -593,6 +593,8 @@ export type ModelUsageBillingRecord = {
   pricedCostMicros: number;
   /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
   estimatedProviderCostMicros: number | null;
+  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
@@ -691,6 +693,12 @@ export async function recordModelUsageAndDebitCredits(
     : hasCompleteCoreTokenTelemetry
       ? (pricingBreakdown?.providerCostMicros ?? null)
       : null;
+  const equivalentCreditCostMicros =
+    pricingBreakdown && !unpinnedWorkspaceGatewayModel
+      ? gatewayBilling || hasCompleteCoreTokenTelemetry
+        ? pricingBreakdown.creditCostMicros
+        : null
+      : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
     : estimatedProviderCostMicros !== null
@@ -734,6 +742,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -745,6 +754,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -798,6 +808,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
     pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -835,6 +846,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       billingPath: input.billing.billingPath,
       pricedCostMicros: input.billing.pricedCostMicros,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      equivalentCreditCostMicros: input.billing.equivalentCreditCostMicros,
       pricingSource: input.billing.pricingSource,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
@@ -862,10 +874,15 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
       ? { outputTokens: normalized.telemetry.outputTokens }
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null
+    ...(normalized.telemetry.cachedTokens !== null || normalized.telemetry.cacheWriteTokens !== null
       ? {
           inputTokensDetails: {
-            cached_tokens: normalized.telemetry.cachedTokens,
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { cached_tokens: normalized.telemetry.cachedTokens }),
+            ...(normalized.telemetry.cacheWriteTokens === null
+              ? {}
+              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
           },
         }
       : {}),
