@@ -70941,8 +70941,9 @@ export type AddSessionSystemUpdateInput = {
   scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
 
-export type AddSessionSystemUpdateResult =
+export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
+  | (RequireIdleSession extends true ? { added: false; reason: "session_not_idle" } : never)
   | {
       added: boolean;
       reason: "added" | "duplicate";
@@ -70957,12 +70958,14 @@ export type AddSessionSystemUpdateResult =
 export type PrepareSessionSystemUpdateSourceResult = {
   /** Private, bounded, content-free source authority appended before insert. */
   lineage?: Record<string, unknown>;
+  /** Source-owned events appended before the pending-update event. */
+  events?: SessionEvent[];
 };
 
 export async function addSessionSystemUpdate(
   db: Database,
   input: AddSessionSystemUpdateInput,
-): Promise<AddSessionSystemUpdateResult> {
+): Promise<AddSessionSystemUpdateResult<false>> {
   if (input.payload.type !== input.kind) {
     throw new Error(`Internal update payload discriminator must equal kind ${input.kind}`);
   }
@@ -70973,29 +70976,34 @@ export async function addSessionSystemUpdate(
  * Persist one internal update without fabricating a user prompt or queue row.
  * Dedupe and any producer/outbox mutation commit in the same transaction.
  */
-export async function addSessionSystemUpdateWithSourceMutation(
+export async function addSessionSystemUpdateWithSourceMutation<
+  RequireIdleSession extends boolean = false,
+>(
   db: Database,
   input: AddSessionSystemUpdateInput,
   mutateSource: (
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
+    rejectionReason: "session_cancelled" | "session_not_idle" | null,
   ) => Promise<void>,
   options: {
+    /** Admit only when the already-locked session is at its idle boundary. */
+    requireIdleSession?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
       tx: Database,
       sessionId: string,
     ) => Promise<PrepareSessionSystemUpdateSourceResult | void>;
   } = {},
-): Promise<AddSessionSystemUpdateResult> {
+): Promise<AddSessionSystemUpdateResult<RequireIdleSession>> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
   }
   if (Buffer.byteLength(input.summary) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update summary exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
   }
-  return await withSessionActivityRlsContext(
+  return (await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -71005,8 +71013,9 @@ export async function addSessionSystemUpdateWithSourceMutation(
           controlLock: "share",
           sessionIds: [input.sessionId],
         });
-        const session = locks.sessions[0];
+        let session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const temporalWorkflowId = session.temporalWorkflowId;
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
@@ -71014,10 +71023,71 @@ export async function addSessionSystemUpdateWithSourceMutation(
           { workspaceControl: locks.control ?? undefined },
         );
         if (session.status === "cancelled") {
-          await mutateSource(tx as unknown as Database, null, null);
+          await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
+        const replayExistingUpdate = async (events: SessionEvent[]) => {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.dedupeKey, input.dedupeKey),
+              ),
+            )
+            .limit(1);
+          if (!existing) return null;
+          const [pendingEvent] = await tx
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.type, "system.update.pending"),
+                sql`${schema.sessionEvents.payload} ->> 'updateId' = ${existing.id}`,
+              ),
+            )
+            .limit(1);
+          if (!pendingEvent) throw new Error("System-update pending event disappeared");
+          await mutateSource(tx as unknown as Database, pendingEvent.id, existing.id, null);
+          return {
+            added: false,
+            reason: "duplicate",
+            update: mapSessionSystemUpdate(existing),
+            shouldWake: false,
+            workflowWakeRevision: null,
+            wakeEventId: pendingEvent.id,
+            temporalWorkflowId,
+            events,
+          } as const;
+        };
+
+        if (options.requireIdleSession && session.status !== "idle") {
+          const replayed = await replayExistingUpdate([]);
+          if (replayed) {
+            return replayed;
+          }
+          await mutateSource(tx as unknown as Database, null, null, "session_not_idle");
+          return { added: false, reason: "session_not_idle" } as const;
+        }
         const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
+        if ((prepared?.events?.length ?? 0) > 0) {
+          const [refreshedSession] = await tx
+            .select()
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (!refreshedSession) throw new Error(`Session not found: ${input.sessionId}`);
+          session = refreshedSession;
+        }
         const lineage = {
           ...(input.lineage ?? {}),
           ...(prepared?.lineage ?? {}),
@@ -71062,42 +71132,9 @@ export async function addSessionSystemUpdateWithSourceMutation(
           })
           .returning();
         if (!inserted) {
-          const [existing] = await tx
-            .select()
-            .from(schema.sessionSystemUpdates)
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                eq(schema.sessionSystemUpdates.dedupeKey, input.dedupeKey),
-              ),
-            )
-            .limit(1);
-          if (!existing) throw new Error("System-update dedupe row disappeared");
-          const [pendingEvent] = await tx
-            .select({ id: schema.sessionEvents.id })
-            .from(schema.sessionEvents)
-            .where(
-              and(
-                eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                eq(schema.sessionEvents.sessionId, input.sessionId),
-                eq(schema.sessionEvents.type, "system.update.pending"),
-                sql`${schema.sessionEvents.payload} ->> 'updateId' = ${existing.id}`,
-              ),
-            )
-            .limit(1);
-          if (!pendingEvent) throw new Error("System-update pending event disappeared");
-          await mutateSource(tx as unknown as Database, pendingEvent.id, existing.id);
-          return {
-            added: false,
-            reason: "duplicate",
-            update: mapSessionSystemUpdate(existing),
-            shouldWake: false,
-            workflowWakeRevision: null,
-            wakeEventId: pendingEvent.id,
-            temporalWorkflowId: session.temporalWorkflowId,
-            events: [],
-          };
+          const replayed = await replayExistingUpdate(prepared?.events ?? []);
+          if (!replayed) throw new Error("System-update dedupe row disappeared");
+          return replayed;
         }
 
         const now = new Date();
@@ -71129,7 +71166,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           )
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
-        await mutateSource(tx as unknown as Database, event.id, inserted.id);
+        await mutateSource(tx as unknown as Database, event.id, inserted.id, null);
         // Producer-side supersession of this child's now-stale pending notices
         // on the parent: a newer child_progress replaces an older one, and a
         // resolution supersedes the child_requires_action of the same exact
@@ -71273,11 +71310,16 @@ export async function addSessionSystemUpdateWithSourceMutation(
               temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
             })
           : null;
+        // An idle-gated admission consumes that boundary even when control or
+        // realtime ownership withholds the workflow wake. Persisting `queued`
+        // reserves the accepted work so a later distinct skip occurrence
+        // cannot cross the same idle boundary while this update is pending.
+        const shouldQueue = shouldWake || options.requireIdleSession === true;
         await tx
           .update(schema.sessions)
           .set({
             lastSequence: session.lastSequence + appendedSequences,
-            ...(shouldWake ? { status: "queued" as const } : {}),
+            ...(shouldQueue ? { status: "queued" as const } : {}),
             updatedAt: now,
           })
           .where(eq(schema.sessions.id, session.id));
@@ -71290,13 +71332,14 @@ export async function addSessionSystemUpdateWithSourceMutation(
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
           events: [
+            ...(prepared?.events ?? []),
             mapEvent(event),
             ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
             ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
           ],
         };
       }),
-  );
+  )) as AddSessionSystemUpdateResult<RequireIdleSession>;
 }
 
 /**
