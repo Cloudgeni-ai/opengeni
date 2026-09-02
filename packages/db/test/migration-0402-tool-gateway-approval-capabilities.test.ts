@@ -5,7 +5,7 @@ import postgres from "postgres";
 import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
-  "../drizzle/0401_tool_gateway_approval_capabilities.sql",
+  "../drizzle/0402_tool_gateway_approval_capabilities.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationPath).text();
@@ -20,10 +20,10 @@ let app: ReturnType<typeof postgres> | null = null;
 beforeAll(async () => {
   blank = await acquireBlankTestDatabase("migration-0401-tool-gateway-approval");
   if (!blank) {
-    if (requireRealDatabase) throw new Error("migration 0401 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0402 requires real PostgreSQL");
     return;
   }
-  if (!blank.appPassword) throw new Error("migration 0401 app password is unavailable");
+  if (!blank.appPassword) throw new Error("migration 0402 app password is unavailable");
   admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
   await admin.unsafe(`
     create schema opengeni_private;
@@ -62,7 +62,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0401 tool gateway approval capabilities", () => {
+describe("migration 0402 tool gateway approval capabilities", () => {
   test("stores only bounded hash-only one-shot approval evidence", () => {
     expect(source).toContain("-- deployment-mode: rolling");
     expect(source).toContain('CREATE TABLE "tool_gateway_approval_capabilities"');

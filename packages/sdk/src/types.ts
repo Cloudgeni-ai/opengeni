@@ -4099,6 +4099,16 @@ export type CreateOrganizationResponse = {
   organization: OrganizationSummary;
   workspaceId: string;
 };
+export type CreateAdditionalOrganizationRequest = {
+  name: string;
+  workspaceName: string;
+  operationId: string;
+};
+export type CreateAdditionalOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
+  personalWorkspaceId: string;
+};
 export type UpdateOrganizationNameRequest = {
   name: string;
   expectedUpdatedAt: string;

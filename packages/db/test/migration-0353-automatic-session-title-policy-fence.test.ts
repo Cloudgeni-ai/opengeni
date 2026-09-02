@@ -947,6 +947,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's evaluator strict for every table that existed at that boundary,
     // while explicitly removing tables introduced by later migrations.
     const post0353RuntimeTables = new Set([
+      "additional_organization_creation_receipts",
       "company_profile_agent_automatic_activation_receipts",
       "deployment_model_catalog",
       "organization_company_profile_agent_policies",
@@ -968,6 +969,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "pr_review_managed_github_authority_nonces",
       "pr_review_managed_github_routes",
       "remember_knowledge_memory_materializations",
+      "session_tenancy_additional_organization_activation_evidence",
       "session_event_cursors",
       "session_work_claim_revisions",
       "session_work_claim_write_capabilities",
@@ -1028,8 +1030,12 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     ]);
     const post0353CapabilityRoutines = new Set([
       ...sessionSetRoutines,
+      "create_additional_managed_organization(text, text, text, text, uuid)",
       "issue_self_local_connection_use_grant(uuid, uuid, uuid, text, boolean)",
       "resolve_workspace_codex_subscription_source(uuid, uuid)",
+    ]);
+    const post0353ForbiddenRoutines = new Set([
+      "activate_session_tenancy_from_additional_organization(uuid)",
     ]);
     const post0353ProtectedTables = new Set([...post0353RuntimeTables, ...sessionSetTables]);
     const preSessionSetProtectedTables = FORCE_RLS_TABLES.filter(
@@ -1054,7 +1060,9 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       protectedNoDirectDmlTables: preSessionSetNoDirectDmlTables,
       tablePrivileges: preSessionSetTablePrivileges,
       targetSchemaCapabilityRoutines: preSessionSetCapabilityRoutines,
-      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
+      targetSchemaForbiddenRoutines: RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES.filter(
+        (routine) => !post0353ForbiddenRoutines.has(routine),
+      ),
     });
 
     try {

@@ -296,6 +296,17 @@ that includes `capabilities:manage`, so they can configure their own Plugins,
 Integrations, and Codex subscription without receiving the `workspace:admin`
 wildcard, member management, or API-key delegation.
 
+An already-onboarded verified managed human may create additional independent
+organizations from the organization switcher. The login and canonical human
+identity remain global; each organization gets a separate owner membership and
+Personal workspace. The creation lifecycle also creates one first shared
+workspace with an explicit administrator grant, refreshes authoritative access
+before navigation, and copies no tenant data from the current organization. A
+subject-scoped database fence limits this self-service lifecycle to ten
+additional organizations per human; invitation memberships do not consume it.
+First-sign-in onboarding and invitation precedence remain a separate one-shot
+path.
+
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
 [`organization-tenancy.md`](organization-tenancy.md),

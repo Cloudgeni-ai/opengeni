@@ -3,6 +3,7 @@ import type { ApiRouteDeps, ManagedEmailDeliveryResult, ManagedEmailMessage } fr
 import {
   bootstrapWorkspace,
   claimOrganizationUserSetupDelivery,
+  completeSelfServiceOrganizationSetup,
   createDb,
   createOrganizationInvitation,
   ensureManagedAccessForUserWithOrganizationMemberships,
@@ -218,6 +219,13 @@ describe("organization membership routes", () => {
       managedAuth: null,
     } as ApiRouteDeps);
     expect((await configured.request("http://x/v1/organization-memberships")).status).toBe(401);
+    expect(
+      (
+        await configured.request("http://x/v1/organizations/additional", {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(401);
 
     const delegated = new Hono();
     registerOrganizationMembershipRoutes(delegated, {
@@ -228,6 +236,17 @@ describe("organization membership routes", () => {
     expect(
       (
         await delegated.request("http://x/v1/organization-memberships", {
+          headers: {
+            authorization: "Bearer delegated",
+            cookie: "session=present",
+          },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await delegated.request("http://x/v1/organizations/additional", {
+          method: "POST",
           headers: {
             authorization: "Bearer delegated",
             cookie: "session=present",
@@ -1386,6 +1405,134 @@ describe("organization membership routes", () => {
       select count(*)::int as count from organization_membership_invitations
       where target_email = ${targetEmail}`;
     expect(committed?.count).toBe(0);
+  });
+
+  test("creates another organization for the same authenticated human", async () => {
+    if (!shared || !client) return;
+    const additionalUserId = `additional-organization-${crypto.randomUUID()}`;
+    const additionalSubjectId = `user:${additionalUserId}`;
+    const additionalSessionId = `session-${crypto.randomUUID()}`;
+    const additionalEmail = `${additionalUserId}@example.test`;
+    await shared.admin`
+      insert into auth_users (id, name, email, email_verified)
+      values (${additionalUserId}, 'Additional owner', ${additionalEmail}, true)`;
+    await completeSelfServiceOrganizationSetup(client.db, {
+      authUserId: additionalUserId,
+      actorSubjectId: additionalSubjectId,
+      organizationName: "Original organization",
+      operationId: crypto.randomUUID(),
+      requestFingerprint: "b".repeat(64),
+    });
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id)
+      values (${crypto.randomUUID()}, ${additionalUserId}, 'credential', ${additionalUserId})`;
+    const identity = await synchronizeCanonicalHumanLoginBindings(client.db, additionalUserId);
+    await shared.admin`
+      insert into auth_sessions (
+        id, user_id, token, expires_at,
+        identity_id, identity_revision, auth_revision
+      ) values (
+        ${additionalSessionId}, ${additionalUserId}, ${crypto.randomUUID()}, now() + interval '1 hour',
+        ${identity.identityId}, ${identity.identityRevision}, ${identity.authRevision}
+      )`;
+
+    const additionalApp = new Hono();
+    registerOrganizationMembershipRoutes(additionalApp, {
+      db: client.db,
+      settings: managedSettings,
+      managedAuth: {
+        api: {
+          getSession: async () => ({
+            headers: new Headers(),
+            response: {
+              session: { id: additionalSessionId },
+              user: {
+                id: additionalUserId,
+                email: additionalEmail,
+                name: "Additional owner",
+                emailVerified: true,
+              },
+            },
+          }),
+        },
+      } as never,
+      managedEmailTransport,
+    } as ApiRouteDeps);
+
+    const request = {
+      name: "New team",
+      workspaceName: "General",
+      operationId: crypto.randomUUID(),
+    };
+    const response = await additionalApp.request("http://x/v1/organizations/additional", {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(response.status).toBe(201);
+    const created = (await response.json()) as {
+      organization: { id: string; name: string };
+      workspaceId: string;
+      personalWorkspaceId: string;
+    };
+    expect(created).toMatchObject({ organization: { name: "New team" } });
+    expect(created.workspaceId).not.toBe(created.personalWorkspaceId);
+
+    const replay = await additionalApp.request("http://x/v1/organizations/additional", {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+    expect(replay.status).toBe(201);
+    expect(await replay.json()).toEqual(created);
+
+    const malformed = await additionalApp.request("http://x/v1/organizations/additional", {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({ ...request, operationId: crypto.randomUUID(), unexpected: true }),
+    });
+    expect(malformed.status).toBe(422);
+
+    for (let index = 2; index <= 10; index += 1) {
+      const withinLimit = await additionalApp.request("http://x/v1/organizations/additional", {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Additional team ${index}`,
+          workspaceName: `Workspace ${index}`,
+          operationId: crypto.randomUUID(),
+        }),
+      });
+      expect(withinLimit.status).toBe(201);
+    }
+    const overLimit = await additionalApp.request("http://x/v1/organizations/additional", {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "One too many",
+        workspaceName: "Overflow",
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(overLimit.status).toBe(409);
+    expect(await overLimit.text()).toBe("additional organization limit reached");
+
+    const [graph] = await shared.admin<
+      Array<{ memberships: number; workspaces: number; access: number }>
+    >`
+      select
+        (select count(*)::int from organization_memberships
+          where account_id = ${created.organization.id}
+            and subject_id = ${additionalSubjectId}
+            and role = 'owner' and status = 'active') as memberships,
+        (select count(*)::int from workspaces
+          where account_id = ${created.organization.id}) as workspaces,
+        (select count(*)::int from workspace_memberships
+          where account_id = ${created.organization.id}
+            and workspace_id = ${created.workspaceId}
+            and subject_id = ${additionalSubjectId}
+            and role = 'admin') as access`;
+    expect(graph).toEqual({ memberships: 1, workspaces: 2, access: 1 });
   });
 
   test("returns only the current active membership and reports terminal state as empty", async () => {
