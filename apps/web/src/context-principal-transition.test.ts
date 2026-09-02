@@ -102,7 +102,7 @@ describe("principal transition contract", () => {
       accessLoad.indexOf("setAccessContext(context)"),
     );
     expect(accessLoad.indexOf("ownsPrincipalTransition(")).toBeLessThan(
-      accessLoad.indexOf('toast.error("Failed to load workspace access"'),
+      accessLoad.indexOf("setAccessError(presentation)"),
     );
   });
 
