@@ -70,3 +70,29 @@ export async function deleteOrganizationWorkspaceWithReconciliation(input: {
     return null;
   }
 }
+
+/**
+ * Once deletion is authoritative, refresh and navigation are best-effort
+ * follow-up work. Attempt both, but never turn their failure into a mutation
+ * failure that invites the user to retry an already-committed deletion.
+ */
+export async function completeWorkspaceDeletionFollowUp(input: {
+  refreshAccess: () => Promise<void>;
+  navigate: () => Promise<void>;
+}): Promise<{ status: "completed" } | { status: "failed"; error: unknown }> {
+  let firstError: unknown;
+  let failed = false;
+  try {
+    await input.refreshAccess();
+  } catch (error) {
+    firstError = error;
+    failed = true;
+  }
+  try {
+    await input.navigate();
+  } catch (error) {
+    if (!failed) firstError = error;
+    failed = true;
+  }
+  return failed ? { status: "failed", error: firstError } : { status: "completed" };
+}

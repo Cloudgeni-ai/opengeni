@@ -65,7 +65,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
-import { deleteOrganizationWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
+import {
+  completeWorkspaceDeletionFollowUp,
+  deleteOrganizationWorkspaceWithReconciliation,
+} from "@/lib/workspace-deletion";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -983,18 +986,29 @@ function OrganizationManagedWorkspaceSettings({
         organizationId,
         workspaceId: workspace.id,
       });
-      await context.revalidatePrincipalAccess();
       const next =
         currentOverview?.workspaces.find((candidate) => candidate.id !== workspace.id) ?? null;
-      if (next) {
-        await navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: next.id },
-          search: { section: "overview" },
-          replace: true,
+      const followUp = await completeWorkspaceDeletionFollowUp({
+        refreshAccess: async () => await context.revalidatePrincipalAccess(),
+        navigate: async () => {
+          if (next) {
+            await navigate({
+              to: "/workspaces/$workspaceId/organization",
+              params: { workspaceId: next.id },
+              search: { section: "overview" },
+              replace: true,
+            });
+          } else {
+            await navigate({ to: "/", replace: true });
+          }
+        },
+      });
+      if (followUp.status === "failed") {
+        toast.warning("Workspace deleted, but the page may be out of date", {
+          description: `${
+            followUp.error instanceof Error ? followUp.error.message : String(followUp.error)
+          }. Reload to refresh your workspace access.`,
         });
-      } else {
-        await navigate({ to: "/", replace: true });
       }
       return true;
     } catch (error) {
@@ -1348,12 +1362,25 @@ export function DangerZone(props: {
     }
     deleteInFlight.current = true;
     setBusy(true);
-    // onDelete (context.deleteWorkspace) surfaces its own error toast; on
-    // success it navigates away, unmounting this dialog.
-    const ok = await props.onDelete();
-    if (ok) {
-      toast.success("Workspace deleted");
-    } else {
+    // onDelete surfaces expected mutation errors. Close explicitly on success
+    // because a best-effort post-delete navigation can leave this route mounted.
+    try {
+      const ok = await props.onDelete();
+      if (ok) {
+        toast.success("Workspace deleted");
+        deleteInFlight.current = false;
+        setBusy(false);
+        setOpen(false);
+        setConfirmName("");
+      }
+      if (!ok) {
+        deleteInFlight.current = false;
+        setBusy(false);
+      }
+    } catch (error) {
+      toast.error("Couldn't finish workspace deletion", {
+        description: error instanceof Error ? error.message : String(error),
+      });
       deleteInFlight.current = false;
       setBusy(false);
     }

@@ -46,6 +46,7 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
 describe("workspace deletion confirmation", () => {
   test("reconciles organization-admin deletion and stays in its manageable workspace roster", () => {
     expect(workspaceSettingsSource).toContain("deleteOrganizationWorkspaceWithReconciliation({");
+    expect(workspaceSettingsSource).toContain("completeWorkspaceDeletionFollowUp({");
     expect(workspaceSettingsSource).toContain(
       "currentOverview?.workspaces.find((candidate) => candidate.id !== workspace.id) ?? null;",
     );
@@ -96,6 +97,42 @@ describe("workspace deletion confirmation", () => {
       expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled).toBe(false);
     } finally {
       pending.resolve(false);
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("closes the confirmation after committed deletion even when the route stays mounted", async () => {
+    const onDelete = mock(async () => true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          <DangerZone
+            workspaceName="Workspace A"
+            canDelete
+            isOnlyWorkspaceInAccount={false}
+            onDelete={onDelete}
+          />,
+        );
+      });
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>("button")!.click();
+      });
+      const input = document.body.querySelector<HTMLInputElement>("#confirm-workspace-name")!;
+      await setInputValue(input, "Workspace A");
+      await act(async () => {
+        input.closest("form")!.requestSubmit();
+        await Promise.resolve();
+      });
+
+      expect(onDelete).toHaveBeenCalledTimes(1);
+      expect(document.body.querySelector("#confirm-workspace-name")).toBeNull();
+      expect(container.querySelector<HTMLButtonElement>("button")?.disabled).toBe(false);
+    } finally {
       await act(async () => root.unmount());
       container.remove();
     }

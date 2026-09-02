@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
 import {
+  completeWorkspaceDeletionFollowUp,
   deleteOrganizationWorkspaceWithReconciliation,
   deleteWorkspaceWithReconciliation,
 } from "./workspace-deletion";
@@ -199,5 +200,35 @@ describe("workspace deletion reconciliation", () => {
         workspaceId: "target-workspace",
       }),
     ).rejects.toBe(mutationError);
+  });
+
+  test("keeps committed deletion successful when refresh fails and still attempts navigation", async () => {
+    const refreshError = new TypeError("refresh failed");
+    let navigated = false;
+
+    await expect(
+      completeWorkspaceDeletionFollowUp({
+        refreshAccess: async () => {
+          throw refreshError;
+        },
+        navigate: async () => {
+          navigated = true;
+        },
+      }),
+    ).resolves.toEqual({ status: "failed", error: refreshError });
+    expect(navigated).toBe(true);
+  });
+
+  test("reports a navigation failure without rejecting committed deletion", async () => {
+    const navigationError = new Error("navigation failed");
+
+    await expect(
+      completeWorkspaceDeletionFollowUp({
+        refreshAccess: async () => {},
+        navigate: async () => {
+          throw navigationError;
+        },
+      }),
+    ).resolves.toEqual({ status: "failed", error: navigationError });
   });
 });
