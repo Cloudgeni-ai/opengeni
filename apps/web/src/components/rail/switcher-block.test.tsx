@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createRef, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 
+import { CreateOrganizationForm } from "@/components/rail/create-organization-dialog";
 import { WorkspaceSwitcherTrigger } from "@/components/rail/workspace-switcher";
 import type { Workspace } from "@/types";
 
@@ -43,6 +44,48 @@ describe("WorkspaceSwitcherTrigger", () => {
     await act(async () => {
       root.unmount();
     });
+    host.remove();
+  });
+});
+
+describe("CreateOrganizationForm", () => {
+  test("explains the isolated organization graph and submits both names", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let submitted = 0;
+    await act(async () => {
+      root.render(
+        <CreateOrganizationForm
+          organizationName="Product team"
+          workspaceName="Launch room"
+          busy={false}
+          onOrganizationNameChange={() => undefined}
+          onWorkspaceNameChange={() => undefined}
+          onCancel={() => undefined}
+          onSubmit={() => {
+            submitted += 1;
+          }}
+        />,
+      );
+    });
+
+    expect(document.body.textContent).toContain("New organization");
+    expect(document.body.textContent).toContain("Product team");
+    expect(document.body.textContent).toContain("Launch room");
+    expect(document.body.textContent).toContain("Your login stays the same");
+    expect(document.body.textContent).toContain("nothing is copied");
+
+    const submit = Array.from(document.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Create organization"),
+    );
+    expect(submit).toBeInstanceOf(HTMLButtonElement);
+    await act(async () => {
+      submit?.click();
+    });
+    expect(submitted).toBe(1);
+
+    await act(async () => root.unmount());
     host.remove();
   });
 });

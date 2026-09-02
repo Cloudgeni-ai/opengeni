@@ -760,6 +760,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Managed organizations | `createOrganization` for first-time compatibility; `createAdditionalOrganization` for an already-onboarded human; `listOrganizationMemberships`, `listOrganizationInvitations`, `acceptOrganizationInvitation` |
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |

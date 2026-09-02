@@ -1,5 +1,7 @@
 import {
   AcceptOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -40,6 +42,7 @@ import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
+  createAdditionalManagedOrganization,
   createManagedOrganization,
   createOrganizationWorkspace,
   createOrganizationInvitation,
@@ -118,7 +121,9 @@ async function requireOrganizationAdministrator(
     );
     return { subjectId };
   }
-  throw new HTTPException(401, { message: "organization administrator session required" });
+  throw new HTTPException(401, {
+    message: "organization administrator session required",
+  });
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -162,6 +167,25 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       return context.json(
         CreateOrganizationResponse.parse(
           await createManagedOrganization(deps.db, {
+            subjectId,
+            subjectLabel: session.user.email || session.user.name,
+            ...payload,
+          }),
+        ),
+        201,
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.post("/v1/organizations/additional", async (context) => {
+    const { session, subjectId } = await requireManagedHuman(context, deps);
+    const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
+    try {
+      return context.json(
+        CreateAdditionalOrganizationResponse.parse(
+          await createAdditionalManagedOrganization(deps.db, {
             subjectId,
             subjectLabel: session.user.email || session.user.name,
             ...payload,
