@@ -19,6 +19,35 @@ UPDATE "workspaces"
 SET "settings" = jsonb_set("settings", '{memoryEnabled}', 'true'::jsonb, true)
 WHERE NOT ("settings" ? 'memoryEnabled');
 
+-- Historical no-revision snapshots were frozen with workspace_mode = 'off'.
+-- Keep those rows valid while allowing newly accepted attempts to freeze the
+-- approval-required default below.
+ALTER TABLE "workspace_learning_policy_snapshots"
+  DROP CONSTRAINT "workspace_learning_policy_snapshots_identity_chk";
+
+ALTER TABLE "workspace_learning_policy_snapshots"
+  ADD CONSTRAINT "workspace_learning_policy_snapshots_identity_chk" CHECK (
+    (
+      "revision_id" IS NULL
+      AND "revision" IS NULL
+      AND "policy_hash" IS NULL
+      AND "activation_version" = 0
+      AND "activated_at" IS NULL
+      AND "workspace_mode" IN ('off', 'suggest')
+      AND "source_overrides" = '[]'::jsonb
+    )
+    OR (
+      "revision_id" IS NOT NULL
+      AND "revision" > 0
+      AND "policy_hash" ~ '^[0-9a-f]{64}$'
+      AND "activation_version" > 0
+      AND "activated_at" IS NOT NULL
+    )
+  ) NOT VALID;
+
+ALTER TABLE "workspace_learning_policy_snapshots"
+  VALIDATE CONSTRAINT "workspace_learning_policy_snapshots_identity_chk";
+
 CREATE OR REPLACE FUNCTION workspace_learning_policy_canonical_at(
   p_account_id uuid,
   p_workspace_id uuid,

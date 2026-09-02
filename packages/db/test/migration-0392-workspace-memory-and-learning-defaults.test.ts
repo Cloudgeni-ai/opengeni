@@ -31,6 +31,7 @@ describe("migration 0392 workspace Memory and learning defaults", () => {
     );
     expect(migration).toContain(`WHERE NOT ("settings" ? 'memoryEnabled')`);
     expect(migration).toContain(`'workspaceMode', 'suggest'`);
+    expect(migration).toContain(`"workspace_mode" IN ('off', 'suggest')`);
     expect(migration).not.toContain(`UPDATE "workspace_learning_policy_snapshots"`);
     expect(migration).not.toContain(`UPDATE "company_brain_turn_context_snapshots"`);
   });
@@ -83,5 +84,14 @@ describe("migration 0392 workspace Memory and learning defaults", () => {
       workspaceMode: "suggest",
       sourceOverrides: [],
     });
+
+    const [snapshotIdentity] = await shared.admin<{ definition: string }[]>`
+      select pg_get_constraintdef(oid) as definition
+      from pg_constraint
+      where conrelid = 'workspace_learning_policy_snapshots'::regclass
+        and conname = 'workspace_learning_policy_snapshots_identity_chk'`;
+    expect(snapshotIdentity!.definition).toContain(
+      "workspace_mode = ANY (ARRAY['off'::text, 'suggest'::text])",
+    );
   }, 180_000);
 });
