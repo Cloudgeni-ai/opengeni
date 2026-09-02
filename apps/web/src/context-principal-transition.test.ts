@@ -171,6 +171,15 @@ describe("principal transition contract", () => {
     }
   });
 
+  test("workspace deletion is single-flight and reconciles the committed end state", () => {
+    const deletion = sourceBetween("async function deleteWorkspace(", "const refreshGitHub");
+    expect(deletion).toContain("deleteWorkspaceWithReconciliation({");
+    expect(deletion).toContain("client.deleteWorkspace(workspaceId)");
+    expect(deletion).toContain("client.getWorkspace(workspaceId)");
+    expect(workspaceSettingsSource).toContain("if (!nameMatches || deleteInFlight.current)");
+    expect(workspaceSettingsSource).toContain("deleteInFlight.current = true;");
+  });
+
   test("mutation callers do not toast, refresh, or announce stale results", () => {
     expect(workspaceSettingsSource).toContain(
       "const updated = await context.setWorkspaceInferenceControl(workspaceId, action)",

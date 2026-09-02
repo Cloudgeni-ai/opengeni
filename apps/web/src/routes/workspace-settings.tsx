@@ -20,7 +20,7 @@ import {
   UserIcon,
   XIcon,
 } from "lucide-react";
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
@@ -929,6 +929,7 @@ function DangerZone(props: {
   const [open, setOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [busy, setBusy] = useState(false);
+  const deleteInFlight = useRef(false);
   const nameMatches =
     confirmName.trim() === props.workspaceName.trim() && props.workspaceName.trim().length > 0;
 
@@ -939,9 +940,10 @@ function DangerZone(props: {
       : null;
 
   async function confirmDelete() {
-    if (!nameMatches) {
+    if (!nameMatches || deleteInFlight.current) {
       return;
     }
+    deleteInFlight.current = true;
     setBusy(true);
     // onDelete (context.deleteWorkspace) surfaces its own error toast; on
     // success it navigates away, unmounting this dialog.
@@ -949,6 +951,7 @@ function DangerZone(props: {
     if (ok) {
       toast.success("Workspace deleted");
     } else {
+      deleteInFlight.current = false;
       setBusy(false);
     }
   }

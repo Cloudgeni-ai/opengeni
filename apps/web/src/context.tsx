@@ -107,6 +107,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { upsertWorkspace } from "@/lib/workspaces";
+import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
   beginWorkspaceOperation,
   beginWorkspaceTransition,
@@ -1436,7 +1437,11 @@ export function RootRouteComponent() {
     try {
       const deletion = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
-        request: async () => await client.deleteWorkspace(workspaceId),
+        request: async () =>
+          await deleteWorkspaceWithReconciliation({
+            deleteWorkspace: async () => await client.deleteWorkspace(workspaceId),
+            readWorkspace: async () => await client.getWorkspace(workspaceId),
+          }),
       });
       if (deletion.status === "stale") return false;
     } catch (error) {
