@@ -314,6 +314,10 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
         mode: "disabled",
       }),
     ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+    const [retainedPreference] = await shared.admin<{ mode: string }[]>`
+      select mode from workspace_codex_subscription_preferences
+      where workspace_id = ${workspace!.id}`;
+    expect(retainedPreference?.mode).toBe("workspace");
   });
 
   test("allows an organization credential lease only in an inheriting shared workspace", async () => {

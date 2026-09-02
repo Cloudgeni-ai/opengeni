@@ -21844,20 +21844,6 @@ function codexCredentialPoolCondition(input: {
       )!;
 }
 
-function effectiveCodexSubscriptionSourceForMode(
-  current: Pick<
-    WorkspaceCodexSubscriptionSource,
-    "workspaceKind" | "workspaceAvailable" | "organizationAvailable"
-  >,
-  mode: WorkspaceCodexSubscriptionMode,
-): EffectiveCodexSubscriptionSource {
-  if (current.workspaceKind === "personal") return "workspace";
-  if (mode !== "automatic") return mode;
-  if (current.workspaceAvailable) return "workspace";
-  if (current.organizationAvailable) return "organization";
-  return "workspace";
-}
-
 async function effectiveCodexCredentialPoolCondition(
   scopedDb: Database,
   workspaceId: string,
@@ -21894,8 +21880,24 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     throw new Error("personal workspaces always use workspace Codex subscriptions");
   }
   if (current.mode === input.mode) return current;
-  const nextEffectiveSource = effectiveCodexSubscriptionSourceForMode(current, input.mode);
-  if (nextEffectiveSource !== current.effectiveSource) {
+  await scopedDb
+    .insert(schema.workspaceCodexSubscriptionPreferences)
+    .values({
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      mode: input.mode,
+      updatedBySubjectId: input.subjectId,
+    })
+    .onConflictDoUpdate({
+      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+      set: {
+        mode: input.mode,
+        updatedBySubjectId: input.subjectId,
+        updatedAt: new Date(),
+      },
+    });
+  const next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  if (next.effectiveSource !== current.effectiveSource) {
     const [activeCodexTurn] = await scopedDb
       .select({ id: schema.sessionTurns.id })
       .from(schema.sessionTurns)
@@ -21921,23 +21923,7 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
       throw new Error("Codex subscription source cannot change while active turns are using it");
     }
   }
-  await scopedDb
-    .insert(schema.workspaceCodexSubscriptionPreferences)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      mode: input.mode,
-      updatedBySubjectId: input.subjectId,
-    })
-    .onConflictDoUpdate({
-      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-      set: {
-        mode: input.mode,
-        updatedBySubjectId: input.subjectId,
-        updatedAt: new Date(),
-      },
-    });
-  return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  return next;
 }
 
 export async function setWorkspaceCodexSubscriptionMode(
