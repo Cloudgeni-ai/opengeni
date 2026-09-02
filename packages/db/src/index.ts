@@ -17489,17 +17489,10 @@ async function validateScheduledTargetExecutionAtClaim(
     runId: string;
   },
 ): Promise<string | null> {
-  const [liveAuthority] = await rawRows<{ denial: string | null }>(
-    tx,
-    sql`select validate_scheduled_agent_run_live_authority(
-      ${input.accountId}::uuid,
-      ${input.workspaceId}::uuid,
-      ${input.runId}::uuid
-    ) as denial`,
-  );
-  if (liveAuthority?.denial) return liveAuthority.denial;
   const [run] = await tx
     .select({
+      status: schema.scheduledTaskRuns.status,
+      error: schema.scheduledTaskRuns.error,
       acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
     })
     .from(schema.scheduledTaskRuns)
@@ -17514,6 +17507,22 @@ async function validateScheduledTargetExecutionAtClaim(
     .limit(1)
     .for("update");
   if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  if (run.status !== "dispatched") {
+    return run.status === "skipped" &&
+      (run.error === "scheduled_task_paused_before_claim" ||
+        run.error === "scheduled_task_deleted_before_claim")
+      ? "scheduled_task_inactive_before_claim"
+      : "scheduled_run_terminal_before_claim";
+  }
+  const [liveAuthority] = await rawRows<{ denial: string | null }>(
+    tx,
+    sql`select validate_scheduled_agent_run_live_authority(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.runId}::uuid
+    ) as denial`,
+  );
+  if (liveAuthority?.denial) return liveAuthority.denial;
   const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
   const target = accepted.targetSessionExecution;
   if (!target) return null;
@@ -61038,6 +61047,7 @@ export async function claimSessionWorkForAttempt(
           }
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
+          const scheduledTaskInactiveUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
           const unrecognizedUpdateIds: string[] = [];
           // Retained so later consumers of the delivered batch (the child
@@ -61073,17 +61083,28 @@ export async function claimSessionWorkForAttempt(
                 })
               : null;
             if (update.scheduledTaskRunId && scheduledAuthorityDenial) {
-              await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
-                workspaceId,
-                sessionId,
-                runId: update.scheduledTaskRunId,
-                error: scheduledAuthorityDenial,
-              });
+              const scheduledTaskInactive =
+                scheduledAuthorityDenial === "scheduled_task_inactive_before_claim";
+              if (!scheduledTaskInactive) {
+                await markScheduledTaskRunAuthorityRejectedInTransaction(
+                  tx as unknown as Database,
+                  {
+                    workspaceId,
+                    sessionId,
+                    runId: update.scheduledTaskRunId,
+                    error: scheduledAuthorityDenial,
+                  },
+                );
+              }
               await tx
                 .update(schema.sessionSystemUpdates)
-                .set({ state: "failed" })
+                .set({ state: scheduledTaskInactive ? "cancelled" : "failed" })
                 .where(eq(schema.sessionSystemUpdates.id, update.id));
-              authorityRejectedUpdateIds.push(update.id);
+              if (scheduledTaskInactive) {
+                scheduledTaskInactiveUpdateIds.push(update.id);
+              } else {
+                authorityRejectedUpdateIds.push(update.id);
+              }
               continue;
             }
             if (input.validatePendingSystemUpdateAuthority) {
@@ -61189,6 +61210,25 @@ export async function claimSessionWorkForAttempt(
                   updateIds: cancelledUpdateIds,
                   count: cancelledUpdateIds.length,
                   reason: "stale_goal_continuation",
+                },
+                occurredAt,
+              });
+            }
+            if (scheduledTaskInactiveUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: scheduledTaskInactiveUpdateIds,
+                  count: scheduledTaskInactiveUpdateIds.length,
+                  reason: "scheduled_task_inactive",
                 },
                 occurredAt,
               });
@@ -61327,6 +61367,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
+              },
+              occurredAt,
+            });
+          }
+          if (scheduledTaskInactiveUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: scheduledTaskInactiveUpdateIds,
+                count: scheduledTaskInactiveUpdateIds.length,
+                reason: "scheduled_task_inactive",
               },
               occurredAt,
             });
