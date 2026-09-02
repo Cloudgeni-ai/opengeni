@@ -627,9 +627,9 @@ export function PackInstallationPlan({ preview }: { preview: PackInstallationPre
       )}
 
       {preview.legacyInlineSkillCount > 0 || preview.legacySandboxImage ? (
-        <Notice tone="info" title="Legacy fields will be migrated">
+        <Notice tone="info" title="Installation details">
           {preview.legacyInlineSkillCount > 0
-            ? `${preview.legacyInlineSkillCount} inline Skill${preview.legacyInlineSkillCount === 1 ? "" : "s"} become ordinary immutable Skill components. `
+            ? `${preview.legacyInlineSkillCount} Pack Skill${preview.legacyInlineSkillCount === 1 ? "" : "s"} become ordinary immutable Skill components. `
             : ""}
           {preview.legacySandboxImage
             ? "The previous sandbox image is checked against the selected compute environment; it will not replace workspace defaults."
@@ -828,14 +828,14 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
         )}
       </PackSection>
 
-      <PackSection title="Legacy inline Skills">
+      <PackSection title="Skills">
         {pack.skills.length > 0 ? (
           <div className="grid gap-1.5">
             {pack.skills.map((skill) => (
               <div key={skill.name} className="min-w-0">
                 <div className="truncate text-xs font-medium">{skill.name}</div>
                 <div className="text-2xs text-fg-subtle">
-                  Migrates to an immutable Skill · {skill.files.length} file
+                  Installs as an immutable Skill · {skill.files.length} included file
                   {skill.files.length === 1 ? "" : "s"}
                 </div>
               </div>
