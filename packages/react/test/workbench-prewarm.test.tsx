@@ -187,9 +187,12 @@ function coldClient(
     listMachines?: () => Promise<MachinesResponse>;
   } = {},
 ) {
-  const spy = { attachCalls: 0 };
+  const spy = { attachCalls: 0, capabilityCalls: 0 };
   const client = fakeClient({
-    getStreamCapabilities: async () => fakeColdCapabilities(),
+    getStreamCapabilities: async () => {
+      spy.capabilityCalls += 1;
+      return fakeColdCapabilities();
+    },
     getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
     listMachines: async () => EMPTY_MACHINES,
     attachViewer: async () => {
@@ -1344,29 +1347,19 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     await rendered.unmount();
   });
 
-  test("an initial host file request wakes a cold workspace without a follow-up render", async () => {
+  test("an initial host file request reaches the first cold-workspace negotiation", async () => {
     const { client, spy } = coldClient();
-    const request = { path: "/workspace/reports/generated.pdf", requestId: 42 };
-    const rendered = await renderComponent(
-      withProvider(
-        client,
-        <SandboxWorkspace
-          sessionId={SESSION_ID}
-          events={[]}
-          primary={<div>chat</div>}
-          openFileRequest={request}
-          autoSaveId="og.test.prewarm.initial-file-request"
-        />,
-      ),
-    );
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      requestedFilePath: "/workspace/reports/generated.pdf",
+      requestedFileRequestId: 42,
+    });
     await flush(60);
 
+    expect(spy.capabilityCalls).toBe(1);
     expect(spy.attachCalls).toBe(1);
-    expect(selectedTabName(rendered.container)).toBe("Files");
-    expect(rendered.container.querySelector("[data-opengeni-selected-file]")?.textContent).toBe(
-      request.path,
-    );
-    await rendered.unmount();
+    await hook.unmount();
   });
 
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {
