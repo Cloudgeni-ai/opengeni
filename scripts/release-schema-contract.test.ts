@@ -115,12 +115,17 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    const sessionSelectedSkillActivationIndex =
+      completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
+        (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+      );
     completeSourceContract = sessionSelectedSkillActivation
       ? {
           ...completeSourceContractWithSessionSelectedSkillActivation,
           latestMigration:
-            completeSourceContractWithSessionSelectedSkillActivation.migrations.at(-2)?.path ??
-            completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+            completeSourceContractWithSessionSelectedSkillActivation.migrations[
+              sessionSelectedSkillActivationIndex - 1
+            ]?.path ?? completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
         }
       : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
@@ -268,6 +273,9 @@ describe("release schema contract", () => {
     const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
     );
+    const scheduledTaskUnclaimedOccurrenceInvalidation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+    );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -280,7 +288,14 @@ describe("release schema contract", () => {
         latestMigration: "0394_session_selected_skill_activation.sql",
       };
     }
+    if (scheduledTaskUnclaimedOccurrenceInvalidation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+      };
+    }
     const automaticSessionTitleMigrationPaths = new Set([
+      "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
@@ -331,6 +346,7 @@ describe("release schema contract", () => {
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
+        (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         migrationsBeforeAutomaticSessionTitles.length +
         (automaticSessionTitlePolicyFence ? 1 : 0) +
@@ -462,6 +478,9 @@ describe("release schema contract", () => {
       ...(sessionSelectedSkillActivation
         ? { latestMigration: "0394_session_selected_skill_activation.sql" }
         : {}),
+      ...(scheduledTaskUnclaimedOccurrenceInvalidation
+        ? { latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql" }
+        : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
@@ -471,9 +490,11 @@ describe("release schema contract", () => {
           : completeSourceContract.latestMigration,
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
-      sessionSelectedSkillActivation
-        ? "0394_session_selected_skill_activation.sql"
-        : completeSourceContractWithContextCompaction.latestMigration,
+      scheduledTaskUnclaimedOccurrenceInvalidation
+        ? "0395_scheduled_task_unclaimed_occurrence_invalidation.sql"
+        : sessionSelectedSkillActivation
+          ? "0394_session_selected_skill_activation.sql"
+          : completeSourceContractWithContextCompaction.latestMigration,
     );
   });
 
@@ -493,12 +514,17 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    const sessionSelectedSkillActivationIndex =
+      completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
+        (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+      );
     completeSourceContract = sessionSelectedSkillActivation
       ? {
           ...completeSourceContractWithSessionSelectedSkillActivation,
           latestMigration:
-            completeSourceContractWithSessionSelectedSkillActivation.migrations.at(-2)?.path ??
-            completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+            completeSourceContractWithSessionSelectedSkillActivation.migrations[
+              sessionSelectedSkillActivationIndex - 1
+            ]?.path ?? completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
         }
       : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
@@ -635,6 +661,7 @@ describe("release schema contract", () => {
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
+      "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -797,6 +824,9 @@ describe("release schema contract", () => {
     const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
       (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
     );
+    const scheduledTaskUnclaimedOccurrenceInvalidation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+    );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -809,9 +839,16 @@ describe("release schema contract", () => {
         latestMigration: "0394_session_selected_skill_activation.sql",
       };
     }
+    if (scheduledTaskUnclaimedOccurrenceInvalidation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+      };
+    }
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
+        (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
         (documentAuthorityReclassification ? 1 : 0) +
@@ -958,6 +995,9 @@ describe("release schema contract", () => {
       ...(sessionSelectedSkillActivation
         ? { latestMigration: "0394_session_selected_skill_activation.sql" }
         : {}),
+      ...(scheduledTaskUnclaimedOccurrenceInvalidation
+        ? { latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql" }
+        : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
@@ -967,9 +1007,11 @@ describe("release schema contract", () => {
           : completeSourceContract.latestMigration,
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
-      sessionSelectedSkillActivation
-        ? "0394_session_selected_skill_activation.sql"
-        : completeSourceContractWithContextCompaction.latestMigration,
+      scheduledTaskUnclaimedOccurrenceInvalidation
+        ? "0395_scheduled_task_unclaimed_occurrence_invalidation.sql"
+        : sessionSelectedSkillActivation
+          ? "0394_session_selected_skill_activation.sql"
+          : completeSourceContractWithContextCompaction.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(
