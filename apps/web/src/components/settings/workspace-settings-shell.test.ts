@@ -6,11 +6,12 @@ import { createRoot } from "react-dom/client";
 import type { WorkspaceManagementLocation } from "./workspace-settings-shell";
 
 const nextWorkspaceId = "22222222-2222-4222-8222-222222222222";
+const fallbackWorkspaceId = "33333333-3333-4333-8333-333333333333";
 const navigate = mock((_options: unknown) => undefined);
 const resetSessionView = mock(() => undefined);
 
 mock.module("@/context", () => ({
-  useAppContext: () => ({ resetSessionView }),
+  useAppContext: () => ({ resetSessionView, workspaces: [{ id: fallbackWorkspaceId }] }),
 }));
 
 mock.module("@tanstack/react-router", () => ({
@@ -63,7 +64,10 @@ beforeEach(() => {
   resetSessionView.mockClear();
 });
 
-async function renderShell(location: WorkspaceManagementLocation) {
+async function renderShell(
+  location: WorkspaceManagementLocation,
+  overrides: Partial<ComponentProps<typeof WorkspaceManagementShell>> = {},
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
@@ -75,6 +79,7 @@ async function renderShell(location: WorkspaceManagementLocation) {
           workspaceId,
           organizationName: "CloudGeni",
           location,
+          ...overrides,
         } as ComponentProps<typeof WorkspaceManagementShell>,
         createElement("p", null, "Settings content"),
       ),
@@ -170,6 +175,36 @@ describe("workspace management navigation", () => {
       expect(navigate).toHaveBeenCalledWith({
         to: "/workspaces/$workspaceId/rigs",
         params: { workspaceId: nextWorkspaceId },
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("keeps the managed workspace identity and an accessible workspace switcher", async () => {
+    const rendered = await renderShell(
+      { kind: "settings", section: "members" },
+      {
+        organizationManagementOnly: true,
+        organizationSettingsWorkspaceId: fallbackWorkspaceId,
+        workspaceName: "Managed without content access",
+      },
+    );
+    try {
+      expect(rendered.container.textContent).toContain("Managed without content access");
+      expect(rendered.container.textContent).toContain("Organization management");
+      expect(rendered.container.textContent).not.toContain("Agent tools");
+
+      const selector = rendered.container.querySelector<HTMLButtonElement>(
+        `button[aria-label="Workspace selector for ${fallbackWorkspaceId}"]`,
+      );
+      await act(async () => selector?.click());
+
+      expect(resetSessionView).toHaveBeenCalledTimes(1);
+      expect(navigate).toHaveBeenCalledWith({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: nextWorkspaceId },
+        search: { section: "members" },
       });
     } finally {
       await rendered.unmount();

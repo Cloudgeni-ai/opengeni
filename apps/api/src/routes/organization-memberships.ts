@@ -68,6 +68,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { deleteWorkspaceForRequest } from "../workspace-deletion";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
@@ -326,6 +327,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     } catch (error) {
       rethrowMembershipError(error);
     }
+  });
+
+  app.delete("/v1/organizations/:organizationId/workspaces/:workspaceId", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
+    const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
+    await deleteWorkspaceForRequest(deps, {
+      accountId: organizationId,
+      workspaceId,
+      organizationAdministratorSubjectId: subjectId,
+    });
+    return context.body(null, 204);
   });
 
   app.patch(

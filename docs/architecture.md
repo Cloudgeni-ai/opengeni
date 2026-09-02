@@ -266,6 +266,13 @@ deployments additionally admit only the access resolver's canonical
 shared-workspace, retention, company-identity, and organization Codex controls.
 This is provenance-stamped authority, not a subject-name check; configured,
 delegated, API-key, service, and agent principals remain excluded.
+A shared-workspace creator receives one explicit named workspace-admin grant;
+organization authority by itself still grants no operational access. Owners
+and organization administrators can open the canonical
+`/workspaces/:workspaceId/settings` route in a restricted management mode for
+shared workspaces they cannot otherwise enter. That mode exposes identity,
+direct access, and deletion only; it never mounts the workspace provider or
+reveals sessions, files, credentials, integrations, or other workspace content.
 A shared workspace's Members page is deliberately narrower: a caller with
 `members:manage` may add an already-active human from the same organization and
 change or revoke access only in that workspace. Personal workspaces,

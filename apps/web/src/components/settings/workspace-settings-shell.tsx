@@ -182,17 +182,33 @@ export function workspaceManagementLocation(
 
 export function WorkspaceManagementShell({
   workspaceId,
+  workspaceName,
   organizationName,
   location,
+  organizationManagementOnly = false,
+  organizationSettingsWorkspaceId,
   children,
 }: {
   workspaceId: string;
+  workspaceName?: string;
   organizationName: string;
   location: WorkspaceManagementLocation;
+  organizationManagementOnly?: boolean;
+  organizationSettingsWorkspaceId?: string;
   children: ReactNode;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const settingsItems = organizationManagementOnly
+    ? SETTINGS_ITEMS.filter(
+        (item) => item.id === "general" || item.id === "members" || item.id === "danger",
+      )
+    : SETTINGS_ITEMS;
+  const organizationLinkWorkspaceId =
+    organizationSettingsWorkspaceId ?? (organizationManagementOnly ? undefined : workspaceId);
+  const switcherWorkspaceId = organizationManagementOnly
+    ? (organizationSettingsWorkspaceId ?? context.workspaces[0]?.id)
+    : workspaceId;
 
   function openManagementWorkspace(nextWorkspaceId: string) {
     context.resetSessionView();
@@ -209,14 +225,13 @@ export function WorkspaceManagementShell({
       params: { workspaceId: nextWorkspaceId },
     });
   }
-
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
       <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-full lg:max-h-none lg:border-r lg:border-b-0">
         <div className="flex h-full min-h-0 flex-col px-3 py-3 lg:py-4">
           <Link
-            to="/workspaces/$workspaceId/sessions"
-            params={{ workspaceId }}
+            to={organizationManagementOnly ? "/" : "/workspaces/$workspaceId/sessions"}
+            params={organizationManagementOnly ? undefined : { workspaceId }}
             className="flex h-9 items-center gap-2 rounded-md px-2 text-sm font-semibold text-fg transition-colors hover:bg-surface-2"
           >
             <span className="flex size-6 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
@@ -226,28 +241,56 @@ export function WorkspaceManagementShell({
           </Link>
 
           <Link
-            to="/workspaces/$workspaceId/sessions"
-            params={{ workspaceId }}
+            to={organizationManagementOnly ? "/" : "/workspaces/$workspaceId/sessions"}
+            params={organizationManagementOnly ? undefined : { workspaceId }}
             className="mt-3 inline-flex h-8 items-center gap-2 rounded-md px-2 text-xs text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:mt-5"
           >
             <ArrowLeftIcon className="size-3.5" />
-            Back to sessions
+            {organizationManagementOnly ? "Back to OpenGeni" : "Back to sessions"}
           </Link>
 
           <div className="mt-4 min-w-0 px-2 lg:mt-6">
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               Workspace settings
             </p>
-            <div className="mt-2 min-w-0">
-              <WorkspaceSwitcherMenu
-                workspaceId={workspaceId}
-                collapsed={false}
-                align="start"
-                onSelect={openManagementWorkspace}
-                className="w-full border-brand/25 bg-brand-strong/10 py-2 hover:border-brand/40 hover:bg-brand-strong/15"
-              />
-              <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
-            </div>
+            {organizationManagementOnly ? (
+              <>
+                <div className="mt-2 flex min-w-0 items-center gap-2.5">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
+                    {workspaceName?.trim().charAt(0).toUpperCase() || "W"}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
+                      {workspaceName ?? "Workspace"}
+                    </p>
+                    <p className="mt-0.5 text-2xs text-fg-subtle">Organization management</p>
+                  </div>
+                </div>
+                {switcherWorkspaceId ? (
+                  <div className="mt-3 min-w-0">
+                    <p className="mb-1 px-1 text-2xs text-fg-subtle">Open another workspace</p>
+                    <WorkspaceSwitcherMenu
+                      workspaceId={switcherWorkspaceId}
+                      collapsed={false}
+                      align="start"
+                      onSelect={openManagementWorkspace}
+                      className="w-full"
+                    />
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 min-w-0">
+                <WorkspaceSwitcherMenu
+                  workspaceId={workspaceId}
+                  collapsed={false}
+                  align="start"
+                  onSelect={openManagementWorkspace}
+                  className="w-full border-brand/25 bg-brand-strong/10 py-2 hover:border-brand/40 hover:bg-brand-strong/15"
+                />
+                <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
+              </div>
+            )}
           </div>
 
           <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
@@ -257,7 +300,7 @@ export function WorkspaceManagementShell({
             aria-label="Workspace settings"
             className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
           >
-            {SETTINGS_ITEMS.map((item) => {
+            {settingsItems.map((item) => {
               const Icon = item.icon;
               const selected = location.kind === "settings" && item.id === location.section;
               return (
@@ -282,54 +325,63 @@ export function WorkspaceManagementShell({
             })}
           </nav>
 
-          {WORKSPACE_PAGE_GROUPS.map((group) => (
-            <div key={group.label}>
-              <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
-                {group.label}
-              </p>
-              <nav
-                aria-label={group.label}
-                className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
-              >
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const selected = location.kind === "page" && item.to === location.target;
-                  return (
-                    <Link
-                      key={item.to}
-                      to={item.to}
-                      params={{ workspaceId }}
-                      aria-current={selected ? "page" : undefined}
-                      className={cn(
-                        "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
-                        selected
-                          ? "bg-surface-3 font-medium text-fg"
-                          : "text-fg-muted hover:bg-surface-2 hover:text-fg",
-                      )}
-                    >
-                      <Icon className="size-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-                    </Link>
-                  );
-                })}
-              </nav>
-            </div>
-          ))}
+          {!organizationManagementOnly
+            ? WORKSPACE_PAGE_GROUPS.map((group) => (
+                <div key={group.label}>
+                  <p className="mt-4 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
+                    {group.label}
+                  </p>
+                  <nav
+                    aria-label={group.label}
+                    className="mt-1 grid grid-cols-2 gap-1 sm:grid-cols-3 lg:flex lg:flex-col"
+                  >
+                    {group.items.map((item) => {
+                      const Icon = item.icon;
+                      const selected = location.kind === "page" && item.to === location.target;
+                      return (
+                        <Link
+                          key={item.to}
+                          to={item.to}
+                          params={{ workspaceId }}
+                          aria-current={selected ? "page" : undefined}
+                          className={cn(
+                            "flex h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm transition-colors lg:w-full",
+                            selected
+                              ? "bg-surface-3 font-medium text-fg"
+                              : "text-fg-muted hover:bg-surface-2 hover:text-fg",
+                          )}
+                        >
+                          <Icon className="size-4 shrink-0" />
+                          <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                        </Link>
+                      );
+                    })}
+                  </nav>
+                </div>
+              ))
+            : null}
 
           <div className="mt-4 border-t border-border pt-3">
             <p className="px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               Organization
             </p>
-            <Link
-              to="/workspaces/$workspaceId/organization"
-              params={{ workspaceId }}
-              aria-label={`Organization settings for ${organizationName}`}
-              className="mt-1 flex min-h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-            >
-              <Building2Icon className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate">{organizationName}</span>
-              <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
-            </Link>
+            {organizationLinkWorkspaceId ? (
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId: organizationLinkWorkspaceId }}
+                aria-label={`Organization settings for ${organizationName}`}
+                className="mt-1 flex min-h-9 min-w-0 items-center gap-2 rounded-md px-2.5 text-sm text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+              >
+                <Building2Icon className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{organizationName}</span>
+                <ChevronRightIcon className="size-3.5 shrink-0 text-fg-subtle" />
+              </Link>
+            ) : (
+              <div className="mt-1 flex min-h-9 min-w-0 items-center gap-2 px-2.5 text-sm text-fg-muted">
+                <Building2Icon className="size-4 shrink-0" />
+                <span className="truncate">{organizationName}</span>
+              </div>
+            )}
           </div>
         </div>
       </aside>

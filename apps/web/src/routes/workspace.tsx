@@ -14,6 +14,7 @@ import {
   WorkspaceManagementShell,
   workspaceManagementLocation,
 } from "@/components/settings/workspace-settings-shell";
+import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@/components/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
@@ -66,11 +67,13 @@ export function WorkspaceShellRouteContent({
   context,
   navigate,
   onAuthorizedShellMount,
+  managementLocation = null,
 }: {
   workspaceId: string;
   context: AppContextValue;
   navigate: ReturnType<typeof useNavigate>;
   onAuthorizedShellMount?: () => void;
+  managementLocation?: ReturnType<typeof workspaceManagementLocation>;
 }) {
   const activeWorkspace = authorizedWorkspaceFromList({
     workspaceId,
@@ -354,6 +357,43 @@ export function WorkspaceShellRouteContent({
     workspaceId,
   ]);
 
+  if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
+    const unavailable = (
+      <WorkspaceUnavailableRoute
+        requestedWorkspaceId={workspaceId}
+        workspaces={context.workspaces}
+        accessContext={context.accessContext}
+        suppressAuthorizedFallback={context.invalidSlackLinkQueryWorkspaceId === workspaceId}
+      />
+    );
+    return (
+      <OrganizationWorkspaceAdministrationBoundary
+        client={context.client}
+        accessContext={context.accessContext}
+        accessKeyVersion={context.accessKeyVersion}
+        workspaceId={workspaceId}
+        unavailable={unavailable}
+      >
+        {(administration) => (
+          <WorkspaceManagementShell
+            workspaceId={workspaceId}
+            workspaceName={administration.workspace.name}
+            organizationName={administration.overview.organization.name}
+            organizationSettingsWorkspaceId={
+              context.workspaces.find(
+                (candidate) => candidate.accountId === administration.organizationId,
+              )?.id
+            }
+            organizationManagementOnly
+            location={managementLocation}
+          >
+            <Outlet />
+          </WorkspaceManagementShell>
+        )}
+      </OrganizationWorkspaceAdministrationBoundary>
+    );
+  }
+
   if (!activeWorkspace && !hasNarrowSlackFlow) {
     return (
       <WorkspaceUnavailableRoute
@@ -514,7 +554,17 @@ function AuthorizedWorkspaceShell({
 export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
+  const location = useRouterState({ select: (state) => state.location });
   return (
-    <WorkspaceShellRouteContent workspaceId={workspaceId} context={context} navigate={navigate} />
+    <WorkspaceShellRouteContent
+      workspaceId={workspaceId}
+      context={context}
+      navigate={navigate}
+      managementLocation={workspaceManagementLocation(
+        location.pathname,
+        workspaceId,
+        location.search.section,
+      )}
+    />
   );
 }
