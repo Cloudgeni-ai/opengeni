@@ -1086,8 +1086,18 @@ proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
+The built-in `opengeni-product-integration` Pack is an opt-in implementation
+aid for those standalone integrations. Its immutable Skill adds no runtime
+tools, credentials, compute, or customer-facing agent behavior; it teaches the
+implementation agent to derive the workspace isolation unit, UI surface, data
+tool boundary, runtime profile, and delivery workflow from the host product.
+The Pack lives in `packages/core/src/domain/product-integration-pack.ts`, while
+the exact customer integration contract remains
+[`product-integration.md`](product-integration.md).
+
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
 [`../packages/react/README.md`](../packages/react/README.md),
+[`product-integration.md`](product-integration.md),
 [`embedding-workbench.md`](embedding-workbench.md), and
 [`embedding.md`](embedding.md).
 
@@ -1347,7 +1357,7 @@ This index intentionally routes at subsystem granularity. Use
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
-| Standalone product integration | `packages/sdk/`, `packages/react/` | [`embedding-workbench.md`](embedding-workbench.md) |
+| Standalone product integration and implementation Pack | `packages/sdk/`, `packages/react/`, `packages/core/src/domain/product-integration-pack.ts` | [`product-integration.md`](product-integration.md), [`packs.md`](packs.md), and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

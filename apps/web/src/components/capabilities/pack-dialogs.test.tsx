@@ -96,6 +96,7 @@ describe("PackDetailDialog", () => {
     const contents = await render(<PackContents pack={pack()} />);
     try {
       expect(contents.container.textContent).toContain("Compute requirement");
+      expect(contents.container.textContent).toContain("Installs as an immutable Skill");
       expect(contents.container.textContent).toContain("Configuration requirements");
       expect(contents.container.textContent).toContain(
         "Values come from an encrypted Variable Set",
@@ -109,7 +110,7 @@ describe("PackDetailDialog", () => {
       expect(plan.container.textContent).toContain("Ready to install");
       expect(plan.container.textContent).toContain("Pinned components");
       expect(plan.container.textContent).toContain("Terraform");
-      expect(plan.container.textContent).toContain("Legacy fields will be migrated");
+      expect(plan.container.textContent).toContain("Installation details");
       expect(plan.container.textContent).toContain("Production Rig");
     } finally {
       await plan.unmount();

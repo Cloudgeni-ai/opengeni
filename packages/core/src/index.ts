@@ -76,6 +76,7 @@ export * from "./rigs";
 export * from "./domain/packs";
 export * from "./domain/automations";
 export * from "./domain/pr-review";
+export * from "./domain/product-integration-pack";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";

@@ -16,6 +16,7 @@ Skill beside the product's integration code and review it whenever the installed
 - OpenGeni base URL: `[non-secret HTTPS base URL]`
 - Organization ID: `[non-secret UUID]`
 - External source convention: `[stable product namespace, for example acme-support]`
+- Workspace isolation unit: `[tenant | end user | chat | another explicit sharing group]`
 - Credential environment variable: `OPENGENI_ORGANIZATION_API_KEY`
 - Base URL environment variable: `OPENGENI_API_BASE_URL`
 - Organization environment variable: `OPENGENI_ORGANIZATION_ID`
@@ -33,13 +34,20 @@ because `[one sentence explaining the authority boundary]`.
 - Tenant-to-workspace mapping persistence: `[path or table/model name]`
 - Session/event proxy: `[path]`
 - Product Skill store/loader: `[path]`
+- Runtime profile version/source: `[version and path]`
+- Explicit first-party tool allowlist: `[source of truth]`
+- External Integration/MCP server selection: `[source of truth]`
 
-If the selected shape is an organization API key, map one authenticated product
-tenant to one OpenGeni organization workspace with `ensureWorkspace`. The wire
-kind is `"shared"`. Personal workspaces are excluded and must never be used as
-a default fallback. Persist the returned opaque workspace ID and pass the exact
-product-selected Skills inline in `CreateSessionRequest.skills` for every
-product-created session; there is no organization-wide Skill inheritance.
+If the selected shape is an organization API key, map the smallest product
+group allowed to share workspace-scoped agent authority to one OpenGeni
+organization workspace with `ensureWorkspace`. The wire kind is `"shared"`.
+Use per-tenant mapping for collaborative chats, per-user mapping for cross-user
+privacy, and per-chat mapping for hard same-user chat isolation. Personal
+workspaces are excluded and must never be used as a default fallback. Persist
+the returned opaque workspace ID and pass the exact product-selected Skills
+inline in `CreateSessionRequest.skills` for every product-created session;
+there is no organization-wide Skill inheritance. Turning workspace Memory off
+does not isolate sessions.
 Use a key issued by the organization API-key control plane. Do not reuse an
 ambiguous legacy null-workspace token; provenance migrations revoke those keys
 so old and new API instances both fail closed during rollout.
@@ -59,10 +67,13 @@ the host-issued token; do not substitute organization-key behavior.
    configured pre-provisioned workspace ID instead.
 4. Apply explicit workspace settings through installed SDK methods.
 5. Create sessions with a stable idempotency key and product-owned inline
-   Skills.
+   Skills, plus explicit minimal `tools` and `firstPartyMcpTools` selections.
 6. Reject caller-supplied workspace/session IDs that do not match the product's
    persisted tenant relationship.
 7. Proxy event streaming with replay-by-sequence and duplicate suppression.
+8. Reconcile settings, Connections, API Integrations, and runtime profile only
+   when their desired version changes; do not repeat control-plane installation
+   on every chat request.
 
 ## Smoke probes
 
