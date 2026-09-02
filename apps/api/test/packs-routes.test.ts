@@ -22,6 +22,7 @@ import postgres from "postgres";
 import { registerPackRoutes } from "../src/routes/packs";
 
 const delegationSecret = "pack-route-secret";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -179,6 +180,25 @@ describe("Pack routes", () => {
         includeSessionSelected: true,
       }),
     ).toContainEqual(expect.objectContaining({ capabilityId, activationMode: "session_selected" }));
+    const installedPreviewResponse = await request(`/packs/${packId}/installation-preview`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const installedPreviewBody = await installedPreviewResponse.text();
+    expect(installedPreviewResponse.status, installedPreviewBody).toBe(200);
+    const installedPreview = JSON.parse(installedPreviewBody) as {
+      manifestDigest: string;
+      installationVersion: number | null;
+      components: Array<{ capabilityId: string; resolvedId: string | null }>;
+    };
+    expect(installedPreview.manifestDigest).toBe(preview.manifestDigest);
+    expect(installedPreview.installationVersion).not.toBeNull();
+    expect(installedPreview.components).toContainEqual(
+      expect.objectContaining({
+        capabilityId,
+        resolvedId: expect.stringMatching(UUID_PATTERN),
+      }),
+    );
 
     const sessionGrant = {
       accountId,

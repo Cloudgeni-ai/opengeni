@@ -1099,7 +1099,9 @@ The Skill uses the existing `capability_facets.activation_mode` authority as
 explicit create-time `installedSkillIds` selection freezes the verified
 artifact into exactly one session. The web Pack action carries that immutable
 capability ID into the new-session composer; Pack installation alone cannot add
-the guidance to customer-facing chats. A dedicated implementation workspace
+the guidance to customer-facing chats. The activation value enters storage at
+maintenance migration 0394; old workers must be fully drained because they do
+not filter this mode. A dedicated implementation workspace
 remains an optional additional operational boundary, not a prerequisite for
 this activation guarantee. The Pack lives in
 `packages/core/src/domain/product-integration-pack.ts`, while the exact customer

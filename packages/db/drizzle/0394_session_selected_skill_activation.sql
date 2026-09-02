@@ -1,4 +1,4 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- A session-selected Skill is installed and inspectable like any other Skill,
 -- but the worker excludes it from ambient workspace resolution. An explicit
 -- session create copies the immutable artifact onto that one session.

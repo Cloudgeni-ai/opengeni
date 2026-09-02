@@ -353,19 +353,11 @@ function PackInstallationDialog(props: {
   const hardcodedRigId = pack.rig?.rigId;
   const selectedRig = props.rigs.find((rig) => rig.id === selection.rigId);
   const [contentsOpen, setContentsOpen] = useState(false);
-  const sessionSelectedSkillNames = new Set(
-    pack.skills
-      .filter((skill) => skill.activationMode === "session_selected")
-      .map((skill) => skill.name.toLowerCase()),
+  const sessionSelectedSkillId = sessionSelectedPackSkillIdForLaunch(
+    pack,
+    props.installation,
+    preview,
   );
-  const sessionSelectedSkillIds = (preview?.components ?? [])
-    .filter(
-      (component) =>
-        component.kind === "inline_skill" &&
-        component.status === "ready" &&
-        sessionSelectedSkillNames.has(component.label.toLowerCase()),
-    )
-    .map((component) => component.capabilityId);
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -496,18 +488,59 @@ function PackInstallationDialog(props: {
             hasPreview={preview !== null}
             installReady={props.installReady}
             installLabel={props.installLabel}
-            canStartSession={props.installed && sessionSelectedSkillIds.length === 1}
+            canStartSession={sessionSelectedSkillId !== null}
             onCancel={() => props.onOpenChange(false)}
             onReview={props.onReview}
             onInstall={props.onInstall}
             onUninstall={props.onUninstall}
             onUnregister={props.onUnregister}
-            onStartSession={() => props.onStartSession(sessionSelectedSkillIds[0]!)}
+            onStartSession={() => props.onStartSession(sessionSelectedSkillId!)}
           />
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Return the sole installed session-selected Skill this exact Pack version may
+ * launch with. Preview uses a future capability id for a missing inline Skill;
+ * only a UUID `resolvedId` is an existing facet installation. The create still
+ * revalidates installation and activation mode, so UI state never grants access.
+ */
+export function sessionSelectedPackSkillIdForLaunch(
+  pack: CapabilityPack,
+  installation: PackInstallation | null,
+  preview: PackInstallationPreview | null,
+): string | null {
+  if (
+    !installation ||
+    installation.status !== "active" ||
+    !preview ||
+    preview.packId !== pack.id ||
+    preview.packVersion !== pack.version ||
+    preview.manifestDigest !== installation.manifestDigest ||
+    preview.installationVersion !== installation.version
+  ) {
+    return null;
+  }
+  const sessionSelectedSkillNames = new Set(
+    pack.skills
+      .filter((skill) => skill.activationMode === "session_selected")
+      .map((skill) => skill.name.toLowerCase()),
+  );
+  const launchable = preview.components.filter(
+    (component) =>
+      component.kind === "inline_skill" &&
+      component.status === "ready" &&
+      component.actualDigest === component.expectedDigest &&
+      component.resolvedId !== null &&
+      UUID_PATTERN.test(component.resolvedId) &&
+      sessionSelectedSkillNames.has(component.label.toLowerCase()),
+  );
+  return launchable.length === 1 ? launchable[0]!.capabilityId : null;
 }
 
 /**
