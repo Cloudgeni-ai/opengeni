@@ -58,13 +58,14 @@ one bounded, tool-less title request beside the ordinary response stream. The
 sidecar uses the same resolved provider and credential authority, receives only
 a bounded conversation opener, and is metered as its own model call. The main
 agent does not wait for a title tool result or make a title follow-up model call.
-When the main stream reaches settlement, the worker aborts any still-pending
-sidecar and joins its physical completion; a completed candidate then uses the
-canonical title mutation, which updates the session row and appends
-`session.title_set`. Generation or persistence failure leaves the safe pending
-marker in place, and a human title remains protected from every later automatic
-write. Historical fallback sessions therefore self-heal on their next eligible
-model turn.
+When the main stream reaches normal settlement, the worker waits for the
+already-running bounded sidecar and joins it without cancelling. Exceptional or
+cancelled exits abort and join any still-pending sidecar. A completed candidate
+then uses the canonical title mutation, which updates the session row and
+appends `session.title_set`. Generation or persistence failure leaves the safe
+pending marker in place, and a human title remains protected from every later
+automatic write. Historical fallback sessions therefore self-heal on their
+next eligible model turn.
 
 `OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
 Older or custom runtimes that do not implement it retain the prior attempt-local
