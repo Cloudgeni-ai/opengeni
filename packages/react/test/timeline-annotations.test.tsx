@@ -77,16 +77,12 @@ function firstTextNode(element: Element): Text {
   return node;
 }
 
-async function waitForDomValue<T>(
-  read: () => T | null | undefined,
-  description: string,
-): Promise<T> {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const value = read();
-    if (value !== null && value !== undefined) return value;
-    await flush(5);
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
   }
-  throw new Error(`Timed out waiting for ${description}`);
 }
 
 describe("timeline annotations", () => {
@@ -104,14 +100,18 @@ describe("timeline annotations", () => {
     const text = firstTextNode(source!);
     selectText(text, 6, 10);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    const action = await waitForDomValue(
+    await waitFor(
       () =>
-        [...document.body.querySelectorAll("button")].find(
+        [...document.body.querySelectorAll("button")].some(
           (button) => button.textContent?.trim() === "Annotate",
         ),
-      "the annotation selection action",
+      "annotation action did not appear",
     );
-    await act(async () => action.click());
+    const action = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Annotate",
+    );
+    expect(action).toBeDefined();
+    await act(async () => action?.click());
     expect(captured).toMatchObject({
       quote: "beta",
       note: "",
@@ -166,31 +166,27 @@ describe("timeline annotations", () => {
     );
     const trigger = rendered.container.querySelector("button");
     expect(trigger?.textContent).toContain("1 annotation");
-    const textarea = await waitForDomValue(
-      () => document.body.querySelector("textarea"),
-      "the annotation note editor",
-    );
+    const textarea = document.body.querySelector("textarea");
+    expect(textarea).not.toBeNull();
     await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-      setter?.call(textarea, "Use the quoted value.");
-      textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      if (textarea) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(textarea, "Use the quoted value.");
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      }
     });
     expect(note).toBe("Use the quoted value.");
-    const sourceButton = await waitForDomValue(
-      () =>
-        [...document.body.querySelectorAll("button")].find((button) =>
-          button.textContent?.includes("view source"),
-        ),
-      "the annotation source action",
+    const sourceButton = [...document.body.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("view source"),
     );
-    await act(async () => sourceButton.click());
-    await waitForDomValue(
+    await act(async () => sourceButton?.click());
+    await waitFor(
       () =>
-        document.body.textContent?.includes("Source is outside the loaded timeline window.")
-          ? true
-          : undefined,
-      "source-unavailable feedback",
+        document.body.textContent?.includes("Source is outside the loaded timeline window.") ===
+        true,
+      "source-unavailable feedback did not appear",
     );
+    expect(document.body.textContent).toContain("Source is outside the loaded timeline window.");
     await rendered.unmount();
   });
 });
