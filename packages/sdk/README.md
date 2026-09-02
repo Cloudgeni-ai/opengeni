@@ -84,10 +84,22 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
+Installed Pack Skills normally remain workspace-managed. A Pack may instead
+mark guidance as `session_selected`; installation then exposes it to no agent
+until `createSession` names the reviewed immutable component in
+`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+so omitting the field from customer-facing creates is a real contamination
+boundary rather than a prompt convention.
+The ordered selection is part of keyed-create identity: reusing an
+`idempotencyKey` with a different selection returns a conflict instead of the
+session configured by the earlier request.
+
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
-shows a short, sensitive-safe preview of the opening prompt and automatically
-yields to the later `session.title_set` value.
+shows the first short, sensitive-safe line of the opening prompt, skipping an
+unsafe pasted URL or identifier when later safe text exists. If no safe line is
+available, a short session reference keeps rows distinguishable. The display
+automatically yields to the later `session.title_set` value.
 
 Browser consoles that do not need operator-only surfaces can import
 `OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
@@ -748,6 +760,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Managed organizations | `createOrganization` for first-time compatibility; `createAdditionalOrganization` for an already-onboarded human; `listOrganizationMemberships`, `listOrganizationInvitations`, `acceptOrganizationInvitation` |
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |

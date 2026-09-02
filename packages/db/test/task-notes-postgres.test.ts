@@ -216,9 +216,26 @@ function claims(attempt: Awaited<ReturnType<typeof seedAttempt>>) {
 }
 
 describe("task-tree notes PostgreSQL authority", () => {
-  test("denies Task-note promotion under the exact default-off learning snapshot", async () => {
+  test("denies Task-note promotion under an explicit off learning snapshot", async () => {
     if (!shared || !client) return;
     const f = await fixture();
+    const offPolicy = await createWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      workspaceMode: "off",
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+    });
+    await activateWorkspaceLearningPolicyRevision(client.db, {
+      accountId: f.grant.accountId,
+      workspaceId: f.grant.workspaceId,
+      revisionId: offPolicy.id,
+      expectedCurrentRevisionId: null,
+      expectedActivationVersion: 0,
+      actorSubjectId: f.ownerSubjectId,
+      principalKind: "human_session",
+      reason: "Keep this fixture's learning policy off.",
+    });
     const attempt = await seedAttempt({
       accountId: f.grant.accountId,
       workspaceId: f.grant.workspaceId,

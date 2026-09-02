@@ -20,6 +20,7 @@ import {
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  SessionSkills,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -77,6 +78,7 @@ import {
   getWorkspaceDefaultRigId,
   listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
+  listInstalledPortableSkills,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -95,6 +97,7 @@ import {
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
+  setActiveSandbox,
   setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
@@ -137,7 +140,11 @@ import {
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
 import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
-import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
+import {
+  preflightCreateTimeSandboxTarget,
+  swapActiveSandbox,
+  type FleetContext,
+} from "../sandbox/fleet";
 import { managedSessionGroupBackend } from "../sandbox/runtime-settings";
 import {
   isWorkspaceCustomModelId,
@@ -719,7 +726,11 @@ export async function createAndStartSessionWithOutcome(input: {
   createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
   // Ordered low-to-high precedence. Names/ids only; session.created never
   // carries variable values.
-  variableSets?: Array<{ id: string; name: string; scope: VariableSet["scope"] }>;
+  variableSets?: Array<{
+    id: string;
+    name: string;
+    scope: VariableSet["scope"];
+  }>;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
   // rig-less session (byte-for-byte today's behavior). Frozen here so a later
   // rig promote never moves an existing session's version.
@@ -761,6 +772,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // session. Every caller repairs or re-delivers the winner's one atomic start;
   // the durable initializer prevents duplicate events or turns.
   createIdempotencyKey?: string | null;
+  // Exact explicit installed-Skill selection. The database stores this only as
+  // keyed-create identity; runtime behavior comes from the frozen Skill content.
+  selectedInstalledSkillIds?: string[];
   // The shared-sandbox group this session's box joins (addendum 05 §D). Null/
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
   // shared/{groupId} spawn passes the resolved group so both run in ONE box.
@@ -771,11 +785,11 @@ export async function createAndStartSessionWithOutcome(input: {
   // OS-labeling surfaces honestly reflect the machine.
   sandboxOs?: Session["sandboxOs"];
   // Create-time machine targeting (A-2a, RACE-FREE): the enrolled machine (a
-  // sandbox id) to run this session on. When set, the active-sandbox pointer is
-  // resolved+validated+seeded (epoch-fenced) INSIDE finishStartSession, AFTER the
-  // session row exists but BEFORE the first turn is enqueued/the workflow woken,
-  // so the FIRST turn routes to the chosen machine. An invalid/unowned/offline
-  // target fails the create (422) — never a silent fall-back to the default box.
+  // sandbox id) to run this session on. When set, target liveness is preflighted
+  // before insertion, then the active-sandbox pointer is authority-checked and
+  // seeded (epoch-fenced) in the SAME transaction as the session row. The FIRST
+  // turn therefore routes to the chosen machine, while an invalid/unowned/offline
+  // target fails the create (422) without leaving a queued session shell.
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: {
@@ -828,12 +842,45 @@ export async function createAndStartSessionWithOutcome(input: {
     (input.workspaceCustomModel === true || input.workspaceGatewayCustomModel === true) &&
     input.retainWorkspaceCustomModel !== true &&
     input.retainWorkspaceGatewayModel !== true;
+  const seedTargetForNewSession = input.seedTargetSandbox ?? null;
+  const preflightTarget = seedTargetForNewSession
+    ? await preflightCreateTimeSandboxTarget(
+        {
+          db: input.db,
+          settings: seedTargetForNewSession.settings,
+          bus: input.bus,
+        },
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          ...(seedTargetForNewSession.resourceSubjectId
+            ? { subjectId: seedTargetForNewSession.resourceSubjectId }
+            : {}),
+        },
+        seedTargetForNewSession.sandboxId,
+        seedTargetForNewSession.workingDir ?? null,
+      )
+    : null;
+  const targetPreflightFailureMessage =
+    preflightTarget && !preflightTarget.ok
+      ? `cannot target sandbox ${seedTargetForNewSession!.sandboxId}: ${preflightTarget.reason}`
+      : null;
+  let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
-    requiresActiveWorkspaceCustomModel || input.consumeNewSessionDraft || input.beforeCreateCommit
+    requiresActiveWorkspaceCustomModel ||
+    input.consumeNewSessionDraft ||
+    input.beforeCreateCommit ||
+    preflightTarget ||
+    targetPreflightFailureMessage
       ? async (tx: Database, sessionId: string, context?: { created: boolean }): Promise<void> => {
           // A committed keyed replay already crossed this fence when its shell
           // was first accepted. Revalidate only the transaction inserting a new
           // session, while still running caller linkage on every replay.
+          if (targetPreflightFailureMessage && context?.created !== false) {
+            throw new HTTPException(422, {
+              message: targetPreflightFailureMessage,
+            });
+          }
           if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
             const reference = {
               scope: input.turnExecutionPolicy.providerId.startsWith("organization-")
@@ -866,6 +913,25 @@ export async function createAndStartSessionWithOutcome(input: {
               expectedRevision: input.consumeNewSessionDraft.expectedRevision,
               expectedSnapshot: input.consumeNewSessionDraft.expectedSnapshot,
             });
+          }
+          if (preflightTarget?.ok && context?.created !== false) {
+            const seeded = await setActiveSandbox(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId,
+              targetSandboxId: preflightTarget.targetSandboxId,
+              expectedEpoch: 0,
+              ...(seedTargetForNewSession?.resourceSubjectId
+                ? { subjectId: seedTargetForNewSession.resourceSubjectId }
+                : {}),
+              workingDir: preflightTarget.workingDir,
+            });
+            if (!seeded.swapped) {
+              throw new HTTPException(422, {
+                message: `cannot target sandbox ${seedTargetForNewSession!.sandboxId}: target authority changed during session creation`,
+              });
+            }
+            targetSeededBeforeCreateCommit = true;
           }
           await input.beforeCreateCommit?.(tx, sessionId);
         }
@@ -905,6 +971,7 @@ export async function createAndStartSessionWithOutcome(input: {
       policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
+      selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
@@ -951,7 +1018,10 @@ export async function createAndStartSessionWithOutcome(input: {
         changed: finished.changed,
       };
     }
-    const finished = await finishStartSession(input, keyed);
+    const finished = await finishStartSession(
+      targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
+      keyed,
+    );
     return {
       session: finished.session,
       outcome: "created",
@@ -1012,7 +1082,10 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     throw error;
   }
-  const finished = await finishStartSession(input, session);
+  const finished = await finishStartSession(
+    targetSeededBeforeCreateCommit ? { ...input, seedTargetSandbox: null } : input,
+    session,
+  );
   return {
     session: finished.session,
     outcome: "created",
@@ -1050,7 +1123,11 @@ async function finishStartSession(
     reasoningEffort: Settings["openaiReasoningEffort"];
     turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
-    variableSets?: Array<{ id: string; name: string; scope: VariableSet["scope"] }>;
+    variableSets?: Array<{
+      id: string;
+      name: string;
+      scope: VariableSet["scope"];
+    }>;
     goal?: GoalSpec | null;
     initialAutomaticTitle?: string | null;
     sessionMcpServers?: SessionMcpServerMetadata[];
@@ -1083,15 +1160,12 @@ async function finishStartSession(
 ): Promise<{ session: CreateSessionResponse; changed: boolean }> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
-  // machine. swapActiveSandbox does
+  // machine. Home backend and active route are independent: a backend:none
+  // session has no managed home but may still attach a valid Connected Machine.
+  // swapActiveSandbox does
   // the same ownership+liveness validation as the live swap; an invalid/unowned/
   // offline target FAILS the create (422) — never a silent fall-back to the box.
   if (input.seedTargetSandbox) {
-    if (session.sandboxBackend === "none") {
-      throw new HTTPException(422, {
-        message: "cannot target a machine for a session with no sandbox (backend: none)",
-      });
-    }
     const ctx: FleetContext = {
       accountId: session.accountId,
       workspaceId: session.workspaceId,
@@ -1867,6 +1941,7 @@ export async function createSessionForRequestWithOutcome(
           ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
+        selectedInstalledSkillIds: payload.installedSkillIds ?? [],
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
         variableSetIds: payload.variableSetIds ?? [],
@@ -2029,9 +2104,43 @@ export async function createSessionForRequestWithOutcome(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
-  const skills = hasOwnProperty(rawPayload, "skills")
+  const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills
     : (parentSession?.skills ?? payload.skills);
+  const selectedInstalledSkillIds = payload.installedSkillIds ?? [];
+  const selectedInstalledSkills: SessionSkill[] = [];
+  if (selectedInstalledSkillIds.length > 0) {
+    const installedSkills = await listInstalledPortableSkills(db, workspaceId, {
+      includeSessionSelected: true,
+    });
+    const installedById = new Map(installedSkills.map((skill) => [skill.capabilityId, skill]));
+    for (const capabilityId of selectedInstalledSkillIds) {
+      const installed = installedById.get(capabilityId);
+      if (!installed) {
+        throw new HTTPException(422, {
+          message: `Session-selected Skill is not installed in this workspace: ${capabilityId}`,
+        });
+      }
+      if (installed.activationMode !== "session_selected") {
+        throw new HTTPException(422, {
+          message: `Installed Skill does not require explicit session selection: ${capabilityId}`,
+        });
+      }
+      selectedInstalledSkills.push({
+        name: installed.name,
+        description: installed.description,
+        files: installed.files.map((file) => ({ path: file.path, content: file.content })),
+      });
+    }
+  }
+  let skills: SessionSkill[];
+  try {
+    skills = SessionSkills.parse([...inheritedOrSubmittedSkills, ...selectedInstalledSkills]);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid session Skill selection",
+    });
+  }
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
   // Visibility became durable draft state after older clients had already
   // written rows without it. Compare it only when the create request supplied
@@ -2330,7 +2439,10 @@ export async function createSessionForRequestWithOutcome(
     payload.firstPartyMcpTools,
     parentSession ? parentSession.firstPartyMcpTools : undefined,
     workspaceFirstPartyDefaults && !parentSession
-      ? { ...deploymentFirstPartyMcpToolPolicy, default: workspaceFirstPartyDefaults }
+      ? {
+          ...deploymentFirstPartyMcpToolPolicy,
+          default: workspaceFirstPartyDefaults,
+        }
       : deploymentFirstPartyMcpToolPolicy,
   );
   const googleDrivePublicationEnabled =
@@ -2406,7 +2518,10 @@ export async function createSessionForRequestWithOutcome(
   let sandboxGroupId: string | null = null;
   let inheritedBackend: Session["sandboxBackend"] | undefined;
   let inheritedSandboxOs: Session["sandboxOs"] | undefined;
-  let inheritedActiveTarget: { sandboxId: string; workingDir: string | null } | null = null;
+  let inheritedActiveTarget: {
+    sandboxId: string;
+    workingDir: string | null;
+  } | null = null;
   // ENV-AWARE GROUPING: under the CURRENT mechanics the workspace VariableSet is
   // creation-time box state — the box's manifest env is fixed when it is cold-
   // created, and the SDK's provided-session guard rejects any manifest-env delta
@@ -2715,6 +2830,7 @@ export async function createSessionForRequestWithOutcome(
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
+      selectedInstalledSkillIds,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
       allowNestedAgentDepthIncrease: hasPermission(grant.permissions, "workspace:admin"),
       subjectId: grant.subjectId,
@@ -3166,7 +3282,15 @@ export async function acceptSessionUserMessageWithOutcome(
           ? { schedulePostCommit: deps.schedulePromptPostCommit }
           : {}),
       });
-    return { accepted, turn, draft, receipt, routing, interruptionCount, replay };
+    return {
+      accepted,
+      turn,
+      draft,
+      receipt,
+      routing,
+      interruptionCount,
+      replay,
+    };
   } catch (error) {
     if (input.clientEventId && boundaryRequestHash) {
       const replay = await withWorkspaceSubjectSessionActivityRls(

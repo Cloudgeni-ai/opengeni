@@ -173,9 +173,12 @@ Rules to keep in mind:
   **422**.
 - When a child omits both `sandbox` and `machineTarget`, sharing a parent that is
   currently routed to a Connected Machine automatically copies that exact
-  machine and working directory to the child before its first turn. The model
-  does not choose the machine again. A selfhosted-only create with neither an
-  inherited nor explicit machine is rejected before an unusable session starts.
+  machine and working directory to the child before its first turn. A
+  `backend:none` parent remains a backend-none shared home; its valid attached
+  machine is an independent active route and is inherited without relabeling the
+  child. The model does not choose the machine again. A selfhosted-only create
+  with neither an inherited nor explicit machine is rejected before an unusable
+  session starts.
 
 The model-facing first-party `session_create` tool makes the dependency
 structural: it accepts an optional `machineTarget` object containing required
@@ -198,7 +201,10 @@ seeds the generated session's active pointer before its first turn. A deployment
 whose default backend is `selfhosted` rejects a generated-session schedule that
 does not select a machine instead of creating a session that cannot execute.
 Manual runs also preflight current liveness and the reported workspace root
-before consuming run capacity.
+before consuming run capacity. After that preflight, session creation rechecks
+durable target authority and commits the active pointer in the same transaction
+as the new session row. If the target is invalid, removed, revoked, or otherwise
+no longer attachable, the create fails without leaving a queued session shell.
 
 Unattended schedules currently accept workspace- and organization-scoped
 machines only. User-scoped machines require an owning human's explicit personal

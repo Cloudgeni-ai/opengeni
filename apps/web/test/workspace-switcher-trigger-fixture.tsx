@@ -12,9 +12,8 @@ import {
 import {
   OrganizationSwitcherLine,
   WORKSPACE_SWITCHER_GRID_CLASS,
-  WorkspaceMenu,
-  WorkspaceSwitcherTrigger,
 } from "../src/components/rail/switcher-block";
+import { WorkspaceMenu, WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { ManagedSelfContext } from "../src/lib/managed-self-context";
 import type { Workspace } from "../src/types";
@@ -119,11 +118,7 @@ function WorkspaceSwitcherFixture() {
                 canCreate
                 onSelect={setActiveWorkspaceId}
                 onCreate={() => setLastAction("New workspace")}
-                activeWorkspace={activeWorkspace}
                 managedSelfContext={selfContext}
-                canControl={false}
-                controlBusy={false}
-                onToggleControl={() => {}}
                 align="start"
               >
                 <WorkspaceSwitcherTrigger
@@ -154,11 +149,7 @@ function WorkspaceSwitcherFixture() {
                     setLastAction(`Opened ${selected.name}`);
                   }}
                   onCreate={() => setLastAction("New workspace")}
-                  activeWorkspace={activeWorkspace}
                   managedSelfContext={selfContext}
-                  canControl={false}
-                  controlBusy={false}
-                  onToggleControl={() => {}}
                   align="start"
                 >
                   <WorkspaceSwitcherTrigger

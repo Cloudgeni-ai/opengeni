@@ -20,6 +20,7 @@
 //     machine route + working directory before the child's first turn.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import postgres from "postgres";
 import {
   testSettings,
@@ -38,7 +39,11 @@ import {
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import type { AccessGrant } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
+import {
+  createAndStartSessionWithOutcome,
+  createSessionForRequest,
+  swapActiveSandbox,
+} from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
 
@@ -69,18 +74,26 @@ const settings = testSettings({
 /** A MemoryEventBus whose responder answers ping → online for the agent subject
  *  (a stand-in for a real enrolled agent over NATS), so the seed swap's liveness
  *  gate passes without a broker. */
-function busWithAgent(opts: { workspaceId: string; agentId: string }): MemoryEventBus {
+function busWithAgent(opts: {
+  workspaceId: string;
+  agentId: string;
+  onPing?: () => Promise<void>;
+}): MemoryEventBus {
   const bus = new MemoryEventBus();
   bus.subscribeRequests(
     subjectFor(opts.workspaceId, opts.agentId, CONNECTION_INSTANCE_ID),
-    (payload) => {
+    async (payload) => {
       const req = ControlRequest.decode(payload);
       const op = req.op;
+      if (op?.$case === "ping") await opts.onPing?.();
       const res: ControlResponse =
         op?.$case === "ping"
           ? {
               requestId: req.requestId,
-              result: { $case: "ping", ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" } },
+              result: {
+                $case: "ping",
+                ping: { nonce: op.ping.nonce, agentMonotonicMs: "0" },
+              },
             }
           : op?.$case === "exec"
             ? {
@@ -111,7 +124,10 @@ function busWithAgent(opts: { workspaceId: string; agentId: string }): MemoryEve
   return bus;
 }
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<
     { id: string }[]
   >`insert into managed_accounts (name) values ('acct') returning id`;
@@ -124,9 +140,13 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
 
 /** Seed an enrolled, online selfhosted machine (+ its sandbox record) in a fresh
  *  workspace, and return the id + a bus whose responder makes it probe online. */
-async function seedMachine(
-  os: "linux" | "macos" | "windows" = "linux",
-): Promise<{ accountId: string; workspaceId: string; sandboxId: string; bus: MemoryEventBus }> {
+async function seedMachine(os: "linux" | "macos" | "windows" = "linux"): Promise<{
+  accountId: string;
+  workspaceId: string;
+  enrollmentId: string;
+  sandboxId: string;
+  bus: MemoryEventBus;
+}> {
   const { accountId, workspaceId } = await freshWorkspace();
   const enrollment = await createEnrollment(db, {
     accountId,
@@ -164,6 +184,7 @@ async function seedMachine(
   return {
     accountId,
     workspaceId,
+    enrollmentId: enrollment.id,
     sandboxId: sandbox.id,
     bus: busWithAgent({ workspaceId, agentId: enrollment.id }),
   };
@@ -209,7 +230,12 @@ function grant(accountId: string, workspaceId: string, fromSessionId?: string): 
     subjectId: "subject",
     permissions: ["sessions:create", "sessions:read"],
     ...(fromSessionId
-      ? { metadata: { sessionId: fromSessionId, firstPartyMcpTools: ["session_create"] } }
+      ? {
+          metadata: {
+            sessionId: fromSessionId,
+            firstPartyMcpTools: ["session_create"],
+          },
+        }
       : {}),
   };
 }
@@ -259,6 +285,114 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     const [turnRow] = await admin<{ sandbox_backend: string }[]>`
       select sandbox_backend from session_turns where session_id = ${session.id} limit 1`;
     expect(turnRow?.sandbox_backend).toBe("selfhosted");
+  }, 60_000);
+
+  test("a rejected machine target leaves no queued session shell", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, bus } = await seedMachine();
+    const [before] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "do not persist this rejected worker",
+        targetSandboxId: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("not found in this workspace"),
+    });
+
+    const [after] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    expect(after?.count).toBe(before?.count);
+  }, 60_000);
+
+  test("a target revoked after liveness preflight rolls the session insert back", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollmentId, sandboxId } = await seedMachine();
+    const bus = busWithAgent({
+      workspaceId,
+      agentId: enrollmentId,
+      onPing: async () => {
+        await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
+      },
+    });
+    const [before] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "do not commit after target authority changes",
+        targetSandboxId: sandboxId,
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("target authority changed during session creation"),
+    });
+
+    const [after] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    expect(after?.count).toBe(before?.count);
+  }, 60_000);
+
+  test("a committed keyed create replays after its machine target is revoked", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollmentId, sandboxId, bus } = await seedMachine();
+    const idempotencyKey = crypto.randomUUID();
+    const createInput = {
+      db,
+      bus,
+      workflowClient: stubWorkflowClient(),
+      accountId,
+      workspaceId,
+      initialMessage: "replay this machine-targeted session",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: settings.openaiReasoningEffort,
+        reasoningSource: "deployment",
+      }),
+      sandboxBackend: "selfhosted" as const,
+      metadata: {},
+      firstPartyMcpTools: [],
+      createIdempotencyKey: idempotencyKey,
+      seedTargetSandbox: {
+        sandboxId,
+        settings,
+      },
+    };
+    const created = await createAndStartSessionWithOutcome(createInput);
+    expect(created).toMatchObject({
+      outcome: "created",
+      replay: false,
+      session: { activeSandboxId: sandboxId },
+    });
+
+    await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
+
+    const replayed = await createAndStartSessionWithOutcome(createInput);
+    expect(replayed).toMatchObject({
+      outcome: "repaired",
+      replay: false,
+      changed: true,
+      session: {
+        id: created.session.id,
+        activeSandboxId: sandboxId,
+      },
+    });
+    const [stored] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${workspaceId}
+        and create_idempotency_key = ${idempotencyKey}`;
+    expect(stored?.count).toBe(1);
   }, 60_000);
 
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
@@ -508,7 +642,104 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     const [turnRow] = await admin<
       { sandbox_backend: string; sandbox_os: string }[]
     >`select sandbox_backend, sandbox_os from session_turns where session_id = ${child.id} limit 1`;
-    expect(turnRow).toEqual({ sandbox_backend: "selfhosted", sandbox_os: "macos" });
+    expect(turnRow).toEqual({
+      sandbox_backend: "selfhosted",
+      sandbox_os: "macos",
+    });
+  }, 60_000);
+
+  test("an omitted child placement inherits a backend:'none' parent's active machine route", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager with an attachable machine route",
+        sandboxBackend: "none",
+      },
+    );
+    expect(parent.sandboxBackend).toBe("none");
+
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: parent.id,
+        sessionBackend: parent.sandboxBackend,
+        sessionGroupId: parent.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+      "workers/manager",
+    );
+    expect(attached).toMatchObject({ swapped: true, activeSandboxId: sandboxId });
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "continue on the manager's active route",
+      },
+    );
+
+    expect(child).toMatchObject({
+      parentSessionId: parent.id,
+      sandboxBackend: "none",
+      sandboxGroupId: parent.sandboxGroupId,
+      activeSandboxId: sandboxId,
+      workingDir: "/srv/project/workers/manager",
+    });
+    const [turnRow] = await admin<{ sandbox_backend: string }[]>`
+      select sandbox_backend from session_turns where session_id = ${child.id} limit 1`;
+    expect(turnRow?.sandbox_backend).toBe("none");
+  }, 60_000);
+
+  test("a rejected inherited machine route leaves no keyed child shell", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollmentId, sandboxId, bus } = await seedMachine();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "manager whose machine route will be revoked",
+        sandboxBackend: "none",
+      },
+    );
+    const attached = await swapActiveSandbox(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: parent.id,
+        sessionBackend: parent.sandboxBackend,
+        sessionGroupId: parent.sandboxGroupId,
+        subjectId: "subject",
+      },
+      sandboxId,
+      "workers/manager",
+    );
+    expect(attached.swapped).toBe(true);
+    await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
+
+    const [before] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "do not persist a child for the revoked route",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      message: expect.stringContaining("not found in this workspace"),
+    });
+    const [after] = await admin<{ count: string }[]>`
+      select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
+    expect(after?.count).toBe(before?.count);
   }, 60_000);
 
   test("a targetless top-level selfhosted session is rejected before its first turn", async () => {

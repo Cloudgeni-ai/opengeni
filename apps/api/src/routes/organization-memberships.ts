@@ -1,5 +1,7 @@
 import {
   AcceptOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -40,6 +42,7 @@ import {
   acceptOrganizationInvitation,
   bindPendingOrganizationInvitationsForVerifiedEmail,
   claimOrganizationUserSetupDelivery,
+  createAdditionalManagedOrganization,
   createManagedOrganization,
   createOrganizationWorkspace,
   createOrganizationInvitation,
@@ -68,6 +71,7 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { deleteWorkspaceForRequest } from "../workspace-deletion";
 
 import {
   assertOrganizationUserSetupDeliveryConfigured,
@@ -117,7 +121,9 @@ async function requireOrganizationAdministrator(
     );
     return { subjectId };
   }
-  throw new HTTPException(401, { message: "organization administrator session required" });
+  throw new HTTPException(401, {
+    message: "organization administrator session required",
+  });
 }
 
 async function parseBody<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
@@ -136,8 +142,14 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
   return parsed.data;
 }
 
-function rethrowMembershipError(error: unknown): never {
-  const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
+function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "54000" && resourceLimitMessage) {
+    throw new HTTPException(409, {
+      message: resourceLimitMessage,
+    });
+  }
+  const status = organizationMembershipHttpStatus(sqlState);
   if (status !== null) {
     throw new HTTPException(status, {
       message:
@@ -170,6 +182,25 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
     } catch (error) {
       rethrowMembershipError(error);
+    }
+  });
+
+  app.post("/v1/organizations/additional", async (context) => {
+    const { session, subjectId } = await requireManagedHuman(context, deps);
+    const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
+    try {
+      return context.json(
+        CreateAdditionalOrganizationResponse.parse(
+          await createAdditionalManagedOrganization(deps.db, {
+            subjectId,
+            subjectLabel: session.user.email || session.user.name,
+            ...payload,
+          }),
+        ),
+        201,
+      );
+    } catch (error) {
+      rethrowMembershipError(error, "additional organization limit reached");
     }
   });
 
@@ -326,6 +357,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     } catch (error) {
       rethrowMembershipError(error);
     }
+  });
+
+  app.delete("/v1/organizations/:organizationId/workspaces/:workspaceId", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
+    const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
+    await deleteWorkspaceForRequest(deps, {
+      accountId: organizationId,
+      workspaceId,
+      organizationAdministratorSubjectId: subjectId,
+    });
+    return context.body(null, 204);
   });
 
   app.patch(

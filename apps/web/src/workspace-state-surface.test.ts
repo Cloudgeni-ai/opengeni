@@ -68,7 +68,7 @@ describe("Agent Knowledge surface", () => {
     expect(preferences).toContain("Company and workspace Skills available here");
   });
 
-  test("routes organization profile and learning autonomy to settings", async () => {
+  test("routes organization profile and instruction and Skill autonomy to settings", async () => {
     const [organization, shell, workspaceSettings, learning, memory] = await Promise.all([
       source("routes/org-settings.tsx"),
       source("components/settings/organization-settings-shell.tsx"),
@@ -83,9 +83,11 @@ describe("Agent Knowledge surface", () => {
     expect(organization).toContain("Organization identity");
     expect(organization).toContain("Open documents");
     expect(workspaceSettings).toContain("WorkspaceLearningAdministration");
+    expect(workspaceSettings).toContain("resolveWorkspaceMemoryEnabled");
     expect(workspaceSettings).toContain("Let agents autonomously save and correct durable facts");
     expect(workspaceSettings).not.toContain("editable on Documents");
-    expect(learning).toContain("Learning & autonomy");
+    expect(learning).toContain("Workspace instruction &amp; Skill autonomy");
+    expect(learning).toContain("Require approval");
     expect(memory).toContain('preference: "Legacy preference"');
     expect(memory).toContain('procedural: "Legacy procedure"');
     expect(memory).toContain('episodic: "Incident or outcome"');

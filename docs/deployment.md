@@ -274,7 +274,12 @@ maintenance migration must be selected explicitly; migration 0389 uses
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
 plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
 operator completes the documented database-role, image-digest, and application
-drain preflight. Postgres and Garage PVCs remain attached. Database migrations
+drain preflight. Migration 0394 likewise requires a complete API and worker
+drain and
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
+a pre-0394 worker would treat the newly admitted activation mode as an ambient
+workspace Skill, so none may remain live or restart after the cutover. Postgres
+and Garage PVCs remain attached. Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.
 

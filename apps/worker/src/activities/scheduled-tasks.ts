@@ -1390,15 +1390,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
-              async (tx, wakeEventId) => {
+              async (tx, wakeEventId, _updateId, rejectionReason) => {
                 if (!wakeEventId) {
+                  const error = scheduledSessionRejectionError(rejectionReason);
                   await settleScheduledTaskRunInTransaction(tx, {
                     workspaceId: task.workspaceId,
                     runId: scheduledRun.id,
                     sessionId: session.id,
                     triggerEventId: null,
                     status: "skipped",
-                    error: "session_cancelled",
+                    error,
                   });
                   return;
                 }
@@ -1410,26 +1411,33 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   status: "dispatched",
                 });
               },
-              incidentPreflightRequired
-                ? {
-                    prepareSource: async (tx, sessionId) =>
-                      await prepareIncidentTelemetrySource({
-                        tx,
-                        settings,
-                        taskId: task.id,
-                        workspaceId: task.workspaceId,
-                        sessionId,
-                        alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
-                        acceptedExecution,
-                      }),
-                  }
-                : undefined,
+              {
+                requireIdleSession: task.overlapPolicy === "skip" && !sessionCreated,
+                ...(incidentPreflightRequired
+                  ? {
+                      prepareSource: async (tx, sessionId) =>
+                        await prepareIncidentTelemetrySource({
+                          tx,
+                          settings,
+                          taskId: task.id,
+                          workspaceId: task.workspaceId,
+                          sessionId,
+                          alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
+                          acceptedExecution,
+                        }),
+                    }
+                  : {}),
+              },
             );
-            if (scheduledUpdate.reason === "session_cancelled") {
+            if (
+              scheduledUpdate.reason === "session_cancelled" ||
+              scheduledUpdate.reason === "session_not_idle"
+            ) {
+              const error = scheduledSessionRejectionError(scheduledUpdate.reason);
               return {
                 kind: "blocked" as const,
                 result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
-                run: { ...run, status: "skipped" as const, error: "session_cancelled" },
+                run: { ...run, status: "skipped" as const, error },
               };
             }
             if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {
@@ -1467,39 +1475,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
               sessionId: session.id,
             });
             // A user-cancelled (terminal) reusable session must not be revived and
-            // re-billed on the next fire. Early check avoids the pre-lock goal
-            // upsert side-effect; the locked-callback check below is the
-            // authoritative atomic guard. Mirrors apps/api/src/domain/sessions.ts.
+            // re-billed on the next fire. This cheap check gives an early answer;
+            // the locked admission check below remains authoritative. Mirrors
+            // apps/api/src/domain/sessions.ts.
             assertReusableSessionRevivable(session.status);
             // Defensive backstop for the API-level 409: a reusable session keeps
             // its creation-time attachment, so a diverged task attachment must
             // fail the run instead of silently running with the wrong secrets.
             assertReusableSessionBindingMatches(session, task);
-            // A recurring "maintain X" task re-establishes its objective on every
-            // fire: replace the goal text, reactivate it, and reset the counters.
-            const goalEvents =
-              task.runMode === "reusable_session" && goalSpec && run.status === "queued"
-                ? await upsertScheduledSessionGoalForRun(dispatchDb, {
-                    accountId: task.accountId,
-                    workspaceId: task.workspaceId,
-                    sessionId: session.id,
-                    runId: run.id,
-                    text: goalSpec.text,
-                    successCriteria: goalSpec.successCriteria ?? null,
-                    maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
-                    ...(goalSpec.mutationPolicy ? { mutationPolicy: goalSpec.mutationPolicy } : {}),
-                  })
-                : [];
-            if (goalEvents.length > 0) {
-              if (deferPublications) {
-                deferredEvents.push({
-                  sessionId: session.id,
-                  events: goalEvents,
-                });
-              } else {
-                await publishDurableSessionEvents(bus, task.workspaceId, session.id, goalEvents);
-              }
-            }
             const bundled = await addSessionSystemUpdateWithSourceMutation(
               dispatchDb,
               {
@@ -1534,15 +1517,16 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                 xaiProviderAccountAuthoritySnapshot: taskXaiProviderAccountAuthoritySnapshot,
                 scheduledTaskRunId: run.id,
               },
-              async (tx, wakeEventId) => {
+              async (tx, wakeEventId, _updateId, rejectionReason) => {
                 if (!wakeEventId) {
+                  const error = scheduledSessionRejectionError(rejectionReason);
                   await settleScheduledTaskRunInTransaction(tx, {
                     workspaceId: task.workspaceId,
                     runId: scheduledRun.id,
                     sessionId: session.id,
                     triggerEventId: null,
                     status: "skipped",
-                    error: "session_cancelled",
+                    error,
                   });
                   return;
                 }
@@ -1554,10 +1538,26 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                   status: "dispatched",
                 });
               },
-              incidentPreflightRequired
-                ? {
-                    prepareSource: async (tx, sessionId) =>
-                      await prepareIncidentTelemetrySource({
+              {
+                requireIdleSession: task.overlapPolicy === "skip",
+                prepareSource: async (tx, sessionId) => {
+                  const goalEvents =
+                    task.runMode === "reusable_session" && goalSpec && run.status === "queued"
+                      ? await upsertScheduledSessionGoalForRun(tx, {
+                          accountId: task.accountId,
+                          workspaceId: task.workspaceId,
+                          sessionId,
+                          runId: run.id,
+                          text: goalSpec.text,
+                          successCriteria: goalSpec.successCriteria ?? null,
+                          maxAutoContinuations: goalSpec.maxAutoContinuations ?? null,
+                          ...(goalSpec.mutationPolicy
+                            ? { mutationPolicy: goalSpec.mutationPolicy }
+                            : {}),
+                        })
+                      : [];
+                  const incidentSource = incidentPreflightRequired
+                    ? await prepareIncidentTelemetrySource({
                         tx,
                         settings,
                         taskId: task.id,
@@ -1565,15 +1565,21 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
                         sessionId,
                         alertOccurrenceLabels: structuredAlertOccurrence?.labels ?? null,
                         acceptedExecution,
-                      }),
-                  }
-                : undefined,
+                      })
+                    : undefined;
+                  return {
+                    ...(incidentSource ?? {}),
+                    ...(goalEvents.length > 0 ? { events: goalEvents } : {}),
+                  };
+                },
+              },
             );
-            if (bundled.reason === "session_cancelled") {
+            if (bundled.reason === "session_cancelled" || bundled.reason === "session_not_idle") {
+              const error = scheduledSessionRejectionError(bundled.reason);
               return {
                 kind: "blocked" as const,
                 result: { action: "blocked" as const, reason: "scheduled_run_terminal" as const },
-                run: { ...run, status: "skipped" as const, error: "session_cancelled" },
+                run: { ...run, status: "skipped" as const, error },
               };
             }
             if (bundled.added && bundled.events.length > 0) {
@@ -1795,6 +1801,14 @@ function scheduledRunTerminalResult(
     return { action: "blocked", reason: "incident_data_source_unsuitable" };
   }
   return { action: "blocked", reason: "scheduled_run_terminal" };
+}
+
+function scheduledSessionRejectionError(
+  rejectionReason: "session_cancelled" | "session_not_idle" | null,
+): "session_cancelled" | "scheduled_session_not_idle" {
+  return rejectionReason === "session_not_idle"
+    ? "scheduled_session_not_idle"
+    : "session_cancelled";
 }
 
 async function prepareIncidentTelemetrySource(input: {
@@ -2304,23 +2318,6 @@ async function recoverBoundScheduledTaskDispatch(input: {
       await publishDurableSessionEvents(input.bus, task.workspaceId, session.id, titleEvents);
     }
   }
-  if (!generatedSession && task.runMode === "reusable_session" && task.agentConfig.goal) {
-    const goalEvents = await upsertScheduledSessionGoalForRun(input.db, {
-      accountId: task.accountId,
-      workspaceId: task.workspaceId,
-      sessionId: session.id,
-      runId: input.run.id,
-      text: task.agentConfig.goal.text,
-      successCriteria: task.agentConfig.goal.successCriteria ?? null,
-      maxAutoContinuations: task.agentConfig.goal.maxAutoContinuations ?? null,
-      ...(task.agentConfig.goal.mutationPolicy
-        ? { mutationPolicy: task.agentConfig.goal.mutationPolicy }
-        : {}),
-    });
-    if (goalEvents.length > 0) {
-      await publishDurableSessionEvents(input.bus, task.workspaceId, session.id, goalEvents);
-    }
-  }
   const scheduledUpdate = await addSessionSystemUpdateWithSourceMutation(
     input.db,
     {
@@ -2359,15 +2356,16 @@ async function recoverBoundScheduledTaskDispatch(input: {
         input.acceptedExecution.xaiProviderAccountAuthoritySnapshot,
       scheduledTaskRunId: input.run.id,
     },
-    async (tx, wakeEventId) => {
+    async (tx, wakeEventId, _updateId, rejectionReason) => {
       if (!wakeEventId) {
+        const error = scheduledSessionRejectionError(rejectionReason);
         await settleScheduledTaskRunInTransaction(tx, {
           workspaceId: task.workspaceId,
           runId: input.run.id,
           sessionId: session.id,
           triggerEventId: null,
           status: "skipped",
-          error: "session_cancelled",
+          error,
         });
         return;
       }
@@ -2379,10 +2377,25 @@ async function recoverBoundScheduledTaskDispatch(input: {
         status: "dispatched",
       });
     },
-    input.acceptedExecution.incidentPreflightRequired
-      ? {
-          prepareSource: async (tx, sessionId) =>
-            await prepareIncidentTelemetrySource({
+    {
+      requireIdleSession: task.overlapPolicy === "skip" && !generatedSession,
+      prepareSource: async (tx, sessionId) => {
+        const goal = task.agentConfig.goal;
+        const goalEvents =
+          !generatedSession && task.runMode === "reusable_session" && goal
+            ? await upsertScheduledSessionGoalForRun(tx, {
+                accountId: task.accountId,
+                workspaceId: task.workspaceId,
+                sessionId,
+                runId: input.run.id,
+                text: goal.text,
+                successCriteria: goal.successCriteria ?? null,
+                maxAutoContinuations: goal.maxAutoContinuations ?? null,
+                ...(goal.mutationPolicy ? { mutationPolicy: goal.mutationPolicy } : {}),
+              })
+            : [];
+        const incidentSource = input.acceptedExecution.incidentPreflightRequired
+          ? await prepareIncidentTelemetrySource({
               tx,
               settings: input.settings,
               taskId: task.id,
@@ -2390,11 +2403,19 @@ async function recoverBoundScheduledTaskDispatch(input: {
               sessionId,
               alertOccurrenceLabels: input.acceptedExecution.alertOccurrenceLabels,
               acceptedExecution: input.acceptedExecution,
-            }),
-        }
-      : undefined,
+            })
+          : undefined;
+        return {
+          ...(incidentSource ?? {}),
+          ...(goalEvents.length > 0 ? { events: goalEvents } : {}),
+        };
+      },
+    },
   );
-  if (scheduledUpdate.reason === "session_cancelled") {
+  if (
+    scheduledUpdate.reason === "session_cancelled" ||
+    scheduledUpdate.reason === "session_not_idle"
+  ) {
     return { action: "blocked", reason: "scheduled_run_terminal" };
   }
   if (scheduledUpdate.added && scheduledUpdate.events.length > 0) {

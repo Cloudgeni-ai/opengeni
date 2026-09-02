@@ -278,6 +278,8 @@ import type {
   AcceptOrganizationRecoveryCustodyRequest,
   ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -4342,6 +4344,17 @@ export class OpenGeniClient {
     return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
   }
 
+  /** Create another organization owned by the current managed human. */
+  async createAdditionalOrganization(
+    request: CreateAdditionalOrganizationRequest,
+  ): Promise<CreateAdditionalOrganizationResponse> {
+    return await this.requestJson<CreateAdditionalOrganizationResponse>(
+      "POST",
+      "/v1/organizations/additional",
+      request,
+    );
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -4431,7 +4444,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create a shared workspace without implicitly granting the actor access. */
+  /** Create a shared workspace and grant its creator explicit workspace-admin access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
@@ -4465,6 +4478,14 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
       request,
+    );
+  }
+
+  /** Delete a shared workspace through organization-administrator authority. */
+  async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
     );
   }
 

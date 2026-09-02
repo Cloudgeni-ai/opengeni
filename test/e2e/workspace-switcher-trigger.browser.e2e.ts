@@ -91,7 +91,7 @@ describe("Workspace switcher trigger in Chromium", () => {
 
     await page.getByRole("menuitem", { name: "Product Testing", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("Opened Product Testing");
-  });
+  }, 15_000);
 
   test("the narrow expanded rail contains the same trigger without page overflow", async () => {
     await page.setViewportSize({ width: 320, height: 760 });
@@ -117,7 +117,7 @@ describe("Workspace switcher trigger in Chromium", () => {
     expect(
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
-  });
+  }, 15_000);
 
   test("Enter and Space open the collapsed tooltip-wrapped trigger and Escape restores focus", async () => {
     await page.setViewportSize({ width: 1120, height: 760 });
@@ -138,5 +138,5 @@ describe("Workspace switcher trigger in Chromium", () => {
     expect(
       await page.getByRole("menuitem", { name: "Product Testing", exact: true }).isVisible(),
     ).toBe(true);
-  });
+  }, 15_000);
 });

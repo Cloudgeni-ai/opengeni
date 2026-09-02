@@ -1,23 +1,14 @@
 // The rail's top switcher: a muted Organization line over a prominent Workspace
-// line. The org line is a menu only when the subject belongs to >1 org (a plain
-// label otherwise); the workspace line is always a menu listing the current
-// org's workspaces plus create / settings actions. Collapsed, the whole block
-// reduces to a workspace-initial avatar that opens the same workspace menu.
+// line. The org line opens organization switching, creation, and settings; the
+// workspace line lists the current org's workspaces plus workspace actions.
+// Collapsed, the whole block reduces to a workspace-initial avatar that opens
+// the same workspace menu.
 import { Link } from "@tanstack/react-router";
-import {
-  BuildingIcon,
-  CheckIcon,
-  ChevronsUpDownIcon,
-  PauseIcon,
-  PlusIcon,
-  SettingsIcon,
-} from "lucide-react";
-import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { WorkspaceNameDialog } from "@/components/rail/workspace-name-dialog";
-import { PersonalWorkspaceBadge } from "@/components/personal-workspace-badge";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,31 +17,38 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
 import {
-  organizationsForSubject,
-  shortAccountId,
-  workspacesInOrg,
-  type OrgOption,
-} from "@/lib/org";
-import { isPersonalWorkspace, type ManagedSelfContext } from "@/lib/managed-self-context";
-import { workspaceCreationAccountId } from "@/lib/workspaces";
-import { cn } from "@/lib/utils";
-import type { Workspace } from "@/types";
+  activeOrganizationLabel,
+  WorkspaceSwitcherMenu,
+} from "@/components/rail/workspace-switcher";
+import { organizationsForSubject, type OrgOption } from "@/lib/org";
+import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 
-function workspaceInitial(workspace: Workspace | null): string {
-  return (workspace?.name.trim()[0] ?? "W").toUpperCase();
+const LazyCreateOrganizationDialog = lazy(() =>
+  import("@/components/rail/create-organization-dialog").then((module) => ({
+    default: module.CreateOrganizationDialog,
+  })),
+);
+
+type AdditionalOrganizationCreationState = "draft" | "uncertain" | "committed";
+
+export function additionalOrganizationCreationOutcomeUnknown(error: unknown): boolean {
+  return error instanceof OpenGeniApiError ? error.outcomeUnknown : error instanceof TypeError;
 }
 
-function activeOrganizationLabel(orgs: OrgOption[], activeAccountId: string | null): string {
-  if (!activeAccountId) {
-    return "Organization";
-  }
+export function additionalOrganizationCreationAttemptIsCurrent(input: {
+  acceptedRevision: number;
+  currentRevision: number;
+  ownerUserId: string;
+  currentManagedUserId: string | null;
+  operationOwnerUserId: string | null;
+}): boolean {
   return (
-    orgs.find((organization) => organization.accountId === activeAccountId)?.label ??
-    `Org ${shortAccountId(activeAccountId)}`
+    input.acceptedRevision === input.currentRevision &&
+    input.ownerUserId === input.currentManagedUserId &&
+    input.ownerUserId === input.operationOwnerUserId
   );
 }
 
@@ -67,85 +65,159 @@ export function SwitcherBlock() {
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
-  const activeIsPersonal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
+  const managedUserId = context.authSession?.user.id ?? null;
+  const canCreateOrganization =
+    context.clientConfig.auth.mode === "managedSession" &&
+    canCreateAdditionalOrganization({
+      managedUserId,
+      emailVerified: context.authSession?.user.emailVerified === true,
+      selfContext: context.managedSelfContext,
+    });
+  const [createOpen, setCreateOpen] = useState(false);
+  const [organizationName, setOrganizationName] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("General");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [creationState, setCreationState] = useState<AdditionalOrganizationCreationState>("draft");
+  const operationId = useRef<string | null>(null);
+  const operationOwnerUserId = useRef<string | null>(null);
+  const currentManagedUserId = useRef(managedUserId);
+  const creationAttemptRevision = useRef(0);
+  currentManagedUserId.current = managedUserId;
 
-  const createAccountId = workspaceCreationAccountId(
-    context.accessContext,
-    activeWorkspace?.accountId ?? null,
-  );
-
-  const [dialog, setDialog] = useState<"create" | "rename" | null>(null);
-  const [nameDraft, setNameDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  function openDialog(mode: "create" | "rename") {
-    setNameDraft(mode === "rename" ? (activeWorkspace?.name ?? "") : "");
-    setDialog(mode);
+  function resetCreateOrganizationDraft() {
+    setOrganizationName("");
+    setWorkspaceName("General");
+    setCreationState("draft");
+    operationId.current = null;
+    operationOwnerUserId.current = null;
   }
 
-  async function submitDialog() {
-    const name = nameDraft.trim();
-    if (!name || !dialog) {
+  useEffect(() => {
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      creationAttemptRevision.current += 1;
+      setCreateBusy(false);
+      setCreateOpen(false);
+      resetCreateOrganizationDraft();
+    }
+  }, [managedUserId]);
+
+  useEffect(
+    () => () => {
+      creationAttemptRevision.current += 1;
+    },
+    [],
+  );
+
+  function updateCreateOpen(open: boolean) {
+    if (createBusy && !open) return;
+    setCreateOpen(open);
+    if (!open && creationState === "draft") {
+      resetCreateOrganizationDraft();
+    }
+  }
+
+  async function submitCreateOrganization() {
+    const name = organizationName.trim();
+    const initialWorkspaceName = workspaceName.trim();
+    if (!name || !initialWorkspaceName || !managedUserId || createBusy) return;
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
       return;
     }
-    const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
-    if (!acceptedTransition) return;
-    setBusy(true);
+    if (!operationId.current) {
+      operationId.current = crypto.randomUUID();
+      operationOwnerUserId.current = managedUserId;
+    }
+    const acceptedAttemptRevision = ++creationAttemptRevision.current;
+    const attemptIsCurrent = () =>
+      additionalOrganizationCreationAttemptIsCurrent({
+        acceptedRevision: acceptedAttemptRevision,
+        currentRevision: creationAttemptRevision.current,
+        ownerUserId: managedUserId,
+        currentManagedUserId: currentManagedUserId.current,
+        operationOwnerUserId: operationOwnerUserId.current,
+      });
+    setCreateBusy(true);
+    let attemptedState: AdditionalOrganizationCreationState = creationState;
+    if (attemptedState === "draft") {
+      attemptedState = "uncertain";
+      setCreationState("uncertain");
+    }
     try {
-      if (dialog === "create") {
-        const created = await context.createWorkspace({
-          name,
-          ...(createAccountId ? { accountId: createAccountId } : {}),
-        });
-        if (!created) {
-          return;
-        }
-        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        toast.success(`Workspace ${created.name} created`);
-        rail.openWorkspace(created.id);
-      } else {
-        const renamed = await context.renameWorkspace(rail.workspaceId, name);
-        if (!renamed) {
-          return;
-        }
-        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
-        toast.success("Workspace renamed");
+      const created = await context.client.createAdditionalOrganization({
+        name,
+        workspaceName: initialWorkspaceName,
+        operationId: operationId.current,
+      });
+      if (!attemptIsCurrent()) return;
+      attemptedState = "committed";
+      setCreationState("committed");
+      const refreshed = await context.refreshPrincipalAccess();
+      if (!attemptIsCurrent()) return;
+      if (!refreshed) {
+        throw new Error("Your access changed before the new organization could be opened");
       }
-      setDialog(null);
+      rail.openWorkspace(created.workspaceId);
+      toast.success(`${created.organization.name} created`, {
+        description: `${initialWorkspaceName} is ready for your team.`,
+      });
+      setCreateBusy(false);
+      setCreateOpen(false);
+      resetCreateOrganizationDraft();
+    } catch (error) {
+      if (!attemptIsCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
+      if (attemptedState !== "committed" && !outcomeUnknown) {
+        attemptedState = "draft";
+        setCreationState("draft");
+        operationId.current = null;
+        operationOwnerUserId.current = null;
+      }
+      toast.error(
+        attemptedState === "committed"
+          ? "Organization created, but not opened"
+          : attemptedState === "uncertain"
+            ? "Creation could not be confirmed"
+            : "Failed to create organization",
+        {
+          description:
+            attemptedState === "committed"
+              ? `${message}. Try again to refresh access and open the same organization.`
+              : attemptedState === "uncertain"
+                ? `${message}. Try again to safely replay this exact request and confirm the result.`
+                : message,
+        },
+      );
     } finally {
-      setBusy(false);
+      if (attemptIsCurrent()) setCreateBusy(false);
     }
   }
 
   if (rail.collapsed) {
     return (
       <>
-        <WorkspaceMenu
-          collapsed={rail.collapsed}
-          orgs={orgs}
-          workspaces={context.workspaces}
-          activeWorkspaceId={rail.workspaceId}
-          canCreate={createAccountId !== null}
-          onSelect={rail.openWorkspace}
-          onCreate={() => openDialog("create")}
-          managedSelfContext={context.managedSelfContext}
+        <WorkspaceSwitcherMenu
+          workspaceId={rail.workspaceId}
+          collapsed
           align="start"
-        >
-          <WorkspaceSwitcherTrigger
-            activeWorkspace={activeWorkspace}
-            activeOrganizationLabel={currentOrgLabel}
-            personal={activeIsPersonal}
-            collapsed
-          />
-        </WorkspaceMenu>
-        <WorkspaceNameDialog
-          mode={dialog}
-          name={nameDraft}
-          busy={busy}
-          onNameChange={setNameDraft}
-          onOpenChange={(open) => !open && setDialog(null)}
-          onSubmit={() => void submitDialog()}
+          onSelect={rail.openWorkspace}
+          onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
         />
+        {createOpen ? (
+          <Suspense fallback={null}>
+            <LazyCreateOrganizationDialog
+              open
+              organizationName={organizationName}
+              workspaceName={workspaceName}
+              busy={createBusy}
+              creationState={creationState}
+              onOrganizationNameChange={setOrganizationName}
+              onWorkspaceNameChange={setWorkspaceName}
+              onOpenChange={updateCreateOpen}
+              onSubmit={() => void submitCreateOrganization()}
+            />
+          </Suspense>
+        ) : null}
       </>
     );
   }
@@ -157,35 +229,30 @@ export function SwitcherBlock() {
         currentLabel={currentOrgLabel}
         activeAccountId={activeAccountId}
         onSelect={rail.openOrg}
+        onCreate={canCreateOrganization ? () => setCreateOpen(true) : undefined}
         workspaceId={rail.workspaceId}
       />
+      {createOpen ? (
+        <Suspense fallback={null}>
+          <LazyCreateOrganizationDialog
+            open
+            organizationName={organizationName}
+            workspaceName={workspaceName}
+            busy={createBusy}
+            creationState={creationState}
+            onOrganizationNameChange={setOrganizationName}
+            onWorkspaceNameChange={setWorkspaceName}
+            onOpenChange={updateCreateOpen}
+            onSubmit={() => void submitCreateOrganization()}
+          />
+        </Suspense>
+      ) : null}
 
-      <WorkspaceMenu
-        collapsed={rail.collapsed}
-        orgs={orgs}
-        workspaces={context.workspaces}
-        activeWorkspaceId={rail.workspaceId}
-        canCreate={createAccountId !== null}
-        onSelect={rail.openWorkspace}
-        onCreate={() => openDialog("create")}
-        managedSelfContext={context.managedSelfContext}
+      <WorkspaceSwitcherMenu
+        workspaceId={rail.workspaceId}
+        collapsed={false}
         align="start"
-      >
-        <WorkspaceSwitcherTrigger
-          activeWorkspace={activeWorkspace}
-          activeOrganizationLabel={currentOrgLabel}
-          personal={activeIsPersonal}
-          collapsed={false}
-        />
-      </WorkspaceMenu>
-
-      <WorkspaceNameDialog
-        mode={dialog}
-        name={nameDraft}
-        busy={busy}
-        onNameChange={setNameDraft}
-        onOpenChange={(open) => !open && setDialog(null)}
-        onSubmit={() => void submitDialog()}
+        onSelect={rail.openWorkspace}
       />
     </div>
   );
@@ -196,6 +263,7 @@ export function OrganizationSwitcherLine(props: {
   currentLabel: string;
   activeAccountId: string | null;
   onSelect: (accountId: string) => void;
+  onCreate?: () => void;
   workspaceId: string | null;
 }) {
   return (
@@ -244,6 +312,20 @@ export function OrganizationSwitcherLine(props: {
         ) : (
           <DropdownMenuLabel className="text-fg-subtle">{props.currentLabel}</DropdownMenuLabel>
         )}
+        {props.onCreate ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault();
+                props.onCreate?.();
+              }}
+            >
+              <PlusIcon className="size-4" />
+              New organization…
+            </DropdownMenuItem>
+          </>
+        ) : null}
         {props.workspaceId ? (
           <>
             <DropdownMenuSeparator />
@@ -260,175 +342,5 @@ export function OrganizationSwitcherLine(props: {
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
-  );
-}
-
-type WorkspaceSwitcherTriggerProps = {
-  activeWorkspace: Workspace | null;
-  activeOrganizationLabel: string;
-  personal: boolean;
-  collapsed: boolean;
-} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children">;
-
-export const WorkspaceSwitcherTrigger = forwardRef<
-  HTMLButtonElement,
-  WorkspaceSwitcherTriggerProps
->(function WorkspaceSwitcherTrigger(
-  {
-    activeWorkspace,
-    activeOrganizationLabel: organizationLabel,
-    personal,
-    collapsed,
-    className,
-    ...buttonProps
-  },
-  ref,
-) {
-  const workspaceLabel = activeWorkspace?.name ?? (collapsed ? "switch workspace" : "none");
-  const accessibleLabel = `${organizationLabel}. ${
-    personal ? "Personal workspace" : "Workspace"
-  }: ${workspaceLabel}. Switch workspace`;
-
-  if (collapsed) {
-    return (
-      <button
-        {...buttonProps}
-        ref={ref}
-        type="button"
-        aria-label={accessibleLabel}
-        className={cn(
-          "mx-auto flex size-9 items-center justify-center rounded-md border border-border bg-surface-2/60 text-sm font-semibold text-fg transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none",
-          className,
-        )}
-      >
-        {workspaceInitial(activeWorkspace)}
-      </button>
-    );
-  }
-
-  return (
-    <button
-      {...buttonProps}
-      ref={ref}
-      type="button"
-      aria-label={accessibleLabel}
-      className={cn(
-        "group flex min-w-0 max-w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left transition-colors hover:border-border-strong hover:bg-surface-2 focus-visible:outline-none",
-        className,
-      )}
-    >
-      <Avatar size="sm" className="rounded-md">
-        <AvatarFallback className="rounded-md bg-brand-strong/25 text-2xs font-semibold text-brand">
-          {workspaceInitial(activeWorkspace)}
-        </AvatarFallback>
-      </Avatar>
-      <span className="min-w-0 flex-1 truncate text-sm font-medium" title={activeWorkspace?.name}>
-        {activeWorkspace?.name ?? "Select workspace"}
-      </span>
-      {personal ? <PersonalWorkspaceBadge decorative /> : null}
-      <ChevronsUpDownIcon className="size-3.5 shrink-0 text-fg-subtle" />
-    </button>
-  );
-});
-
-export function WorkspaceMenu(props: {
-  collapsed: boolean;
-  orgs: OrgOption[];
-  workspaces: Workspace[];
-  activeWorkspaceId: string;
-  canCreate: boolean;
-  onSelect: (workspaceId: string) => void;
-  onCreate: () => void;
-  managedSelfContext: ManagedSelfContext | null;
-  align: "start" | "end";
-  children: ReactNode;
-}) {
-  const grouped = props.orgs.map((org) => ({
-    org,
-    workspaces: workspacesInOrg(props.workspaces, org.accountId),
-  }));
-  const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
-  return (
-    <DropdownMenu>
-      {props.collapsed ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <span className="inline-flex">{trigger}</span>
-          </TooltipTrigger>
-          <TooltipContent side="right">Switch workspace</TooltipContent>
-        </Tooltip>
-      ) : (
-        trigger
-      )}
-      <DropdownMenuContent
-        align={props.align}
-        className="min-w-60"
-        side={props.collapsed ? "right" : "bottom"}
-      >
-        {grouped.map(({ org, workspaces }, index) => (
-          <div key={org.accountId}>
-            {index > 0 ? <DropdownMenuSeparator /> : null}
-            <DropdownMenuLabel className="text-fg-subtle">
-              {props.orgs.length > 1 ? org.label : "Workspaces"}
-            </DropdownMenuLabel>
-            {workspaces.map((workspace) => (
-              <DropdownMenuItem
-                key={workspace.id}
-                aria-current={workspace.id === props.activeWorkspaceId ? "page" : undefined}
-                onSelect={() => props.onSelect(workspace.id)}
-              >
-                <WorkspaceMenuItemContent
-                  workspace={workspace}
-                  activeWorkspaceId={props.activeWorkspaceId}
-                  managedSelfContext={props.managedSelfContext}
-                />
-              </DropdownMenuItem>
-            ))}
-          </div>
-        ))}
-        <DropdownMenuSeparator />
-        {props.canCreate ? (
-          <DropdownMenuItem
-            onSelect={(event) => {
-              event.preventDefault();
-              props.onCreate();
-            }}
-          >
-            <PlusIcon className="size-4" />
-            New workspace…
-          </DropdownMenuItem>
-        ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-export function WorkspaceMenuItemContent(props: {
-  workspace: Workspace;
-  activeWorkspaceId: string;
-  managedSelfContext: ManagedSelfContext | null;
-}) {
-  const personal = isPersonalWorkspace(props.workspace, props.managedSelfContext);
-  const paused = props.workspace.inferenceControl.state === "paused";
-  return (
-    <>
-      <span
-        aria-hidden="true"
-        className="flex size-5 items-center justify-center rounded bg-surface-3 text-2xs font-semibold"
-      >
-        {workspaceInitial(props.workspace)}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{props.workspace.name}</span>
-      {personal ? <PersonalWorkspaceBadge /> : null}
-      {paused ? (
-        <>
-          <PauseIcon aria-hidden="true" className="size-3.5 fill-current text-status-waiting" />
-          <span className="sr-only"> Paused</span>
-        </>
-      ) : null}
-      {props.workspace.id === props.activeWorkspaceId ? (
-        <CheckIcon aria-hidden="true" className="size-4 text-brand" />
-      ) : null}
-    </>
   );
 }

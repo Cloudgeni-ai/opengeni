@@ -19,6 +19,15 @@ exact-head review sessions. The Pack is packaging and activation authority; the
 provider registration and repository binding remain separate credential and
 resource authorities. See [`pr-review-pack.md`](pr-review-pack.md).
 
+The built-in `opengeni-product-integration` Pack installs implementation-agent
+guidance for adding OpenGeni to an external product. It declares no executable
+tools, connectors, credentials, knowledge, compute, automations, or
+customer-agent persona. Its installed Skill is `session_selected`, so
+installation alone adds it to no session. An implementation session opts in
+explicitly and derives a customer-specific runtime profile from the host
+product. Its canonical product contract is
+[`product-integration.md`](product-integration.md).
+
 ## Product model
 
 The user-facing model is intentionally simpler than the storage model:
@@ -41,6 +50,7 @@ The portable Pack manifest is the **blueprint**. Installation preview resolves i
 5. **V2 runtime comes from components plus a Rig on the platform base.** A v2 installation is identified by its frozen `manifestSnapshot` and `manifestDigest`. The worker does not directly load that manifest's inline Skills or `sandboxImage`; the installer migrates those Skills and selects a Rig. A manifest that still requires `sandboxImage` is blocked instead of replacing the deployment-owned sandbox beneath that Rig.
 6. **Connections remain independent.** A Pack may adopt an exact named Integration instance or Facet binding, but uninstalling the Pack never deletes the underlying Connection.
 7. **Tenant boundaries are enforced twice.** Pack installation, selected Rig, component ledger, and operation rows are workspace/account scoped under FORCE RLS, and database triggers reject cross-tenant Rig or ledger references.
+8. **Session-selected Skills never activate by installation alone.** A Pack Skill with `activationMode: "session_selected"` remains installed and reviewable but is excluded from the worker's workspace Skill resolution. Session creation must explicitly name its installed capability ID; OpenGeni then freezes the exact immutable artifact into that session's `skills`.
 
 ## Manifest composition
 
@@ -60,13 +70,18 @@ Each reference is required by default. A missing or mismatched optional referenc
 The manifest `skills` field is retained for compatibility, but v2 installation converts each inline Skill into the ordinary immutable Skill persistence model:
 
 - its complete normalized file artifact receives one SHA-256;
-- its canonical identity is based on case-insensitive Skill name plus exact content hash, not Pack ID;
-- two Packs declaring the same name and exact content share one Skill installation with two Pack owners;
-- an effective Skill with the same case-insensitive name but different content is a preview-time mismatch;
+- its canonical identity is based on activation mode, case-insensitive Skill name, and exact content hash, not Pack ID; the legacy workspace-managed form keeps its existing identity;
+- two Packs declaring the same activation mode, name, and exact content share one Skill installation with two Pack owners;
+- an effective Skill with the same case-insensitive name but different content or activation mode is a preview-time mismatch, because a workspace-managed twin would defeat a session-selected boundary;
 - uninstalling one Pack retains the Skill while another effective owner remains;
 - uninstalling the final owner removes the Skill from later turns.
 
 The Pack manifest and component ledger retain the Pack provenance even when the underlying Skill artifact is shared.
+
+Inline Skills default to `activationMode: "workspace_managed"` for compatibility. Use
+`"session_selected"` for implementation guidance or another Skill that must not
+enter every agent in the workspace. A selected Skill is copied onto the session
+at creation, so later Pack updates do not silently rewrite an existing session.
 
 ### Rig requirements and legacy images
 
@@ -235,6 +250,28 @@ deleting provider registrations or historical sessions. Provider permissions,
 setup, exact-head fencing, and webhook semantics are documented in
 [`pr-review-pack.md`](pr-review-pack.md).
 
+## OpenGeni Product Integration Pack
+
+The instruction-only `opengeni-product-integration` Pack uses the reviewed
+preview/install lifecycle because its Skill becomes an ordinary immutable
+workspace Skill component. That Skill is `session_selected`: installing the
+Pack does not expose its descriptor or files through ordinary agent runtime
+resolution. In the web console, reopen the installed Pack and choose **Start
+with Pack** to attach it to one new implementation session. Through the SDK,
+pass the reviewed inline component's `capabilityId` in `installedSkillIds` when
+creating that session. Customer-facing sessions omit that field, so they do not
+receive the generic implementation instructions even when they share the
+installation workspace. A dedicated implementation workspace can provide
+additional operational separation, but is not required for Skill activation.
+
+The Skill is version-aligned with the OpenGeni release and teaches adaptive
+repository discovery, workspace isolation decisions, explicit tool policy,
+SDK/React/framework-neutral UI choices, OpenAPI/GraphQL/MCP data access,
+credential brokerage and rotation, customer-specific runtime profile creation,
+verification, and delivery autonomy. Strict instructions are confined to real
+authority and privacy boundaries; it does not prescribe a framework, cloud,
+branch workflow, deployment owner, chat presentation, or analytics behavior.
+
 ## Client surfaces
 
 The SDK exposes:
@@ -250,6 +287,7 @@ The SDK exposes:
 
 - contracts: `packages/contracts/src/index.ts`
 - domain preview and legacy migration: `packages/core/src/domain/packs.ts`
+- built-in product-integration Pack: `packages/core/src/domain/product-integration-pack.ts`
 - HTTP lifecycle: `apps/api/src/routes/packs.ts`
 - operation/installation persistence: `packages/db/src/pack-installations.ts`
 - component resolution/ownership: `packages/db/src/pack-components.ts`

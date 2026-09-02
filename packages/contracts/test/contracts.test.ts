@@ -945,6 +945,22 @@ describe("contracts", () => {
     ).toThrow("conflicting session skill definitions");
   });
 
+  test("accepts only unique installed Skill selections", () => {
+    const capabilityId = "skill:pack-inline/session-selected/implementation@abc";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId],
+      }).installedSkillIds,
+    ).toEqual([capabilityId]);
+    expect(
+      CreateSessionRequest.safeParse({
+        initialMessage: "implement the integration",
+        installedSkillIds: [capabilityId, capabilityId],
+      }).success,
+    ).toBe(false);
+  });
+
   test("accepts only a UUID as a caller-preallocated session id", () => {
     const requestedSessionId = "00000000-0000-4000-8000-000000000042";
     expect(

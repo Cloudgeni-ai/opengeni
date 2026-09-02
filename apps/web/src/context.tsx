@@ -56,6 +56,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
+import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -106,6 +107,7 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { upsertWorkspace } from "@/lib/workspaces";
+import { deleteWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
   beginWorkspaceOperation,
   beginWorkspaceTransition,
@@ -295,6 +297,8 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   /** Reload grants, workspaces, and managed self-membership from the cookie. */
   revalidatePrincipalAccess: () => void;
+  /** Refreshes the current principal's organization and workspace grants in place. */
+  refreshPrincipalAccess: () => Promise<boolean>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
@@ -354,6 +358,8 @@ export type AppContextValue = {
     submission: TurnSubmission,
     options?: {
       instructions?: string;
+      /** Installed session-selected Skills to freeze onto this exact session. */
+      installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
@@ -554,7 +560,8 @@ export function RootRouteComponent() {
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [configError, setConfigError] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
+  const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
@@ -567,7 +574,7 @@ export function RootRouteComponent() {
     string | null
   >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
-  const [accessError, setAccessError] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -859,14 +866,13 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
-        const message = error instanceof Error ? error.message : String(error);
-        setConfigError(message);
-        toast.error("Failed to load client config", { description: message });
+        const presentation = bootstrapErrorPresentation(error, "client_configuration");
+        setConfigError(presentation);
       });
     return () => {
       cancelled = true;
     };
-  }, [isPublicDevHarness]);
+  }, [configRequestVersion, isPublicDevHarness]);
 
   useEffect(() => {
     if (!clientConfig) {
@@ -986,12 +992,10 @@ export function RootRouteComponent() {
         ) {
           return;
         }
-        toast.error("Failed to load workspace access", {
-          description: String(error),
-        });
+        const presentation = bootstrapErrorPresentation(error, "workspace_access");
         setAccessContext(null);
         setWorkspaces([]);
-        setAccessError(error instanceof Error ? error.message : String(error));
+        setAccessError(presentation);
       })
       .finally(() => {
         if (
@@ -1435,7 +1439,11 @@ export function RootRouteComponent() {
     try {
       const deletion = await runCurrentTransitionInvocation({
         isCurrent: ownsInvocation,
-        request: async () => await client.deleteWorkspace(workspaceId),
+        request: async () =>
+          await deleteWorkspaceWithReconciliation({
+            deleteWorkspace: async () => await client.deleteWorkspace(workspaceId),
+            readWorkspace: async () => await client.getWorkspace(workspaceId),
+          }),
       });
       if (deletion.status === "stale") return false;
     } catch (error) {
@@ -1797,6 +1805,7 @@ export function RootRouteComponent() {
     submission: TurnSubmission,
     options?: {
       instructions?: string;
+      installedSkillIds?: string[];
       /** Exact session MCP policy. Omit to use the product UI's workspace selection. */
       sessionTools?: ToolRef[];
       targetSandboxId?: string | null;
@@ -1864,6 +1873,7 @@ export function RootRouteComponent() {
           currentResources,
           submission: effectiveSubmission,
           instructions: options?.instructions,
+          installedSkillIds: options?.installedSkillIds,
           omitWorkspaceResources: options?.omitWorkspaceResources,
           selectedTools,
           defaultModel: model,
@@ -2377,6 +2387,57 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  async function refreshPrincipalAccess(): Promise<boolean> {
+    if (!clientConfig || !authReady) return false;
+    let acceptedPrincipal = principalTransitionIdentity.current;
+    const acceptedManagedIdentity =
+      clientConfig.auth.mode === "managedSession" && authSession
+        ? managedSelfContextIdentity({
+            credentialGeneration: accessKeyVersion,
+            managedUserId: authSession.user.id,
+          })
+        : null;
+    managedSelfContextIdentityRef.current = acceptedManagedIdentity;
+    const selfContextPromise = acceptedManagedIdentity
+      ? loadCurrentManagedSelfContext({
+          identity: acceptedManagedIdentity,
+          currentIdentity: () => managedSelfContextIdentityRef.current,
+          request: () => client.listOrganizationMemberships(),
+        })
+      : Promise.resolve(null);
+    const [nextAccessContext, nextWorkspaces, nextManagedSelfContext] = await Promise.all([
+      client.getAccessContext(),
+      client.listWorkspaces(),
+      selfContextPromise,
+    ]);
+    if (!ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)) {
+      return false;
+    }
+    if (acceptedManagedIdentity && nextManagedSelfContext === null) return false;
+    if (
+      nextManagedSelfContext &&
+      nextAccessContext.subjectId !== nextManagedSelfContext.identity.subjectId
+    ) {
+      throw new Error("managed self context did not match the authenticated subject");
+    }
+    if (
+      accessPrincipalIdRef.current !== null &&
+      accessPrincipalIdRef.current !== nextAccessContext.subjectId
+    ) {
+      invalidatePrincipalWorkspaceState();
+      acceptedPrincipal = principalTransitionIdentity.current;
+      managedSelfContextIdentityRef.current = acceptedManagedIdentity;
+    }
+    if (!ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)) {
+      return false;
+    }
+    accessPrincipalIdRef.current = nextAccessContext.subjectId;
+    setAccessContext(nextAccessContext);
+    setWorkspaces(nextWorkspaces);
+    setManagedSelfContext(nextManagedSelfContext);
+    return true;
+  }
+  const contextRefreshPrincipalAccess = useLatestCallback(refreshPrincipalAccess);
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
   const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
@@ -2492,6 +2553,7 @@ export function RootRouteComponent() {
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
           revalidatePrincipalAccess,
+          refreshPrincipalAccess: contextRefreshPrincipalAccess,
           createWorkspace: contextCreateWorkspace,
           renameWorkspace: contextRenameWorkspace,
           setWorkspaceInferenceControl: contextSetWorkspaceInferenceControl,
@@ -2580,6 +2642,7 @@ export function RootRouteComponent() {
     latencyMode,
     reasoningEffort,
     revalidatePrincipalAccess,
+    contextRefreshPrincipalAccess,
     refreshGitHub,
     refreshPersonalGitHub,
     refreshWorkspace,
@@ -2616,7 +2679,22 @@ export function RootRouteComponent() {
   ) : !clientConfig && !configError ? (
     <LoadingPanel label="Loading OpenGeni" />
   ) : configError ? (
-    <ProblemPanel title="Client configuration unavailable" description={configError} />
+    <ProblemPanel
+      title={configError.title}
+      description={configError.description}
+      action={
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => {
+            setConfigError(null);
+            setConfigRequestVersion((version) => version + 1);
+          }}
+        >
+          Try again
+        </Button>
+      }
+    />
   ) : keyAuthRequired && !hasAccessKey ? (
     <AccessKeyPanel
       authMode={clientConfig?.auth.mode}
@@ -2657,8 +2735,8 @@ export function RootRouteComponent() {
     </Suspense>
   ) : accessError && !accessLoading ? (
     <ProblemPanel
-      title="Workspace access unavailable"
-      description={accessError}
+      title={accessError.title}
+      description={accessError.description}
       action={
         <Button
           type="button"

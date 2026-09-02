@@ -2738,6 +2738,8 @@ export type CreateSessionRequest = {
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
   skills?: SessionSkill[] | undefined;
+  /** Installed session-selected Skill identities to freeze onto this session at creation. */
+  installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -3052,6 +3054,7 @@ export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace"
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -4019,6 +4022,16 @@ export type CreateOrganizationRequest = {
 export type CreateOrganizationResponse = {
   organization: OrganizationSummary;
   workspaceId: string;
+};
+export type CreateAdditionalOrganizationRequest = {
+  name: string;
+  workspaceName: string;
+  operationId: string;
+};
+export type CreateAdditionalOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
+  personalWorkspaceId: string;
 };
 export type UpdateOrganizationNameRequest = {
   name: string;
@@ -6041,10 +6054,12 @@ export type CapabilityPackSkillFile = {
 export type CapabilityPackSkill = {
   name: string;
   description?: string | undefined;
+  /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
+  activationMode?: "workspace_managed" | "session_selected" | undefined;
   files: CapabilityPackSkillFile[];
 };
 
-export type SessionSkill = CapabilityPackSkill;
+export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6138,6 +6153,7 @@ export type RegisterCapabilityPackRequest = {
     | {
         name: string;
         description?: string | undefined;
+        activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];
       }[]
     | undefined;
@@ -7348,6 +7364,8 @@ export type InsightsModelUsageRow = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
@@ -7355,6 +7373,8 @@ export type InsightsSeriesPoint = {
   modelCostUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
   outputTokens: number;
@@ -7386,6 +7406,8 @@ export type InsightsSpendDriver = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
@@ -7431,6 +7453,8 @@ export type InsightsScheduleRow = {
   creditUsd: number | null;
   estimatedProviderUsd: number | null;
   estimatedProviderCostKnownCalls: number | null;
+  equivalentCreditUsd: number | null;
+  equivalentCreditCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
@@ -7455,6 +7479,7 @@ export type InsightsModelCallRow = {
   totalTokens: number | null;
   creditUsd: number;
   estimatedProviderUsd: number | null;
+  equivalentCreditUsd: number | null;
   pricingSource: InsightsPricingSource | null;
 };
 
@@ -7515,6 +7540,10 @@ export type WorkspaceInsightsSnapshot = {
   priorEstimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
   priorEstimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  priorEquivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
+  priorEquivalentCreditCostKnownCalls: number;
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;

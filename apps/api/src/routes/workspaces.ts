@@ -35,7 +35,6 @@ import {
 import {
   allWorkspacePermissions,
   createWorkspace,
-  deleteWorkspaceIfQuiescent,
   ensureWorkspaceByExternalIdentity,
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
@@ -101,8 +100,7 @@ import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { buildWorkspaceModelCatalog } from "../model-catalog";
-import { processTemporalScheduleCleanupClaims } from "../temporal-schedule-cleanup";
-import { workspaceDeleteObserver } from "../workspace-delete-observability";
+import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
@@ -913,65 +911,10 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
-    // The DB transaction locks the account/workspace and every existing
-    // session/lease before checking runtime quiescence, then returns the exact
-    // external schedules removed by the cascade. A racing cold->warm transition
-    // can therefore never erase the only provider/capture ownership receipt.
-    const deleteObserver = workspaceDeleteObserver(deps.observability, {
+    await deleteWorkspaceForRequest(deps, {
       accountId: grant.accountId,
       workspaceId,
     });
-    const deleted = await deleteWorkspaceIfQuiescent(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      ...(deleteObserver ? { observer: deleteObserver } : {}),
-    });
-    if (deleted.status === "not_found") {
-      throw new HTTPException(404, { message: "workspace not found" });
-    }
-    if (deleted.status === "only_workspace") {
-      throw new HTTPException(409, {
-        message: "cannot delete the account's only workspace",
-      });
-    }
-    if (deleted.status === "active_sessions") {
-      throw new HTTPException(409, {
-        message: "stop the workspace's running sessions before deleting it",
-      });
-    }
-    if (deleted.status === "active_video_generations") {
-      throw new HTTPException(409, {
-        message: "wait for the workspace's active video generations to finish before deleting it",
-      });
-    }
-    if (deleted.status === "active_background_commands") {
-      throw new HTTPException(409, {
-        message: "pause or cancel the workspace's background commands before deleting it",
-      });
-    }
-    if (deleted.status === "live_sandboxes") {
-      throw new HTTPException(409, {
-        message: "wait for the workspace's active sandboxes to finish draining before deleting it",
-      });
-    }
-    if (deleted.status !== "deleted") {
-      throw new Error(`Unhandled workspace deletion outcome: ${deleted.status}`);
-    }
-    // The cleanup claims were inserted in the same transaction as the cascade.
-    // Try them immediately; failures are released to the replica-safe outbox
-    // pump, so a process crash or Temporal outage cannot orphan the schedules.
-    await processTemporalScheduleCleanupClaims(
-      {
-        db: deps.db,
-        deleteSchedule: async (temporalScheduleId) => {
-          await deps.workflowClient.deleteScheduledTaskSchedule({
-            temporalScheduleId,
-          });
-        },
-        ...(deps.observability ? { observability: deps.observability } : {}),
-      },
-      deleted.temporalScheduleCleanups,
-    );
     return c.body(null, 204);
   });
 

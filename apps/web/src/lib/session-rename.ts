@@ -6,7 +6,7 @@
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  AUTOMATIC_SESSION_TITLE_FALLBACK,
+  deriveAutomaticSessionTitlePreview,
   deriveSessionDisplayTitle,
   sessionTitleIsPending,
 } from "@opengeni/sdk";
@@ -28,15 +28,15 @@ export function sessionDisplayTitle(session: Session): string {
 
 /**
  * The value the editor seeds from when entering edit mode. A safe provisional
- * prompt preview is editable because it is also what the user sees; the generic
- * fallback remains an empty draft rather than becoming an accidental rename.
+ * prompt preview is editable because it is also what the user sees; the
+ * UUID-derived reference remains an empty draft rather than becoming an
+ * accidental rename.
  */
 export function renameSeedValue(session: Session): string {
   if (!sessionTitleIsPending(session)) {
     return session.title?.trim() || "";
   }
-  const display = deriveSessionDisplayTitle(session);
-  return display === AUTOMATIC_SESSION_TITLE_FALLBACK ? "" : display;
+  return deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "";
 }
 
 /**

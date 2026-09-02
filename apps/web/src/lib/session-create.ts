@@ -189,6 +189,8 @@ export type BuildCreateSessionRequestInput = {
   submission: TurnSubmission;
   /** Session-scoped system guidance that is not rendered in the chat timeline. */
   instructions?: string;
+  /** Installed session-selected Skills to freeze onto the new session. */
+  installedSkillIds?: string[];
   startMode?: "realtime";
   visibility?: "private" | "workspace";
   omitWorkspaceResources?: boolean;
@@ -281,6 +283,7 @@ export function buildCreateSessionRequest(
       : { initialMessage: input.submission.text }),
     visibility: input.visibility ?? "workspace",
     instructions: input.instructions || undefined,
+    ...(input.installedSkillIds?.length ? { installedSkillIds: input.installedSkillIds } : {}),
     resources,
     ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,

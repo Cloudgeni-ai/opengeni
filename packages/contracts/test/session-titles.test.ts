@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES,
+  deriveAutomaticSessionTitlePreview,
+  deriveSessionDisplayTitle,
   normalizeAutomaticSessionTitle,
 } from "../src/session-titles";
 
@@ -230,6 +232,51 @@ describe("automatic session titles", () => {
     expect(unicode).not.toBeNull();
     expect(graphemeCount(unicode!)).toBeLessThanOrEqual(AUTOMATIC_SESSION_TITLE_MAX_GRAPHEMES);
     expect(unicode).not.toContain("�");
+  });
+
+  test("uses the first safe prompt line when an unsafe URL or secret precedes the request", () => {
+    expect(
+      deriveAutomaticSessionTitlePreview(
+        "https://app.example.test/workspaces/one/sessions/two\nFix default session naming behavior",
+      ),
+    ).toBe("Fix default session naming behavior");
+    expect(
+      deriveAutomaticSessionTitlePreview(
+        "API_TOKEN=super-secret-value\nInvestigate the deployment failure",
+      ),
+    ).toBe("Investigate the deployment failure");
+    expect(
+      deriveAutomaticSessionTitlePreview(
+        "https://app.example.test/private?token=super-secret-value",
+      ),
+    ).toBeNull();
+  });
+
+  test("uses a short session reference when no safe prompt preview exists", () => {
+    expect(
+      deriveSessionDisplayTitle({
+        id: "123e4567-e89b-42d3-a456-426614174000",
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage: "API_TOKEN=super-secret-value",
+      }),
+    ).toBe("Conversation 123e4567-e89b");
+    expect(
+      deriveSessionDisplayTitle({
+        id: "123e4567-f012-42d3-a456-426614174000",
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage: "API_TOKEN=super-secret-value",
+      }),
+    ).toBe("Conversation 123e4567-f012");
+    expect(
+      deriveSessionDisplayTitle({
+        id: "not-a-session-id",
+        title: AUTOMATIC_SESSION_TITLE_FALLBACK,
+        titleSource: "agent",
+        initialMessage: "API_TOKEN=super-secret-value",
+      }),
+    ).toBe(AUTOMATIC_SESSION_TITLE_FALLBACK);
   });
 
   test("returns null for empty/boilerplate-only candidates so callers retain the safe fallback", () => {
