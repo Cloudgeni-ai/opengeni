@@ -17,6 +17,7 @@ import {
   getWorkspaceArtifact,
   getWorkspaceArtifactContentRef,
   listWorkspaceArtifacts,
+  nestedPostgresSqlState,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
   setWorkspaceArtifactStatus,
@@ -46,7 +47,7 @@ function artifactId(context: Context): string {
   return parsed.data;
 }
 
-function errorResponse(context: Context, error: unknown): Response {
+export function workspaceArtifactErrorResponse(context: Context, error: unknown): Response {
   if (error instanceof WorkspaceArtifactNotFoundError) {
     return context.json({ code: "WORKSPACE_ARTIFACT_NOT_FOUND", message: error.message }, 404);
   }
@@ -66,7 +67,7 @@ function errorResponse(context: Context, error: unknown): Response {
       422,
     );
   }
-  if (typeof error === "object" && error !== null && "code" in error && error.code === "23505") {
+  if (nestedPostgresSqlState(error) === "23505") {
     return context.json(
       { code: "WORKSPACE_ARTIFACT_CONFLICT", message: "Artifact slug or operation already exists" },
       409,
@@ -120,7 +121,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -153,7 +154,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         201,
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -167,7 +168,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -206,7 +207,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         }),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -236,7 +237,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -259,7 +260,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 
@@ -282,7 +283,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         ),
       );
     } catch (error) {
-      return errorResponse(context, error);
+      return workspaceArtifactErrorResponse(context, error);
     }
   });
 }
