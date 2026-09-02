@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import type { SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
+import { describe, expect, jest, test } from "bun:test";
+import type { GetSessionOptions, SessionEvent, SessionEventPayloadMode } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
@@ -138,6 +138,192 @@ describe("useSessionEvents", () => {
     expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
 
     await hook.unmount();
+  });
+
+  test("foreground resume replays tiny gaps, compacts small message sets, and reloads only complex backlogs", async () => {
+    let visibility: DocumentVisibilityState = "visible";
+    const visibilityDescriptor = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      get: () => visibility,
+    });
+    let store = [event(1), event(2)];
+    let durableHead = 2;
+    let failHeadRead = false;
+    const headReadCalls: GetSessionOptions[] = [];
+    const listCalls: ListOptions[] = [];
+    const streamCalls: number[] = [];
+    const client = fakeClient({
+      getSession: async (_workspaceId, _sessionId, options = {}) => {
+        headReadCalls.push(options);
+        if (failHeadRead) throw new TypeError("session head unavailable");
+        return { lastSequence: durableHead } as never;
+      },
+      listEvents: async (_workspaceId, _sessionId, options = {}) => {
+        listCalls.push(options);
+        if (durableHead === 200 && options.after === 4) {
+          return [
+            event(5, "agent.message.delta", {
+              text: "one compact continuation",
+              coalescedUntil: 200,
+            }),
+          ];
+        }
+        return listPage(store, options);
+      },
+      streamEvents: (_workspaceId, _sessionId, options = {}) => {
+        streamCalls.push(options.after ?? 0);
+        return (async function* () {
+          options.onOpen?.();
+          for (const item of store) {
+            if (options.signal?.aborted) return;
+            if (item.sequence > (options.after ?? 0) && item.sequence <= durableHead) {
+              yield item;
+            }
+          }
+          await new Promise<void>((resolve) => {
+            if (options.signal?.aborted) {
+              resolve();
+              return;
+            }
+            options.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          yield* [] as SessionEvent[];
+        })();
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    try {
+      const suspendAndResume = async () => {
+        visibility = "hidden";
+        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(() => jest.advanceTimersByTime(2_000));
+        expect(hook.result.current.connectionState).toBe("idle");
+
+        visibility = "visible";
+        await actRun(() => document.dispatchEvent(new Event("visibilitychange")));
+        await actRun(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+          await Promise.resolve();
+          jest.advanceTimersByTime(20);
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+      };
+
+      await flush(20);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2]);
+      expect(streamCalls).toEqual([2]);
+
+      jest.useFakeTimers();
+      // Two missed durable events are below the direct-replay bound: no
+      // history request and no visual reset, just one ordinary SSE catch-up.
+      store = Array.from({ length: 4 }, (_, index) => event(index + 1));
+      durableHead = 4;
+      await suspendAndResume();
+      expect(listCalls).toEqual([
+        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      ]);
+      expect(streamCalls).toEqual([2, 2]);
+      expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4]);
+
+      // A raw gap of 196 rows could still be one visible streaming answer. The
+      // compact probe proves that here, appends it once, and resumes at 200.
+      durableHead = 200;
+      await suspendAndResume();
+      expect(listCalls.at(-1)).toEqual({
+        after: 4,
+        limit: 196,
+        compact: true,
+        direction: "after",
+        payloadMode: "full",
+      });
+      expect(streamCalls).toEqual([2, 2, 200]);
+      expect(hook.result.current.events.at(-1)).toMatchObject({
+        sequence: 5,
+        coveredThrough: 200,
+      });
+      expect(hook.result.current.lastSequence).toBe(200);
+
+      // The same-sized raw gap can instead contain hundreds of visible
+      // messages. That compact probe crosses the semantic group bound, so the
+      // hook discards it and reloads one latest tail before reopening SSE.
+      store = Array.from({ length: 400 }, (_, index) => event(index + 1));
+      durableHead = 400;
+      await suspendAndResume();
+
+      expect(listCalls).toEqual([
+        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+        {
+          after: 4,
+          limit: 196,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        {
+          after: 200,
+          limit: 200,
+          compact: true,
+          direction: "after",
+          payloadMode: "full",
+        },
+        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      ]);
+      expect(streamCalls).toEqual([2, 2, 200, 400]);
+      expect(hook.result.current.events).toHaveLength(400);
+      expect(hook.result.current.events[0]?.sequence).toBe(1);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+
+      // A gap beyond the bounded 5,000-sequence probe budget skips the forward
+      // read entirely and goes straight to the latest compact tail.
+      store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
+      durableHead = 6_000;
+      await suspendAndResume();
+      expect(listCalls.at(-1)).toEqual({
+        before: Number.MAX_SAFE_INTEGER,
+        limit: 1000,
+        compact: true,
+        payloadMode: "full",
+      });
+      expect(listCalls.some((call) => call.after === 400)).toBe(false);
+      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000]);
+      expect(hook.result.current.events).toHaveLength(1_000);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
+
+      // The head read is only an optimization. A transient failure falls back
+      // to the SDK's exact cursor replay and keeps the existing timeline.
+      store = Array.from({ length: 6_002 }, (_, index) => event(index + 1));
+      durableHead = 6_002;
+      failHeadRead = true;
+      await suspendAndResume();
+      expect(listCalls.at(-1)).toEqual({
+        before: Number.MAX_SAFE_INTEGER,
+        limit: 1000,
+        compact: true,
+        payloadMode: "full",
+      });
+      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000, 6_000]);
+      expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
+      expect(headReadCalls).toHaveLength(5);
+      for (const options of headReadCalls) {
+        expect(options.fresh).toBe(true);
+        expect(options.signal).toBeDefined();
+      }
+    } finally {
+      await hook.unmount();
+      jest.useRealTimers();
+      if (visibilityDescriptor) {
+        Object.defineProperty(document, "visibilityState", visibilityDescriptor);
+      }
+    }
   });
 
   test("a session switch never exposes the previous session's event log during render", async () => {

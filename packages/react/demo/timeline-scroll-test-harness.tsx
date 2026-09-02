@@ -6,6 +6,7 @@ import { MessageTimeline, type TimelineItem } from "@opengeni/react";
 import "./styles.css";
 
 type VisibleRow = { id: string | null; top: number | null };
+const VISIBLE_ROW_EDGE_TOLERANCE_PX = 2;
 type TimelineScrollHarness = {
   append: () => void;
   growRowsAbove: () => void;
@@ -83,7 +84,11 @@ function Harness() {
     const node = scroller();
     const containerTop = node.getBoundingClientRect().top;
     const row = [...document.querySelectorAll<HTMLElement>("[data-timeline-row]")].find(
-      (candidate) => candidate.getBoundingClientRect().bottom > containerTop + 1,
+      // Ignore a subpixel sliver at the viewport edge. Layout rounding can
+      // otherwise make the preceding row intermittently look like the reader's
+      // anchor even while the retained row stays at the same pixel position.
+      (candidate) =>
+        candidate.getBoundingClientRect().bottom > containerTop + VISIBLE_ROW_EDGE_TOLERANCE_PX,
     );
     return {
       id: row?.dataset.timelineRow ?? null,
