@@ -320,7 +320,7 @@ out of API and worker pods. Its default command serializes `db:migrate`,
 `helm upgrade` before workload replacement begins. Operators running without
 Helm must preserve the same order explicitly.
 
-Migration `0393_fail_closed_rig_version_activation.sql` is the drained,
+Migration `0394_fail_closed_rig_version_activation.sql` is the drained,
 maintenance-only Rig writer-protocol cutover described below. Its trigger keeps
 the boundary fail-closed after activation by rejecting an active insert or new
 activation without exact current proof, while the replaced scoped-create
@@ -329,7 +329,7 @@ version-1/version-2 Rig provider-image cold-boot proof and rejects any stale
 finalizer that tries to restore an obsolete ready image. New activation requires
 one version-3 receipt matched to the exact immutable provider image, backend,
 build request, and Rig version. Existing active versions and unrelated updates remain
-available after the cutover. Never restart a pre-0393 workload; remain in
+available after the cutover. Never restart a pre-0394 workload; remain in
 maintenance and fix forward instead of reversing the ledger, dropping either
 trigger, restoring the old active default, or fabricating verification JSON.
 
@@ -491,21 +491,21 @@ organization membership table, `workspaces`, and `workspace_memberships`. A
 live listed session rejects the cutover with SQLSTATE `55000`. After commit,
 never restart a pre-0348 image; remain in maintenance and fix forward.
 
-### Fail-closed Rig verification cutover (0393)
+### Fail-closed Rig verification cutover (0394)
 
-`0393_fail_closed_rig_version_activation.sql` changes the Rig writer protocol:
+`0394_fail_closed_rig_version_activation.sql` changes the Rig writer protocol:
 new initial and direct versions remain inactive until an exact native
 platform-surface receipt passes, retries carry durable attempt identities, and
 promoted versions retain truthful source-change receipt linkage. Old writers
 can omit that state and activate newly authored versions without proof. Before
-applying 0393:
+applying 0394:
 
 1. stop every API, control worker, and turn worker using the target database;
 2. supply the exact old/new runtime login list through
    `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` (or
    `applicationDatabaseRoles` for a programmatic migration);
 3. prove those roles have zero other sessions in `pg_stat_activity`;
-4. apply 0393 from the exact new image and require it in `schema_migrations`;
+4. apply 0394 from the exact new image and require it in `schema_migrations`;
 5. start only that same image generation and complete readiness checks before
    reopening Rig mutation or verification dispatch.
 
@@ -514,7 +514,7 @@ The migration validates the explicit role list before exclusive locks on
 A missing/malformed list or live listed session rejects the cutover with
 SQLSTATE `55000` and rolls the transaction back. Historical versions receive
 `status = unverified`; no migration backfill manufactures passing evidence.
-After commit, never restart a pre-0393 image or attempt mixed-version rollback;
+After commit, never restart a pre-0394 image or attempt mixed-version rollback;
 remain in maintenance and fix forward.
 
 ### Session-event raw-lane cutover (0379)

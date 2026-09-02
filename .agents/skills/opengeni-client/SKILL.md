@@ -34,6 +34,22 @@ Read `docs/product-integration.md` when the repository is available; it is the
 canonical product boundary for organization keys, workspace mapping, and Skill
 ownership.
 
+## Work Adaptively
+
+- Inspect the customer's repository, authentication, tenancy, data routes,
+  frontend conventions, installed packages, tests, CI, and deployment guidance
+  before asking questions or choosing an integration shape.
+- Ask only for consequential product choices or external authority that cannot
+  be inferred. Do not ask the customer to restate facts the system proves.
+- Use a reversible, clearly stated default when an unresolved choice is
+  low-risk. Resolve privacy, tenant authority, data writes, cost exposure, and
+  ambiguous external mutations before crossing those boundaries.
+- Match the requested delivery autonomy. Repository or cloud access is
+  technical capability, not permission to push, deploy, merge, or change
+  production.
+- This Skill guides an implementation agent. Never copy it into the runtime
+  Skills of the customer-facing agent.
+
 ## Choose The Integration Shape First
 
 Pick the smallest surface that satisfies the product:
@@ -99,12 +115,24 @@ the organization-scoped `/v1/organizations/:organizationId/api-keys` routes.
 The create response shows the token once; store it only in the product's secret
 manager.
 
-For each product tenant, call `ensureWorkspace` /
+For each chosen product sharing boundary, call `ensureWorkspace` /
 `PUT /v1/workspaces/external` with a stable external mapping identity and persist
 the returned `result.workspace.id`; `result.created` distinguishes the first
 insert from an idempotent replay. Call it an **organization workspace** in
 customer guidance; its exact wire kind is `"shared"`. Personal workspaces are
 excluded and must never be selected through a default-workspace fallback.
+
+Choose the boundary from who may share workspace-scoped agent authority and
+resources, not from a preferred workspace count: use one workspace per tenant
+for collaborative chats, per end user when chats are private between users, and
+per chat when even the same user's chats require a hard boundary. Shared
+upstream data does not weaken the chat boundary. Turning `memoryEnabled` off
+does not isolate sessions.
+
+Organization-key-created top-level sessions are workspace-visible. Managed
+human Only-me sessions are not a backend impersonation mechanism. A live agent
+with cross-session tools can reach unrelated sessions in the same workspace;
+removing those tools is defense in depth, not a hard boundary.
 
 The external backend owns product Skills. Store and version them outside
 OpenGeni, then pass the selected definitions inline in
@@ -138,7 +166,9 @@ agent instruction prefix.
 4. Load the exact Skills selected by the external product and pass them inline.
 5. Create a session with a stable idempotency key; optionally preallocate its ID
    when the product must persist a link before the first turn can run.
-6. Attach only canonical resources and tool selections the user may use.
+6. Attach only canonical resources and an explicit minimal tool selection the
+   user may use. Omitting tool selections inherits workspace/deployment
+   defaults, including first-party workspace and cross-session capabilities.
 7. Stream/replay session events through the SDK; tolerate unknown additive event
    types.
 8. Send visible text separately from `modelContext`.
@@ -154,8 +184,19 @@ agent instruction prefix.
   themselves.
 - Organization workspaces have wire `kind: "shared"`; Personal workspaces are
   outside the external product mapping.
+- Use the smallest workspace whose members may share agent authority. Memory
+  settings and prompt instructions do not create a tenant boundary.
+- For hard session isolation use separate workspaces. Removing every
+  unnecessary peer-session and workspace-wide tool can narrow a deliberately
+  softer design, but cannot replace the boundary.
 - Do not invent an organization-wide Skill registry or rely on Skill
   inheritance. The external backend passes selected Skills inline per session.
+- The SDK cannot accept arbitrary customer backend functions as remote tools.
+  Expose an existing API through a reviewed OpenAPI/GraphQL Integration or an
+  MCP server.
+- OpenGeni's credential broker encrypts secrets and keeps them out of model
+  context, but the trusted control plane can decrypt them for the authorized
+  provider request. Do not describe it as zero knowledge.
 - Do not call Temporal, NATS, Postgres, workers, sandbox providers, object
   storage APIs, or MCP transports as substitutes for the public SDK/API.
 - Do not claim auth, model, tool, billing, CORS, storage, or compute behavior

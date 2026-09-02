@@ -26,7 +26,7 @@ the setting is off.
 
 First-party OpenGeni MCP company-profile tool (independent of `settings.memoryEnabled`):
 
-- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Review first: Off creates nothing, Review first stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
+- `company_profile_propose` / `company_profile_confirm` - explicit organization-identity administration for an exact agent attempt whose live turn was initiated by the organization owner. The separate owner-managed organization policy defaults to Require approval: Off creates nothing, Require approval stages one inactive immutable identity/mission revision and returns the exact `request_human_input` payload for `confirm`, and Autonomous activates the proposal immediately through the existing compare-and-swap lifecycle and returns `status=activated`. Every mode retains exact live-owner admission and immutable receipts; this policy is independent of workspace Learning mode (see [`company-profile.md`](company-profile.md)).
 
 First-party OpenGeni MCP session monitoring tools (`sessions:read`):
 

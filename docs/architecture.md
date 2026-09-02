@@ -213,15 +213,16 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
-Workspace Memory is the autonomous agent-retention lane: when the workspace
-Memory toggle is enabled, exact live agent attempts save and correct active
+Workspace Memory is the autonomous agent-retention lane. It is enabled by
+default; an explicit workspace opt-out disables agent writes. When enabled,
+exact live agent attempts save and correct active
 facts, decisions, incidents, fixes, and outcomes without consulting Learning
 mode. It remains retrieval-only model context through `memory_search`; it is
 not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
 claim.
 
 Organization identity has a separate organization-owner autonomy policy. Off
-rejects agent-authored identity changes before proposal creation, Review first
+rejects agent-authored identity changes before proposal creation, Require approval
 keeps the bound human-confirmation path, and Autonomous activates eligible
 proposals without another prompt. All three modes still require an exact live
 turn initiated by the active organization owner and use the existing
@@ -619,10 +620,12 @@ Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
 main model/tool loop. When the durable title is still pending and exact session
 tool policy permits naming, the production runtime starts one bounded tool-less
 title request in parallel with the ordinary stream, meters it independently,
-and aborts/joins it before atomic turn settlement. The title write uses the
-generic session-title lifecycle and still loses to a human rename. Custom
-runtimes without the optional auxiliary seam retain the serialized
-`set_session_title` compatibility path.
+and joins it before atomic turn settlement. A normal fast response waits for the
+already-running bounded title request instead of cancelling it; exceptional or
+cancelled exits abort and join it. The title write uses the generic session-title
+lifecycle and still loses to a human rename. Custom runtimes without the
+optional auxiliary seam retain the serialized `set_session_title` compatibility
+path.
 
 ### 5.2 Lifecycle overview
 
@@ -1086,8 +1089,21 @@ proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
+The built-in `opengeni-product-integration` Pack is an opt-in implementation
+aid for those standalone integrations. Its immutable Skill adds no executable
+tools, credentials, or compute, but it is visible to every session in the
+workspace where the Pack is installed. Install it only in a dedicated
+implementation workspace and create customer-facing runtime sessions in
+separate workspaces. The Skill teaches the implementation agent to derive the
+workspace isolation unit, UI surface, data-tool boundary, runtime profile, and
+delivery workflow from the host product. The Pack lives in
+`packages/core/src/domain/product-integration-pack.ts`, while the exact customer
+integration contract remains
+[`product-integration.md`](product-integration.md).
+
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
 [`../packages/react/README.md`](../packages/react/README.md),
+[`product-integration.md`](product-integration.md),
 [`embedding-workbench.md`](embedding-workbench.md), and
 [`embedding.md`](embedding.md).
 
@@ -1380,7 +1396,7 @@ This index intentionally routes at subsystem granularity. Use
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
-| Standalone product integration | `packages/sdk/`, `packages/react/` | [`embedding-workbench.md`](embedding-workbench.md) |
+| Standalone product integration and implementation Pack | `packages/sdk/`, `packages/react/`, `packages/core/src/domain/product-integration-pack.ts` | [`product-integration.md`](product-integration.md), [`packs.md`](packs.md), and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

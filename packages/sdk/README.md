@@ -86,8 +86,10 @@ security boundary, and delivery checklist.
 
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
-shows a short, sensitive-safe preview of the opening prompt and automatically
-yields to the later `session.title_set` value.
+shows the first short, sensitive-safe line of the opening prompt, skipping an
+unsafe pasted URL or identifier when later safe text exists. If no safe line is
+available, a short session reference keeps rows distinguishable. The display
+automatically yields to the later `session.title_set` value.
 
 Browser consoles that do not need operator-only surfaces can import
 `OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration

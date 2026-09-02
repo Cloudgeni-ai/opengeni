@@ -51,6 +51,8 @@ const created = await client.createSession(workspace.id, {
   initialMessage: "Inspect the uploaded logs and summarize the failing deploy step.",
   idempotencyKey: crypto.randomUUID(),
   skills,
+  firstPartyMcpTools: selectedFirstPartyTools,
+  tools: selectedIntegrationServers,
 });
 
 for await (const event of client.streamEvents(workspace.id, created.id)) {
@@ -76,6 +78,77 @@ The product backend stores and versions Skills outside OpenGeni and passes the
 selected definitions inline in `CreateSessionRequest.skills`. There is no
 organization-wide Skill registry or Skill inheritance in this integration
 contract.
+
+The product must choose the workspace mapping from its sharing rule before
+running this flow. A tenant-shared workspace is suitable only when that tenant
+may share workspace-scoped agent authority and resources. Use a per-user
+workspace for cross-user chat privacy and a per-chat workspace for hard
+same-user chat isolation. `memoryEnabled: false` does not create either
+boundary.
+
+For a headless product, send an explicit minimal `firstPartyMcpTools` and
+`tools` selection. Omission inherits deployment/workspace defaults. Removing
+cross-session tools from a shared workspace is defense in depth, not a hard
+tenant boundary.
+
+## Existing APIs As Agent Tools
+
+The SDK cannot serialize ordinary customer backend functions into tools. Use
+one of the supported network boundaries:
+
+- For an existing HTTP API, host a focused OpenAPI 3.0/3.1 document and call
+  `previewApiIntegration`, then `installApiIntegration` with the exact revision,
+  digest, Connection, stable instance key, and selected operations.
+- For GraphQL, use the same preview/install lifecycle with the GraphQL source.
+- For MCP, install a workspace capability or pass a session-specific
+  `mcpServers` definition with an HTTPS URL, allowed tools, approval policy, and
+  write-only headers or a `connectionRef`.
+
+Preview/install is deterministic backend work and can be reconciled across many
+workspaces; a model does not need to read and approve the same API description
+for every workspace. Persist the returned Integration instance/server IDs and
+skip unchanged desired versions rather than reinstalling on every chat.
+
+Create API-key credentials with `createConnection`. Rotate ordinary credentials
+through `updateConnection` with `expectedVersion`; OAuth providers use their
+dedicated reconnect flow. For session-specific MCP headers, later message
+requests may carry the supported MCP credential update. Responses expose
+metadata and credential versions, never the values.
+
+OpenGeni encrypts brokered credentials at rest and keeps them out of model
+context. The trusted control plane can decrypt them to call the exact provider;
+the model and sandbox receive only schemas and bounded results. The provider API
+must still enforce tenant/user scope on every operation and must not trust a
+model-supplied tenant ID.
+
+## Runtime Profile And Models
+
+Use workspace `agentInstructions` for stable workspace behavior, session
+`instructions` for one role/conversation, Skills for conditional procedures,
+and `modelContext` for current dashboard or route state. Avoid duplicating one
+policy across all four surfaces.
+
+Inline Skills are transmitted once in `createSession` and fixed onto that
+session, not sent on each turn. Version the customer-owned runtime profile and
+apply new Skill content to new sessions unless the product deliberately
+migrates old ones.
+
+Workspace `sessionDefaults` set the default model and reasoning for new
+sessions. A session or message may override them subject to the workspace model
+access policy. Resolve model IDs from the live client configuration rather than
+hard-coding a remembered list.
+
+OpenGeni-credit models in every organization workspace draw from the same
+organization account balance; workspace creation does not create separate
+wallets. Connected subscriptions and workspace-owned provider credentials may
+instead use an externally billed path. Preserve the workspace and product
+boundary in usage attribution when the customer needs a per-user or per-tenant
+view over the shared organization balance.
+
+Reconcile stable workspace settings, Connections, Integrations, and runtime
+profile versions during provisioning, startup, deployment, or a controlled
+migration. Do not PATCH the same settings or reinstall the same Integration on
+every chat request when no desired version changed.
 
 ## Session Creation Options
 

@@ -6714,12 +6714,13 @@ describe("API component integration", () => {
     });
     expect(badSearch.status).toBe(400);
 
-    // Settings default off, PATCH round-trips + preserves unknown keys.
+    // Workspace Memory defaults on; explicit opt-out and re-enable round-trip
+    // while preserving unknown settings keys.
     const beforeSettings = await app.request(workspacePath(workspaceId, ""));
     const workspaceBefore = (await beforeSettings.json()) as {
       settings: Record<string, unknown>;
     };
-    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
+    expect(workspaceBefore.settings.memoryEnabled).toBe(true);
 
     const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
@@ -6727,6 +6728,17 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(seedUnknown.status).toBe(200);
+    const disableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ memoryEnabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disableResponse.status).toBe(200);
+    const disabled = (await disableResponse.json()) as {
+      settings: Record<string, unknown>;
+    };
+    expect(disabled.settings.memoryEnabled).toBe(false);
+    expect(disabled.settings.someFutureKey).toBe("keep-me");
     const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
       body: JSON.stringify({ memoryEnabled: true }),
@@ -7741,6 +7753,7 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: false });
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,

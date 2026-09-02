@@ -313,6 +313,8 @@ describe("organization billing StrictMode ownership", () => {
 
     expect(getCompanyProfileAgentPolicy.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(container.textContent).toContain("Agent-managed organization identity");
+    expect(container.textContent).toContain("Require approval");
+    expect(container.textContent).not.toContain("Review first");
     const automatic = container.querySelector<HTMLInputElement>(
       'input[name="company-profile-agent-policy"][value="automatic"]',
     );

@@ -2112,7 +2112,7 @@ export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_
 export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
@@ -2149,10 +2149,12 @@ export const WorkspaceSettingsSchema = z
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 
-// Resolve the effective memoryEnabled flag from a raw settings bag (default off).
-export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? parsed.data.memoryEnabled === true : false;
+// Resolve the effective memoryEnabled flag from a raw settings bag. Omission
+// defaults on; malformed settings still fail closed so invalid state cannot
+// unexpectedly enable durable retention.
+export function resolveWorkspaceMemoryEnabled(settings?: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings === undefined ? {} : settings);
+  return parsed.success ? parsed.data.memoryEnabled !== false : false;
 }
 
 /** Explicit defaults for new chats/schedules, or null for deployment defaults. */

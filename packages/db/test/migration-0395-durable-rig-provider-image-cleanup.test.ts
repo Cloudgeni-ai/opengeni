@@ -22,7 +22,7 @@ import {
 import { rigProviderImageCleanupObligationStateValues } from "../src/schema";
 
 const migrationUrl = new URL(
-  "../drizzle/0394_durable_rig_provider_image_cleanup.sql",
+  "../drizzle/0395_durable_rig_provider_image_cleanup.sql",
   import.meta.url,
 );
 const schemaUrl = new URL("../src/schema.ts", import.meta.url);
@@ -34,12 +34,12 @@ const providerIdentity = canonicalModalCheckpointProviderBinding({
   environment: "main",
 });
 if (!providerIdentity) {
-  throw new Error("migration 0394 fixture has an invalid Modal provider binding");
+  throw new Error("migration 0395 fixture has an invalid Modal provider binding");
 }
 const providerBinding = providerIdentity.binding;
 const providerBindingKey = providerIdentity.key;
 
-describe("migration 0394 durable Rig provider image cleanup", () => {
+describe("migration 0395 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
     const source = await Bun.file(migrationUrl).text();
     const schemaSource = (await Bun.file(schemaUrl).text()).replace(/\s+/gu, " ");
@@ -86,7 +86,7 @@ describe("migration 0394 durable Rig provider image cleanup", () => {
     if (!blank) {
       if (requireRealDatabase) {
         throw new Error(
-          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0394 PostgreSQL harness is unavailable",
+          "OPENGENI_REQUIRE_REAL_DB=1 but the migration 0395 PostgreSQL harness is unavailable",
         );
       }
       return;
@@ -97,7 +97,7 @@ describe("migration 0394 durable Rig provider image cleanup", () => {
     try {
       await migrate(blank.databaseUrl);
       if (!blank.appPassword) {
-        throw new Error("migration 0394 test database has no shared app-role password");
+        throw new Error("migration 0395 test database has no shared app-role password");
       }
       await provisionRoles(blank.databaseUrl, {
         rlsStrategy: "force",

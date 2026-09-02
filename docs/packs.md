@@ -19,6 +19,15 @@ exact-head review sessions. The Pack is packaging and activation authority; the
 provider registration and repository binding remain separate credential and
 resource authorities. See [`pr-review-pack.md`](pr-review-pack.md).
 
+The built-in `opengeni-product-integration` Pack installs implementation-agent
+guidance for adding OpenGeni to an external product. It declares no executable
+tools, connectors, credentials, knowledge, compute, automations, or
+customer-agent persona, but its installed Skill is available to every session
+in the installation workspace. Use a dedicated implementation workspace and
+create customer-facing runtime sessions elsewhere. The implementation agent
+derives a customer-specific runtime profile from the host product. Its
+canonical product contract is [`product-integration.md`](product-integration.md).
+
 ## Product model
 
 The user-facing model is intentionally simpler than the storage model:
@@ -235,6 +244,24 @@ deleting provider registrations or historical sessions. Provider permissions,
 setup, exact-head fencing, and webhook semantics are documented in
 [`pr-review-pack.md`](pr-review-pack.md).
 
+## OpenGeni Product Integration Pack
+
+The instruction-only `opengeni-product-integration` Pack uses the reviewed
+preview/install lifecycle because its Skill becomes an ordinary immutable
+workspace Skill component. Ordinary installed Skills enter every session's
+runtime Skill index in that workspace; Pack metadata does not create a runtime
+filter or security boundary. Install this Pack only in a dedicated workspace
+used to implement a customer integration, and provision end-user runtime chats
+in separate workspaces.
+
+The Skill is version-aligned with the OpenGeni release and teaches adaptive
+repository discovery, workspace isolation decisions, explicit tool policy,
+SDK/React/framework-neutral UI choices, OpenAPI/GraphQL/MCP data access,
+credential brokerage and rotation, customer-specific runtime profile creation,
+verification, and delivery autonomy. Strict instructions are confined to real
+authority and privacy boundaries; it does not prescribe a framework, cloud,
+branch workflow, deployment owner, chat presentation, or analytics behavior.
+
 ## Client surfaces
 
 The SDK exposes:
@@ -250,6 +277,7 @@ The SDK exposes:
 
 - contracts: `packages/contracts/src/index.ts`
 - domain preview and legacy migration: `packages/core/src/domain/packs.ts`
+- built-in product-integration Pack: `packages/core/src/domain/product-integration-pack.ts`
 - HTTP lifecycle: `apps/api/src/routes/packs.ts`
 - operation/installation persistence: `packages/db/src/pack-installations.ts`
 - component resolution/ownership: `packages/db/src/pack-components.ts`

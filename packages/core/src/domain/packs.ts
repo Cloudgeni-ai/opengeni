@@ -31,6 +31,7 @@ import {
   PR_REVIEW_AUTOMATION_ADAPTER_ID,
   PR_REVIEW_AUTOMATION_TEMPLATE_ID,
 } from "./pr-review";
+import { OPENGENI_PRODUCT_INTEGRATION_PACK } from "./product-integration-pack";
 
 export const MARKETING_SOCIAL_PACK_ID = "marketing-social-daily-analysis";
 
@@ -277,7 +278,11 @@ const openGeniPrReviewPack: CapabilityPack = {
   },
 };
 
-const packs = [marketingSocialPack, openGeniPrReviewPack] satisfies CapabilityPack[];
+const packs = [
+  marketingSocialPack,
+  openGeniPrReviewPack,
+  OPENGENI_PRODUCT_INTEGRATION_PACK,
+] satisfies CapabilityPack[];
 
 export function listCapabilityPacks(): CapabilityPack[] {
   return packs;
