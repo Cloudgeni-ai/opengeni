@@ -29,6 +29,7 @@ import {
 import { requireAccessGrantAuthorization, type ApiRouteDeps } from "@opengeni/core";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { trustedRequestSourceAddress } from "./http/request-source";
 import {
   prepareWorkspaceToolGateway,
   requireWorkspaceToolGatewayAuthorization,
@@ -113,7 +114,9 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         clientName: parsed.data.client_name ?? null,
         grantTypes: parsed.data.grant_types,
         responseTypes: ["code"],
-        registrationScopeHash: tokenHash(mcpOAuthRegistrationClientKey(c)),
+        registrationScopeHash: tokenHash(
+          mcpOAuthRegistrationClientKey(c, deps.settings.mcpOauthTrustedProxyHops),
+        ),
       });
     } catch (error) {
       if (error instanceof McpOAuthClientRegistrationRateLimitError) {
@@ -498,10 +501,8 @@ function tokenHash(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function mcpOAuthRegistrationClientKey(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for")?.split(",")[0]?.trim();
-  const address = forwarded || c.req.header("x-real-ip")?.trim() || "unknown";
-  return `mcp-oauth-registration:${address.slice(0, 128)}`;
+function mcpOAuthRegistrationClientKey(c: Context, trustedProxyHops: number): string {
+  return `mcp-oauth-registration:${trustedRequestSourceAddress(c, trustedProxyHops)}`;
 }
 
 function expiresIn(seconds: number): Date {

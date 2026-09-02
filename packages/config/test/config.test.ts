@@ -65,7 +65,9 @@ describe(".env.example", () => {
 
 describe("MCP OAuth settings", () => {
   test("defaults off and requires a credential-free public origin when enabled", () => {
-    expect(withEnv({}, () => getSettings()).mcpOauthEnabled).toBe(false);
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.mcpOauthEnabled).toBe(false);
+    expect(defaults.mcpOauthTrustedProxyHops).toBe(0);
     expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
       "OPENGENI_PUBLIC_BASE_URL",
     );
@@ -78,6 +80,16 @@ describe("MCP OAuth settings", () => {
         () => getSettings(),
       ).mcpOauthEnabled,
     ).toBe(true);
+  });
+
+  test("bounds explicit trusted proxy hops", () => {
+    expect(
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2" }, () => getSettings())
+        .mcpOauthTrustedProxyHops,
+    ).toBe(2);
+    expect(() =>
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "17" }, () => getSettings()),
+    ).toThrow();
   });
 
   test("requires HTTPS outside local and test", () => {

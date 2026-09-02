@@ -33,6 +33,16 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
+The source quota uses the transport peer address reported by Bun and ignores
+caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behind
+a fixed trusted proxy chain may set
+`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
+`X-Forwarded-For` from the server side by exactly that many hops, so a caller
+cannot evade the quota by prepending values. Enable this only when firewall or
+network-policy rules prevent direct API access and every declared hop overwrites
+or appends the forwarding chain. A missing or shorter chain fails back to the
+server-owned transport peer.
+
 Current-human HTTP/SDK calls classified for human approval and every Site call
 use the ordinary API database and require migration
 `0402_tool_gateway_approval_capabilities.sql`. No additional secret or service

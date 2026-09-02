@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQLWrapper } from "drizzle-orm/sql";
 import { Hono } from "hono";
 import { testSettings } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
 import {
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
@@ -125,6 +128,62 @@ describe("MCP OAuth protocol", () => {
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("600");
     expect(await response.json()).toEqual({ error: "temporarily_unavailable" });
+  });
+
+  test("does not let spoofed forwarding-header rotation bypass the source quota", async () => {
+    const admittedSourceHashes = new Set<string>();
+    const app = new Hono();
+    registerMcpOAuthRoutes(app, {
+      ...depsWithRows(),
+      settings: testSettings({
+        mcpOauthEnabled: true,
+        mcpOauthTrustedProxyHops: 1,
+        publicBaseUrl: "https://api.example.test",
+      }),
+      db: {
+        execute: async (query: SQLWrapper | string) => {
+          if (typeof query === "string") throw new Error("expected parameterized registration SQL");
+          const compiled = new PgDialect().sqlToQuery(query.getSQL());
+          const sourceHash = compiled.params.at(-1);
+          if (typeof sourceHash !== "string") throw new Error("missing registration source hash");
+          if (admittedSourceHashes.has(sourceHash)) {
+            throw Object.assign(new Error("registration rate limited"), { code: "P0004" });
+          }
+          admittedSourceHashes.add(sourceHash);
+          return [
+            {
+              client_id: compiled.params[0],
+              redirect_uris: ["http://127.0.0.1:4567/callback"],
+              client_name: null,
+              grant_types: ["authorization_code", "refresh_token"],
+              response_types: ["code"],
+              created_at: "2026-09-02T00:00:00.000Z",
+            },
+          ];
+        },
+      } as ApiRouteDeps["db"],
+    } as ApiRouteDeps);
+
+    const register = async (forwardedFor: string, realIp: string) =>
+      await app.request(
+        "/oauth/register",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-forwarded-for": forwardedFor,
+            "x-real-ip": realIp,
+          },
+          body: JSON.stringify({
+            redirect_uris: ["http://127.0.0.1:4567/callback"],
+          }),
+        },
+        apiRequestBindingsForTransportPeer("10.0.0.10"),
+      );
+
+    expect((await register("203.0.113.7, 198.51.100.42", "203.0.113.8")).status).toBe(201);
+    expect((await register("192.0.2.99, 198.51.100.42", "192.0.2.100")).status).toBe(429);
+    expect(admittedSourceHashes.size).toBe(1);
   });
 
   test("returns OAuth protocol errors for invalid token resources", async () => {
