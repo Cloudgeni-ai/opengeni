@@ -128,6 +128,9 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
         }
       : completeSourceContractWithModelCallEquivalentCreditCost;
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+    );
     const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
       ...completeSourceContractWithModelCallEquivalentCreditCost,
     };
@@ -148,9 +151,6 @@ describe("release schema contract", () => {
       completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
         "0396_model_call_equivalent_credit_cost.sql";
     }
-    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
-    );
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
     const sessionSelectedSkillActivationIndex =
       completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
@@ -592,6 +592,9 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
         }
       : completeSourceContractWithModelCallEquivalentCreditCost;
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
+    );
     const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
       ...completeSourceContractWithModelCallEquivalentCreditCost,
     };
@@ -612,9 +615,6 @@ describe("release schema contract", () => {
       completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
         "0396_model_call_equivalent_credit_cost.sql";
     }
-    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0394_session_selected_skill_activation.sql",
-    );
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
     const sessionSelectedSkillActivationIndex =
       completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
