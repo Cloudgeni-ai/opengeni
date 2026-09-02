@@ -73309,6 +73309,7 @@ export {
 
 export * from "./workspace-artifacts";
 export * from "./mcp-oauth";
+export * from "./tool-gateway-approvals";
 export * from "./transcription-recordings";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";

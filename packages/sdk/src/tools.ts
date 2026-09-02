@@ -1,6 +1,8 @@
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
   ToolGatewayCatalog,
   ToolGatewayCatalogEntry,
   ToolGatewayDeclarationsResponse,
@@ -12,8 +14,8 @@ export type OpenGeniToolCallOptions = {
   operationId?: string;
   signal?: AbortSignal;
   refreshCatalog?: boolean;
-  /** Set by a current-human host only after its approval UI resolves. */
-  approvalConfirmed?: true;
+  /** Server-issued, single-use capability returned by `$approve`. */
+  approvalToken?: string;
 };
 
 export type OpenGeniToolFunction<
@@ -41,6 +43,11 @@ export type OpenGeniWorkspaceTools = OpenGeniGeneratedTools &
       argumentsValue?: Record<string, unknown>,
       options?: OpenGeniToolCallOptions,
     ) => Promise<unknown>;
+    readonly $approve: (
+      identity: ToolGatewayIdentity,
+      argumentsValue?: Record<string, unknown>,
+      options?: { operationId?: string; signal?: AbortSignal },
+    ) => Promise<ToolGatewayApprovalResponse>;
     readonly $declarations: (options?: {
       signal?: AbortSignal;
     }) => Promise<ToolGatewayDeclarationsResponse>;
@@ -104,6 +111,9 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       argumentsValue: Record<string, unknown> = {},
       options: OpenGeniToolCallOptions = {},
     ): Promise<unknown> => {
+      if (options.approvalToken && !options.operationId) {
+        throw new TypeError("operationId is required when using an approval token");
+      }
       const current = await catalog({
         ...(options.refreshCatalog === undefined ? {} : { refresh: options.refreshCatalog }),
         ...(options.signal ? { signal: options.signal } : {}),
@@ -113,7 +123,7 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         catalogDigest: current.digest,
         identity,
         arguments: argumentsValue,
-        ...(options.approvalConfirmed ? { approvalConfirmed: true as const } : {}),
+        ...(options.approvalToken ? { approvalToken: options.approvalToken } : {}),
       };
       const response = await this.transport.requestJson<ToolGatewayCallResponse>(
         "POST",
@@ -130,6 +140,26 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       return entry?.outputSchema && response.result.structuredContent !== undefined
         ? response.result.structuredContent
         : response.result;
+    };
+    const approveIdentity = async (
+      identity: ToolGatewayIdentity,
+      argumentsValue: Record<string, unknown> = {},
+      options: { operationId?: string; signal?: AbortSignal } = {},
+    ): Promise<ToolGatewayApprovalResponse> => {
+      const current = await catalog(options.signal ? { signal: options.signal } : {});
+      const request: ToolGatewayApprovalRequest = {
+        operationId: options.operationId ?? crypto.randomUUID(),
+        catalogDigest: current.digest,
+        identity,
+        arguments: argumentsValue,
+      };
+      return await this.transport.requestJson<ToolGatewayApprovalResponse>(
+        "POST",
+        `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/approvals`,
+        request,
+        {},
+        options.signal ? { signal: options.signal } : {},
+      );
     };
     const invokePath = async (
       path: readonly string[],
@@ -168,6 +198,7 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         if (property === "then") return undefined;
         if (property === "$catalog") return catalog;
         if (property === "$call") return callIdentity;
+        if (property === "$approve") return approveIdentity;
         if (property === "$declarations") {
           return async (options: { signal?: AbortSignal } = {}) =>
             await this.transport.requestJson<ToolGatewayDeclarationsResponse>(

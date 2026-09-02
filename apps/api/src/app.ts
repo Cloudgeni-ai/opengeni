@@ -18,6 +18,7 @@ import {
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  ToolGatewayApprovalRequest,
   ToolGatewayCallRequest,
   type AccessGrant,
   type ErrorCode,
@@ -102,6 +103,7 @@ import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
   buildWorkspaceToolGatewayMcpServer,
+  approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   grantUsesAttemptScopedMcp,
   prepareMcpOAuthWorkspaceToolGateway,
@@ -950,7 +952,11 @@ export function createAppComposition(deps: AppDependencies): {
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
         });
-        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, oauthAccess.grant);
+        const mcp = buildWorkspaceToolGatewayMcpServer(
+          prepared,
+          oauthAccess.grant,
+          routeDeps.observability,
+        );
         try {
           await mcp.connect(transport);
           return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
@@ -1001,7 +1007,7 @@ export function createAppComposition(deps: AppDependencies): {
       });
       if (!grantUsesAttemptScopedMcp(grant)) {
         const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
-        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant);
+        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
         try {
           await mcp.connect(transport);
           return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
@@ -1054,7 +1060,46 @@ export function createAppComposition(deps: AppDependencies): {
     }
     const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
     try {
-      return c.json(await callWorkspaceToolGateway(prepared, grant, parsed.data));
+      return c.json(
+        await callWorkspaceToolGateway(
+          prepared,
+          grant,
+          parsed.data,
+          routeDeps.db,
+          undefined,
+          routeDeps.observability,
+        ),
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/approvals", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway approval" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(
+        await approveWorkspaceToolGatewayCall(
+          prepared,
+          authorization.grant,
+          routeDeps.db,
+          parsed.data,
+          undefined,
+          routeDeps.observability,
+        ),
+        201,
+      );
     } finally {
       await prepared.close();
     }
@@ -1717,6 +1762,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/tools\/calls$/,
     label: "/v1/workspaces/:workspaceId/tools/calls",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/approvals$/,
+    label: "/v1/workspaces/:workspaceId/tools/approvals",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/tools\/declarations$/,

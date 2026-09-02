@@ -48,6 +48,8 @@ export type {
 export type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
   ToolGatewayCatalog,
   ToolGatewayCatalogEntry,
   ToolGatewayDeclarationsResponse,

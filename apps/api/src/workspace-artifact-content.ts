@@ -43,8 +43,9 @@ export function prepareWorkspaceArtifactContent(
   const sourceBytes = encoder.encode(JSON.stringify(source));
   const contentSha256 = sha256(contentBytes);
   const sourceSha256 = sha256(sourceBytes);
-  const contentKey = `workspaces/${workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-  const sourceKey = `workspaces/${workspaceId}/workspace-artifacts/sources/${sourceSha256}.json`;
+  const storageGroupId = crypto.randomUUID();
+  const contentKey = `workspaces/${workspaceId}/workspace-artifacts/blobs/${storageGroupId}-${contentSha256}.html`;
+  const sourceKey = `workspaces/${workspaceId}/workspace-artifacts/sources/${storageGroupId}-${sourceSha256}.json`;
   return {
     contentKey,
     contentSha256,
@@ -54,7 +55,7 @@ export function prepareWorkspaceArtifactContent(
     sourceSizeBytes: sourceBytes.byteLength,
     ...(requestedTools === undefined ? {} : { requestedTools }),
     persistContent: async () => {
-      await Promise.all([
+      const writes = await Promise.allSettled([
         objectStorage.putObject({
           key: contentKey,
           contentType: "text/html; charset=utf-8",
@@ -68,6 +69,16 @@ export function prepareWorkspaceArtifactContent(
           sha256: sourceSha256,
         }),
       ]);
+      const failed = writes.find((write) => write.status === "rejected");
+      if (!failed) return;
+      await Promise.allSettled(
+        writes.flatMap((write, index) =>
+          write.status === "fulfilled"
+            ? [objectStorage.deleteObject(index === 0 ? contentKey : sourceKey)]
+            : [],
+        ),
+      );
+      throw failed.reason;
     },
   };
 }

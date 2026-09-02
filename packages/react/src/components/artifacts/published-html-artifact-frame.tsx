@@ -11,6 +11,7 @@ import {
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
+  ToolGatewayApprovalResponse,
   ToolGatewayCatalog,
   ToolGatewayDeclarationsResponse,
 } from "@opengeni/sdk";
@@ -42,6 +43,10 @@ export type PublishedHtmlArtifactToolBridge = {
     request: ToolGatewayCallRequest,
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayCallResponse>;
+  approve: (
+    request: ToolGatewayCallRequest & { operationId: string },
+    options: { signal: AbortSignal },
+  ) => Promise<ToolGatewayApprovalResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
 };
 

@@ -33,6 +33,20 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
+Current-human HTTP/SDK and Site calls that need approval use the ordinary API
+database and require migration `0401_tool_gateway_approval_capabilities.sql`.
+No additional secret or service is required. The API stores only a token hash,
+binds each capability to the current human and exact call, expires it after five
+minutes, and consumes it once. Issuance opportunistically removes bounded
+expired/consumed rows. Existing database readiness therefore covers this path.
+
+Gateway calls emit `opengeni_tool_gateway_operations_total` and
+`opengeni_tool_gateway_operation_duration_seconds` with bounded adapter,
+operation, source, and outcome labels. The same observer emits
+`opengeni.tool_gateway.operation` spans and safe structured log attributes
+(`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
+subject, tool-name, argument, result, credential, or approval-token values.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use

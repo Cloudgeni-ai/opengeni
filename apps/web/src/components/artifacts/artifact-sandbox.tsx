@@ -65,8 +65,9 @@ export function ArtifactSandbox(props: {
     const pending = pendingApprovalRef.current;
     if (!pending) return;
     try {
+      const approval = await pending.bridge.approve(pending.request, { signal: pending.signal });
       const response = await pending.bridge.call(
-        { ...pending.request, approvalConfirmed: true },
+        { ...pending.request, approvalToken: approval.approvalToken },
         { signal: pending.signal },
       );
       pending.cleanup();
@@ -230,7 +231,7 @@ export function ArtifactSandbox(props: {
 
 type PendingToolApproval = {
   bridge: PublishedHtmlArtifactToolBridge;
-  request: ToolGatewayCallRequest;
+  request: ToolGatewayCallRequest & { operationId: string };
   signal: AbortSignal;
   cleanup: () => void;
   resolve: (response: ToolGatewayCallResponse) => void;
@@ -246,6 +247,7 @@ function useApprovedToolBridge(
     if (!bridge) return undefined;
     return {
       catalog: bridge.catalog,
+      approve: bridge.approve,
       ...(bridge.declarations ? { declarations: bridge.declarations } : {}),
       call: async (request, options) => {
         const siteRequest = sanitizeOpenGeniSiteToolCallRequest(request);
@@ -263,9 +265,13 @@ function useApprovedToolBridge(
           throw new Error("Another Site tool is waiting for approval");
         }
         if (options.signal.aborted) throw options.signal.reason;
+        const approvalRequest = {
+          ...siteRequest,
+          operationId: siteRequest.operationId ?? crypto.randomUUID(),
+        };
         return await new Promise<ToolGatewayCallResponse>((resolve, reject) => {
           const abort = () => {
-            if (pendingApprovalRef.current?.request !== request) return;
+            if (pendingApprovalRef.current?.request !== approvalRequest) return;
             pendingApprovalRef.current = null;
             onApprovalRequested(null);
             reject(options.signal.reason);
@@ -274,7 +280,7 @@ function useApprovedToolBridge(
           options.signal.addEventListener("abort", abort, { once: true });
           pendingApprovalRef.current = {
             bridge,
-            request: siteRequest,
+            request: approvalRequest,
             signal: options.signal,
             cleanup,
             resolve,

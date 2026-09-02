@@ -422,10 +422,13 @@ assign product types such as app, page, dashboard, or gallery. List pages are
 bounded and expose both `truncated` and an opaque `nextCursor` so callers never
 mistake a partial page for the complete workspace catalog.
 
-The initial web renderer supports semantic HTML, inline CSS, CSS-only
-interactions, and inline SVG. It removes JavaScript, event handlers, forms,
-embeds, external URLs, and other active or navigation-capable markup before
-rendering. Executable artifacts require a later, stronger isolation boundary.
+Each Site version retains one self-contained executable HTML runtime, its
+bounded editable source bundle, and the exact canonical tool identities it
+requested. The web host renders that runtime in an opaque-origin sandboxed
+iframe. Credentials, cookies, API URLs, workspace ids, and parent DOM authority
+never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
+`MessagePort` that exposes only the retained tool allowlist intersected with the
+current viewer's live workspace catalog.
 
 ```ts
 let cursor: string | undefined;
@@ -444,6 +447,40 @@ same key only to retry the same logical mutation. Agent-authored versions also
 return the exact source session, turn, attempt, and execution generation that
 published them. Version and event history are bounded; inspect
 `versionsTruncated` and `eventsTruncated` on the detail response.
+
+## Workspace tools
+
+The browser-safe SDK exposes the same gateway catalog and executor used by
+model MCP calls and Codemode. Generated declarations augment the lazy namespace
+for exact installed-tool types; canonical `{ serverId, toolName }` identity and
+the server-side catalog remain authoritative.
+
+```ts
+const tools = client.tools.forWorkspace(workspaceId);
+const documents = await tools.docs.search({ query: "launch plan" });
+```
+
+An approval-required call needs a server-issued capability. A trusted host
+shows its approval UI first, then asks for one token bound to the current human,
+workspace, operation id, catalog digest, exact tool identity, and arguments.
+The token expires after five minutes, is stored only as a hash, and is consumed
+once by the matching call.
+
+```ts
+const operationId = crypto.randomUUID();
+const identity = { serverId: "linear", toolName: "issues_update" };
+const input = { issueId, state: "Done" };
+const approval = await tools.$approve(identity, input, { operationId });
+
+await tools.$call(identity, input, {
+  operationId,
+  approvalToken: approval.approvalToken,
+});
+```
+
+Do not request approval capabilities speculatively or expose them to Site
+iframe code. A Site host performs this sequence only after its parent-owned
+confirmation dialog resolves.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately

@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -12,6 +13,8 @@ import type { Settings } from "@opengeni/config";
 import {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
   ToolGatewayDeclarationsResponse,
   type AccessGrant,
   type ToolGatewayCatalog,
@@ -30,6 +33,9 @@ import {
   buildCodexTokenResolver,
   buildConnectionTokenResolver,
   withCodexAppsRequestAuthorization,
+  consumeToolGatewayApproval,
+  issueToolGatewayApproval,
+  ToolGatewayApprovalRateLimitError,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -44,6 +50,7 @@ import {
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
   ToolGatewayToolNotFoundError,
+  digestCanonicalJson,
   generateToolGatewayDeclarations,
 } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
@@ -51,6 +58,8 @@ import { HTTPException } from "hono/http-exception";
 import { buildDocumentsMcpServer } from "./mcp/documents";
 import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import { startWorkspaceToolGatewayObservation } from "./workspace-tool-gateway-observability";
+import type { Observability } from "@opengeni/observability";
 
 export type PreparedWorkspaceToolGateway = Pick<
   PreparedWorkspaceToolGatewayTools,
@@ -242,6 +251,7 @@ async function prepareWorkspaceToolGatewayForGrant(
 export function buildWorkspaceToolGatewayMcpServer(
   prepared: PreparedWorkspaceToolGateway,
   grant: AccessGrant,
+  observability?: Observability,
 ): Server {
   const server = new Server(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
@@ -270,16 +280,28 @@ export function buildWorkspaceToolGatewayMcpServer(
       (candidate) => candidate.modelName === request.params.name,
     );
     if (!entry) throw new ToolGatewayToolNotFoundError();
-    return (await prepared.toolGateway.call(
-      {
-        operationId: crypto.randomUUID(),
-        catalogDigest: prepared.toolGatewayCatalog.digest,
-        identity: entry.identity,
-        arguments: request.params.arguments ?? {},
-        caller: { kind: "mcp", subjectId: grant.subjectId },
-      },
-      { signal: extra.signal },
-    )) as CallToolResult;
+    const observation = startWorkspaceToolGatewayObservation(observability, {
+      adapter: "mcp",
+      operation: "call",
+      source: entry.source,
+    });
+    try {
+      const result = (await prepared.toolGateway.call(
+        {
+          operationId: crypto.randomUUID(),
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: entry.identity,
+          arguments: request.params.arguments ?? {},
+          caller: { kind: "mcp", subjectId: grant.subjectId },
+        },
+        { signal: extra.signal },
+      )) as CallToolResult;
+      observation.end(result.isError ? "tool_error" : "ok");
+      return result;
+    } catch (error) {
+      observation.end(workspaceToolGatewayOutcome(error));
+      throw error;
+    }
   });
   return server;
 }
@@ -288,10 +310,36 @@ export async function callWorkspaceToolGateway(
   prepared: PreparedWorkspaceToolGateway,
   grant: AccessGrant,
   input: unknown,
+  db?: ApiRouteDeps["db"],
+  consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
+  observability?: Observability,
 ) {
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
+  const entry = prepared.toolGatewayCatalog.entries.find(
+    (candidate) =>
+      candidate.identity.serverId === request.identity.serverId &&
+      candidate.identity.toolName === request.identity.toolName,
+  );
+  const observation = startWorkspaceToolGatewayObservation(observability, {
+    adapter: "http",
+    operation: "call",
+    source: entry?.source ?? "aggregate",
+  });
   try {
+    let approvalConfirmed = false;
+    if (entry?.approval === "human" && request.approvalToken && db) {
+      approvalConfirmed = await consumeApproval(db, {
+        tokenHash: hashOpaqueValue(request.approvalToken),
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        operationId,
+        catalogDigest: request.catalogDigest,
+        identity: request.identity,
+        argumentsDigest: digestCanonicalJson(request.arguments),
+      });
+    }
     const result = await prepared.toolGateway.call(
       {
         operationId,
@@ -301,15 +349,17 @@ export async function callWorkspaceToolGateway(
         caller: { kind: "http", subjectId: grant.subjectId },
       },
       {
-        transportMeta: { approvalConfirmed: request.approvalConfirmed === true },
+        transportMeta: { approvalConfirmed },
       },
     );
+    observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
       catalogDigest: prepared.toolGatewayCatalog.digest,
       result,
     });
   } catch (error) {
+    observation.end(workspaceToolGatewayOutcome(error));
     if (error instanceof ToolGatewayCatalogStaleError) {
       throw new HTTPException(409, { message: error.code, cause: error });
     }
@@ -324,6 +374,74 @@ export async function callWorkspaceToolGateway(
     }
     throw error;
   }
+}
+
+export async function approveWorkspaceToolGatewayCall(
+  prepared: PreparedWorkspaceToolGateway,
+  grant: AccessGrant,
+  db: ApiRouteDeps["db"],
+  input: unknown,
+  issueApproval: typeof issueToolGatewayApproval = issueToolGatewayApproval,
+  observability?: Observability,
+) {
+  const request = ToolGatewayApprovalRequest.parse(input);
+  if (request.catalogDigest !== prepared.toolGatewayCatalog.digest) {
+    throw new HTTPException(409, { message: "catalog_stale" });
+  }
+  const entry = prepared.toolGatewayCatalog.entries.find(
+    (candidate) =>
+      candidate.identity.serverId === request.identity.serverId &&
+      candidate.identity.toolName === request.identity.toolName,
+  );
+  if (!entry) throw new HTTPException(404, { message: "tool_not_found" });
+  if (entry.approval !== "human") {
+    throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
+  }
+  const observation = startWorkspaceToolGatewayObservation(observability, {
+    adapter: "http",
+    operation: "approval",
+    source: entry.source,
+  });
+  const approvalToken = `ogta_${randomBytes(32).toString("base64url")}`;
+  const expiresAt = new Date(Date.now() + 5 * 60_000);
+  try {
+    await issueApproval(db, {
+      tokenHash: hashOpaqueValue(approvalToken),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      operationId: request.operationId,
+      catalogDigest: request.catalogDigest,
+      identity: request.identity,
+      argumentsDigest: digestCanonicalJson(request.arguments),
+      expiresAt,
+    });
+  } catch (error) {
+    if (error instanceof ToolGatewayApprovalRateLimitError) {
+      observation.end("rate_limited");
+      throw new HTTPException(429, { message: "tool_approval_rate_limited", cause: error });
+    }
+    observation.end("failed");
+    throw error;
+  }
+  observation.end("ok");
+  return ToolGatewayApprovalResponse.parse({
+    operationId: request.operationId,
+    approvalToken,
+    expiresAt: expiresAt.toISOString(),
+  });
+}
+
+function hashOpaqueValue(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function workspaceToolGatewayOutcome(error: unknown) {
+  if (error instanceof ToolGatewayApprovalRequiredError) return "approval_required" as const;
+  if (error instanceof ToolGatewayCatalogStaleError) return "catalog_stale" as const;
+  if (error instanceof ToolGatewayInputValidationError) return "invalid_input" as const;
+  if (error instanceof ToolGatewayToolNotFoundError) return "not_found" as const;
+  return "failed" as const;
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

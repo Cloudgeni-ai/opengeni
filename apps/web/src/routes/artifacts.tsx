@@ -242,6 +242,15 @@ export function ArtifactDetailRoute({
     };
     return {
       catalog,
+      approve: async (toolRequest, { signal }) => {
+        if (!allowed.has(toolIdentityKey(toolRequest.identity))) {
+          throw new Error("This tool is not available to the Site");
+        }
+        return await workspaceTools.$approve(toolRequest.identity, toolRequest.arguments, {
+          operationId: toolRequest.operationId,
+          signal,
+        });
+      },
       call: async (toolRequest, { signal }) => {
         if (!allowed.has(toolIdentityKey(toolRequest.identity))) {
           throw new Error("This tool is not available to the Site");

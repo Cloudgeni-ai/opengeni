@@ -974,7 +974,11 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,
         });
-        const server = buildWorkspaceToolGatewayMcpServer(prepared, oauthAccess.grant);
+        const server = buildWorkspaceToolGatewayMcpServer(
+          prepared,
+          oauthAccess.grant,
+          deps.observability,
+        );
         try {
           await server.connect(transport);
           return await transport.handleRequest(c.req.raw);

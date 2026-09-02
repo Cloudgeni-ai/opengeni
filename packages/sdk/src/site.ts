@@ -28,7 +28,7 @@ export type OpenGeniSiteBridgeReadyMessage = {
 };
 
 /** Site-originated calls cannot carry host-only approval authority. */
-export type OpenGeniSiteToolCallRequest = Omit<ToolGatewayCallRequest, "approvalConfirmed">;
+export type OpenGeniSiteToolCallRequest = Omit<ToolGatewayCallRequest, "approvalToken">;
 
 export type OpenGeniSiteBridgeRequestMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_REQUEST;

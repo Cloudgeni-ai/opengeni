@@ -28,6 +28,10 @@ ALTER TABLE "workspace_artifact_versions"
         AND "source_sha256" IS NULL
         AND "source_size_bytes" IS NULL
       ) OR (
+        "source_key" IS NOT NULL
+        AND "source_sha256" IS NOT NULL
+        AND "source_size_bytes" IS NOT NULL
+        AND
         length("source_key") BETWEEN 1 AND 1024
         AND "source_sha256" ~ '^[0-9a-f]{64}$'
         AND "source_size_bytes" BETWEEN 1 AND 4194304

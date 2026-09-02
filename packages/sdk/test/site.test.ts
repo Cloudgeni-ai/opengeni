@@ -82,9 +82,9 @@ describe("OpenGeni Site client", () => {
 
     expect((client.tools as unknown as { then?: unknown }).then).toBeUndefined();
     expect(await client.tools.$catalog()).toEqual(catalog);
-    expect(
-      await client.tools["docs"]!["search"]!({ query: "roadmap" }, { approvalConfirmed: true }),
-    ).toEqual({ documents: [{ id: "document-1" }] });
+    expect(await client.tools["docs"]!["search"]!({ query: "roadmap" })).toEqual({
+      documents: [{ id: "document-1" }],
+    });
     expect(calls.map((call) => call.method)).toEqual(["catalog", "call"]);
     expect(calls[1]).toMatchObject({
       payload: {
@@ -94,8 +94,11 @@ describe("OpenGeni Site client", () => {
       },
     });
     expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
-      "approvalConfirmed",
+      "approvalToken",
     );
+    await expect(
+      client.tools.$approve(catalog.entries[0]!.identity, { query: "roadmap" }),
+    ).rejects.toThrow("Unsupported Site bridge request");
 
     client.close();
     for (const port of hostPorts) port.close();

@@ -323,11 +323,33 @@ export const ToolGatewayCallRequest = z
     catalogDigest: sha256,
     identity: ToolGatewayIdentity,
     arguments: jsonObject,
-    /** Current-human HTTP adapters set this only after an explicit approval UI. */
-    approvalConfirmed: z.literal(true).optional(),
+    /** Opaque, server-issued, single-use capability for an approval-required call. */
+    approvalToken: z
+      .string()
+      .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
+      .optional(),
   })
   .strict();
 export type ToolGatewayCallRequest = z.infer<typeof ToolGatewayCallRequest>;
+
+export const ToolGatewayApprovalRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    catalogDigest: sha256,
+    identity: ToolGatewayIdentity,
+    arguments: jsonObject,
+  })
+  .strict();
+export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalRequest>;
+
+export const ToolGatewayApprovalResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type ToolGatewayApprovalResponse = z.infer<typeof ToolGatewayApprovalResponse>;
 
 export const ToolGatewayCallResponse = z
   .object({

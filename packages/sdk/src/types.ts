@@ -114,7 +114,20 @@ export type ToolGatewayCallRequest = {
   catalogDigest: string;
   identity: ToolGatewayIdentity;
   arguments: Record<string, unknown>;
-  approvalConfirmed?: true | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  approvalToken: string;
+  expiresAt: string;
 };
 
 export type ToolGatewayCallResponse = {

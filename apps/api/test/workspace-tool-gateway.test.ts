@@ -6,6 +6,7 @@ import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import {
   buildWorkspaceToolGatewayMcpServer,
+  approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
   workspaceToolGatewayDeclarations,
@@ -110,13 +111,25 @@ describe("workspace tool gateway adapters", () => {
         }),
       ).rejects.toMatchObject({ status: 409 });
 
-      const response = await callWorkspaceToolGateway(prepared, access, {
-        operationId: "33333333-3333-4333-8333-333333333333",
-        catalogDigest: prepared.toolGatewayCatalog.digest,
-        identity: { serverId: "inventory", toolName: "lookup" },
-        arguments: { sku: "SKU-2" },
-        approvalConfirmed: true,
-      });
+      const response = await callWorkspaceToolGateway(
+        prepared,
+        access,
+        {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "SKU-2" },
+          approvalToken: `ogta_${"a".repeat(43)}`,
+        },
+        {} as never,
+        async (_db, input) => {
+          expect(input).toMatchObject({
+            operationId: "33333333-3333-4333-8333-333333333333",
+            identity: { serverId: "inventory", toolName: "lookup" },
+          });
+          return true;
+        },
+      );
       expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
       expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SKU-2" } }]);
     } finally {
@@ -145,12 +158,49 @@ describe("workspace tool gateway adapters", () => {
       }),
     ).rejects.toMatchObject({ status: 404 });
     await expect(
-      callWorkspaceToolGateway(prepared, access, {
-        ...base,
-        arguments: {},
-        approvalConfirmed: true,
-      }),
+      callWorkspaceToolGateway(
+        prepared,
+        access,
+        {
+          ...base,
+          operationId: "33333333-3333-4333-8333-333333333333",
+          arguments: {},
+          approvalToken: `ogta_${"a".repeat(43)}`,
+        },
+        {} as never,
+        async () => true,
+      ),
     ).rejects.toMatchObject({ status: 422 });
+  });
+
+  test("issues an opaque approval capability bound to the exact operation", async () => {
+    const prepared = preparedGateway([]);
+    const access = grant();
+    const issued: unknown[] = [];
+    const response = await approveWorkspaceToolGatewayCall(
+      prepared,
+      access,
+      {} as never,
+      {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "inventory", toolName: "lookup" },
+        arguments: { sku: "SKU-2" },
+      },
+      async (_db, input) => {
+        issued.push(input);
+      },
+    );
+    expect(response.operationId).toBe("33333333-3333-4333-8333-333333333333");
+    expect(response.approvalToken).toMatch(/^ogta_[A-Za-z0-9_-]{43}$/u);
+    expect(issued).toHaveLength(1);
+    expect(issued[0]).toMatchObject({
+      accountId,
+      workspaceId,
+      subjectId,
+      operationId: response.operationId,
+      identity: { serverId: "inventory", toolName: "lookup" },
+    });
   });
 
   test("generates SDK declarations from the catalog exposed by the route adapter", () => {

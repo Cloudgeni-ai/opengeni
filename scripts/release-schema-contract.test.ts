@@ -126,7 +126,9 @@ describe("release schema contract", () => {
 
   test("registers sandbox deadline rotation preemption before workspace management", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe("0400_mcp_oauth_authorization_server.sql");
+    expect(completeSourceContract.latestMigration).toBe(
+      "0401_tool_gateway_approval_capabilities.sql",
+    );
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );
@@ -147,6 +149,23 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const toolGatewayApprovalCapabilities = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0401_tool_gateway_approval_capabilities.sql",
+    );
+    const completeSourceContractWithToolGatewayApprovalCapabilities = completeSourceContract;
+    const toolGatewayApprovalCapabilitiesMigrationIndex =
+      completeSourceContractWithToolGatewayApprovalCapabilities.migrations.findIndex(
+        (migration) => migration.path === "0401_tool_gateway_approval_capabilities.sql",
+      );
+    completeSourceContract = toolGatewayApprovalCapabilities
+      ? {
+          ...completeSourceContractWithToolGatewayApprovalCapabilities,
+          latestMigration:
+            completeSourceContractWithToolGatewayApprovalCapabilities.migrations[
+              toolGatewayApprovalCapabilitiesMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration,
+        }
+      : completeSourceContractWithToolGatewayApprovalCapabilities;
     const mcpOauthAuthorizationServer = completeSourceContract.migrations.some(
       (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
     );
@@ -419,6 +438,12 @@ describe("release schema contract", () => {
         latestMigration: "0400_mcp_oauth_authorization_server.sql",
       };
     }
+    if (toolGatewayApprovalCapabilities) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0401_tool_gateway_approval_capabilities.sql",
+      };
+    }
     const automaticSessionTitleMigrationPaths = new Set([
       "0398_organization_workspace_management_entry.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
@@ -467,6 +492,7 @@ describe("release schema contract", () => {
       "0396_model_call_equivalent_credit_cost.sql",
       "0399_workspace_html_site_sources.sql",
       "0400_mcp_oauth_authorization_server.sql",
+      "0401_tool_gateway_approval_capabilities.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -532,7 +558,8 @@ describe("release schema contract", () => {
         (workspaceMemoryAndLearningDefaults ? 1 : 0) +
         (modelCallEquivalentCreditCost ? 1 : 0) +
         (workspaceHtmlSiteSources ? 1 : 0) +
-        (mcpOauthAuthorizationServer ? 1 : 0),
+        (mcpOauthAuthorizationServer ? 1 : 0) +
+        (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -634,6 +661,9 @@ describe("release schema contract", () => {
       ...(mcpOauthAuthorizationServer
         ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
+      ...(toolGatewayApprovalCapabilities
+        ? { latestMigration: "0401_tool_gateway_approval_capabilities.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationWorkspaceManagementEntry
@@ -669,6 +699,11 @@ describe("release schema contract", () => {
         ? "0400_mcp_oauth_authorization_server.sql"
         : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
     );
+    expect(completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration).toBe(
+      toolGatewayApprovalCapabilities
+        ? "0401_tool_gateway_approval_capabilities.sql"
+        : completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
+    );
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
@@ -683,6 +718,23 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const toolGatewayApprovalCapabilities = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0401_tool_gateway_approval_capabilities.sql",
+    );
+    const completeSourceContractWithToolGatewayApprovalCapabilities = completeSourceContract;
+    const toolGatewayApprovalCapabilitiesMigrationIndex =
+      completeSourceContractWithToolGatewayApprovalCapabilities.migrations.findIndex(
+        (migration) => migration.path === "0401_tool_gateway_approval_capabilities.sql",
+      );
+    completeSourceContract = toolGatewayApprovalCapabilities
+      ? {
+          ...completeSourceContractWithToolGatewayApprovalCapabilities,
+          latestMigration:
+            completeSourceContractWithToolGatewayApprovalCapabilities.migrations[
+              toolGatewayApprovalCapabilitiesMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration,
+        }
+      : completeSourceContractWithToolGatewayApprovalCapabilities;
     const mcpOauthAuthorizationServer = completeSourceContract.migrations.some(
       (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
     );
@@ -911,6 +963,7 @@ describe("release schema contract", () => {
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0399_workspace_html_site_sources.sql",
       "0400_mcp_oauth_authorization_server.sql",
+      "0401_tool_gateway_approval_capabilities.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1112,6 +1165,12 @@ describe("release schema contract", () => {
         latestMigration: "0400_mcp_oauth_authorization_server.sql",
       };
     }
+    if (toolGatewayApprovalCapabilities) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0401_tool_gateway_approval_capabilities.sql",
+      };
+    }
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
@@ -1171,7 +1230,8 @@ describe("release schema contract", () => {
         (workspaceMemoryAndLearningDefaults ? 1 : 0) +
         (modelCallEquivalentCreditCost ? 1 : 0) +
         (workspaceHtmlSiteSources ? 1 : 0) +
-        (mcpOauthAuthorizationServer ? 1 : 0),
+        (mcpOauthAuthorizationServer ? 1 : 0) +
+        (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -1283,6 +1343,9 @@ describe("release schema contract", () => {
       ...(mcpOauthAuthorizationServer
         ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
+      ...(toolGatewayApprovalCapabilities
+        ? { latestMigration: "0401_tool_gateway_approval_capabilities.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationWorkspaceManagementEntry
@@ -1317,6 +1380,11 @@ describe("release schema contract", () => {
       mcpOauthAuthorizationServer
         ? "0400_mcp_oauth_authorization_server.sql"
         : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
+    );
+    expect(completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration).toBe(
+      toolGatewayApprovalCapabilities
+        ? "0401_tool_gateway_approval_capabilities.sql"
+        : completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(

@@ -3629,6 +3629,70 @@ export const mcpOauthAccessTokens = pgTable(
   }),
 );
 
+export const toolGatewayApprovalCapabilities = pgTable(
+  "tool_gateway_approval_capabilities",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    catalogDigest: text("catalog_digest").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    argumentsDigest: text("arguments_digest").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "tool_gateway_approval_capabilities_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("tool_gateway_approval_capabilities_operation_uq").on(
+      table.workspaceId,
+      table.subjectId,
+      table.operationId,
+    ),
+    expires: index("tool_gateway_approval_capabilities_expires_idx").on(
+      table.expiresAt,
+      table.tokenHash,
+    ),
+    tokenHashValid: check(
+      "tool_gateway_approval_capabilities_token_hash_chk",
+      sql`${table.tokenHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    catalogDigestValid: check(
+      "tool_gateway_approval_capabilities_catalog_digest_chk",
+      sql`${table.catalogDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    argumentsDigestValid: check(
+      "tool_gateway_approval_capabilities_arguments_digest_chk",
+      sql`${table.argumentsDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    subjectValid: check(
+      "tool_gateway_approval_capabilities_subject_chk",
+      sql`length(btrim(${table.subjectId})) between 1 and 1024`,
+    ),
+    identityValid: check(
+      "tool_gateway_approval_capabilities_identity_chk",
+      sql`length(${table.serverId}) between 1 and 256
+        and length(${table.toolName}) between 1 and 256`,
+    ),
+    expiryValid: check(
+      "tool_gateway_approval_capabilities_expiry_chk",
+      sql`${table.expiresAt} > ${table.createdAt}
+        and ${table.expiresAt} <= ${table.createdAt} + interval '10 minutes'`,
+    ),
+  }),
+);
+
 // Per-workspace Codex account selection (the ACTIVE pointer) + P3 rotation
 // forward-compat. One row per workspace. The only P1-load-bearing column is
 // activeCredentialId — the account a session runs on when it has no pin. NULL ⇒

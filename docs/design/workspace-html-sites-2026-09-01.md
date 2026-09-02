@@ -1,8 +1,8 @@
 <!-- docs-refs: record -->
 
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
-> September 1, 2026 and resolved by OPE-327 on September 2, 2026. Code wins
-> where the implementation later differs.
+> September 1, 2026 and resolved on September 2, 2026. Code wins where the
+> implementation later differs.
 
 # Workspace HTML Sites
 
@@ -209,7 +209,8 @@ resolves personal/workspace connection authority through the existing broker,
 validates the catalog digest and input, and invokes the same executor as model
 and Codemode calls. An approval-required entry opens the stock parent-owned
 confirmation dialog; only the resulting authenticated current-human HTTP call
-carries the one-shot confirmation. Site code cannot approve itself.
+carries the server-issued one-shot approval capability. Site code cannot approve
+itself.
 
 This avoids version-scoped bearer issuance entirely. Membership, permission,
 connection, logout, and catalog changes are observed by the parent's ordinary
@@ -295,7 +296,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   but that route currently registers OpenGeni's first-party tools rather than
   the complete set of configured external integrations.
 
-### OPE-327 additions
+### Implemented additions
 
 1. Extract or introduce generic tool definition, catalog, namespace, type
    generation, validation, and execution contracts below the current
@@ -360,8 +361,8 @@ catalog changed after the Site was built.
 4. The parent rejects identities outside the immutable requested set and sends
    the call through the authenticated workspace HTTP adapter.
 5. Approval-required entries stop at a stock parent-owned confirmation dialog.
-   The confirmed HTTP request carries one explicit approval marker; MCP and Site
-   code cannot silently provide it.
+   The parent obtains a server-issued one-shot capability bound to the exact
+   operation; MCP and Site code cannot silently provide it.
 6. The API rebuilds the current-human gateway from live enabled first-party and
    integration servers, validates digest/input/authorization, resolves current
    connections, and calls the same executor closures as model and Codemode.
