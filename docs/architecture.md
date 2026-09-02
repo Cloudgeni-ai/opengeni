@@ -662,7 +662,10 @@ interruption that would fence the terminal checkpoint write. A durable
 `compacted` or `skipped` landmark becomes the handoff: the ordinary turn settles
 `superseded` before another model request, while standalone maintenance completes
 and the waiting Steer is claimed next. Pause and Cancel retain immediate
-interruption semantics.
+interruption semantics. Automatic starts also maintain one content-free private
+pending projection keyed by exact attempt; terminal landmarks, attempt closure,
+and active-attempt replacement clear it so control-worker alerting survives
+turn-worker loss without exporting session identity.
 
 Pause and Resume are desired-state commands with durable semantic receipts. A
 fresh key allocates a control revision, events, interruptions, and wakes only

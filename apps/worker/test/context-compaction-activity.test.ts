@@ -2057,6 +2057,7 @@ describe("standalone context compaction execution", () => {
       session.id,
       attemptId,
     );
+    const startLifecycle: string[] = [];
 
     const outcome = await maybeCompactContext(
       client.db,
@@ -2071,9 +2072,18 @@ describe("standalone context compaction execution", () => {
       },
       null,
       async () => "larger replacement ".repeat(1_000),
-      { force: true, clearRequestedCompaction: true, trigger: "operator" },
+      {
+        force: true,
+        clearRequestedCompaction: true,
+        trigger: "operator",
+        onCompactionStarted: (trigger) => startLifecycle.push(`metric:${trigger}`),
+        publishLiveEvents: async () => {
+          startLifecycle.push("live-publish");
+        },
+      },
     );
 
+    expect(startLifecycle).toEqual(["metric:operator", "live-publish"]);
     expect(outcome).toMatchObject({
       compacted: false,
       reason: "replacement_not_smaller",

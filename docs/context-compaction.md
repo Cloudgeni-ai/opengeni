@@ -224,6 +224,26 @@ pre/post activity instead of vanishing inside a chevron. Copy always reminds
 that chat history above is unchanged. Provider `implementation` stays in the
 event payload for debug, not as hero UI text.
 
+## Observability
+
+The turn worker records `opengeni_context_compaction_starts_total{trigger}`
+immediately after the attempt-fenced `session.context.compaction.started`
+transition commits, before best-effort live fanout or any provider call. A
+successful replacement records `opengeni_context_compactions_total{trigger}`.
+Both counters publish the closed trigger set (`auto`, `operator`, `proactive`,
+`overflow`) at zero during turn-worker metric initialization.
+
+The same durable event transaction updates a content-free exact-attempt pending
+projection. Terminal `compacted`/`skipped` landmarks, attempt closure, and active
+attempt replacement clear it. A control-worker monitor exports
+`opengeni_context_compaction_pending`,
+`opengeni_context_compaction_oldest_pending_age_seconds`, and a same-target
+freshness gauge. The Helm `OpenGeniCompactionNotFiring` rule alerts when the
+oldest pending automatic start exceeds 15 minutes. This remains correct across
+concurrent turn activities, terminal skips, and turn-worker restarts while
+following the resolved model's real compaction threshold instead of a static
+token guess. No tenant or attempt identity becomes a Prometheus label.
+
 ## Turn behavior
 
 Before a fresh user or goal inference, the worker checks the durable token

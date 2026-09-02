@@ -110,7 +110,19 @@ describe("release schema contract", () => {
   });
 
   test("registers forward migrations without repinning host-export history", async () => {
-    const completeSourceContract = await buildSchemaContract();
+    let completeSourceContract = await buildSchemaContract();
+    const contextCompactionPendingObservability = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+    );
+    const completeSourceContractWithContextCompaction = completeSourceContract;
+    completeSourceContract = contextCompactionPendingObservability
+      ? {
+          ...completeSourceContractWithContextCompaction,
+          latestMigration:
+            completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
+            completeSourceContractWithContextCompaction.latestMigration,
+        }
+      : completeSourceContractWithContextCompaction;
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
       (migration) => migration.path === "0353_automatic_session_title_policy_fence.sql",
     );
@@ -237,6 +249,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0391_sandbox_provider_deadline_interaction_followup.sql",
     );
     const automaticSessionTitleMigrationPaths = new Set([
+      "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
@@ -283,6 +296,10 @@ describe("release schema contract", () => {
 
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (completeSourceContractWithContextCompaction.latestMigration ===
+        "0392_context_compaction_pending_observability.sql"
+          ? 1
+          : 0) +
         migrationsBeforeAutomaticSessionTitles.length +
         (automaticSessionTitlePolicyFence ? 1 : 0) +
         (automaticSessionTitleQuarantineIndex ? 1 : 0) +
@@ -407,10 +424,15 @@ describe("release schema contract", () => {
                                                                                           -1,
                                                                                         )?.path,
     });
+    expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
+      contextCompactionPendingObservability
+        ? "0392_context_compaction_pending_observability.sql"
+        : completeSourceContract.latestMigration,
+    );
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
-    const completeSourceContract = await contractWithoutMigrations([
+    let completeSourceContract = await contractWithoutMigrations([
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
@@ -421,6 +443,18 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const contextCompactionPendingObservability = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+    );
+    const completeSourceContractWithContextCompaction = completeSourceContract;
+    completeSourceContract = contextCompactionPendingObservability
+      ? {
+          ...completeSourceContractWithContextCompaction,
+          latestMigration:
+            completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
+            completeSourceContractWithContextCompaction.latestMigration,
+        }
+      : completeSourceContractWithContextCompaction;
     const companyBrainMigrationPaths = [
       "0238_goal_persistence_policy.sql",
       "0239_task_tree_notes.sql",
@@ -439,6 +473,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
       "0355_automatic_session_title_quarantine.sql",
@@ -696,6 +731,10 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (completeSourceContractWithContextCompaction.latestMigration ===
+        "0392_context_compaction_pending_observability.sql"
+          ? 1
+          : 0) +
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
         (documentAuthorityReclassification ? 1 : 0) +
         (tenancyBackfillActivationEvidence ? 1 : 0) +
@@ -835,6 +874,11 @@ describe("release schema contract", () => {
                                                                                                   ? "0337_slack_routed_action_handles.sql"
                                                                                                   : "0336_atomic_session_fork_visibility.sql",
     });
+    expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
+      contextCompactionPendingObservability
+        ? "0392_context_compaction_pending_observability.sql"
+        : completeSourceContract.latestMigration,
+    );
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0330_api_key_descriptions.sql",
