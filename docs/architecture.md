@@ -745,7 +745,9 @@ therefore either commits first and is invalidated, or observes the terminal run
 and cannot publish; a concurrent claim either creates its turn first and
 remains recoverable, or observes the skipped run and cancels the pending update
 without starting model, tool, or sandbox work. Resuming the task never revives
-those pre-pause deposits.
+those pre-pause deposits. A database delivery fence rejects `pending` to
+`delivered` transitions for terminal scheduled runs, so a rolling old worker
+cannot bypass the cutoff before the new claim logic is fully deployed.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage

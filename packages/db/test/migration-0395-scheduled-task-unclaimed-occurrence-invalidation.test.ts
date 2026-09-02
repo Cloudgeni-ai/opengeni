@@ -14,6 +14,12 @@ describe("migration 0395 scheduled task unclaimed occurrence invalidation", () =
       "CREATE FUNCTION invalidate_unclaimed_scheduled_agent_runs_on_task_inactive()",
     );
     expect(migration).toContain("AFTER UPDATE OF status, deleted_at ON scheduled_tasks");
+    expect(migration).toContain("CREATE FUNCTION fence_terminal_scheduled_occurrence_delivery()");
+    expect(migration).toContain("BEFORE UPDATE OF state ON session_system_updates");
+    expect(migration).toContain("OLD.state = 'pending'");
+    expect(migration).toContain("NEW.state = 'delivered'");
+    expect(migration).toContain("run_status IS DISTINCT FROM 'dispatched'");
+    expect(migration).toContain("terminal scheduled occurrence cannot be delivered");
     expect(migration).toContain("OLD.status = 'active' AND NEW.status = 'paused'");
     expect(migration).toContain("OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL");
     expect(migration).toContain("AND run.status IN ('queued', 'dispatched')");

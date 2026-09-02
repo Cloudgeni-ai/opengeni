@@ -8,6 +8,46 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- Old claimers do not inspect scheduled_task_runs.status after this migration
+-- marks an occurrence terminal. Keep the rolling boundary safe in the database:
+-- every binary must cross this state transition before it can create the
+-- scheduler-owned turn or start provider work.
+CREATE FUNCTION fence_terminal_scheduled_occurrence_delivery()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  run_status text;
+BEGIN
+  SELECT run.status INTO run_status
+  FROM scheduled_task_runs run
+  WHERE run.id = OLD.scheduled_task_run_id
+    AND run.account_id = OLD.account_id
+    AND run.workspace_id = OLD.workspace_id
+    AND run.session_id = OLD.session_id
+    AND run.action_kind = 'agent_turn'
+  FOR UPDATE;
+
+  IF run_status IS DISTINCT FROM 'dispatched' THEN
+    RAISE EXCEPTION 'terminal scheduled occurrence cannot be delivered'
+      USING ERRCODE = '42501';
+  END IF;
+  RETURN NEW;
+END
+$body$;
+
+CREATE TRIGGER scheduled_terminal_occurrence_delivery_fence
+BEFORE UPDATE OF state ON session_system_updates
+FOR EACH ROW
+WHEN (
+  OLD.scheduled_task_run_id IS NOT NULL
+  AND OLD.state = 'pending'
+  AND NEW.state = 'delivered'
+)
+EXECUTE FUNCTION fence_terminal_scheduled_occurrence_delivery();
+
 CREATE FUNCTION invalidate_unclaimed_scheduled_agent_runs_on_task_inactive()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -89,6 +129,7 @@ EXECUTE FUNCTION invalidate_unclaimed_scheduled_agent_runs_on_task_inactive();
 REVOKE ALL ON FUNCTION
   invalidate_unclaimed_scheduled_agent_runs_on_task_inactive()
   FROM PUBLIC;
+REVOKE ALL ON FUNCTION fence_terminal_scheduled_occurrence_delivery() FROM PUBLIC;
 
 DO $pin_scheduled_task_unclaimed_invalidation$
 DECLARE
@@ -96,6 +137,12 @@ DECLARE
 BEGIN
   EXECUTE pg_catalog.format(
     'ALTER FUNCTION %I.invalidate_unclaimed_scheduled_agent_runs_on_task_inactive() '
+      || 'SET search_path = pg_catalog, %I, pg_temp',
+    data_schema,
+    data_schema
+  );
+  EXECUTE pg_catalog.format(
+    'ALTER FUNCTION %I.fence_terminal_scheduled_occurrence_delivery() '
       || 'SET search_path = pg_catalog, %I, pg_temp',
     data_schema,
     data_schema

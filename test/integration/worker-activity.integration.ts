@@ -3612,6 +3612,11 @@ describe("worker activities integration", () => {
     if (first.action !== "start") throw new Error("pause fixture did not create its session");
 
     await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "paused" });
+    const [pausedRun] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(pausedRun).toMatchObject({
+      status: "skipped",
+      error: "scheduled_task_paused_before_claim",
+    });
     expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
       expect.objectContaining({
         status: "skipped",
@@ -3620,6 +3625,20 @@ describe("worker activities integration", () => {
     ]);
 
     await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "active" });
+    await expect(
+      withWorkspaceRls(
+        dbClient.db,
+        grant.workspaceId,
+        async (scopedDb) =>
+          await scopedDb.execute(dbSql`
+          update session_system_updates
+          set state = 'delivered'
+          where workspace_id = ${grant.workspaceId}
+            and scheduled_task_run_id = ${pausedRun!.id}
+            and state = 'pending'
+        `),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
     const pausedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
       sessionId: first.sessionId,
       workflowId: first.workflowId,
