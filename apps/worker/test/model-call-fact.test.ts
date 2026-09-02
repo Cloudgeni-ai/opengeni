@@ -21,9 +21,10 @@ function billedSettings() {
     vercelAiGatewayApiKey: "test-gateway-key",
     modelPricingJson: JSON.stringify({
       "gpt-5.6-sol": {
-        inputMicrosPerMillionTokens: 5_000_000,
-        cachedInputMicrosPerMillionTokens: 500_000,
-        outputMicrosPerMillionTokens: 30_000_000,
+        inputMicrosPerMillionTokens: 4_000_000,
+        cachedInputMicrosPerMillionTokens: 400_000,
+        cacheWriteMicrosPerMillionTokens: 5_000_000,
+        outputMicrosPerMillionTokens: 20_000_000,
         marginBps: 500,
       },
     }),
@@ -179,8 +180,8 @@ describe("recordAuthoritativeModelCallFact", () => {
     });
     expect(billing.billingPath).toBe("external");
     expect(billing.pricedCostMicros).toBe(0);
-    expect(billing.estimatedProviderCostMicros).toBe(20_000);
-    expect(billing.equivalentCreditCostMicros).toBe(21_000);
+    expect(billing.estimatedProviderCostMicros).toBe(14_000);
+    expect(billing.equivalentCreditCostMicros).toBe(14_700);
     expect(billing.pricingSource).toBe("configured_list_price");
     expect(debitSpy).not.toHaveBeenCalled();
   });

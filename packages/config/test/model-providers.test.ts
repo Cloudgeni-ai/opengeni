@@ -1897,6 +1897,27 @@ describe("configuredModelPricing", () => {
   });
 
   test("keeps current GPT-5.6 OpenAI list rates and long-context tiers", () => {
+    expect(defaultModelPricing["gpt-5.6-sol"]).toEqual({
+      default: {
+        inputMicrosPerMillionTokens: 4_000_000,
+        cachedInputMicrosPerMillionTokens: 400_000,
+        cacheWriteMicrosPerMillionTokens: 5_000_000,
+        outputMicrosPerMillionTokens: 20_000_000,
+        marginBps: 500,
+      },
+      inputTokenTiers: [
+        {
+          minimumInputTokens: 272_001,
+          pricing: {
+            inputMicrosPerMillionTokens: 8_000_000,
+            cachedInputMicrosPerMillionTokens: 800_000,
+            cacheWriteMicrosPerMillionTokens: 10_000_000,
+            outputMicrosPerMillionTokens: 30_000_000,
+            marginBps: 500,
+          },
+        },
+      ],
+    });
     expect(defaultModelPricing["gpt-5.6-terra"]?.default).toEqual({
       inputMicrosPerMillionTokens: 2_000_000,
       cachedInputMicrosPerMillionTokens: 200_000,

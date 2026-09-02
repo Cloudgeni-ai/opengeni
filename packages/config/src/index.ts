@@ -2614,10 +2614,11 @@ export function configuredOpenRouterOrganizationProductModelIds(settings: Settin
 export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   "gpt-5.6-sol": {
     default: {
-      inputMicrosPerMillionTokens: 5_000_000,
-      cachedInputMicrosPerMillionTokens: 500_000,
-      cacheWriteMicrosPerMillionTokens: 6_250_000,
-      outputMicrosPerMillionTokens: 30_000_000,
+      // Promotional OpenAI pricing, guaranteed through at least 2026-11-21.
+      inputMicrosPerMillionTokens: 4_000_000,
+      cachedInputMicrosPerMillionTokens: 400_000,
+      cacheWriteMicrosPerMillionTokens: 5_000_000,
+      outputMicrosPerMillionTokens: 20_000_000,
       marginBps: 500,
     },
     inputTokenTiers: [
@@ -2625,10 +2626,10 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
         // OpenAI: prompts with >272K input tokens use the long-context rate.
         minimumInputTokens: 272_001,
         pricing: {
-          inputMicrosPerMillionTokens: 10_000_000,
-          cachedInputMicrosPerMillionTokens: 1_000_000,
-          cacheWriteMicrosPerMillionTokens: 12_500_000,
-          outputMicrosPerMillionTokens: 45_000_000,
+          inputMicrosPerMillionTokens: 8_000_000,
+          cachedInputMicrosPerMillionTokens: 800_000,
+          cacheWriteMicrosPerMillionTokens: 10_000_000,
+          outputMicrosPerMillionTokens: 30_000_000,
           marginBps: 500,
         },
       },

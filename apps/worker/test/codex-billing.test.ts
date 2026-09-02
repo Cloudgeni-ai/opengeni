@@ -267,7 +267,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sessionId: "sess-1",
         turnId: "turn-1",
         turnAttemptId: "attempt-1",
-        model: "codex/gpt-5.6-sol", // has NO OpenGeni pricing
+        model: "codex/gpt-5.6-sol", // externally billed even though comparison pricing exists
         externallyBilled: true,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
