@@ -244,13 +244,8 @@ export function ArtifactSandbox(props: {
   );
 }
 
-export function formatSiteToolArguments(
-  argumentsValue: Record<string, unknown>,
-  maximumCharacters = 4_096,
-): string {
-  const canonical = JSON.stringify(sortSiteToolJson(argumentsValue), null, 2) ?? "{}";
-  if (canonical.length <= maximumCharacters) return canonical;
-  return `${canonical.slice(0, Math.max(0, maximumCharacters - 1))}…`;
+export function formatSiteToolArguments(argumentsValue: Record<string, unknown>): string {
+  return JSON.stringify(sortSiteToolJson(argumentsValue), null, 2) ?? "{}";
 }
 
 export function siteToolIsDestructive(entry: ToolGatewayCatalogEntry | null): boolean {

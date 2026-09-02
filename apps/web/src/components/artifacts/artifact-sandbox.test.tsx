@@ -58,11 +58,17 @@ describe("published HTML artifacts", () => {
     ).toBeNull();
   });
 
-  it("shows bounded canonical arguments and honors destructive tool annotations", () => {
+  it("shows complete canonical arguments and honors destructive tool annotations", () => {
     expect(formatSiteToolArguments({ z: 1, a: { y: 2, x: 3 } })).toBe(
       '{\n  "a": {\n    "x": 3,\n    "y": 2\n  },\n  "z": 1\n}',
     );
-    expect(formatSiteToolArguments({ text: "abcdefgh" }, 8)).toHaveLength(8);
+    const longArguments = formatSiteToolArguments({
+      a: "x".repeat(5_000),
+      z: "delete-everything-after-the-filler",
+    });
+    expect(longArguments.length).toBeGreaterThan(5_000);
+    expect(longArguments).toContain('"z": "delete-everything-after-the-filler"');
+    expect(longArguments).not.toContain("…");
     expect(
       siteToolIsDestructive({
         identity: { serverId: "files", toolName: "delete" },
