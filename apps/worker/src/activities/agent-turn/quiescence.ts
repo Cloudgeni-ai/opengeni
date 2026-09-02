@@ -15,8 +15,13 @@ import { sleep } from "./sandbox-provision";
 export function shouldRunTurnEndWorkspacePersistence(input: {
   activityStatus: RunAgentTurnResult["status"] | "unknown";
   cancellationRequested: boolean;
+  deadlineRotationRequested?: boolean;
 }): boolean {
-  return input.activityStatus !== "cancelled" && !input.cancellationRequested;
+  return (
+    input.activityStatus !== "cancelled" &&
+    !input.cancellationRequested &&
+    input.deadlineRotationRequested !== true
+  );
 }
 
 /**
@@ -29,9 +34,13 @@ export function shouldStartPeriodicWorkspaceSnapshot(input: {
   firstProviderRequestStarted: boolean;
   snapshotInFlight: boolean;
   turnEndCaptureInProgress: boolean;
+  deadlineRotationRequested: boolean;
 }): boolean {
   return (
-    input.firstProviderRequestStarted && !input.snapshotInFlight && !input.turnEndCaptureInProgress
+    input.firstProviderRequestStarted &&
+    !input.snapshotInFlight &&
+    !input.turnEndCaptureInProgress &&
+    !input.deadlineRotationRequested
   );
 }
 

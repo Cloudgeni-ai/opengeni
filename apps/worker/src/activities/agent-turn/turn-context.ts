@@ -97,7 +97,8 @@ export type SandboxRuntimeState = {
   sandboxHolderId: TurnSandboxLeaseHolderId | null;
   sandboxGroupId: string | null;
   leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
-  rotationInFlight: Promise<void> | null;
+  rotationPreemptionInFlight: Promise<void> | null;
+  deadlineRotationRequested: boolean;
   snapshotInFlight: Promise<void> | null;
   firstProviderRequestStarted: boolean;
   turnEndCaptureInProgress: boolean;
@@ -225,7 +226,8 @@ export function createTurnContext(input: {
       sandboxHolderId: null,
       sandboxGroupId: null,
       leaseHeartbeatTimer: undefined,
-      rotationInFlight: null,
+      rotationPreemptionInFlight: null,
+      deadlineRotationRequested: false,
       snapshotInFlight: null,
       firstProviderRequestStarted: false,
       turnEndCaptureInProgress: false,
