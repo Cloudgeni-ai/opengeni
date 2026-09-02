@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Migration 0392: enable Workspace Memory by default and make approval-required
+-- Migration 0393: enable Workspace Memory by default and make approval-required
 -- workspace instruction/Skill learning the default when no policy revision has
 -- been activated.
 --

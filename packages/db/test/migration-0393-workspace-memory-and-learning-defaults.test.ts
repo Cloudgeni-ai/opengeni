@@ -4,7 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { readFile } from "node:fs/promises";
 
 const migrationUrl = new URL(
-  "../drizzle/0392_workspace_memory_and_learning_defaults.sql",
+  "../drizzle/0393_workspace_memory_and_learning_defaults.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -12,9 +12,9 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let shared: SharedTestDatabase | null = null;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("migration-0392-memory-learning-defaults");
+  shared = await acquireSharedTestDatabase("migration-0393-memory-learning-defaults");
   if (!shared && requireRealDatabase) {
-    throw new Error("migration 0392 requires real PostgreSQL");
+    throw new Error("migration 0393 requires real PostgreSQL");
   }
 }, 180_000);
 
@@ -22,7 +22,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("migration 0392 workspace Memory and learning defaults", () => {
+describe("migration 0393 workspace Memory and learning defaults", () => {
   test("pins the rolling, non-retroactive default transition", async () => {
     const migration = await readFile(migrationUrl, "utf8");
     expect(migration.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -41,7 +41,7 @@ describe("migration 0392 workspace Memory and learning defaults", () => {
     const migration = await readFile(migrationUrl, "utf8");
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name)
-      values ('migration 0392 defaults account')
+      values ('migration 0393 defaults account')
       returning id`;
     const [omitted, disabled] = await shared.admin<{ id: string }[]>`
       insert into workspaces (account_id, name, settings)

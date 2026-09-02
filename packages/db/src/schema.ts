@@ -110,7 +110,7 @@ export const workspaces = pgTable(
     // White-label agent persona template override. NULL means the deployment
     // default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE / DEFAULT_AGENT_INSTRUCTIONS).
     agentInstructions: text("agent_instructions"),
-    // Growth-ready per-workspace settings bag (migration 0045). Migration 0392
+    // Growth-ready per-workspace settings bag (migration 0045). Migration 0393
     // makes Memory enabled by default; explicit false remains authoritative.
     settings: jsonb("settings")
       .$type<Record<string, unknown>>()
