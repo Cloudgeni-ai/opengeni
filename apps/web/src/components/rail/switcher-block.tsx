@@ -38,6 +38,20 @@ export function additionalOrganizationCreationOutcomeUnknown(error: unknown): bo
   return error instanceof OpenGeniApiError ? error.outcomeUnknown : error instanceof TypeError;
 }
 
+export function additionalOrganizationCreationAttemptIsCurrent(input: {
+  acceptedRevision: number;
+  currentRevision: number;
+  ownerUserId: string;
+  currentManagedUserId: string | null;
+  operationOwnerUserId: string | null;
+}): boolean {
+  return (
+    input.acceptedRevision === input.currentRevision &&
+    input.ownerUserId === input.currentManagedUserId &&
+    input.ownerUserId === input.operationOwnerUserId
+  );
+}
+
 export const WORKSPACE_SWITCHER_GRID_CLASS =
   "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 px-3 pt-1";
 
@@ -51,10 +65,11 @@ export function SwitcherBlock() {
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
+  const managedUserId = context.authSession?.user.id ?? null;
   const canCreateOrganization =
     context.clientConfig.auth.mode === "managedSession" &&
     canCreateAdditionalOrganization({
-      managedUserId: context.authSession?.user.id ?? null,
+      managedUserId,
       emailVerified: context.authSession?.user.emailVerified === true,
       selfContext: context.managedSelfContext,
     });
@@ -65,6 +80,9 @@ export function SwitcherBlock() {
   const [creationState, setCreationState] = useState<AdditionalOrganizationCreationState>("draft");
   const operationId = useRef<string | null>(null);
   const operationOwnerUserId = useRef<string | null>(null);
+  const currentManagedUserId = useRef(managedUserId);
+  const creationAttemptRevision = useRef(0);
+  currentManagedUserId.current = managedUserId;
 
   function resetCreateOrganizationDraft() {
     setOrganizationName("");
@@ -75,12 +93,20 @@ export function SwitcherBlock() {
   }
 
   useEffect(() => {
-    const managedUserId = context.authSession?.user.id ?? null;
     if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      creationAttemptRevision.current += 1;
+      setCreateBusy(false);
       setCreateOpen(false);
       resetCreateOrganizationDraft();
     }
-  }, [context.authSession?.user.id]);
+  }, [managedUserId]);
+
+  useEffect(
+    () => () => {
+      creationAttemptRevision.current += 1;
+    },
+    [],
+  );
 
   function updateCreateOpen(open: boolean) {
     if (createBusy && !open) return;
@@ -93,12 +119,23 @@ export function SwitcherBlock() {
   async function submitCreateOrganization() {
     const name = organizationName.trim();
     const initialWorkspaceName = workspaceName.trim();
-    const managedUserId = context.authSession?.user.id ?? null;
     if (!name || !initialWorkspaceName || !managedUserId || createBusy) return;
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      return;
+    }
     if (!operationId.current) {
       operationId.current = crypto.randomUUID();
       operationOwnerUserId.current = managedUserId;
     }
+    const acceptedAttemptRevision = ++creationAttemptRevision.current;
+    const attemptIsCurrent = () =>
+      additionalOrganizationCreationAttemptIsCurrent({
+        acceptedRevision: acceptedAttemptRevision,
+        currentRevision: creationAttemptRevision.current,
+        ownerUserId: managedUserId,
+        currentManagedUserId: currentManagedUserId.current,
+        operationOwnerUserId: operationOwnerUserId.current,
+      });
     setCreateBusy(true);
     let attemptedState: AdditionalOrganizationCreationState = creationState;
     if (attemptedState === "draft") {
@@ -111,20 +148,23 @@ export function SwitcherBlock() {
         workspaceName: initialWorkspaceName,
         operationId: operationId.current,
       });
+      if (!attemptIsCurrent()) return;
       attemptedState = "committed";
       setCreationState("committed");
       const refreshed = await context.refreshPrincipalAccess();
+      if (!attemptIsCurrent()) return;
       if (!refreshed) {
         throw new Error("Your access changed before the new organization could be opened");
       }
+      rail.openWorkspace(created.workspaceId);
       toast.success(`${created.organization.name} created`, {
         description: `${initialWorkspaceName} is ready for your team.`,
       });
       setCreateBusy(false);
       setCreateOpen(false);
       resetCreateOrganizationDraft();
-      rail.openWorkspace(created.workspaceId);
     } catch (error) {
+      if (!attemptIsCurrent()) return;
       const message = error instanceof Error ? error.message : String(error);
       const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
       if (attemptedState !== "committed" && !outcomeUnknown) {
@@ -148,7 +188,8 @@ export function SwitcherBlock() {
                 : message,
         },
       );
-      setCreateBusy(false);
+    } finally {
+      if (attemptIsCurrent()) setCreateBusy(false);
     }
   }
 

@@ -79,6 +79,9 @@ describe("migration 0399 additional managed organization creation", () => {
     expect(source).toContain("workspace_membership_count <> 1");
     expect(source).toContain("'additional-organization-creation-subject:' || p_subject_id");
     expect(source).toContain("created_organization_count >= additional_organization_limit");
+    expect(source).toContain(
+      "CREATE INDEX additional_organization_creation_receipts_actor_subject_idx",
+    );
     expect(FORCE_RLS_TABLES).toContain("additional_organization_creation_receipts");
     expect(FORCE_RLS_TABLES).toContain(
       "session_tenancy_additional_organization_activation_evidence",

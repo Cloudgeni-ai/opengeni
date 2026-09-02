@@ -43,6 +43,8 @@ CREATE TABLE additional_organization_creation_receipts (
     jsonb_typeof(result) = 'object'
   )
 );
+CREATE INDEX additional_organization_creation_receipts_actor_subject_idx
+  ON additional_organization_creation_receipts (actor_subject_id);
 ALTER TABLE additional_organization_creation_receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE additional_organization_creation_receipts FORCE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE additional_organization_creation_receipts FROM PUBLIC;

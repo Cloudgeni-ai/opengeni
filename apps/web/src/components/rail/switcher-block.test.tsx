@@ -5,7 +5,10 @@ import { createRoot } from "react-dom/client";
 import { OpenGeniApiError } from "@opengeni/sdk";
 
 import { CreateOrganizationForm } from "@/components/rail/create-organization-dialog";
-import { additionalOrganizationCreationOutcomeUnknown } from "@/components/rail/switcher-block";
+import {
+  additionalOrganizationCreationAttemptIsCurrent,
+  additionalOrganizationCreationOutcomeUnknown,
+} from "@/components/rail/switcher-block";
 import { WorkspaceSwitcherTrigger } from "@/components/rail/workspace-switcher";
 import type { Workspace } from "@/types";
 
@@ -51,6 +54,27 @@ describe("WorkspaceSwitcherTrigger", () => {
 });
 
 describe("CreateOrganizationForm", () => {
+  test("rejects a stale creation completion after the managed identity changes", () => {
+    expect(
+      additionalOrganizationCreationAttemptIsCurrent({
+        acceptedRevision: 4,
+        currentRevision: 4,
+        ownerUserId: "user-a",
+        currentManagedUserId: "user-a",
+        operationOwnerUserId: "user-a",
+      }),
+    ).toBe(true);
+    expect(
+      additionalOrganizationCreationAttemptIsCurrent({
+        acceptedRevision: 4,
+        currentRevision: 5,
+        ownerUserId: "user-a",
+        currentManagedUserId: "user-b",
+        operationOwnerUserId: null,
+      }),
+    ).toBe(false);
+  });
+
   test("classifies only ambiguous mutation failures as outcome unknown", () => {
     expect(
       additionalOrganizationCreationOutcomeUnknown(
