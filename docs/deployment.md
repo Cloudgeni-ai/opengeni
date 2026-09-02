@@ -1321,8 +1321,13 @@ data. The complete job graph, reusable admission gate, and local publication
 actions therefore come from reviewed controller bytes. Every job that checks
 out or executes candidate source depends on the read-only gate, which
 reconstructs the provider-owned merge, merged-source identity, retention, and
-required-check evidence. A merge composed against a different base fails before
-candidate source runs or candidate bytes exist. Acceptance, embedded
+required-check evidence. When GitHub squashes the immutable reviewed head after
+protected `main` advances, the gate accepts only a single-parent source whose
+complete parent-to-source Git-tree delta is byte-for-byte identical to the
+reviewed base-to-head delta and whose integration parent retains that reviewed
+base as an ancestor. An overlapping, truncated, extra, missing, or otherwise
+unproved composition fails before candidate source runs or candidate bytes
+exist. Acceptance, embedded
 distribution, and final publication all require that same controller SHA and
 revalidate its direct tag, immutable provider release, and successful admission
 job before trusting the candidate artifact.

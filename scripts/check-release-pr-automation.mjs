@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import {
+  canonicalLeafMap,
+  directTreeManifest,
   verifyHistoricalSourceAdmission,
   verifySourceAdmission,
 } from "./check-source-admission.mjs";
@@ -1983,6 +1985,84 @@ async function classifyMergeOutcome(api, source, pullIdentity) {
   return "rebase";
 }
 
+function treeManifestSha256(manifest) {
+  const text = `${manifest.map(({ line }) => line).join("\n")}\n`;
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function manifestsMatch(left, right) {
+  return (
+    left.length === right.length && left.every((entry, index) => entry.line === right[index]?.line)
+  );
+}
+
+async function classifyReleaseSourceComposition(api, source, base, head, pullIdentity) {
+  if (source.treeSha === head.treeSha) {
+    return {
+      mergeMethod: await classifyMergeOutcome(api, source, pullIdentity),
+      sourceComposition: {
+        type: "exact-reviewed-tree",
+        reviewedTreeSha: head.treeSha,
+      },
+    };
+  }
+
+  invariant(
+    source.parents.length === 1,
+    "release source tree differs from the exact reviewed head and is not a single-parent moving-main squash",
+  );
+  const integrationBaseSha = source.parents[0];
+  invariant(
+    integrationBaseSha !== pullIdentity.baseSha,
+    "release source tree differs from the exact reviewed head on its exact PR base",
+  );
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    pullIdentity.baseSha,
+    integrationBaseSha,
+    "moving-main integration base",
+    "reviewed base",
+  );
+  const integrationBase = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${integrationBaseSha}`)),
+    integrationBaseSha,
+    "moving-main integration-base commit",
+  );
+  const [baseTree, headTree, integrationBaseTree, sourceTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${base.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${integrationBase.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
+  ]);
+  const reviewedManifest = directTreeManifest(
+    canonicalLeafMap(baseTree, base.treeSha, "reviewed base tree"),
+    canonicalLeafMap(headTree, head.treeSha, "reviewed head tree"),
+  );
+  const landedManifest = directTreeManifest(
+    canonicalLeafMap(
+      integrationBaseTree,
+      integrationBase.treeSha,
+      "moving-main integration-base tree",
+    ),
+    canonicalLeafMap(sourceTree, source.treeSha, "moving-main release source tree"),
+  );
+  invariant(reviewedManifest.length > 0, "reviewed release tree delta is empty");
+  invariant(
+    manifestsMatch(reviewedManifest, landedManifest),
+    "release source tree differs from the exact reviewed moving-main composition",
+  );
+  return {
+    mergeMethod: "provider-verified-moving-main-squash",
+    sourceComposition: {
+      type: "exact-reviewed-delta-on-moving-main",
+      integrationBaseSha,
+      integrationBaseTreeSha: integrationBase.treeSha,
+      manifestSha256: treeManifestSha256(reviewedManifest),
+      pathCount: reviewedManifest.length,
+    },
+  };
+}
+
 function releaseApprovalContext(env, suppliedSourceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
@@ -2116,11 +2196,13 @@ export async function verifyApprovedMerge(options = {}) {
       "release controller tree differs from the exact reviewed base tree",
     );
   }
-  invariant(
-    source.treeSha === head.treeSha,
-    "release source tree differs from the exact reviewed head",
+  const { mergeMethod, sourceComposition } = await classifyReleaseSourceComposition(
+    api,
+    source,
+    base,
+    head,
+    pullIdentity,
   );
-  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
   const reviewUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
     `/pull/${pullNumber}`;
@@ -2198,6 +2280,7 @@ export async function verifyApprovedMerge(options = {}) {
     },
     pullRequestNumber: pullNumber,
     mergeMethod,
+    sourceComposition,
     providerPullCommitCount: pullIdentity.commitCount,
     mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
     reviewedBaseSha: pullIdentity.baseSha,
