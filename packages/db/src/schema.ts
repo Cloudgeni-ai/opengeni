@@ -110,9 +110,12 @@ export const workspaces = pgTable(
     // White-label agent persona template override. NULL means the deployment
     // default (OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE / DEFAULT_AGENT_INSTRUCTIONS).
     agentInstructions: text("agent_instructions"),
-    // Growth-ready per-workspace settings bag (migration 0045). Holds memoryEnabled
-    // and future workspace-level toggles; validated/merged via WorkspaceSettingsSchema.
-    settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+    // Growth-ready per-workspace settings bag (migration 0045). Migration 0393
+    // makes Memory enabled by default; explicit false remains authoritative.
+    settings: jsonb("settings")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({ memoryEnabled: true }),
     // The workspace's default rig (migration 0047). NULL ⇒ no default; sessions
     // created without an explicit rig ride no rig (today's behavior exactly). FK
     // (-> rigs(id) ON DELETE SET NULL) lives in migration 0047, not a Drizzle

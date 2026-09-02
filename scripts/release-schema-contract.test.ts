@@ -248,6 +248,9 @@ describe("release schema contract", () => {
     const sandboxProviderDeadlineInteractionFollowup = completeSourceContract.migrations.some(
       (migration) => migration.path === "0391_sandbox_provider_deadline_interaction_followup.sql",
     );
+    const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
+    );
     const automaticSessionTitleMigrationPaths = new Set([
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
@@ -289,6 +292,7 @@ describe("release schema contract", () => {
       "0389_model_catalog_and_gateway_custom_models.sql",
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
+      "0393_workspace_memory_and_learning_defaults.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -339,7 +343,8 @@ describe("release schema contract", () => {
         (sandboxProviderDeadlineInteractions ? 1 : 0) +
         (modelCatalogAndGatewayCustomModels ? 1 : 0) +
         (organizationModelProviderConnections ? 1 : 0) +
-        (sandboxProviderDeadlineInteractionFollowup ? 1 : 0),
+        (sandboxProviderDeadlineInteractionFollowup ? 1 : 0) +
+        (workspaceMemoryAndLearningDefaults ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -423,6 +428,9 @@ describe("release schema contract", () => {
                                                                                       : migrationsBeforeAutomaticSessionTitles.at(
                                                                                           -1,
                                                                                         )?.path,
+      ...(workspaceMemoryAndLearningDefaults
+        ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
+        : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       contextCompactionPendingObservability
@@ -570,6 +578,7 @@ describe("release schema contract", () => {
       "0389_model_catalog_and_gateway_custom_models.sql",
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
+      "0393_workspace_memory_and_learning_defaults.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -729,6 +738,9 @@ describe("release schema contract", () => {
     const sandboxProviderDeadlineInteractionFollowup = completeSourceContract.migrations.some(
       (migration) => migration.path === "0391_sandbox_provider_deadline_interaction_followup.sql",
     );
+    const workspaceMemoryAndLearningDefaults = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0393_workspace_memory_and_learning_defaults.sql",
+    );
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (completeSourceContractWithContextCompaction.latestMigration ===
@@ -779,7 +791,8 @@ describe("release schema contract", () => {
         (sandboxProviderDeadlineInteractions ? 1 : 0) +
         (modelCatalogAndGatewayCustomModels ? 1 : 0) +
         (organizationModelProviderConnections ? 1 : 0) +
-        (sandboxProviderDeadlineInteractionFollowup ? 1 : 0),
+        (sandboxProviderDeadlineInteractionFollowup ? 1 : 0) +
+        (workspaceMemoryAndLearningDefaults ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -873,6 +886,9 @@ describe("release schema contract", () => {
                                                                                                 : routedSlackHandles
                                                                                                   ? "0337_slack_routed_action_handles.sql"
                                                                                                   : "0336_atomic_session_fork_visibility.sql",
+      ...(workspaceMemoryAndLearningDefaults
+        ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
+        : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       contextCompactionPendingObservability
