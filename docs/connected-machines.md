@@ -198,7 +198,10 @@ seeds the generated session's active pointer before its first turn. A deployment
 whose default backend is `selfhosted` rejects a generated-session schedule that
 does not select a machine instead of creating a session that cannot execute.
 Manual runs also preflight current liveness and the reported workspace root
-before consuming run capacity.
+before consuming run capacity. After that preflight, session creation rechecks
+durable target authority and commits the active pointer in the same transaction
+as the new session row. If the target is invalid, removed, revoked, or otherwise
+no longer attachable, the create fails without leaving a queued session shell.
 
 Unattended schedules currently accept workspace- and organization-scoped
 machines only. User-scoped machines require an owning human's explicit personal
