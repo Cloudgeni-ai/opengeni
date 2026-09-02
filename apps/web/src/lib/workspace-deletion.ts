@@ -1,9 +1,13 @@
 import { OpenGeniApiError } from "@opengeni/sdk/browser";
 
+function shouldReconcile(error: unknown): boolean {
+  return error instanceof TypeError || (error instanceof OpenGeniApiError && error.outcomeUnknown);
+}
+
 /**
- * Delete once, then point-read the workspace when the mutation reports an
- * error. A missing workspace proves the requested end state was committed,
- * including when a competing request deleted it first.
+ * Treat DELETE 404 as idempotent success. For an outcome-unknown mutation,
+ * point-read the workspace and accept only an authoritative missing result.
+ * Definitive mutation failures are preserved without reconciliation.
  */
 export async function deleteWorkspaceWithReconciliation(input: {
   deleteWorkspace: () => Promise<void>;
@@ -12,6 +16,12 @@ export async function deleteWorkspaceWithReconciliation(input: {
   try {
     await input.deleteWorkspace();
   } catch (mutationError) {
+    if (mutationError instanceof OpenGeniApiError && mutationError.status === 404) {
+      return;
+    }
+    if (!shouldReconcile(mutationError)) {
+      throw mutationError;
+    }
     try {
       await input.readWorkspace();
     } catch (readError) {
