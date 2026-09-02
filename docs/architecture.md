@@ -738,6 +738,15 @@ goal. An admitted occurrence persists `queued` to consume that boundary even
 when a pause or active realtime lease withholds its workflow wake. A newly
 generated session still admits the occurrence that creates it.
 
+Pausing or soft-deleting a scheduled task is a durable first-claim cutoff. The
+task lifecycle transaction locks each nonterminal agent run and marks it
+skipped only when no scheduler-owned turn exists. A concurrent deposit
+therefore either commits first and is invalidated, or observes the terminal run
+and cannot publish; a concurrent claim either creates its turn first and
+remains recoverable, or observes the skipped run and cancels the pending update
+without starting model, tool, or sandbox work. Resuming the task never revives
+those pre-pause deposits.
+
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
 boundaries.
