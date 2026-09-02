@@ -1,6 +1,7 @@
 export { OpenGeniClient } from "./artifact-client";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
