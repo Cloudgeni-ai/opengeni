@@ -142,8 +142,14 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
   return parsed.data;
 }
 
-function rethrowMembershipError(error: unknown): never {
-  const status = organizationMembershipHttpStatus(nestedPostgresSqlState(error));
+function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState === "54000" && resourceLimitMessage) {
+    throw new HTTPException(409, {
+      message: resourceLimitMessage,
+    });
+  }
+  const status = organizationMembershipHttpStatus(sqlState);
   if (status !== null) {
     throw new HTTPException(status, {
       message:
@@ -194,7 +200,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         201,
       );
     } catch (error) {
-      rethrowMembershipError(error);
+      rethrowMembershipError(error, "additional organization limit reached");
     }
   });
 

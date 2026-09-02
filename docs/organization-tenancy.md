@@ -608,7 +608,7 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
-### Additional organization creation (0398)
+### Additional organization creation (0399)
 
 Migration `0399_additional_managed_organization_creation.sql` adds a separate
 managed-cookie-only lifecycle for a verified human who already has at least one
@@ -628,12 +628,15 @@ organization.
 
 The database function creates the complete graph and an immutable,
 input-bound operation receipt in one transaction. Exact concurrent retries
-converge; changed operation-id reuse fails closed. Once the deployment has a
-session-tenancy activation witness, the same transaction validates the exact
-fresh graph and writes its activation, enabled private-session setting, event,
-and immutable evidence. The application role can execute only the public
-creation capability and has no direct DML on either receipt table or access to
-the owner-only activation helper.
+converge; changed operation-id reuse fails closed. A subject-scoped transaction
+lock atomically enforces a lifetime allowance of ten organizations created
+through this self-service lifecycle. Organizations joined by invitation do not
+consume that allowance, and exact retries still replay after it is full. Once
+the deployment has a session-tenancy activation witness, the same transaction
+validates the exact fresh graph and writes its activation, enabled
+private-session setting, event, and immutable evidence. The application role
+can execute only the public creation capability and has no direct DML on either
+receipt table or access to the owner-only activation helper.
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling

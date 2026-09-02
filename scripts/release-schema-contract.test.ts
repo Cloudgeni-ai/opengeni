@@ -143,7 +143,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
       ),
     ).toMatchObject({
-      sha256: "443b2d0871209845273e7dfe827e20f6ece806c95c08dadd24263c37e41d12ad",
+      sha256: "a2cd5b0203aeba0530c19e69b29ef07421b849c472ac271f6a87a134e33ac81f",
       deploymentMode: "rolling",
     });
   });

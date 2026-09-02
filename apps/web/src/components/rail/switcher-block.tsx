@@ -23,6 +23,7 @@ import {
   WorkspaceSwitcherMenu,
 } from "@/components/rail/workspace-switcher";
 import { organizationsForSubject, type OrgOption } from "@/lib/org";
+import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 
 const LazyCreateOrganizationDialog = lazy(() =>
   import("@/components/rail/create-organization-dialog").then((module) => ({
@@ -43,7 +44,13 @@ export function SwitcherBlock() {
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
-  const canCreateOrganization = context.clientConfig.auth.mode === "managedSession";
+  const canCreateOrganization =
+    context.clientConfig.auth.mode === "managedSession" &&
+    canCreateAdditionalOrganization({
+      managedUserId: context.authSession?.user.id ?? null,
+      emailVerified: context.authSession?.user.emailVerified === true,
+      selfContext: context.managedSelfContext,
+    });
   const [createOpen, setCreateOpen] = useState(false);
   const [organizationName, setOrganizationName] = useState("");
   const [workspaceName, setWorkspaceName] = useState("General");

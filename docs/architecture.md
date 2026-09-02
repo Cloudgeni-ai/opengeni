@@ -301,7 +301,9 @@ organizations from the organization switcher. The login and canonical human
 identity remain global; each organization gets a separate owner membership and
 Personal workspace. The creation lifecycle also creates one first shared
 workspace with an explicit administrator grant, refreshes authoritative access
-before navigation, and copies no tenant data from the current organization.
+before navigation, and copies no tenant data from the current organization. A
+subject-scoped database fence limits this self-service lifecycle to ten
+additional organizations per human; invitation memberships do not consume it.
 First-sign-in onboarding and invitation precedence remain a separate one-shot
 path.
 

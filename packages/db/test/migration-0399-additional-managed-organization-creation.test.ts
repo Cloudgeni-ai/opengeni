@@ -77,6 +77,8 @@ describe("migration 0399 additional managed organization creation", () => {
     );
     expect(source).toContain("account.xmin::text::bigint = pg_catalog.pg_current_xact_id()");
     expect(source).toContain("workspace_membership_count <> 1");
+    expect(source).toContain("'additional-organization-creation-subject:' || p_subject_id");
+    expect(source).toContain("created_organization_count >= additional_organization_limit");
     expect(FORCE_RLS_TABLES).toContain("additional_organization_creation_receipts");
     expect(FORCE_RLS_TABLES).toContain(
       "session_tenancy_additional_organization_activation_evidence",
@@ -211,6 +213,43 @@ describe("migration 0399 additional managed organization creation", () => {
       select count(*)::int as count from organization_memberships
       where subject_id = ${subjectId} and status = 'active'`;
     expect(membershipCount?.count).toBe(3);
+
+    for (let index = 3; index <= 9; index += 1) {
+      await createAdditionalManagedOrganization(appClient.db, {
+        ...input,
+        name: `Team ${index}`,
+        workspaceName: `Workspace ${index}`,
+        operationId: crypto.randomUUID(),
+      });
+    }
+    const competing = await Promise.allSettled(
+      ["Ten A", "Ten B"].map((name) =>
+        createAdditionalManagedOrganization(appClient!.db, {
+          ...input,
+          name,
+          workspaceName: name,
+          operationId: crypto.randomUUID(),
+        }),
+      ),
+    );
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = competing.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    expect(nestedPostgresSqlState(rejected?.reason)).toBe("54000");
+
+    const [quota] = await owned.admin<Array<{ receipts: number; accounts: number }>>`
+      select
+        (select count(*)::int from additional_organization_creation_receipts
+          where actor_subject_id = ${subjectId}) as receipts,
+        (select count(*)::int from managed_accounts
+          where external_source = 'opengeni:additional-organization'
+            and id in (
+              select account_id from additional_organization_creation_receipts
+              where actor_subject_id = ${subjectId}
+            )) as accounts`;
+    expect(quota).toEqual({ receipts: 10, accounts: 10 });
+    expect(await createAdditionalManagedOrganization(appClient.db, input)).toEqual(left);
 
     const outsiderId = crypto.randomUUID();
     await owned.admin`

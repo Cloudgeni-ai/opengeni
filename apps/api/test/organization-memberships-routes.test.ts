@@ -1493,6 +1493,30 @@ describe("organization membership routes", () => {
     });
     expect(malformed.status).toBe(422);
 
+    for (let index = 2; index <= 10; index += 1) {
+      const withinLimit = await additionalApp.request("http://x/v1/organizations/additional", {
+        method: "POST",
+        headers: { cookie: "session=present", "content-type": "application/json" },
+        body: JSON.stringify({
+          name: `Additional team ${index}`,
+          workspaceName: `Workspace ${index}`,
+          operationId: crypto.randomUUID(),
+        }),
+      });
+      expect(withinLimit.status).toBe(201);
+    }
+    const overLimit = await additionalApp.request("http://x/v1/organizations/additional", {
+      method: "POST",
+      headers: { cookie: "session=present", "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "One too many",
+        workspaceName: "Overflow",
+        operationId: crypto.randomUUID(),
+      }),
+    });
+    expect(overLimit.status).toBe(409);
+    expect(await overLimit.text()).toBe("additional organization limit reached");
+
     const [graph] = await shared.admin<
       Array<{ memberships: number; workspaces: number; access: number }>
     >`

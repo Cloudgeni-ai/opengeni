@@ -540,6 +540,7 @@ async function grantAppRoleIfSchemaExists(
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",
     "prepare_organization_workspace_member_removal(jsonb)",
     "record_organization_workspace_member_removal(jsonb,uuid,uuid)",
+    "create_additional_managed_organization(text,text,text,text,uuid)",
     "create_managed_organization(text,text,text,uuid)",
     "assert_organization_shared_workspace_administrator(uuid,uuid,text)",
     "open_organization_shared_workspace_administration_capability(uuid,uuid,text)",

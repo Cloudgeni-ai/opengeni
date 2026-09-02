@@ -445,6 +445,7 @@ LANGUAGE plpgsql VOLATILE SECURITY DEFINER
 SET search_path FROM CURRENT
 AS $creation$
 DECLARE
+  additional_organization_limit constant integer := 10;
   auth_user_id_value text := substring(p_subject_id from length('user:') + 1);
   organization_name_value text := nullif(pg_catalog.btrim(p_organization_name), '');
   workspace_name_value text := nullif(pg_catalog.btrim(p_workspace_name), '');
@@ -455,6 +456,7 @@ DECLARE
   organization_membership organization_memberships%ROWTYPE;
   personal_workspace workspaces%ROWTYPE;
   shared_workspace workspaces%ROWTYPE;
+  created_organization_count integer;
   public_result jsonb;
 BEGIN
   IF p_subject_id IS NULL
@@ -517,6 +519,22 @@ BEGIN
         USING ERRCODE = '23505';
     END IF;
     RETURN prior.result;
+  END IF;
+
+  -- Fresh operation ids must not turn one verified login into an unbounded
+  -- tenant allocator. Serialize every create for the canonical subject, then
+  -- count only organizations allocated through this lifecycle. Invitations do
+  -- not consume the self-service allowance, and an exact committed retry above
+  -- continues to replay after the allowance is full.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+    'additional-organization-creation-subject:' || p_subject_id, 0
+  ));
+  SELECT count(*)::integer INTO created_organization_count
+  FROM additional_organization_creation_receipts receipt
+  WHERE receipt.actor_subject_id = p_subject_id;
+  IF created_organization_count >= additional_organization_limit THEN
+    RAISE EXCEPTION 'additional organization limit reached'
+      USING ERRCODE = '54000';
   END IF;
 
   PERFORM pg_catalog.set_config(
