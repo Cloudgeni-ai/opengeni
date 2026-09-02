@@ -3054,6 +3054,7 @@ export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace"
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -7353,6 +7354,8 @@ export type InsightsModelUsageRow = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
@@ -7360,6 +7363,8 @@ export type InsightsSeriesPoint = {
   modelCostUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
   outputTokens: number;
@@ -7391,6 +7396,8 @@ export type InsightsSpendDriver = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
@@ -7436,6 +7443,8 @@ export type InsightsScheduleRow = {
   creditUsd: number | null;
   estimatedProviderUsd: number | null;
   estimatedProviderCostKnownCalls: number | null;
+  equivalentCreditUsd: number | null;
+  equivalentCreditCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
@@ -7460,6 +7469,7 @@ export type InsightsModelCallRow = {
   totalTokens: number | null;
   creditUsd: number;
   estimatedProviderUsd: number | null;
+  equivalentCreditUsd: number | null;
   pricingSource: InsightsPricingSource | null;
 };
 
@@ -7520,6 +7530,10 @@ export type WorkspaceInsightsSnapshot = {
   priorEstimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
   priorEstimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  priorEquivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
+  priorEquivalentCreditCostKnownCalls: number;
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;
