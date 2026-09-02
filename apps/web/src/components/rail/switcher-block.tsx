@@ -1,10 +1,13 @@
 // The rail's top switcher: a muted Organization line over a prominent Workspace
-// line. The org line is a menu only when the subject belongs to >1 org (a plain
-// label otherwise); the workspace line is always a menu listing the current
-// org's workspaces plus create / settings actions. Collapsed, the whole block
-// reduces to a workspace-initial avatar that opens the same workspace menu.
+// line. The org line opens organization switching, creation, and settings; the
+// workspace line lists the current org's workspaces plus workspace actions.
+// Collapsed, the whole block reduces to a workspace-initial avatar that opens
+// the same workspace menu.
 import { Link } from "@tanstack/react-router";
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, SettingsIcon } from "lucide-react";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
 
 import {
   DropdownMenu,
@@ -21,6 +24,33 @@ import {
   WorkspaceSwitcherMenu,
 } from "@/components/rail/workspace-switcher";
 import { organizationsForSubject, type OrgOption } from "@/lib/org";
+import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
+
+const LazyCreateOrganizationDialog = lazy(() =>
+  import("@/components/rail/create-organization-dialog").then((module) => ({
+    default: module.CreateOrganizationDialog,
+  })),
+);
+
+type AdditionalOrganizationCreationState = "draft" | "uncertain" | "committed";
+
+export function additionalOrganizationCreationOutcomeUnknown(error: unknown): boolean {
+  return error instanceof OpenGeniApiError ? error.outcomeUnknown : error instanceof TypeError;
+}
+
+export function additionalOrganizationCreationAttemptIsCurrent(input: {
+  acceptedRevision: number;
+  currentRevision: number;
+  ownerUserId: string;
+  currentManagedUserId: string | null;
+  operationOwnerUserId: string | null;
+}): boolean {
+  return (
+    input.acceptedRevision === input.currentRevision &&
+    input.ownerUserId === input.currentManagedUserId &&
+    input.ownerUserId === input.operationOwnerUserId
+  );
+}
 
 export const WORKSPACE_SWITCHER_GRID_CLASS =
   "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 px-3 pt-1";
@@ -35,15 +65,160 @@ export function SwitcherBlock() {
 
   const orgs = organizationsForSubject(context.accessContext, context.workspaces);
   const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
+  const managedUserId = context.authSession?.user.id ?? null;
+  const canCreateOrganization =
+    context.clientConfig.auth.mode === "managedSession" &&
+    canCreateAdditionalOrganization({
+      managedUserId,
+      emailVerified: context.authSession?.user.emailVerified === true,
+      selfContext: context.managedSelfContext,
+    });
+  const [createOpen, setCreateOpen] = useState(false);
+  const [organizationName, setOrganizationName] = useState("");
+  const [workspaceName, setWorkspaceName] = useState("General");
+  const [createBusy, setCreateBusy] = useState(false);
+  const [creationState, setCreationState] = useState<AdditionalOrganizationCreationState>("draft");
+  const operationId = useRef<string | null>(null);
+  const operationOwnerUserId = useRef<string | null>(null);
+  const currentManagedUserId = useRef(managedUserId);
+  const creationAttemptRevision = useRef(0);
+  currentManagedUserId.current = managedUserId;
+
+  function resetCreateOrganizationDraft() {
+    setOrganizationName("");
+    setWorkspaceName("General");
+    setCreationState("draft");
+    operationId.current = null;
+    operationOwnerUserId.current = null;
+  }
+
+  useEffect(() => {
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      creationAttemptRevision.current += 1;
+      setCreateBusy(false);
+      setCreateOpen(false);
+      resetCreateOrganizationDraft();
+    }
+  }, [managedUserId]);
+
+  useEffect(
+    () => () => {
+      creationAttemptRevision.current += 1;
+    },
+    [],
+  );
+
+  function updateCreateOpen(open: boolean) {
+    if (createBusy && !open) return;
+    setCreateOpen(open);
+    if (!open && creationState === "draft") {
+      resetCreateOrganizationDraft();
+    }
+  }
+
+  async function submitCreateOrganization() {
+    const name = organizationName.trim();
+    const initialWorkspaceName = workspaceName.trim();
+    if (!name || !initialWorkspaceName || !managedUserId || createBusy) return;
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      return;
+    }
+    if (!operationId.current) {
+      operationId.current = crypto.randomUUID();
+      operationOwnerUserId.current = managedUserId;
+    }
+    const acceptedAttemptRevision = ++creationAttemptRevision.current;
+    const attemptIsCurrent = () =>
+      additionalOrganizationCreationAttemptIsCurrent({
+        acceptedRevision: acceptedAttemptRevision,
+        currentRevision: creationAttemptRevision.current,
+        ownerUserId: managedUserId,
+        currentManagedUserId: currentManagedUserId.current,
+        operationOwnerUserId: operationOwnerUserId.current,
+      });
+    setCreateBusy(true);
+    let attemptedState: AdditionalOrganizationCreationState = creationState;
+    if (attemptedState === "draft") {
+      attemptedState = "uncertain";
+      setCreationState("uncertain");
+    }
+    try {
+      const created = await context.client.createAdditionalOrganization({
+        name,
+        workspaceName: initialWorkspaceName,
+        operationId: operationId.current,
+      });
+      if (!attemptIsCurrent()) return;
+      attemptedState = "committed";
+      setCreationState("committed");
+      const refreshed = await context.refreshPrincipalAccess();
+      if (!attemptIsCurrent()) return;
+      if (!refreshed) {
+        throw new Error("Your access changed before the new organization could be opened");
+      }
+      rail.openWorkspace(created.workspaceId);
+      toast.success(`${created.organization.name} created`, {
+        description: `${initialWorkspaceName} is ready for your team.`,
+      });
+      setCreateBusy(false);
+      setCreateOpen(false);
+      resetCreateOrganizationDraft();
+    } catch (error) {
+      if (!attemptIsCurrent()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
+      if (attemptedState !== "committed" && !outcomeUnknown) {
+        attemptedState = "draft";
+        setCreationState("draft");
+        operationId.current = null;
+        operationOwnerUserId.current = null;
+      }
+      toast.error(
+        attemptedState === "committed"
+          ? "Organization created, but not opened"
+          : attemptedState === "uncertain"
+            ? "Creation could not be confirmed"
+            : "Failed to create organization",
+        {
+          description:
+            attemptedState === "committed"
+              ? `${message}. Try again to refresh access and open the same organization.`
+              : attemptedState === "uncertain"
+                ? `${message}. Try again to safely replay this exact request and confirm the result.`
+                : message,
+        },
+      );
+    } finally {
+      if (attemptIsCurrent()) setCreateBusy(false);
+    }
+  }
 
   if (rail.collapsed) {
     return (
-      <WorkspaceSwitcherMenu
-        workspaceId={rail.workspaceId}
-        collapsed
-        align="start"
-        onSelect={rail.openWorkspace}
-      />
+      <>
+        <WorkspaceSwitcherMenu
+          workspaceId={rail.workspaceId}
+          collapsed
+          align="start"
+          onSelect={rail.openWorkspace}
+          onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
+        />
+        {createOpen ? (
+          <Suspense fallback={null}>
+            <LazyCreateOrganizationDialog
+              open
+              organizationName={organizationName}
+              workspaceName={workspaceName}
+              busy={createBusy}
+              creationState={creationState}
+              onOrganizationNameChange={setOrganizationName}
+              onWorkspaceNameChange={setWorkspaceName}
+              onOpenChange={updateCreateOpen}
+              onSubmit={() => void submitCreateOrganization()}
+            />
+          </Suspense>
+        ) : null}
+      </>
     );
   }
 
@@ -54,8 +229,24 @@ export function SwitcherBlock() {
         currentLabel={currentOrgLabel}
         activeAccountId={activeAccountId}
         onSelect={rail.openOrg}
+        onCreate={canCreateOrganization ? () => setCreateOpen(true) : undefined}
         workspaceId={rail.workspaceId}
       />
+      {createOpen ? (
+        <Suspense fallback={null}>
+          <LazyCreateOrganizationDialog
+            open
+            organizationName={organizationName}
+            workspaceName={workspaceName}
+            busy={createBusy}
+            creationState={creationState}
+            onOrganizationNameChange={setOrganizationName}
+            onWorkspaceNameChange={setWorkspaceName}
+            onOpenChange={updateCreateOpen}
+            onSubmit={() => void submitCreateOrganization()}
+          />
+        </Suspense>
+      ) : null}
 
       <WorkspaceSwitcherMenu
         workspaceId={rail.workspaceId}
@@ -72,6 +263,7 @@ export function OrganizationSwitcherLine(props: {
   currentLabel: string;
   activeAccountId: string | null;
   onSelect: (accountId: string) => void;
+  onCreate?: () => void;
   workspaceId: string | null;
 }) {
   return (
@@ -120,6 +312,20 @@ export function OrganizationSwitcherLine(props: {
         ) : (
           <DropdownMenuLabel className="text-fg-subtle">{props.currentLabel}</DropdownMenuLabel>
         )}
+        {props.onCreate ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={(event) => {
+                event.preventDefault();
+                props.onCreate?.();
+              }}
+            >
+              <PlusIcon className="size-4" />
+              New organization…
+            </DropdownMenuItem>
+          </>
+        ) : null}
         {props.workspaceId ? (
           <>
             <DropdownMenuSeparator />

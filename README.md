@@ -427,6 +427,7 @@ Core endpoints:
 - `GET /v1/config/client`
 - `GET /v1/access/me`
 - `GET /v1/organization-memberships` (managed-human self membership and personal-workspace identity)
+- `POST /v1/organizations/additional` (managed-human creation of another isolated organization with its first shared workspace)
 - bounded/keyset `GET /v1/organization-invitations` and exact subject-bound
   `POST /v1/organization-invitations/:id/accept`
 - `GET|POST /v1/organizations/:id/invitations` for bounded admin listing and

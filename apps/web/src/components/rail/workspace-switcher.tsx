@@ -1,4 +1,4 @@
-import { CheckIcon, ChevronsUpDownIcon, PauseIcon, PlusIcon } from "lucide-react";
+import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PauseIcon, PlusIcon } from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -49,6 +49,7 @@ export function WorkspaceSwitcherMenu(props: {
   collapsed: boolean;
   align: "start" | "end";
   onSelect: (workspaceId: string) => void;
+  onCreateOrganization?: () => void;
   className?: string;
 }) {
   const context = useAppContext();
@@ -99,6 +100,7 @@ export function WorkspaceSwitcherMenu(props: {
         canCreate={createAccountId !== null}
         onSelect={props.onSelect}
         onCreate={() => setCreateOpen(true)}
+        onCreateOrganization={props.onCreateOrganization}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
       >
@@ -201,6 +203,7 @@ export function WorkspaceMenu(props: {
   canCreate: boolean;
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
+  onCreateOrganization?: () => void;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
   children: ReactNode;
@@ -258,6 +261,17 @@ export function WorkspaceMenu(props: {
           >
             <PlusIcon className="size-4" />
             New workspace…
+          </DropdownMenuItem>
+        ) : null}
+        {props.onCreateOrganization ? (
+          <DropdownMenuItem
+            onSelect={(event) => {
+              event.preventDefault();
+              props.onCreateOrganization?.();
+            }}
+          >
+            <BuildingIcon className="size-4" />
+            New organization…
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>

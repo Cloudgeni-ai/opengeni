@@ -278,6 +278,8 @@ import type {
   AcceptOrganizationRecoveryCustodyRequest,
   ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -4340,6 +4342,17 @@ export class OpenGeniClient {
     request: CreateOrganizationRequest,
   ): Promise<CreateOrganizationResponse> {
     return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
+  }
+
+  /** Create another organization owned by the current managed human. */
+  async createAdditionalOrganization(
+    request: CreateAdditionalOrganizationRequest,
+  ): Promise<CreateAdditionalOrganizationResponse> {
+    return await this.requestJson<CreateAdditionalOrganizationResponse>(
+      "POST",
+      "/v1/organizations/additional",
+      request,
+    );
   }
 
   /** Pending and historical invitations addressed to the current managed human. */

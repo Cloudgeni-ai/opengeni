@@ -12,8 +12,8 @@ afterEach(async () => {
 
 async function buildSchemaContract(directory?: string) {
   // Keep the shared published-history fixtures projected before the optional
-  // 0392-0396 compatibility migrations. This branch's 0397 contract is
-  // asserted separately below.
+  // 0392-0396 compatibility migrations. The full 0397 and latest forward
+  // contracts are asserted separately below.
   return directory === undefined
     ? await contractWithoutMigrations([
         "0392_context_compaction_pending_observability.sql",
@@ -21,6 +21,7 @@ async function buildSchemaContract(directory?: string) {
         "0394_session_selected_skill_activation.sql",
         "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
         "0396_model_call_equivalent_credit_cost.sql",
+        "0399_additional_managed_organization_creation.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -124,10 +125,10 @@ describe("release schema contract", () => {
     );
   });
 
-  test("registers sandbox deadline rotation preemption before workspace management", async () => {
+  test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0398_organization_workspace_management_entry.sql",
+      "0399_additional_managed_organization_creation.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -135,6 +136,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "8bf2a1a39eb2518a661d89b17910fa702e084bbb4213c395a951903e135039df",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
+      ),
+    ).toMatchObject({
+      sha256: "851f5563db7540c47fe243caaabbe7b2a1e83104029ecb4e084009823cc57f22",
       deploymentMode: "rolling",
     });
   });
@@ -420,12 +429,16 @@ describe("release schema contract", () => {
     const sandboxDeadlineRotationPreemption = completeSourceContract.migrations.some(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );
+    const additionalManagedOrganizationCreation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
+    );
 
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
         ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
         : {}),
       fileCount:
+        (additionalManagedOrganizationCreation ? 1 : 0) +
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (organizationWorkspaceManagementEntry &&
@@ -572,11 +585,16 @@ describe("release schema contract", () => {
       ...(modelCallEquivalentCreditCost
         ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
         : {}),
+      ...(additionalManagedOrganizationCreation
+        ? { latestMigration: "0399_additional_managed_organization_creation.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      organizationWorkspaceManagementEntry
-        ? "0398_organization_workspace_management_entry.sql"
-        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      additionalManagedOrganizationCreation
+        ? "0399_additional_managed_organization_creation.sql"
+        : organizationWorkspaceManagementEntry
+          ? "0398_organization_workspace_management_entry.sql"
+          : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
@@ -803,6 +821,7 @@ describe("release schema contract", () => {
       "0393_workspace_memory_and_learning_defaults.sql",
       "0396_model_call_equivalent_credit_cost.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+      "0399_additional_managed_organization_creation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -968,6 +987,9 @@ describe("release schema contract", () => {
     const scheduledTaskUnclaimedOccurrenceInvalidation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
     );
+    const additionalManagedOrganizationCreation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
+    );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -994,6 +1016,7 @@ describe("release schema contract", () => {
     }
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (additionalManagedOrganizationCreation ? 1 : 0) +
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
         (organizationWorkspaceManagementEntry &&
@@ -1157,9 +1180,11 @@ describe("release schema contract", () => {
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      organizationWorkspaceManagementEntry
-        ? "0398_organization_workspace_management_entry.sql"
-        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      additionalManagedOrganizationCreation
+        ? "0399_additional_managed_organization_creation.sql"
+        : organizationWorkspaceManagementEntry
+          ? "0398_organization_workspace_management_entry.sql"
+          : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults

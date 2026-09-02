@@ -297,6 +297,8 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   /** Reload grants, workspaces, and managed self-membership from the cookie. */
   revalidatePrincipalAccess: () => void;
+  /** Refreshes the current principal's organization and workspace grants in place. */
+  refreshPrincipalAccess: () => Promise<boolean>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
   setWorkspaceInferenceControl: (
@@ -2385,6 +2387,57 @@ export function RootRouteComponent() {
     () => setAccessKeyVersion((version) => version + 1),
     [],
   );
+  async function refreshPrincipalAccess(): Promise<boolean> {
+    if (!clientConfig || !authReady) return false;
+    let acceptedPrincipal = principalTransitionIdentity.current;
+    const acceptedManagedIdentity =
+      clientConfig.auth.mode === "managedSession" && authSession
+        ? managedSelfContextIdentity({
+            credentialGeneration: accessKeyVersion,
+            managedUserId: authSession.user.id,
+          })
+        : null;
+    managedSelfContextIdentityRef.current = acceptedManagedIdentity;
+    const selfContextPromise = acceptedManagedIdentity
+      ? loadCurrentManagedSelfContext({
+          identity: acceptedManagedIdentity,
+          currentIdentity: () => managedSelfContextIdentityRef.current,
+          request: () => client.listOrganizationMemberships(),
+        })
+      : Promise.resolve(null);
+    const [nextAccessContext, nextWorkspaces, nextManagedSelfContext] = await Promise.all([
+      client.getAccessContext(),
+      client.listWorkspaces(),
+      selfContextPromise,
+    ]);
+    if (!ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)) {
+      return false;
+    }
+    if (acceptedManagedIdentity && nextManagedSelfContext === null) return false;
+    if (
+      nextManagedSelfContext &&
+      nextAccessContext.subjectId !== nextManagedSelfContext.identity.subjectId
+    ) {
+      throw new Error("managed self context did not match the authenticated subject");
+    }
+    if (
+      accessPrincipalIdRef.current !== null &&
+      accessPrincipalIdRef.current !== nextAccessContext.subjectId
+    ) {
+      invalidatePrincipalWorkspaceState();
+      acceptedPrincipal = principalTransitionIdentity.current;
+      managedSelfContextIdentityRef.current = acceptedManagedIdentity;
+    }
+    if (!ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)) {
+      return false;
+    }
+    accessPrincipalIdRef.current = nextAccessContext.subjectId;
+    setAccessContext(nextAccessContext);
+    setWorkspaces(nextWorkspaces);
+    setManagedSelfContext(nextManagedSelfContext);
+    return true;
+  }
+  const contextRefreshPrincipalAccess = useLatestCallback(refreshPrincipalAccess);
   const contextCreateWorkspace = useLatestCallback(createWorkspace);
   const contextRenameWorkspace = useLatestCallback(renameWorkspace);
   const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
@@ -2500,6 +2553,7 @@ export function RootRouteComponent() {
           forgetAccessKey: contextForgetAccessKey,
           handleManagedSignOut: contextHandleManagedSignOut,
           revalidatePrincipalAccess,
+          refreshPrincipalAccess: contextRefreshPrincipalAccess,
           createWorkspace: contextCreateWorkspace,
           renameWorkspace: contextRenameWorkspace,
           setWorkspaceInferenceControl: contextSetWorkspaceInferenceControl,
@@ -2588,6 +2642,7 @@ export function RootRouteComponent() {
     latencyMode,
     reasoningEffort,
     revalidatePrincipalAccess,
+    contextRefreshPrincipalAccess,
     refreshGitHub,
     refreshPersonalGitHub,
     refreshWorkspace,
