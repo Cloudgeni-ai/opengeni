@@ -29,9 +29,7 @@ function userItem(id: string, text: string, sequence: number): UserMessageItem {
   };
 }
 
-function annotation(
-  note = "Keep this exact constraint.",
-): DraftTimelineAnnotation {
+function annotation(note = "Keep this exact constraint."): DraftTimelineAnnotation {
   return {
     id: "00000000-0000-4000-8000-000000000502",
     source: {
@@ -79,10 +77,7 @@ function firstTextNode(element: Element): Text {
   return node;
 }
 
-async function waitFor(
-  condition: () => boolean,
-  message: string,
-): Promise<void> {
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 1_000;
   while (!condition()) {
     if (Date.now() >= deadline) throw new Error(message);
@@ -95,10 +90,7 @@ describe("timeline annotations", () => {
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
     const rendered = await renderComponent(
-      <MessageTimeline
-        items={[item]}
-        onAnnotate={(next) => (captured = next)}
-      />,
+      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
     );
     await flush();
     const source = rendered.container.querySelector<HTMLElement>(
@@ -136,11 +128,7 @@ describe("timeline annotations", () => {
 
   test("rejects a selection spanning two timeline messages", async () => {
     const first = userItem("00000000-0000-4000-8000-000000000511", "first", 1);
-    const second = userItem(
-      "00000000-0000-4000-8000-000000000512",
-      "second",
-      2,
-    );
+    const second = userItem("00000000-0000-4000-8000-000000000512", "second", 2);
     const rendered = await renderComponent(
       <MessageTimeline items={[first, second]} onAnnotate={() => undefined} />,
     );
@@ -182,29 +170,23 @@ describe("timeline annotations", () => {
     expect(textarea).not.toBeNull();
     await act(async () => {
       if (textarea) {
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLTextAreaElement.prototype,
-          "value",
-        )?.set;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
         setter?.call(textarea, "Use the quoted value.");
         textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
       }
     });
     expect(note).toBe("Use the quoted value.");
-    const sourceButton = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent?.includes("view source"),
+    const sourceButton = [...document.body.querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("view source"),
     );
     await act(async () => sourceButton?.click());
     await waitFor(
       () =>
-        document.body.textContent?.includes(
-          "Source is outside the loaded timeline window.",
-        ) === true,
+        document.body.textContent?.includes("Source is outside the loaded timeline window.") ===
+        true,
       "source-unavailable feedback did not appear",
     );
-    expect(document.body.textContent).toContain(
-      "Source is outside the loaded timeline window.",
-    );
+    expect(document.body.textContent).toContain("Source is outside the loaded timeline window.");
     await rendered.unmount();
   });
 });
