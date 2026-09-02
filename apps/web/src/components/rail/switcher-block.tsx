@@ -5,7 +5,7 @@
 // the same workspace menu.
 import { Link } from "@tanstack/react-router";
 import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
-import { lazy, Suspense, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import {
@@ -55,30 +55,53 @@ export function SwitcherBlock() {
   const [organizationName, setOrganizationName] = useState("");
   const [workspaceName, setWorkspaceName] = useState("General");
   const [createBusy, setCreateBusy] = useState(false);
+  const [createCommitted, setCreateCommitted] = useState(false);
   const operationId = useRef<string | null>(null);
+  const operationOwnerUserId = useRef<string | null>(null);
+
+  function resetCreateOrganizationDraft() {
+    setOrganizationName("");
+    setWorkspaceName("General");
+    setCreateCommitted(false);
+    operationId.current = null;
+    operationOwnerUserId.current = null;
+  }
+
+  useEffect(() => {
+    const managedUserId = context.authSession?.user.id ?? null;
+    if (operationOwnerUserId.current !== null && operationOwnerUserId.current !== managedUserId) {
+      setCreateOpen(false);
+      resetCreateOrganizationDraft();
+    }
+  }, [context.authSession?.user.id]);
 
   function updateCreateOpen(open: boolean) {
     if (createBusy && !open) return;
     setCreateOpen(open);
-    if (!open) {
-      setOrganizationName("");
-      setWorkspaceName("General");
-      operationId.current = null;
+    if (!open && !createCommitted) {
+      resetCreateOrganizationDraft();
     }
   }
 
   async function submitCreateOrganization() {
     const name = organizationName.trim();
     const initialWorkspaceName = workspaceName.trim();
-    if (!name || !initialWorkspaceName || createBusy) return;
-    operationId.current ??= crypto.randomUUID();
+    const managedUserId = context.authSession?.user.id ?? null;
+    if (!name || !initialWorkspaceName || !managedUserId || createBusy) return;
+    if (!operationId.current) {
+      operationId.current = crypto.randomUUID();
+      operationOwnerUserId.current = managedUserId;
+    }
     setCreateBusy(true);
+    let committed = createCommitted;
     try {
       const created = await context.client.createAdditionalOrganization({
         name,
         workspaceName: initialWorkspaceName,
         operationId: operationId.current,
       });
+      committed = true;
+      setCreateCommitted(true);
       const refreshed = await context.refreshPrincipalAccess();
       if (!refreshed) {
         throw new Error("Your access changed before the new organization could be opened");
@@ -88,14 +111,18 @@ export function SwitcherBlock() {
       });
       setCreateBusy(false);
       setCreateOpen(false);
-      setOrganizationName("");
-      setWorkspaceName("General");
-      operationId.current = null;
+      resetCreateOrganizationDraft();
       rail.openWorkspace(created.workspaceId);
     } catch (error) {
-      toast.error("Failed to create organization", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(
+        committed ? "Organization created, but not opened" : "Failed to create organization",
+        {
+          description: committed
+            ? `${message}. Try again to refresh access and open the same organization.`
+            : message,
+        },
+      );
       setCreateBusy(false);
     }
   }
@@ -117,6 +144,7 @@ export function SwitcherBlock() {
               organizationName={organizationName}
               workspaceName={workspaceName}
               busy={createBusy}
+              committed={createCommitted}
               onOrganizationNameChange={setOrganizationName}
               onWorkspaceNameChange={setWorkspaceName}
               onOpenChange={updateCreateOpen}
@@ -145,6 +173,7 @@ export function SwitcherBlock() {
             organizationName={organizationName}
             workspaceName={workspaceName}
             busy={createBusy}
+            committed={createCommitted}
             onOrganizationNameChange={setOrganizationName}
             onWorkspaceNameChange={setWorkspaceName}
             onOpenChange={updateCreateOpen}

@@ -88,4 +88,42 @@ describe("CreateOrganizationForm", () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  test("keeps a committed organization immutable while offering a safe open retry", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    let submitted = 0;
+    await act(async () => {
+      root.render(
+        <CreateOrganizationForm
+          organizationName="Product team"
+          workspaceName="Launch room"
+          busy={false}
+          committed
+          onOrganizationNameChange={() => undefined}
+          onWorkspaceNameChange={() => undefined}
+          onCancel={() => undefined}
+          onSubmit={() => {
+            submitted += 1;
+          }}
+        />,
+      );
+    });
+
+    const inputs = Array.from(document.querySelectorAll("input"));
+    expect(inputs).toHaveLength(2);
+    expect(inputs.every((input) => input.disabled)).toBe(true);
+    const retry = Array.from(document.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Try opening again"),
+    );
+    expect(retry).toBeInstanceOf(HTMLButtonElement);
+    await act(async () => {
+      retry?.click();
+    });
+    expect(submitted).toBe(1);
+
+    await act(async () => root.unmount());
+    host.remove();
+  });
 });

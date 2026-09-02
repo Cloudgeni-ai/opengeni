@@ -24,6 +24,7 @@ type CreateOrganizationFormProps = {
   organizationName: string;
   workspaceName: string;
   busy: boolean;
+  committed?: boolean;
   onOrganizationNameChange: (name: string) => void;
   onWorkspaceNameChange: (name: string) => void;
   onCancel: () => void;
@@ -60,6 +61,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
             onChange={(event) => props.onOrganizationNameChange(event.target.value)}
             placeholder="Acme"
             maxLength={120}
+            disabled={props.committed}
             autoFocus
           />
         </div>
@@ -71,6 +73,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
             onChange={(event) => props.onWorkspaceNameChange(event.target.value)}
             placeholder="General"
             maxLength={120}
+            disabled={props.committed}
           />
           <p className="text-xs text-fg-subtle">
             Your team can start working here. You can add more workspaces later.
@@ -101,18 +104,21 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
 
       <DialogFooter className="mt-5">
         <Button type="button" variant="ghost" disabled={props.busy} onClick={props.onCancel}>
-          Cancel
+          {props.committed ? "Close" : "Cancel"}
         </Button>
         <Button
           type="submit"
-          disabled={props.busy || !props.organizationName.trim() || !props.workspaceName.trim()}
+          disabled={
+            props.busy ||
+            (!props.committed && (!props.organizationName.trim() || !props.workspaceName.trim()))
+          }
         >
           {props.busy ? (
             <Loader2Icon aria-hidden="true" className="size-4 animate-spin" />
           ) : (
             <CheckIcon aria-hidden="true" className="size-4" />
           )}
-          Create organization
+          {props.committed ? "Try opening again" : "Create organization"}
         </Button>
       </DialogFooter>
     </form>
@@ -132,9 +138,13 @@ export function CreateOrganizationDialog(
           {...props}
           header={
             <DialogHeader>
-              <DialogTitle>New organization</DialogTitle>
+              <DialogTitle>
+                {props.committed ? `${props.organizationName} was created` : "New organization"}
+              </DialogTitle>
               <DialogDescription>
-                Create a separate home for another team, with its own members, workspaces, and data.
+                {props.committed
+                  ? "Try again to refresh your access and open the new organization. This will not create another one."
+                  : "Create a separate home for another team, with its own members, workspaces, and data."}
               </DialogDescription>
             </DialogHeader>
           }
