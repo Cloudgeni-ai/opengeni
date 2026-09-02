@@ -308,6 +308,59 @@ async function discardPersistedArtifactContent(
   throw error;
 }
 
+type ArtifactOperationReplay = NonNullable<Awaited<ReturnType<typeof replayForOperation>>>;
+
+function persistedArtifactContentIsReferenced(
+  replay: ArtifactOperationReplay,
+  input: Pick<PublishMetadata, "contentKey" | "sourceKey">,
+): boolean {
+  return (
+    replay.version.contentKey === input.contentKey || replay.version.sourceKey === input.sourceKey
+  );
+}
+
+async function reconcilePersistedArtifactMutation(
+  db: Database,
+  input: PublishMetadata,
+  error: unknown,
+  validateReplay: (replay: ArtifactOperationReplay) => void,
+): Promise<WorkspaceArtifactMutationResponse> {
+  let replay: ArtifactOperationReplay | null;
+  try {
+    replay = await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        await lockOperation(scopedDb, input.workspaceId, input.operationKey);
+        return await replayForOperation(scopedDb, input.workspaceId, input.operationKey);
+      },
+    );
+  } catch {
+    // The transaction outcome is still unknown. Leaking an unreferenced object
+    // is recoverable; deleting content that may have committed is not.
+    throw error;
+  }
+  if (!replay) return await discardPersistedArtifactContent(input, error);
+  try {
+    validateReplay(replay);
+  } catch (replayError) {
+    if (!persistedArtifactContentIsReferenced(replay, input)) {
+      await input.discardContent().catch(() => undefined);
+    }
+    throw replayError;
+  }
+  if (!persistedArtifactContentIsReferenced(replay, input)) {
+    await input.discardContent().catch(() => undefined);
+  }
+  return mutationResult(
+    replay.artifact,
+    replay.version,
+    replay.event,
+    true,
+    replay.current ?? replay.version,
+  );
+}
+
 async function assertAttemptAuthority(
   scopedDb: any,
   input: Pick<
@@ -443,6 +496,19 @@ function assertCreateReplay(replay: Awaited<ReturnType<typeof replayForOperation
   }
 }
 
+function assertCreateReplayMatchesInput(
+  replay: ArtifactOperationReplay,
+  input: PublishMetadata,
+): void {
+  assertCreateReplay(replay);
+  if (replay.version.contentSha256 !== input.contentSha256) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used with different content",
+    );
+  }
+  assertReplayVersionMetadata(replay.version, input);
+}
+
 function assertPublishReplay(
   replay: Awaited<ReturnType<typeof replayForOperation>>,
   artifactId: string,
@@ -458,6 +524,19 @@ function assertPublishReplay(
       "Idempotency key was already used for a different operation",
     );
   }
+}
+
+function assertPublishReplayMatchesInput(
+  replay: ArtifactOperationReplay,
+  input: PublishMetadata & { artifactId: string; expectedCurrentVersionId: string },
+): void {
+  assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
+  if (replay.version.contentSha256 !== input.contentSha256) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used with different content",
+    );
+  }
+  assertReplayVersionMetadata(replay.version, input);
 }
 
 function assertRollbackReplay(
@@ -538,13 +617,7 @@ export async function createWorkspaceArtifact(
           await assertAttemptAuthority(tx, input);
           const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
           if (replay) {
-            assertCreateReplay(replay);
-            if (replay.version.contentSha256 !== input.contentSha256) {
-              throw new WorkspaceArtifactConflictError(
-                "Idempotency key was already used with different content",
-              );
-            }
-            assertReplayVersionMetadata(replay.version, input);
+            assertCreateReplayMatchesInput(replay, input);
             return mutationResult(
               replay.artifact,
               replay.version,
@@ -620,7 +693,11 @@ export async function createWorkspaceArtifact(
       },
     );
   } catch (error) {
-    if (contentPersisted) return await discardPersistedArtifactContent(input, error);
+    if (contentPersisted) {
+      return await reconcilePersistedArtifactMutation(db, input, error, (replay) => {
+        assertCreateReplayMatchesInput(replay, input);
+      });
+    }
     throw error;
   }
 }
@@ -645,13 +722,7 @@ export async function publishWorkspaceArtifactVersion(
           await assertAttemptAuthority(tx, input);
           const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
           if (replay) {
-            assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
-            if (replay.version.contentSha256 !== input.contentSha256) {
-              throw new WorkspaceArtifactConflictError(
-                "Idempotency key was already used with different content",
-              );
-            }
-            assertReplayVersionMetadata(replay.version, input);
+            assertPublishReplayMatchesInput(replay, input);
             return mutationResult(
               replay.artifact,
               replay.version,
@@ -742,7 +813,11 @@ export async function publishWorkspaceArtifactVersion(
       },
     );
   } catch (error) {
-    if (contentPersisted) return await discardPersistedArtifactContent(input, error);
+    if (contentPersisted) {
+      return await reconcilePersistedArtifactMutation(db, input, error, (replay) => {
+        assertPublishReplayMatchesInput(replay, input);
+      });
+    }
     throw error;
   }
 }

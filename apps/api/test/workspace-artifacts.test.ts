@@ -13,7 +13,9 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
+  createWorkspaceArtifact,
   deleteWorkspace,
+  publishWorkspaceArtifactVersion,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -123,7 +125,122 @@ async function request(
   return await app.request(`http://x${path}`, { ...init, headers });
 }
 
+function rejectFirstCommittedTransaction(db: DbClient["db"]): DbClient["db"] {
+  const transaction = db.transaction.bind(db);
+  let reject = true;
+  return new Proxy(db, {
+    get(targetDb, property, receiver) {
+      if (property === "transaction") {
+        return async (...args: Parameters<typeof transaction>) => {
+          const result = await transaction(...args);
+          if (reject) {
+            reject = false;
+            throw new Error("simulated lost transaction commit response");
+          }
+          return result;
+        };
+      }
+      const value = Reflect.get(targetDb, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(targetDb) : value;
+    },
+  });
+}
+
 describe("workspace artifact API and PostgreSQL authority", () => {
+  test("reconciles ambiguously committed create and publish before deleting content", async () => {
+    const suffix = crypto.randomUUID();
+    const retainedObjects = new Set<string>();
+    const discardedObjects: string[] = [];
+    const createContentKey = `workspace-artifacts/${grant.workspaceId}/${suffix}/create.html`;
+    const createSourceKey = `workspace-artifacts/${grant.workspaceId}/${suffix}/create-source.json`;
+    const persistCreateContent = async () => {
+      retainedObjects.add(createContentKey);
+      retainedObjects.add(createSourceKey);
+    };
+    const discardCreateContent = async () => {
+      discardedObjects.push(createContentKey, createSourceKey);
+      retainedObjects.delete(createContentKey);
+      retainedObjects.delete(createSourceKey);
+    };
+
+    const created = await createWorkspaceArtifact(rejectFirstCommittedTransaction(client.db), {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      artifactId: crypto.randomUUID(),
+      slug: `ambiguous-create-${suffix}`,
+      title: "Ambiguously committed Site",
+      description: null,
+      contentKey: createContentKey,
+      contentSha256: "1".repeat(64),
+      sizeBytes: 128,
+      sourceKey: createSourceKey,
+      sourceSha256: "2".repeat(64),
+      sourceSizeBytes: 64,
+      requestedTools: [],
+      operationKey: `ambiguous-create-${suffix}`,
+      actorSubjectId: grant.subjectId,
+      sourceSessionId: null,
+      sourceTurnId: null,
+      sourceAttemptId: null,
+      sourceExecutionGeneration: null,
+      sourceToolName: null,
+      persistContent: persistCreateContent,
+      discardContent: discardCreateContent,
+    });
+
+    expect(created.replayed).toBe(true);
+    expect(created.version.revision).toBe(1);
+    expect(created.artifact.currentVersion?.id).toBe(created.version.id);
+    expect(retainedObjects).toEqual(new Set([createContentKey, createSourceKey]));
+    expect(discardedObjects).toEqual([]);
+
+    const publishContentKey = `workspace-artifacts/${grant.workspaceId}/${suffix}/publish.html`;
+    const publishSourceKey = `workspace-artifacts/${grant.workspaceId}/${suffix}/publish-source.json`;
+    const persistPublishContent = async () => {
+      retainedObjects.add(publishContentKey);
+      retainedObjects.add(publishSourceKey);
+    };
+    const discardPublishContent = async () => {
+      discardedObjects.push(publishContentKey, publishSourceKey);
+      retainedObjects.delete(publishContentKey);
+      retainedObjects.delete(publishSourceKey);
+    };
+
+    const published = await publishWorkspaceArtifactVersion(
+      rejectFirstCommittedTransaction(client.db),
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        artifactId: created.artifact.id,
+        expectedCurrentVersionId: created.version.id,
+        contentKey: publishContentKey,
+        contentSha256: "3".repeat(64),
+        sizeBytes: 256,
+        sourceKey: publishSourceKey,
+        sourceSha256: "4".repeat(64),
+        sourceSizeBytes: 96,
+        requestedTools: [],
+        operationKey: `ambiguous-publish-${suffix}`,
+        actorSubjectId: grant.subjectId,
+        sourceSessionId: null,
+        sourceTurnId: null,
+        sourceAttemptId: null,
+        sourceExecutionGeneration: null,
+        sourceToolName: null,
+        persistContent: persistPublishContent,
+        discardContent: discardPublishContent,
+      },
+    );
+
+    expect(published.replayed).toBe(true);
+    expect(published.version.revision).toBe(2);
+    expect(published.artifact.currentVersion?.id).toBe(published.version.id);
+    expect(retainedObjects).toEqual(
+      new Set([createContentKey, createSourceKey, publishContentKey, publishSourceKey]),
+    );
+    expect(discardedObjects).toEqual([]);
+  }, 60_000);
+
   test("publishes, versions concurrently, rolls back, replays, and isolates content", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     expect((await request(grant, ["workspace:read"], base)).status).toBe(403);
