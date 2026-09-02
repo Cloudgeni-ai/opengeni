@@ -993,6 +993,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability materialize_remember_knowledge_memory(uuid, uuid, uuid) is missing or ambiguous",
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
+      "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
     ];
     const sessionSetTables = new Set([
       "managed_auth_actor_mutation_leases",
