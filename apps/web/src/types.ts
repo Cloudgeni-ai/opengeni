@@ -51,6 +51,7 @@ export type {
   CreateConnectionRequest,
   CreateFileUploadResponse,
   CreateRigRequest,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
   McpServerConnectionRef,
   McpPersonalConnectionSummary,

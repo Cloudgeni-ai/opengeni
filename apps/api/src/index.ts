@@ -14,8 +14,10 @@ import type {
   ScheduledTaskScheduleSpec,
 } from "@opengeni/contracts";
 import {
+  advanceRigVerificationExecutionGeneration,
   assertRuntimeDatabasePosture,
   createDb,
+  getCurrentRigVerificationExecutionGeneration,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   type Database,
@@ -59,6 +61,7 @@ import {
   type StandaloneEditableArtifactApplication,
 } from "./editable-artifact-production";
 import { installApiFatalProcessBoundary } from "./fatal-process-boundary";
+import { dispatchRigVerification } from "./rig-verification-dispatch";
 
 /**
  * A REJECT_DUPLICATE start collides on the deterministic workflowId when the
@@ -258,30 +261,45 @@ export async function createTemporalWorkflowClient(
         throw error;
       }
     },
-    startRigVerification: async ({ workspaceId, changeId, versionId, workflowId }) => {
+    startRigVerification: async ({ workspaceId, changeId, versionId, attemptId, workflowId }) => {
       const targetId = changeId ?? versionId;
       if (!targetId) {
         throw new Error("rig verification requires changeId or versionId");
       }
-      try {
-        await temporal.workflow.start("rigVerificationWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: workflowId ?? `rig-verification-${targetId}-${crypto.randomUUID()}`,
-          workflowIdReusePolicy: "REJECT_DUPLICATE",
-          args: [
-            {
-              workspaceId,
-              ...(changeId ? { changeId } : {}),
-              ...(versionId ? { versionId } : {}),
-            },
-          ],
-        });
-      } catch (error) {
-        // A lost start acknowledgement is indistinguishable from a retry. The
-        // caller-owned workflow id makes both cases the same successful start.
-        if (isWorkflowAlreadyStarted(error)) return;
-        throw error;
+      if (!attemptId) {
+        throw new Error("rig verification requires an attemptId");
       }
+      const logicalWorkflowId = workflowId ?? `rig-verification-${targetId}-attempt-${attemptId}`;
+      const target = {
+        workspaceId,
+        attemptId,
+        workflowId: logicalWorkflowId,
+        ...(changeId ? { changeId } : { versionId: versionId! }),
+      };
+      await dispatchRigVerification(target, {
+        getCurrentExecutionGeneration: async (input) =>
+          await getCurrentRigVerificationExecutionGeneration(db, input),
+        advanceExecutionGeneration: async (input) =>
+          await advanceRigVerificationExecutionGeneration(db, input),
+        start: async (input) => {
+          await temporal.workflow.start("rigVerificationWorkflow", {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: input.physicalWorkflowId,
+            workflowIdReusePolicy: "REJECT_DUPLICATE",
+            args: [
+              {
+                workspaceId: input.workspaceId,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+                ...(input.changeId ? { changeId: input.changeId } : { versionId: input.versionId }),
+              },
+            ],
+          });
+        },
+        describeStatus: async (physicalWorkflowId) =>
+          (await temporal.workflow.getHandle(physicalWorkflowId).describe()).status.name,
+        isAlreadyStarted: isWorkflowAlreadyStarted,
+      });
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});

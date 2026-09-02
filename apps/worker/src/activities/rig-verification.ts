@@ -4,9 +4,12 @@ import type {
   RigChange,
   RigCheck,
   RigProviderImage,
+  RigPlatformSurfaceValidationReceipt,
   RigVersion,
   SandboxBackend,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
+import { RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION } from "@opengeni/contracts";
 import { sandboxLifecycleTransitionWaitMs } from "@opengeni/config";
 import {
   appendRigSetupCommand,
@@ -21,39 +24,51 @@ import {
 } from "@opengeni/core";
 import {
   acquireLease,
-  beginRigChangeVerificationAttempt,
+  beginRigProviderImageCleanupObligation,
   claimRigVersionProviderImageBuild,
+  completeRigVersionVerification,
   commitWarmingToWarm,
   failWarmingToCold,
   finalizeRigVersionProviderImageBuild,
+  failRigVersionVerification,
   getRig,
   getRigChange,
   getRigVersionById,
+  isCurrentRigChangeVerificationAttempt,
+  isCurrentRigVersionVerificationAttempt,
   markWarmLeaseInstanceLost,
+  markRigProviderImageCleanupObligationBuildFailed,
+  markRigProviderImageCleanupObligationOutcomeUnknown,
   markSandboxCheckpointArtifactDeletePending,
   recordWarmingSandboxCreated,
+  recordRigProviderImageCleanupObject,
   registerSandboxCheckpointArtifact,
   releaseLeaseHolder,
+  settleRigProviderImageCleanupObligation,
   touchLeaseHolder,
-  updateRigChangeStatus,
-  SandboxCheckpointArtifactRegistrationConflictError,
+  updateRigChangeStatusForVerificationAttempt,
   type Database,
 } from "@opengeni/db";
 import {
+  attachProviderTrustedRigPlatformSurface,
   buildImmutableProviderImage,
+  classifyModalImmutableProviderImageBuildFailure,
   createTurnToolCancellationController,
-  deleteModalCheckpointSnapshot,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
   establishSandboxSessionFromEnvelope,
+  inspectProviderTrustedRigPlatformRuntime,
   sandboxCommandExitCode,
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
   providerSupportsImmutableImageBuild,
+  resolveModalCheckpointProviderBindingForSession,
   tagModalSandbox,
   terminateManagedSandboxSession,
   verifySandboxExecReadiness,
   type EstablishedSandboxSession,
+  type BrowserControlPlacementSession,
+  type TrustedRigPlatformRuntimeManifest,
   type TurnSandboxCommandArgs,
   type TurnSandboxCommandSession,
 } from "@opengeni/runtime/sandbox";
@@ -62,6 +77,8 @@ import type { ControlActivityServices } from "./types";
 import { rigProviderImageSourceImage } from "./sandbox-images";
 import { resolveWorkspacePackRuntime, type WorkspacePackRuntime } from "./packs";
 import { currentActivityContext } from "./streaming";
+import { runRigPlatformSurfaceValidation } from "./rig-platform-surface-validation";
+import { reconcileRigProviderImageCleanupObligationsForSource } from "./rig-provider-image-cleanup";
 
 type RigSetupHook = typeof import("@opengeni/runtime").runRigSetupHook;
 let rigSetupHookPromise: Promise<RigSetupHook> | null = null;
@@ -78,8 +95,20 @@ type SandboxLifecycleCommandRunner = (
 ) => Promise<unknown>;
 
 export type RigVerificationWorkflowInput =
-  | { workspaceId: string; changeId: string; versionId?: never }
-  | { workspaceId: string; versionId: string; changeId?: never };
+  | {
+      workspaceId: string;
+      changeId: string;
+      attemptId: string;
+      executionGeneration: number;
+      versionId?: never;
+    }
+  | {
+      workspaceId: string;
+      versionId: string;
+      attemptId: string;
+      executionGeneration: number;
+      changeId?: never;
+    };
 
 type CommandResult = {
   exitCode: number | null;
@@ -98,9 +127,6 @@ export type RigPlatformCheckResult = CommandResult & RigCheck;
 export function rigPlatformChecksForSettings(
   settings: ControlActivityServices["settings"],
 ): RigCheck[] {
-  const backend = settings.sandboxBackend as SandboxBackend;
-  if (!rigProviderImageSourceImage(settings, backend)) return [];
-
   const checks: RigCheck[] = [
     {
       name: "opengeni-platform-browser",
@@ -190,8 +216,18 @@ export class RigVerificationActivityDeadlineError extends Error {
   }
 }
 
+export class RigProviderImageBuildDeadlineError extends Error {
+  readonly name = "RigProviderImageBuildDeadlineError";
+
+  constructor() {
+    super("Rig provider image build exceeded the remaining verification work deadline");
+  }
+}
+
 export type RigVerificationActivityLifecycle = {
   signal: AbortSignal;
+  /** Absolute boundary for verifier work; cleanup begins when this is reached. */
+  workDeadlineAtMs: number | null;
   /** Absolute wall-clock boundary before which immediate cleanup may wait. */
   cleanupDeadlineAtMs: number | null;
   dispose(): void;
@@ -247,6 +283,8 @@ export function createRigVerificationActivityLifecycle(
     reserveMs === null ? 0 : Math.min(30_000, Math.max(1, Math.floor(reserveMs / 4)));
   const cleanupDeadlineAtMs =
     serverDeadlineAtMs === null ? null : serverDeadlineAtMs - serverReportingMarginMs;
+  const workDeadlineAtMs =
+    serverDeadlineAtMs === null || reserveMs === null ? null : serverDeadlineAtMs - reserveMs;
 
   let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
   if (reserveMs !== null && startToCloseTimeoutMs !== undefined && !controller.signal.aborted) {
@@ -295,6 +333,7 @@ export function createRigVerificationActivityLifecycle(
 
   return {
     signal: controller.signal,
+    workDeadlineAtMs,
     cleanupDeadlineAtMs,
     dispose: () => {
       temporalSignal?.removeEventListener("abort", forwardTemporalCancellation);
@@ -393,8 +432,10 @@ export type RigVerificationOwnershipDependencies = {
   serialize: typeof serializeEstablishedSandboxEnvelope;
   tag: typeof tagModalSandbox;
   terminate: typeof terminateThrowaway;
+  attachTrustedSurface: typeof attachProviderTrustedRigPlatformSurface;
+  inspectTrustedRuntime: typeof inspectProviderTrustedRigPlatformRuntime;
+  reconcileProviderImageBuilds: typeof reconcileRigProviderImageCleanupObligationsForSource;
   createCancellationController: typeof createTurnToolCancellationController;
-  randomUUID: () => string;
 };
 
 const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
@@ -409,13 +450,33 @@ const defaultOwnershipDependencies: RigVerificationOwnershipDependencies = {
   serialize: serializeEstablishedSandboxEnvelope,
   tag: tagModalSandbox,
   terminate: terminateThrowaway,
+  attachTrustedSurface: attachProviderTrustedRigPlatformSurface,
+  inspectTrustedRuntime: inspectProviderTrustedRigPlatformRuntime,
+  reconcileProviderImageBuilds: reconcileRigProviderImageCleanupObligationsForSource,
   createCancellationController: createTurnToolCancellationController,
-  randomUUID: () => crypto.randomUUID(),
 };
+
+export function rigVerificationLeaseHolderId(input: {
+  targetKind: "change" | "version" | "provider_image";
+  targetId: string;
+  attemptId: string;
+  executionGeneration: number;
+}): string {
+  const digest = createHash("sha256")
+    .update(
+      `${input.targetKind}:${input.targetId}:${input.attemptId}:${input.executionGeneration}`,
+      "utf8",
+    )
+    .digest("hex")
+    .slice(0, 32);
+  return `rig-verification:${digest}`;
+}
 
 export type RigVerificationSandboxRunContext = {
   signal: AbortSignal;
   commandRunner: SandboxLifecycleCommandRunner;
+  trustedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
+  runtimeAuthorityImageId: string;
   ownership: {
     leaseId: string;
     leaseEpoch: number;
@@ -459,6 +520,20 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     sandboxGroupId: string;
     rigVersionId: string;
     sessionIdPrefix: string;
+    holderId: string;
+    /** Assertion-only immutable image identity. Provider-owned validation
+     * still discovers its authority from the exact live sandbox instance. */
+    expectedProviderImageId?: string;
+    /** Logical image persisted on the verifier lease. Cold provider-image
+     * validation keeps this source fence separate from the physical image ID. */
+    leaseImage?: string;
+    /** Image identity projected into the platform-surface provenance. */
+    providerImage?: string;
+    /** Pristine deployment image that hosts protected validation commands. */
+    runtimeAuthorityImageId?: string;
+    /** Pristine deployment helper/runtime bytes. A derived provider image must
+     * match this exact manifest before any candidate command is invoked. */
+    expectedRuntimeManifest?: TrustedRigPlatformRuntimeManifest;
     lifecycle?: RigVerificationActivityLifecycle;
   },
   run: (
@@ -474,7 +549,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     throw new Error(RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE);
   }
 
-  const holderId = `rig-verification:${dependencies.randomUUID()}`;
+  const holderId = input.holderId;
   const fallbackController = new AbortController();
   const signal = input.lifecycle?.signal ?? fallbackController.signal;
   const commandController = dependencies.createCancellationController(signal);
@@ -483,6 +558,7 @@ export async function runWithOwnedRigVerificationSandbox<T>(
   let acquired = false;
   let ownsWarmingEpoch = false;
   let expectedEpoch: number | null = null;
+  let committedLeaseId: string | null = null;
   let holderLivenessTimer: ReturnType<typeof setInterval> | null = null;
   let establishmentSettled = false;
   let establishmentPromise: Promise<EstablishedSandboxSession> | null = null;
@@ -575,7 +651,9 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderId,
       subjectId: null,
       backend: input.settings.sandboxBackend,
-      image: rigProviderImageSourceImage(input.settings, input.settings.sandboxBackend),
+      image:
+        input.leaseImage ??
+        rigProviderImageSourceImage(input.settings, input.settings.sandboxBackend),
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
@@ -674,6 +752,41 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     void establishmentPromise.catch(() => undefined);
     const established = await waitForAbortable(establishmentPromise, signal);
     cleanupTarget = established;
+    const providerImage =
+      input.providerImage ?? requiredRigVerificationProviderImage(input.settings);
+    const remainingInspectionMs =
+      input.lifecycle?.workDeadlineAtMs == null
+        ? input.settings.sandboxSnapshotTimeoutMs
+        : Math.floor(input.lifecycle.workDeadlineAtMs - Date.now());
+    if (remainingInspectionMs <= 0) {
+      throw new Error("Rig verification runtime integrity inspection exceeded its work deadline");
+    }
+    const trustedRuntimeManifest = await dependencies.inspectTrustedRuntime({
+      backend: established.backendId as SandboxBackend,
+      settings: input.settings,
+      session: established.session,
+      instanceId: established.instanceId,
+      providerImage,
+      ...(input.expectedProviderImageId
+        ? { expectedProviderImageId: input.expectedProviderImageId }
+        : {}),
+      ...(input.expectedRuntimeManifest
+        ? { expectedRuntimeManifest: input.expectedRuntimeManifest }
+        : {}),
+      timeoutMs: Math.max(
+        1,
+        Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingInspectionMs),
+      ),
+      ...(input.lifecycle?.workDeadlineAtMs == null
+        ? {}
+        : { deadlineAtMs: input.lifecycle.workDeadlineAtMs }),
+      signal,
+    });
+    if (!trustedRuntimeManifest) {
+      throw new Error(
+        `sandbox backend ${established.backendId} has no deployment-owned Rig platform runtime inspection authority`,
+      );
+    }
     await waitForAbortable(verifySandboxExecReadiness(established), signal);
     const resumeState =
       established.backendId === "modal" ? null : await dependencies.serialize(established);
@@ -691,9 +804,37 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     if (!committed.committed || !committed.lease) {
       throw new RigVerificationLeaseUnavailableError(input.sandboxGroupId, "fenced");
     }
+    committedLeaseId = committed.lease.id;
+    const trustedSurfaceAttached = await dependencies.attachTrustedSurface({
+      backend: established.backendId as SandboxBackend,
+      settings: input.settings,
+      session: established.session,
+      instanceId: established.instanceId,
+      providerImage,
+      ...(input.expectedProviderImageId
+        ? { expectedProviderImageId: input.expectedProviderImageId }
+        : {}),
+      ...(input.runtimeAuthorityImageId
+        ? { runtimeAuthorityImageId: input.runtimeAuthorityImageId }
+        : {}),
+      leaseId: committed.lease.id,
+      leaseEpoch: committed.lease.leaseEpoch,
+      workspaceGeneration: committed.lease.workspaceGeneration,
+      sandboxGroupId: input.sandboxGroupId,
+      rigVersionId: input.rigVersionId,
+      runtimeManifest: trustedRuntimeManifest,
+    });
+    if (!trustedSurfaceAttached) {
+      throw new Error(
+        `sandbox backend ${established.backendId} has no deployment-owned Rig platform validation authority`,
+      );
+    }
+    const runtimeAuthorityImageId = observedRuntimeAuthorityImageId(established);
     const result = await run(established, {
       signal,
       commandRunner,
+      trustedRuntimeManifest,
+      runtimeAuthorityImageId,
       ownership: {
         leaseId: committed.lease.id,
         leaseEpoch: committed.lease.leaseEpoch,
@@ -750,6 +891,21 @@ export async function runWithOwnedRigVerificationSandbox<T>(
           });
         }
         return true;
+      }
+      try {
+        if (!committedLeaseId) return await terminateAndClear(cleanupTarget);
+        await dependencies.reconcileProviderImageBuilds({
+          db: input.db,
+          settings: input.settings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sourceLeaseId: committedLeaseId,
+          sourceInstanceId: cleanupTarget.instanceId,
+          timeoutMs: cleanupWaitMs(input.lifecycle),
+        });
+      } catch (error) {
+        warnCleanupFailure("provider_image_build_reconciliation", cleanupTarget.instanceId, error);
+        return false;
       }
       return await terminateAndClear(cleanupTarget);
     });
@@ -851,7 +1007,7 @@ function setupAppendCommand(change: RigChange): string | null {
 
 function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): RigVersion {
   if (change.kind !== "definition_edit") {
-    return { ...baseVersion, image: null, providerImages: {} };
+    return { ...baseVersion, id: change.id, image: null, providerImages: {}, active: false };
   }
   const payload = change.payload as {
     setupScript?: unknown;
@@ -862,6 +1018,8 @@ function candidateVersionForChange(baseVersion: RigVersion, change: RigChange): 
   };
   return {
     ...baseVersion,
+    id: change.id,
+    active: false,
     image: null,
     setupScript:
       payload.setupScript === undefined
@@ -906,6 +1064,34 @@ export function rigProviderImageContentMarkerCommand(
   return `mkdir -p '${normalizedRoot}' && touch '${marker}'`;
 }
 
+function requiredRigVerificationProviderImage(
+  settings: ControlActivityServices["settings"],
+): string {
+  const image = rigProviderImageSourceImage(settings, settings.sandboxBackend);
+  if (!image) {
+    throw new Error("Rig verification requires one exact deployment provider image");
+  }
+  return image;
+}
+
+function observedProviderImageId(established: EstablishedSandboxSession): string {
+  const imageId = (established.session as BrowserControlPlacementSession).trustedRigPlatformSurface
+    ?.binding.providerImageId;
+  if (!imageId) {
+    throw new Error("Rig verification has no immutable trusted platform image binding");
+  }
+  return imageId;
+}
+
+function observedRuntimeAuthorityImageId(established: EstablishedSandboxSession): string {
+  const imageId = (established.session as BrowserControlPlacementSession).trustedRigPlatformSurface
+    ?.binding.runtimeAuthorityImageId;
+  if (!imageId) {
+    throw new Error("Rig verification has no immutable trusted runtime authority image binding");
+  }
+  return imageId;
+}
+
 function rigProviderImageContentMarker(
   contentHash: string,
   markerRoot = "/var/opengeni",
@@ -923,11 +1109,13 @@ function rigProviderImageContentMarker(
 
 export type RigProviderImageColdBootDependencies = {
   runOwnedSandbox: typeof runWithOwnedRigVerificationSandbox;
+  runSurfaceValidation: typeof runRigPlatformSurfaceValidation;
   now: () => Date;
 };
 
 const defaultRigProviderImageColdBootDependencies: RigProviderImageColdBootDependencies = {
   runOwnedSandbox: runWithOwnedRigVerificationSandbox,
+  runSurfaceValidation: runRigPlatformSurfaceValidation,
   now: () => new Date(),
 };
 
@@ -941,24 +1129,43 @@ export async function verifyRigProviderImageColdBoot(
     workspaceId: string;
     buildRequestId: string;
     rigVersionId: string;
+    verificationAttemptId: string;
+    verificationExecutionGeneration: number;
     sessionIdPrefix: string;
     imageId: string;
+    sourceImage: string;
+    runtimeAuthorityImageId: string;
+    expectedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
     contentHash: string;
     checks: RigProviderImageDefinition["checks"];
     lifecycle: RigVerificationActivityLifecycle;
   },
   dependencies: RigProviderImageColdBootDependencies = defaultRigProviderImageColdBootDependencies,
-): Promise<string> {
+): Promise<{
+  checkedAt: string;
+  platformSurfaceValidation: RigPlatformSurfaceValidationReceipt;
+}> {
   const { marker } = rigProviderImageContentMarker(input.contentHash);
-  await dependencies.runOwnedSandbox(
+  const coldBootSettings =
+    input.settings.sandboxBackend === "modal"
+      ? {
+          ...input.settings,
+          modalImageId: input.imageId,
+          // The full-machine provider image is the immutable rig base. Any future
+          // workspace recovery must layer /workspace onto it, never replace it.
+          modalWorkspacePersistence: "snapshot_directory" as const,
+        }
+      : input.settings.sandboxBackend === "docker"
+        ? { ...input.settings, dockerImageId: input.imageId }
+        : null;
+  if (!coldBootSettings) {
+    throw new Error(
+      `sandbox backend ${input.settings.sandboxBackend} has no provider-image cold-boot contract`,
+    );
+  }
+  const platformSurfaceValidation = await dependencies.runOwnedSandbox(
     {
-      settings: {
-        ...input.settings,
-        modalImageId: input.imageId,
-        // The full-machine provider image is the immutable rig base. Any future
-        // workspace recovery must layer /workspace onto it, never replace it.
-        modalWorkspacePersistence: "snapshot_directory",
-      },
+      settings: coldBootSettings,
       db: input.db,
       observability: input.observability,
       accountId: input.accountId,
@@ -966,6 +1173,17 @@ export async function verifyRigProviderImageColdBoot(
       sandboxGroupId: input.buildRequestId,
       rigVersionId: input.rigVersionId,
       sessionIdPrefix: input.sessionIdPrefix,
+      holderId: rigVerificationLeaseHolderId({
+        targetKind: "provider_image",
+        targetId: input.buildRequestId,
+        attemptId: input.verificationAttemptId,
+        executionGeneration: input.verificationExecutionGeneration,
+      }),
+      expectedProviderImageId: input.imageId,
+      leaseImage: input.sourceImage,
+      providerImage: input.imageId,
+      runtimeAuthorityImageId: input.runtimeAuthorityImageId,
+      expectedRuntimeManifest: input.expectedRuntimeManifest,
       lifecycle: input.lifecycle,
     },
     async (established, runContext) => {
@@ -991,6 +1209,19 @@ export async function verifyRigProviderImageColdBoot(
           );
         }
       }
+      const receipt = await dependencies.runSurfaceValidation({
+        settings: input.settings,
+        db: input.db,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.buildRequestId,
+        rigVersionId: input.rigVersionId,
+        providerImage: input.imageId,
+        providerImageId: input.imageId,
+        leaseImage: input.sourceImage,
+        established,
+        ownership: runContext.ownership,
+        lifecycle: input.lifecycle,
+      });
       for (const check of input.checks) {
         const result = await runCommand(
           established.session as TurnSandboxCommandSession,
@@ -1004,25 +1235,57 @@ export async function verifyRigProviderImageColdBoot(
           );
         }
       }
+      return receipt;
     },
   );
-  return dependencies.now().toISOString();
+  return {
+    checkedAt: dependencies.now().toISOString(),
+    platformSurfaceValidation,
+  };
 }
 
-export async function buildVerifiedRigProviderImage(input: {
-  settings: ControlActivityServices["settings"];
-  db: Database;
-  observability: ControlActivityServices["observability"];
-  accountId: string;
-  workspaceId: string;
-  existingVersionId?: string;
-  definition: RigProviderImageDefinition;
-  target: { kind: "change" | "version"; id: string };
-  established: EstablishedSandboxSession;
-  ownership: RigVerificationSandboxRunContext["ownership"];
-  lifecycle: RigVerificationActivityLifecycle;
-  signal: AbortSignal;
-}): Promise<RigProviderImage> {
+export type RigProviderImageBuildVerification = {
+  image: RigProviderImage;
+  platformSurfaceValidation: RigPlatformSurfaceValidationReceipt | null;
+};
+
+export async function buildVerifiedRigProviderImage(
+  input: {
+    settings: ControlActivityServices["settings"];
+    db: Database;
+    observability: ControlActivityServices["observability"];
+    accountId: string;
+    workspaceId: string;
+    existingVersionId?: string;
+    definition: RigProviderImageDefinition;
+    target: { kind: "change" | "version"; id: string };
+    verificationAttemptId: string;
+    verificationExecutionGeneration: number;
+    established: EstablishedSandboxSession;
+    ownership: RigVerificationSandboxRunContext["ownership"];
+    runtimeManifest: TrustedRigPlatformRuntimeManifest;
+    runtimeAuthorityImageId: string;
+    lifecycle: RigVerificationActivityLifecycle;
+    signal: AbortSignal;
+  },
+  dependencies: {
+    buildImmutableProviderImage: typeof buildImmutableProviderImage;
+    resolveProviderBinding: typeof resolveModalCheckpointProviderBindingForSession;
+    beginCleanupObligation: typeof beginRigProviderImageCleanupObligation;
+    recordCleanupObject: typeof recordRigProviderImageCleanupObject;
+    settleCleanupObligation: typeof settleRigProviderImageCleanupObligation;
+    markCleanupBuildFailed: typeof markRigProviderImageCleanupObligationBuildFailed;
+    markCleanupOutcomeUnknown: typeof markRigProviderImageCleanupObligationOutcomeUnknown;
+  } = {
+    buildImmutableProviderImage,
+    resolveProviderBinding: resolveModalCheckpointProviderBindingForSession,
+    beginCleanupObligation: beginRigProviderImageCleanupObligation,
+    recordCleanupObject: recordRigProviderImageCleanupObject,
+    settleCleanupObligation: settleRigProviderImageCleanupObligation,
+    markCleanupBuildFailed: markRigProviderImageCleanupObligationBuildFailed,
+    markCleanupOutcomeUnknown: markRigProviderImageCleanupObligationOutcomeUnknown,
+  },
+): Promise<RigProviderImageBuildVerification> {
   const backend = input.settings.sandboxBackend as SandboxBackend;
   const providerSupportsBuild = providerSupportsImmutableImageBuild(backend);
   const sourceImage = rigProviderImageSourceImage(input.settings, backend);
@@ -1031,6 +1294,9 @@ export async function buildVerifiedRigProviderImage(input: {
     sourceImage,
     definition: input.definition,
   });
+  if (!sourceImage) {
+    throw new Error(`sandbox backend ${backend} has no deployment platform image source`);
+  }
   const startedAt = new Date().toISOString();
   let building: RigProviderImage = {
     backend,
@@ -1066,24 +1332,51 @@ export async function buildVerifiedRigProviderImage(input: {
       staleAfterMs: RIG_VERIFICATION_OWNER_TTL_MS,
       retryUnsupported: providerSupportsBuild,
     });
-    if (
-      claim.status === "ready" ||
-      claim.status === "in_progress" ||
-      claim.status === "unsupported"
-    ) {
-      return claim.image;
+    if (claim.status === "in_progress" || claim.status === "unsupported") {
+      return { image: claim.image, platformSurfaceValidation: null };
+    }
+    if (claim.status === "ready") {
+      if (!claim.image.imageId) {
+        throw new Error("ready provider image has no cold-bootable immutable image id");
+      }
+      const validation = await verifyRigProviderImageColdBoot({
+        settings: input.settings,
+        db: input.db,
+        observability: input.observability,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        buildRequestId: claim.image.buildRequestId,
+        rigVersionId: input.target.id,
+        verificationAttemptId: input.verificationAttemptId,
+        verificationExecutionGeneration: input.verificationExecutionGeneration,
+        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+        imageId: claim.image.imageId,
+        sourceImage,
+        runtimeAuthorityImageId: input.runtimeAuthorityImageId,
+        expectedRuntimeManifest: input.runtimeManifest,
+        contentHash,
+        checks: input.definition.checks,
+        lifecycle: input.lifecycle,
+      });
+      return {
+        image: claim.image,
+        platformSurfaceValidation: validation.platformSurfaceValidation,
+      };
     }
     if (claim.status === "conflict") {
       return {
-        ...building,
-        status: "failed",
-        finishedAt: new Date().toISOString(),
-        error: {
-          code: "provider_image_content_conflict",
-          message:
-            "this exact rig version already records a provider image for different effective content; mint and verify a new version",
-          retryable: false,
+        image: {
+          ...building,
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+          error: {
+            code: "provider_image_content_conflict",
+            message:
+              "this exact rig version already records a provider image for different effective content; mint and verify a new version",
+            retryable: false,
+          },
         },
+        platformSurfaceValidation: null,
       };
     }
     building = claim.image;
@@ -1125,7 +1418,7 @@ export async function buildVerifiedRigProviderImage(input: {
   };
 
   if (!providerSupportsBuild) {
-    return await finalize({
+    const image = await finalize({
       ...building,
       status: "unsupported",
       finishedAt: new Date().toISOString(),
@@ -1135,23 +1428,108 @@ export async function buildVerifiedRigProviderImage(input: {
         retryable: false,
       },
     });
+    return { image, platformSurfaceValidation: null };
   }
 
   throwIfAborted(input.signal);
-  let builtIdentity: {
-    imageId: string;
-    providerBindingKey: string;
-  } | null = null;
+  let cleanupObligation: Awaited<ReturnType<typeof beginRigProviderImageCleanupObligation>> | null =
+    null;
   let artifactId: string | null = null;
-  let coldBootValidatedAt: string | null = null;
+  let coldBootVerification: Awaited<ReturnType<typeof verifyRigProviderImageColdBoot>> | null =
+    null;
   try {
-    const built = await buildImmutableProviderImage({
+    throwIfAborted(input.signal);
+    const remainingWorkMs =
+      input.lifecycle.workDeadlineAtMs == null
+        ? input.settings.sandboxSnapshotTimeoutMs
+        : Math.floor(input.lifecycle.workDeadlineAtMs - Date.now());
+    if (remainingWorkMs <= 0) {
+      throw new RigProviderImageBuildDeadlineError();
+    }
+    const buildTimeoutMs = Math.max(
+      1,
+      Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingWorkMs),
+    );
+    if (backend === "modal") {
+      const providerBinding = await dependencies.resolveProviderBinding(
+        input.settings,
+        input.established.session,
+      );
+      cleanupObligation = await dependencies.beginCleanupObligation(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sandboxGroupId: input.target.id,
+        sourceLeaseId: input.ownership.leaseId,
+        sourceLeaseEpoch: input.ownership.leaseEpoch,
+        sourceInstanceId: input.ownership.instanceId,
+        sourceWorkspaceGeneration: input.ownership.workspaceGeneration,
+        providerBindingKey: providerBinding.key,
+        providerBinding: providerBinding.binding,
+        buildRequestId: building.buildRequestId,
+      });
+    }
+    const buildPromise = dependencies.buildImmutableProviderImage({
       backend,
       settings: input.settings,
       session: input.established.session,
       requestId: building.buildRequestId,
-      timeoutMs: input.settings.sandboxSnapshotTimeoutMs,
+      timeoutMs: buildTimeoutMs,
     });
+    let providerBuildRejected = false;
+    const trackedBuildPromise = buildPromise.then(
+      (result) => {
+        if (
+          backend === "modal" &&
+          cleanupObligation &&
+          result?.imageId &&
+          result.providerBindingKey === cleanupObligation.providerBindingKey
+        ) {
+          void dependencies
+            .recordCleanupObject(input.db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              obligationId: cleanupObligation.id,
+              buildRequestId: cleanupObligation.buildRequestId,
+              providerBindingKey: cleanupObligation.providerBindingKey,
+              objectId: result.imageId,
+            })
+            .catch(() => false);
+        }
+        return result;
+      },
+      (error) => {
+        providerBuildRejected = true;
+        throw error;
+      },
+    );
+    void trackedBuildPromise.catch(() => undefined);
+    const deadlineSignal =
+      input.lifecycle.workDeadlineAtMs == null
+        ? input.signal
+        : AbortSignal.any([input.signal, AbortSignal.timeout(buildTimeoutMs)]);
+    let built: Awaited<ReturnType<typeof buildImmutableProviderImage>>;
+    try {
+      built = await waitForAbortable(trackedBuildPromise, deadlineSignal);
+    } catch (error) {
+      if (providerBuildRejected && cleanupObligation?.state === "building") {
+        const markCleanupFailure =
+          classifyModalImmutableProviderImageBuildFailure(error) === "definitive_rejection"
+            ? dependencies.markCleanupBuildFailed
+            : dependencies.markCleanupOutcomeUnknown;
+        await markCleanupFailure(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          obligationId: cleanupObligation.id,
+          buildRequestId: cleanupObligation.buildRequestId,
+          providerBindingKey: cleanupObligation.providerBindingKey,
+          error: error instanceof Error ? error.message : String(error),
+        }).catch(() => false);
+      }
+      if (!input.signal.aborted && deadlineSignal.aborted) {
+        throw new RigProviderImageBuildDeadlineError();
+      }
+      throw error;
+    }
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
     }
@@ -1159,10 +1537,20 @@ export async function buildVerifiedRigProviderImage(input: {
       if (!built.imageId || !built.providerBindingKey || !built.providerBinding) {
         throw new Error("Modal provider image build returned incomplete ownership identity");
       }
-      builtIdentity = {
-        imageId: built.imageId,
-        providerBindingKey: built.providerBindingKey,
-      };
+      if (!cleanupObligation || cleanupObligation.providerBindingKey !== built.providerBindingKey) {
+        throw new Error("Modal provider image build returned another provider binding");
+      }
+      const objectRecorded = await dependencies.recordCleanupObject(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        obligationId: cleanupObligation.id,
+        buildRequestId: cleanupObligation.buildRequestId,
+        providerBindingKey: cleanupObligation.providerBindingKey,
+        objectId: built.imageId,
+      });
+      if (!objectRecorded) {
+        throw new Error("Modal provider image build could not persist its exact image id");
+      }
       const archiveBytes = encodeNativeSnapshotRef({
         provider: "modal_snapshot_filesystem",
         snapshotId: built.imageId,
@@ -1187,26 +1575,43 @@ export async function buildVerifiedRigProviderImage(input: {
         registrationIdentity: "provider_object",
       });
       artifactId = artifact.id;
-
-      // A snapshot receipt is not proof that the artifact can cold-start. Boot
-      // a second, independently owned sandbox from the exact image before it
-      // can become runtime-selectable.
-      coldBootValidatedAt = await verifyRigProviderImageColdBoot({
-        settings: input.settings,
-        db: input.db,
-        observability: input.observability,
+      const obligationSettled = await dependencies.settleCleanupObligation(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        buildRequestId: building.buildRequestId,
-        rigVersionId: input.target.id,
-        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
-        imageId: built.imageId,
-        contentHash,
-        checks: input.definition.checks,
-        lifecycle: input.lifecycle,
+        obligationId: cleanupObligation.id,
+        objectId: built.imageId,
       });
+      if (!obligationSettled) {
+        throw new Error("Modal provider image cleanup ownership could not be transferred");
+      }
     }
-    if (!coldBootValidatedAt) {
+    if (!built.imageId) {
+      throw new Error(`${backend} provider image build returned no cold-bootable image id`);
+    }
+    // A provider build receipt is not proof that the artifact can cold-start.
+    // Boot a second, independently owned sandbox from the exact image before it
+    // can become runtime-selectable. Modal retains its artifact ledger above;
+    // Docker uses its daemon-local content-addressed image identity directly.
+    coldBootVerification = await verifyRigProviderImageColdBoot({
+      settings: input.settings,
+      db: input.db,
+      observability: input.observability,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      buildRequestId: building.buildRequestId,
+      rigVersionId: input.target.id,
+      verificationAttemptId: input.verificationAttemptId,
+      verificationExecutionGeneration: input.verificationExecutionGeneration,
+      sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+      imageId: built.imageId,
+      sourceImage,
+      runtimeAuthorityImageId: input.runtimeAuthorityImageId,
+      expectedRuntimeManifest: input.runtimeManifest,
+      contentHash,
+      checks: input.definition.checks,
+      lifecycle: input.lifecycle,
+    });
+    if (!coldBootVerification) {
       throw new Error(`${backend} provider image build has no independent cold-boot validator`);
     }
     if (input.signal.aborted) {
@@ -1220,7 +1625,7 @@ export async function buildVerifiedRigProviderImage(input: {
       }
       throw abortReason(input.signal);
     }
-    return await finalize({
+    const image = await finalize({
       ...building,
       provider: built.provider,
       status: "ready",
@@ -1231,14 +1636,22 @@ export async function buildVerifiedRigProviderImage(input: {
         ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
         : null,
       coldBootValidation: {
-        version: 1,
-        checkedAt: coldBootValidatedAt,
+        version: RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
+        checkedAt: coldBootVerification.checkedAt,
       },
       finishedAt: new Date().toISOString(),
       error: null,
     });
+    return {
+      image,
+      platformSurfaceValidation:
+        image.status === "ready" && image.imageId === built.imageId
+          ? coldBootVerification.platformSurfaceValidation
+          : null,
+    };
   } catch (error) {
     if (input.signal.aborted) throw abortReason(input.signal);
+    if (error instanceof RigProviderImageBuildDeadlineError) throw error;
     if (artifactId) {
       await markSandboxCheckpointArtifactDeletePending(input.db, {
         accountId: input.accountId,
@@ -1246,19 +1659,9 @@ export async function buildVerifiedRigProviderImage(input: {
         artifactId,
         reason: "rig_provider_image_build_failed",
       }).catch(() => false);
-    } else if (
-      backend === "modal" &&
-      builtIdentity &&
-      !(error instanceof SandboxCheckpointArtifactRegistrationConflictError)
-    ) {
-      await deleteModalCheckpointSnapshot(
-        input.settings,
-        builtIdentity.providerBindingKey,
-        builtIdentity.imageId,
-      ).catch(() => "not_found" as const);
     }
     const message = (error instanceof Error ? error.message : String(error)).slice(0, 2000);
-    return await finalize({
+    const image = await finalize({
       ...building,
       status: "failed",
       artifactId: null,
@@ -1269,6 +1672,7 @@ export async function buildVerifiedRigProviderImage(input: {
         retryable: true,
       },
     });
+    return { image, platformSurfaceValidation: null };
   }
 }
 
@@ -1339,9 +1743,33 @@ async function withRigVerificationActivityLifecycle<T>(
   }
 }
 
+export async function handleRigVersionVerificationActivityFailure(input: {
+  error: unknown;
+  terminalStateCommitted: boolean;
+  failVerification: (detail: string) => Promise<{ applied: boolean; stale: boolean }>;
+  recordFailureAudit: (detail: string) => Promise<void>;
+}): Promise<never> {
+  if (input.error instanceof RigVerificationLeaseUnavailableError) {
+    throw input.error;
+  }
+  const detail = input.error instanceof Error ? input.error.message : String(input.error);
+  if (!input.terminalStateCommitted) {
+    const failure = await input
+      .failVerification(detail)
+      .catch(() => ({ applied: false, stale: true }));
+    if (failure.applied) await input.recordFailureAudit(detail);
+  }
+  throw input.error;
+}
+
 export function createRigVerificationActivities(services: () => Promise<ControlActivityServices>) {
   return {
-    verifyRigChange: (input: { workspaceId: string; changeId: string }) =>
+    verifyRigChange: (input: {
+      workspaceId: string;
+      changeId: string;
+      attemptId: string;
+      executionGeneration: number;
+    }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
@@ -1350,20 +1778,44 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           input.workspaceId,
           input.changeId,
         );
+        if (
+          !(await isCurrentRigChangeVerificationAttempt(db, {
+            workspaceId: input.workspaceId,
+            changeId: change.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          }))
+        ) {
+          throw new Error(`Rig change verification attempt is stale: ${input.attemptId}`);
+        }
         const grant = systemGrant(rig);
         const startedAt = new Date().toISOString();
-        await beginRigChangeVerificationAttempt(db, input.workspaceId, change.id, {
-          startedAt,
-          allowAlreadyVerifying: true,
-        });
         await recordRigAuditEvent(db, {
           grant,
           action: "rig.verification.started",
           rigId: rig.id,
-          metadata: { changeId: change.id },
+          metadata: {
+            changeId: change.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          },
         });
 
-        const verification: Record<string, unknown> = { startedAt, checkResults: [] };
+        const verification: Record<string, unknown> = {
+          attemptId: input.attemptId,
+          executionGeneration: input.executionGeneration,
+          startedAt,
+          checkResults: [],
+        };
+        const settle = async (status: RigChange["status"]) =>
+          await updateRigChangeStatusForVerificationAttempt(
+            db,
+            input.workspaceId,
+            change.id,
+            input.attemptId,
+            input.executionGeneration,
+            { status, verification },
+          );
         try {
           const candidateVersion = candidateVersionForChange(baseVersion, change);
           const providerImageDefinition = providerImageDefinitionForChange(
@@ -1392,6 +1844,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               sandboxGroupId: change.id,
               rigVersionId: candidateVersion.id,
               sessionIdPrefix: `rig-verification-${change.id}`,
+              holderId: rigVerificationLeaseHolderId({
+                targetKind: "change",
+                targetId: change.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              }),
               lifecycle,
             },
             async (established, runContext) => {
@@ -1423,23 +1881,30 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 if (commandResult.exitCode !== 0) {
                   verification.finishedAt = new Date().toISOString();
                   verification.passed = false;
-                  const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                    status: "rejected",
-                    verification,
-                  });
+                  const settlement = await settle("rejected");
+                  if (!settlement.applied) return settlement.change;
                   await recordRigAuditEvent(db, {
                     grant,
                     action: "rig.verification.failed",
                     rigId: rig.id,
-                    metadata: { changeId: change.id, status: "rejected" },
+                    metadata: {
+                      changeId: change.id,
+                      status: "rejected",
+                      attemptId: input.attemptId,
+                      executionGeneration: input.executionGeneration,
+                    },
                   });
                   await recordRigAuditEvent(db, {
                     grant,
                     action: "rig.change.rejected",
                     rigId: rig.id,
-                    metadata: { changeId: change.id },
+                    metadata: {
+                      changeId: change.id,
+                      attemptId: input.attemptId,
+                      executionGeneration: input.executionGeneration,
+                    },
                   });
-                  return updated;
+                  return settlement.change;
                 }
               }
               const markerResult = await runCommand(
@@ -1460,6 +1925,18 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 runContext.commandRunner,
               );
               verification.platformCheckResults = platformCheckResults;
+              verification.platformSurfacePreflight = await runRigPlatformSurfaceValidation({
+                settings: runSettings,
+                db,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: change.id,
+                rigVersionId: candidateVersion.id,
+                providerImage: requiredRigVerificationProviderImage(runSettings),
+                providerImageId: observedProviderImageId(established),
+                established,
+                ownership: runContext.ownership,
+                lifecycle,
+              });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,
                 candidateVersion.checks,
@@ -1467,37 +1944,54 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 runContext.commandRunner,
               );
               verification.checkResults = checkResults;
-              const passed =
+              const checksPassed =
                 platformCheckResults.every((result) => result.exitCode === 0) &&
                 checkResults.every((result) => result.exitCode === 0);
-              if (passed) {
-                verification.providerImage = await buildVerifiedRigProviderImage({
-                  settings: runSettings,
-                  db,
-                  observability,
-                  accountId: rig.accountId,
-                  workspaceId: input.workspaceId,
-                  definition: providerImageDefinition,
-                  target: { kind: "change", id: change.id },
-                  established,
-                  ownership: runContext.ownership,
-                  lifecycle,
-                  signal: runContext.signal,
-                });
+              const providerImageBuild = checksPassed
+                ? await buildVerifiedRigProviderImage({
+                    settings: runSettings,
+                    db,
+                    observability,
+                    accountId: rig.accountId,
+                    workspaceId: input.workspaceId,
+                    definition: providerImageDefinition,
+                    target: { kind: "change", id: change.id },
+                    verificationAttemptId: input.attemptId,
+                    verificationExecutionGeneration: input.executionGeneration,
+                    established,
+                    ownership: runContext.ownership,
+                    runtimeManifest: runContext.trustedRuntimeManifest,
+                    runtimeAuthorityImageId: runContext.runtimeAuthorityImageId,
+                    lifecycle,
+                    signal: runContext.signal,
+                  })
+                : null;
+              if (providerImageBuild) {
+                verification.providerImage = providerImageBuild.image;
+                if (providerImageBuild.platformSurfaceValidation) {
+                  verification.platformSurfaceValidation =
+                    providerImageBuild.platformSurfaceValidation;
+                }
               }
+              const passed =
+                checksPassed &&
+                providerImageBuild?.image.status === "ready" &&
+                providerImageBuild.platformSurfaceValidation !== null;
               verification.finishedAt = new Date().toISOString();
               verification.passed = passed;
-              const classified = classifyRigVerificationOutcome({ kind: change.kind, passed });
+              const classified = classifyRigVerificationOutcome({
+                kind: change.kind,
+                passed,
+                infraError: checksPassed && !passed,
+              });
               if (classified.action === "auto_promote") {
                 // Keep the change `verifying` (NOT `proposed`) across the write→promote
                 // gap: promoteSetupAppendChange accepts `verifying`, and leaving it
                 // `verifying` keeps beginRigChangeVerificationAttempt blocking a
                 // concurrent /verify — resetting to `proposed` would reopen that race
                 // (a second run could reject a change whose first verification passed).
-                await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                  status: "verifying",
-                  verification,
-                });
+                const settlement = await settle("verifying");
+                if (!settlement.applied) return settlement.change;
                 const { change: merged } = await promoteSetupAppendChange({ db }, grant, rig, {
                   ...change,
                   verification,
@@ -1506,69 +2000,110 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                   grant,
                   action: "rig.verification.passed",
                   rigId: rig.id,
-                  metadata: { changeId: change.id },
+                  metadata: {
+                    changeId: change.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                  },
                 });
                 return merged;
               }
-              const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-                status: classified.status,
-                verification,
-              });
+              const settlement = await settle(classified.status);
+              if (!settlement.applied) return settlement.change;
               await recordRigAuditEvent(db, {
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
                 rigId: rig.id,
-                metadata: { changeId: change.id, status: classified.status },
+                metadata: {
+                  changeId: change.id,
+                  status: classified.status,
+                  attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
+                },
               });
               if (!passed) {
                 await recordRigAuditEvent(db, {
                   grant,
                   action: "rig.change.rejected",
                   rigId: rig.id,
-                  metadata: { changeId: change.id },
+                  metadata: {
+                    changeId: change.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                  },
                 });
               }
-              return updated;
+              return settlement.change;
             },
           );
         } catch (error) {
+          if (error instanceof RigVerificationLeaseUnavailableError) throw error;
           verification.finishedAt = new Date().toISOString();
           verification.passed = false;
           verification.error = error instanceof Error ? error.message : String(error);
-          const updated = await updateRigChangeStatus(db, input.workspaceId, change.id, {
-            status: "failed",
-            verification,
-          });
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.verification.failed",
-            rigId: rig.id,
-            metadata: { changeId: change.id, status: "failed" },
-          });
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.change.failed",
-            rigId: rig.id,
-            metadata: { changeId: change.id },
-          });
+          const settlement = await settle("failed");
+          if (settlement.applied) {
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.verification.failed",
+              rigId: rig.id,
+              metadata: {
+                changeId: change.id,
+                status: "failed",
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              },
+            });
+            await recordRigAuditEvent(db, {
+              grant,
+              action: "rig.change.failed",
+              rigId: rig.id,
+              metadata: {
+                changeId: change.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              },
+            });
+          }
           if (lifecycle.signal.aborted) throw abortReason(lifecycle.signal);
-          return updated;
+          return settlement.change;
         }
       }),
 
-    verifyRigVersion: (input: { workspaceId: string; versionId: string }) =>
+    verifyRigVersion: (input: {
+      workspaceId: string;
+      versionId: string;
+      attemptId: string;
+      executionGeneration: number;
+    }) =>
       withRigVerificationActivityLifecycle(async (lifecycle) => {
         const { settings, db, observability } = await services();
         throwIfAborted(lifecycle.signal);
         const { rig, version } = await loadVersionTarget(db, input.workspaceId, input.versionId);
+        if (
+          !(await isCurrentRigVersionVerificationAttempt(db, {
+            workspaceId: input.workspaceId,
+            rigId: rig.id,
+            versionId: version.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          }))
+        ) {
+          throw new Error(`Rig version verification attempt is stale: ${input.attemptId}`);
+        }
         const grant = systemGrant(rig);
         const startedAt = new Date().toISOString();
         await recordRigAuditEvent(db, {
           grant,
           action: "rig.verification.started",
           rigId: rig.id,
-          metadata: { versionId: version.id },
+          metadata: {
+            versionId: version.id,
+            attemptId: input.attemptId,
+            executionGeneration: input.executionGeneration,
+          },
         });
+        let terminalStateCommitted = false;
         try {
           const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
           const runSettings = settingsForRigVerification(settings, packRuntime, version.image);
@@ -1587,6 +2122,12 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
               sandboxGroupId: version.id,
               rigVersionId: version.id,
               sessionIdPrefix: `rig-version-verification-${version.id}`,
+              holderId: rigVerificationLeaseHolderId({
+                targetKind: "version",
+                targetId: version.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+              }),
               lifecycle,
             },
             async (established, runContext) => {
@@ -1622,16 +2163,28 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                 settings.rigSetupTimeoutMs,
                 runContext.commandRunner,
               );
+              const platformSurfacePreflight = await runRigPlatformSurfaceValidation({
+                settings: runSettings,
+                db,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: version.id,
+                rigVersionId: version.id,
+                providerImage: requiredRigVerificationProviderImage(runSettings),
+                providerImageId: observedProviderImageId(established),
+                established,
+                ownership: runContext.ownership,
+                lifecycle,
+              });
               const checkResults = await runRigChecks(
                 established.session as TurnSandboxCommandSession,
                 version.checks,
                 settings.rigSetupTimeoutMs,
                 runContext.commandRunner,
               );
-              const passed =
+              const checksPassed =
                 platformCheckResults.every((result) => result.exitCode === 0) &&
                 checkResults.every((result) => result.exitCode === 0);
-              const providerImage = passed
+              const providerImageBuild = checksPassed
                 ? await buildVerifiedRigProviderImage({
                     settings: runSettings,
                     db,
@@ -1641,32 +2194,102 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     existingVersionId: version.id,
                     definition: version,
                     target: { kind: "version", id: version.id },
+                    verificationAttemptId: input.attemptId,
+                    verificationExecutionGeneration: input.executionGeneration,
                     established,
                     ownership: runContext.ownership,
+                    runtimeManifest: runContext.trustedRuntimeManifest,
+                    runtimeAuthorityImageId: runContext.runtimeAuthorityImageId,
                     lifecycle,
                     signal: runContext.signal,
                   })
                 : null;
+              const providerImage = providerImageBuild?.image ?? null;
+              const platformSurfaceValidation =
+                providerImageBuild?.platformSurfaceValidation ?? null;
+              const passed =
+                checksPassed &&
+                providerImage?.status === "ready" &&
+                platformSurfaceValidation !== null;
+              const activation = passed
+                ? await completeRigVersionVerification(db, {
+                    workspaceId: input.workspaceId,
+                    rigId: rig.id,
+                    versionId: version.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                    receipt: platformSurfaceValidation,
+                  })
+                : null;
+              const failure = passed
+                ? null
+                : await failRigVersionVerification(db, {
+                    workspaceId: input.workspaceId,
+                    rigId: rig.id,
+                    versionId: version.id,
+                    attemptId: input.attemptId,
+                    executionGeneration: input.executionGeneration,
+                    error: checksPassed
+                      ? `immutable provider image validation did not pass (${providerImage?.error?.message ?? providerImage?.status ?? "no image result"})`
+                      : "one or more mandatory Rig checks failed",
+                  });
+              terminalStateCommitted = activation?.applied ?? failure?.applied ?? false;
+              const staleAttempt = activation?.applied === false || failure?.applied === false;
+              if (staleAttempt) {
+                return {
+                  versionId: version.id,
+                  passed,
+                  platformCheckResults,
+                  platformSurfacePreflight,
+                  platformSurfaceValidation,
+                  checkResults,
+                  providerImage,
+                  activated: false,
+                  stale: true,
+                };
+              }
               await recordRigAuditEvent(db, {
                 grant,
                 action: passed ? "rig.verification.passed" : "rig.verification.failed",
                 rigId: rig.id,
                 metadata: {
                   versionId: version.id,
+                  attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
                   startedAt,
                   finishedAt: new Date().toISOString(),
                   passed,
                   platformCheckResults,
+                  platformSurfacePreflight,
+                  platformSurfaceValidation,
                   checkResults,
                   providerImage,
+                  activated: activation?.activated ?? false,
+                  stale: activation?.stale ?? failure?.stale ?? false,
                 },
               });
+              if (activation?.activated) {
+                await recordRigAuditEvent(db, {
+                  grant,
+                  action: "rig.version.activated",
+                  rigId: rig.id,
+                  metadata: {
+                    versionId: version.id,
+                    version: version.version,
+                    verification: true,
+                  },
+                });
+              }
               return {
                 versionId: version.id,
                 passed,
                 platformCheckResults,
+                platformSurfacePreflight,
+                platformSurfaceValidation,
                 checkResults,
                 providerImage,
+                activated: activation?.activated ?? false,
+                stale: activation?.stale ?? failure?.stale ?? false,
               };
             },
           );
@@ -1675,20 +2298,34 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
           // rig.verification.failed so activeVersionHealth reflects the failed
           // re-run instead of staying stale, symmetric to verifyRigChange. Then
           // rethrow so the Temporal activity still surfaces the failure.
-          const detail = error instanceof Error ? error.message : String(error);
-          await recordRigAuditEvent(db, {
-            grant,
-            action: "rig.verification.failed",
-            rigId: rig.id,
-            metadata: {
-              versionId: version.id,
-              startedAt,
-              finishedAt: new Date().toISOString(),
-              passed: false,
-              error: detail,
-            },
+          return await handleRigVersionVerificationActivityFailure({
+            error,
+            terminalStateCommitted,
+            failVerification: async (detail) =>
+              await failRigVersionVerification(db, {
+                workspaceId: input.workspaceId,
+                rigId: rig.id,
+                versionId: version.id,
+                attemptId: input.attemptId,
+                executionGeneration: input.executionGeneration,
+                error: detail,
+              }),
+            recordFailureAudit: async (detail) =>
+              await recordRigAuditEvent(db, {
+                grant,
+                action: "rig.verification.failed",
+                rigId: rig.id,
+                metadata: {
+                  versionId: version.id,
+                  attemptId: input.attemptId,
+                  executionGeneration: input.executionGeneration,
+                  startedAt,
+                  finishedAt: new Date().toISOString(),
+                  passed: false,
+                  error: detail,
+                },
+              }),
           });
-          throw error;
         }
       }),
   };

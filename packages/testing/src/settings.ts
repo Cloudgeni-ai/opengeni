@@ -209,6 +209,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     sandboxBackend: "none",
     sandboxArtifactRuntimeEnabled: false,
     dockerImage: "opengeni-sandbox:local",
+    dockerImageId: undefined,
     dockerExposedPorts: "",
     dockerNetwork: undefined,
     modalAppName: "opengeni-sandbox",

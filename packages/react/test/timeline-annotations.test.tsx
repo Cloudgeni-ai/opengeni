@@ -87,6 +87,7 @@ async function waitFor(condition: () => boolean, message: string): Promise<void>
 
 describe("timeline annotations", () => {
   test("turns one same-message text selection into one exact draft annotation", async () => {
+    await import("../src/components/timeline-annotation-selection");
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
     const rendered = await renderComponent(
@@ -162,6 +163,7 @@ describe("timeline annotations", () => {
         focusAnnotationId="00000000-0000-4000-8000-000000000502"
         onUpdate={(_id, next) => (note = next)}
         onRemove={() => undefined}
+        onRevealSource={() => false}
       />,
     );
     const trigger = rendered.container.querySelector("button");

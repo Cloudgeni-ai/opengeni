@@ -736,6 +736,74 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(established.origin).toBe("created");
   });
 
+  test("a missing provider-immutable Docker image retries from the unchanged logical platform image", async () => {
+    const selectedImages: Array<{
+      logical: string | undefined;
+      immutable: string | undefined;
+    }> = [];
+    const createMetrics: Array<{
+      backend: string;
+      imageSource: "logical" | "provider_immutable";
+      outcome: "completed" | "failed";
+    }> = [];
+    const immutableImageId = `sha256:${"a".repeat(64)}`;
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni/platform:logical",
+      dockerImageId: immutableImageId,
+    });
+    const logicalFallbackSettings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "opengeni/platform:logical",
+      dockerImageId: undefined,
+    });
+
+    const established = await establishRuntimeSandboxSessionFromEnvelope(settings, null, {
+      sessionId: "sess-stale-docker-rig-image",
+      recovery: "create-or-restore",
+      environment: {},
+      logicalFallbackSettings,
+      clientFactory: (_backend, currentSettings) => {
+        selectedImages.push({
+          logical: currentSettings.dockerImage,
+          immutable: currentSettings.dockerImageId,
+        });
+        const providerImmutable = currentSettings.dockerImageId === immutableImageId;
+        return {
+          backendId: "docker",
+          async create() {
+            if (providerImmutable) throw { code: "RESOURCE_NOT_FOUND" };
+            return { state: { containerId: "docker-logical-fallback" } };
+          },
+        };
+      },
+      metrics: {
+        onSandboxCreate(input) {
+          createMetrics.push(input);
+        },
+      },
+    });
+
+    expect(selectedImages).toEqual([
+      { logical: "opengeni/platform:logical", immutable: immutableImageId },
+      { logical: "opengeni/platform:logical", immutable: undefined },
+    ]);
+    expect(createMetrics).toEqual([
+      expect.objectContaining({
+        backend: "docker",
+        imageSource: "provider_immutable",
+        outcome: "failed",
+      }),
+      expect.objectContaining({
+        backend: "docker",
+        imageSource: "logical",
+        outcome: "completed",
+      }),
+    ]);
+    expect(established.instanceId).toBe("docker-logical-fallback");
+    expect(established.origin).toBe("created");
+  });
+
   test("an OpenSandbox create throttle records the failed create and bounded API signal", async () => {
     const createMetrics: Array<{ backend: string; outcome: "completed" | "failed" }> = [];
     const throttles: Array<{ backend: string; operation: "create" | "renew" }> = [];

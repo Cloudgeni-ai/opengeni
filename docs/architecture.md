@@ -1141,7 +1141,40 @@ tokens, cloud login, attached files, or generated media.
 Rigs layer versioned setup and checks on the deployment-owned platform sandbox
 base; they cannot replace that base image. A verified provider-native Rig image
 is only a physical cold-create optimization and never changes the logical lease
-image, workspace archive, session snapshot, or credential authority.
+image, workspace archive, session snapshot, or credential authority. Docker and
+Modal both require independent cold-boot proof of the exact physical image;
+Modal additionally retains its exact provider-binding provenance, while Docker
+keeps its daemon-local image ID separate from the logical platform source fence.
+Initial and manager-authored direct versions are inserted inactive. Their
+verification worker uses one exact leased provider session to prove the
+interactive root Terminal, a real headed BrowserSession, and, when deployment
+policy enables it, a real ComputerSession with native image evidence and a
+benign action. Before the worker invokes any candidate shell command, the
+Docker or Modal adapter reads a bounded manifest of the exact platform helper,
+runtime, shell, and browser-engine bytes through its provider-owned filesystem
+boundary. A derived provider image must match the pristine deployment manifest
+before readiness or native validation can run. Native validation then rechecks
+the mutable candidate around every protected phase while trusted commands run
+inside fresh provider-owned sidecars booted from the pristine deployment
+runtime authority image. Terminal authority is terminated before a separate
+Browser/Computer controller authority is created, so candidate mutation or
+sidecar reuse cannot manufacture deployment-control-plane evidence. The receipt
+is fenced to lease epoch, workspace generation,
+provider instance, and Rig version. Activation persists that receipt and flips
+the version in one active-version-CAS transaction; deferred dispatch, enabled
+surface `unsupported`, binding drift, invalid evidence, and cleanup failure all
+leave the version inactive.
+
+Modal Rig image snapshot ownership is persisted before provider dispatch.
+Docker commits the exact verifier container under a deterministic request tag,
+validates its ownership labels and immutable daemon image ID, and reuses only
+that object after an acknowledgement-loss retry. Typed, authoritative provider
+refusals settle the cleanup obligation as terminal `build_failed`; timeout,
+cancellation, transport, malformed, and untyped failures remain
+`outcome_unknown` and may retry only the exact durable request against the
+original sandbox and provider binding. A late externally managed image can
+still move either state into bounded checkpoint garbage collection before
+source teardown.
 
 Sandbox snapshots and provider-native checkpoints are recovery artifacts, not
 session history. Capturing a workspace requires proof that no unaccounted writer

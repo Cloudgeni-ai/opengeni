@@ -821,6 +821,14 @@ const SettingsSchema = z.object({
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
   dockerImage: z.string().default("opengeni-sandbox:local"),
+  // Runtime-only provider-native immutable Docker image ID. Rig selection may
+  // set this on a cloned Settings value after parsing; it intentionally has no
+  // environment variable because `dockerImage` remains the deployment-owned
+  // logical source persisted on leases and used for content fencing.
+  dockerImageId: z
+    .string()
+    .regex(/^sha256:[0-9a-f]{64}$/u)
+    .optional(),
   // Explicit deployment contract: the configured base sandbox image contains
   // the verified, self-contained native artifact runtime at its fixed image
   // paths. Disabled by default so arbitrary/custom provider images never make

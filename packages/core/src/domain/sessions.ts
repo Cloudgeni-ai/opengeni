@@ -2192,9 +2192,9 @@ export async function createSessionForRequestWithOutcome(
   // promote never moves it. Rig-less (both null) when neither resolves, which is
   // byte-for-byte today's behavior (zero extra work, zero row change).
   //   - An EXPLICIT unknown/inactive rigId is a caller error → 422.
-  //   - A stale workspace-default rig (deleted → FK-nulled, or somehow with no
-  //     active version) degrades SILENTLY to rig-less: an operator-side default
-  //     must never brick every create in the workspace.
+  //   - An unknown/inactive explicit or inherited rig is a caller/operator
+  //     configuration error → 422. Never silently create a different rig-less
+  //     session than the selected workspace policy requested.
   const requestedRigId =
     payload.rigId === undefined ? await getWorkspaceDefaultRigId(db, workspaceId) : payload.rigId;
   let frozenRigId: string | null = null;
@@ -2202,14 +2202,11 @@ export async function createSessionForRequestWithOutcome(
   if (requestedRigId) {
     const rig = await getRig(db, grant, requestedRigId);
     if (!rig || !rig.activeVersion) {
-      if (payload.rigId) {
-        throw new HTTPException(422, {
-          message: rig
-            ? `rig ${payload.rigId} has no active version to bind`
-            : `unknown rigId: ${payload.rigId}`,
-        });
-      }
-      // else: workspace-default fallback that no longer resolves → rig-less.
+      throw new HTTPException(422, {
+        message: rig
+          ? `rig ${requestedRigId} has no active version to bind`
+          : `unknown rigId: ${requestedRigId}`,
+      });
     } else {
       for (const defaultVariableSetId of new Set(rig.activeVersion.defaultVariableSetIds)) {
         await validateVariableSetAttachment(

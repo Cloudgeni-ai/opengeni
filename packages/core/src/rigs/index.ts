@@ -4,10 +4,13 @@
 // the raw RLS-scoped persistence lives in @opengeni/db. M4 adds verification /
 // auto-merge / promotion on top of the change substrate created here.
 
+import { randomUUID } from "node:crypto";
+import { RigProviderImage as RigProviderImageContract } from "@opengeni/contracts";
+import { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
 import type {
   AccessGrant,
   CreateRigRequest,
-  RigDefinitionEditPayload,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
   Rig,
   RigChange,
@@ -27,19 +30,25 @@ import {
   getRigChange,
   getRigVersion,
   getVariableSet,
+  listPendingInactiveRigVersionVerificationAttempts,
   listRigChanges,
   listRigVersions,
   recordAuditEvent,
   revokeScopedRig,
   RigActiveVersionChangedError,
+  RigChangeVerificationAttemptStaleError,
   RigChangeTransitionError,
+  RigVersionVerificationRequiredError,
   updateScopedRig,
   type Database,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import { boundedParallelMap } from "@opengeni/runtime/mcp-network";
 import { requirePermission } from "../access";
-import { rigProviderImagesFromVerification } from "./provider-images";
+import {
+  rigProviderImageMatchesSurfaceValidation,
+  rigProviderImagesFromVerification,
+} from "./provider-images";
 
 export * from "./provider-images";
 
@@ -48,6 +57,20 @@ export const MAX_CHECKS_PER_RIG = 100;
 export const MAX_CREDENTIAL_HOOKS_PER_RIG = 50;
 export const MAX_DEFAULT_VARIABLE_SETS_PER_RIG = 25;
 export const RIG_DEFAULT_VARIABLE_SET_LOAD_CONCURRENCY = 4;
+
+export class RigDeferredVerificationRecoveryError extends Error {
+  constructor(
+    readonly reason: "not_found" | "ambiguous",
+    readonly candidateCount: number,
+  ) {
+    super(
+      reason === "ambiguous"
+        ? "More than one inactive Rig version has a pending verification attempt; a manager must choose the exact version."
+        : "This Rig has no inactive pending verification attempt to recover.",
+    );
+    this.name = "RigDeferredVerificationRecoveryError";
+  }
+}
 
 type VariableSetEnvironment = { values: Record<string, string> } | null;
 
@@ -92,6 +115,7 @@ type RigAuditAction =
   | "rig.verification.started"
   | "rig.verification.passed"
   | "rig.verification.failed"
+  | "rig.version.verification.requested"
   | "rig.version.activated"
   | "rig.version.promoted";
 
@@ -260,11 +284,27 @@ export async function createRigForApi(
       changelog: "Initial version",
       createdBy,
     },
+    initialVerification: {
+      status: "pending",
+      attemptId: randomUUID(),
+      executionGeneration: 1,
+      expectedActiveVersionId: null,
+      requestedAt: new Date().toISOString(),
+    },
+    activateInitialVersion: false,
   });
+  const [initialVersion] = await listRigVersions(deps.db, rig.workspaceId, rig.id);
+  if (!initialVersion) throw new Error("Failed to load initial rig version");
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.created",
     rigId: rig.id,
+  });
+  await recordRigAuditEvent(deps.db, {
+    grant,
+    action: "rig.version.verification.requested",
+    rigId: rig.id,
+    metadata: { versionId: initialVersion.id, version: initialVersion.version, initial: true },
   });
   return rig;
 }
@@ -400,6 +440,53 @@ export function appendRigSetupCommand(
   return base ? `${base}\n${command}` : command;
 }
 
+function requirePlatformSurfaceValidation(change: RigChange) {
+  if (change.verification?.passed !== true) {
+    throw new HTTPException(422, {
+      message: "rig change must pass verification before promote",
+    });
+  }
+  const parsed = RigPlatformSurfaceValidationReceipt.safeParse(
+    change.verification.platformSurfaceValidation,
+  );
+  const providerImage = RigProviderImageContract.safeParse(change.verification.providerImage);
+  if (
+    !parsed.success ||
+    !providerImage.success ||
+    !rigProviderImageMatchesSurfaceValidation(providerImage.data, parsed.data, change.id, "change")
+  ) {
+    throw new HTTPException(422, {
+      message:
+        "rig change has no exact immutable-provider-image platform-surface validation receipt",
+    });
+  }
+  return parsed.data;
+}
+
+function requireRigChangeVerificationAttemptId(change: RigChange): string {
+  const attemptId = change.verification?.attemptId;
+  if (typeof attemptId !== "string") {
+    throw new HTTPException(422, {
+      message: "rig change has no durable verification attempt identity",
+    });
+  }
+  return attemptId;
+}
+
+function requireRigChangeVerificationExecutionGeneration(change: RigChange): number {
+  const executionGeneration = change.verification?.executionGeneration;
+  if (
+    typeof executionGeneration !== "number" ||
+    !Number.isInteger(executionGeneration) ||
+    executionGeneration < 1
+  ) {
+    // Verification records committed before execution generations existed are
+    // generation one by definition.
+    return 1;
+  }
+  return executionGeneration;
+}
+
 async function promoteChangeWithActiveCas(
   deps: RigServices,
   workspaceId: string,
@@ -413,6 +500,11 @@ async function promoteChangeWithActiveCas(
     if (error instanceof RigActiveVersionChangedError) {
       throw new HTTPException(409, {
         message: `rig moved since this change was verified (base ${error.expectedVersionId}, now ${error.actualVersionId ?? "none"}); re-verify before promoting`,
+      });
+    }
+    if (error instanceof RigChangeVerificationAttemptStaleError) {
+      throw new HTTPException(409, {
+        message: "rig change verification was superseded; re-verify before promoting",
       });
     }
     if (error instanceof RigChangeTransitionError) {
@@ -441,6 +533,7 @@ export async function promoteSetupAppendChange(
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
+  requirePlatformSurfaceValidation(change);
   const base = await getRigVersion(deps.db, rig.workspaceId, rig.id, change.baseVersionId);
   if (!base) {
     throw new HTTPException(404, { message: "base rig version not found" });
@@ -465,13 +558,20 @@ export async function promoteSetupAppendChange(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
+      expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
+      expectedVerificationExecutionGeneration:
+        requireRigChangeVerificationExecutionGeneration(change),
       ...nextDefinition,
       changelog:
         typeof payload.note === "string" && payload.note.trim()
           ? payload.note
           : "Verified setup append",
       createdBy: change.proposedBy ?? rigActorForGrant(grant),
-      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
+      providerImages: rigProviderImagesFromVerification(
+        change.verification,
+        nextDefinition,
+        change.id,
+      ),
     },
   );
   await recordRigAuditEvent(deps.db, {
@@ -513,11 +613,7 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
       message: `rig change is ${change.status}; cannot promote`,
     });
   }
-  if (change.verification?.passed !== true) {
-    throw new HTTPException(422, {
-      message: "definition_edit change must pass verification before promote",
-    });
-  }
+  requirePlatformSurfaceValidation(change);
   if (!change.baseVersionId) {
     throw new HTTPException(422, { message: "rig change has no base version" });
   }
@@ -551,13 +647,20 @@ export async function promoteVerifiedDefinitionEditChangeForApi(
     change.id,
     {
       expectedActiveVersionId: change.baseVersionId,
+      expectedVerificationAttemptId: requireRigChangeVerificationAttemptId(change),
+      expectedVerificationExecutionGeneration:
+        requireRigChangeVerificationExecutionGeneration(change),
       ...nextDefinition,
       changelog:
         typeof payload.changelog === "string" && payload.changelog.trim()
           ? payload.changelog
           : "Verified definition edit",
       createdBy: rigActorForGrant(grant),
-      providerImages: rigProviderImagesFromVerification(change.verification, nextDefinition),
+      providerImages: rigProviderImagesFromVerification(
+        change.verification,
+        nextDefinition,
+        change.id,
+      ),
     },
   );
   await recordRigAuditEvent(deps.db, {
@@ -587,11 +690,8 @@ export async function createRigVersionForApi(
   deps: RigServices,
   grant: AccessGrant,
   rig: Rig,
-  payload: RigDefinitionEditPayload,
+  payload: CreateRigVersionRequest,
 ): Promise<RigVersion> {
-  if (!rig.activeVersion) {
-    throw new HTTPException(422, { message: "rig has no active version" });
-  }
   assertUniqueCheckNames(payload.checks);
   await assertVariableSetsExist(
     deps.db,
@@ -599,25 +699,88 @@ export async function createRigVersionForApi(
     rig.scope,
     payload.defaultVariableSetIds ?? undefined,
   );
-  const base = rig.activeVersion;
-  const version = await createRigVersion(
-    deps.db,
-    rig.workspaceId,
-    rig.id,
-    {
-      image: null,
-      setupScript: payload.setupScript === undefined ? base.setupScript : payload.setupScript,
-      checks: payload.checks ?? base.checks,
-      credentialHooks: payload.credentialHooks ?? base.credentialHooks,
-      defaultVariableSetIds: payload.defaultVariableSetIds ?? base.defaultVariableSetIds,
-      changelog: payload.changelog ?? "Manager-created version",
-      createdBy: rigActorForGrant(grant),
-    },
-    { activate: true },
-  );
+  let base: RigVersion | null = rig.activeVersion;
+  let expectedActiveVersionId: string | null;
+  if (rig.activeVersion) {
+    if (payload.baseVersionId && payload.baseVersionId !== rig.activeVersion.id) {
+      throw new HTTPException(422, {
+        message: "a Rig with an active version must inherit from that active version",
+      });
+    }
+    expectedActiveVersionId = rig.activeVersion.id;
+    if (
+      Object.hasOwn(payload, "expectedActiveVersionId") &&
+      payload.expectedActiveVersionId !== expectedActiveVersionId
+    ) {
+      throw new HTTPException(409, { message: "the Rig active version changed" });
+    }
+  } else {
+    if (
+      !Object.hasOwn(payload, "expectedActiveVersionId") ||
+      payload.expectedActiveVersionId !== null
+    ) {
+      throw new HTTPException(422, {
+        message: "replacement versions require expectedActiveVersionId: null",
+      });
+    }
+    expectedActiveVersionId = null;
+    if (payload.baseVersionId) {
+      base = await getRigVersion(deps.db, rig.workspaceId, rig.id, payload.baseVersionId);
+      if (!base) throw new HTTPException(422, { message: "replacement base version not found" });
+      if (base.active) {
+        throw new HTTPException(422, { message: "replacement base version must be inactive" });
+      }
+    } else {
+      const required = [
+        "setupScript",
+        "checks",
+        "credentialHooks",
+        "defaultVariableSetIds",
+      ] as const;
+      const missing = required.filter((field) => !Object.hasOwn(payload, field));
+      if (missing.length > 0) {
+        throw new HTTPException(422, {
+          message: `complete replacement definition required; missing ${missing.join(", ")}`,
+        });
+      }
+    }
+  }
+  let version: RigVersion;
+  try {
+    version = await createRigVersion(
+      deps.db,
+      rig.workspaceId,
+      rig.id,
+      {
+        image: null,
+        setupScript:
+          payload.setupScript === undefined ? (base?.setupScript ?? null) : payload.setupScript,
+        checks: payload.checks ?? base?.checks ?? [],
+        credentialHooks: payload.credentialHooks ?? base?.credentialHooks ?? [],
+        defaultVariableSetIds: payload.defaultVariableSetIds ?? base?.defaultVariableSetIds ?? [],
+        changelog: payload.changelog ?? "Manager-created version",
+        createdBy: rigActorForGrant(grant),
+      },
+      {
+        activate: false,
+        expectedActiveVersionId,
+        verification: {
+          status: "pending",
+          attemptId: randomUUID(),
+          expectedActiveVersionId,
+          requestedAt: new Date().toISOString(),
+        },
+      },
+    );
+  } catch (error) {
+    if (error instanceof RigActiveVersionChangedError) {
+      throw new HTTPException(409, { message: "the Rig active version changed" });
+    }
+    throw error;
+  }
   await recordRigAuditEvent(deps.db, {
     grant,
-    action: "rig.version.promoted",
+    action: "rig.version.verification.requested",
     rigId: rig.id,
     metadata: { versionId: version.id, version: version.version, direct: true },
   });
@@ -633,7 +796,17 @@ export async function activateRigVersionForApi(
   versionId: string,
 ): Promise<RigVersion> {
   const workspaceId = rig.workspaceId;
-  const version = await activateRigVersion(deps.db, workspaceId, rig.id, versionId);
+  let version: RigVersion;
+  try {
+    version = await activateRigVersion(deps.db, workspaceId, rig.id, versionId, {
+      requireVerification: true,
+    });
+  } catch (error) {
+    if (error instanceof RigVersionVerificationRequiredError) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
+  }
   await recordRigAuditEvent(deps.db, {
     grant,
     action: "rig.version.activated",
@@ -651,6 +824,29 @@ export async function listRigVersionsForApi(
   rigId: string,
 ): Promise<RigVersion[]> {
   return await listRigVersions(deps.db, workspaceId, rigId);
+}
+
+/**
+ * Resolve only a uniquely pending inactive version. The caller cannot select a
+ * historical version, and this read creates no attempt or activation state.
+ */
+export async function resolveDeferredRigVersionVerificationRecovery(
+  deps: RigServices,
+  workspaceId: string,
+  rigId: string,
+) {
+  const candidates = await listPendingInactiveRigVersionVerificationAttempts(
+    deps.db,
+    workspaceId,
+    rigId,
+  );
+  if (candidates.length === 0) {
+    throw new RigDeferredVerificationRecoveryError("not_found", 0);
+  }
+  if (candidates.length !== 1) {
+    throw new RigDeferredVerificationRecoveryError("ambiguous", candidates.length);
+  }
+  return candidates[0]!;
 }
 
 export async function listRigChangesForApi(

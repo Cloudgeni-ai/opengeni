@@ -100,8 +100,10 @@ export {
 } from "./errors";
 export {
   PROVIDER_REGISTRY,
+  attachProviderTrustedRigPlatformSurface,
   assertProviderRegistryInvariants,
   buildImmutableProviderImage,
+  inspectProviderTrustedRigPlatformRuntime,
   isProviderApiThrottleError,
   prepareProviderForTeardownAfterCapture,
   providerSupportsImmutableImageBuild,
@@ -112,10 +114,26 @@ export {
   type ProviderExactResumeMode,
   type ProviderImmutableImageBuildInput,
   type ProviderImmutableImageBuildResult,
+  type ProviderTrustedRigPlatformRuntimeInspectionInput,
+  type ProviderTrustedRigPlatformSurfaceInput,
   type ProviderExpirationRenewalInput,
   type ProviderWorkspaceCapturePolicy,
   type ProviderWorkspaceCaptureTakeover,
+  TRUSTED_RIG_PLATFORM_RUNTIME_MANIFEST_VERSION,
+  assertTrustedRigPlatformRuntimeManifest,
+  assertTrustedRigPlatformRuntimeMatches,
+  captureTrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifest,
+  type TrustedRigPlatformRuntimeManifestEntry,
+  type TrustedRigPlatformRuntimePathMetadata,
+  type TrustedRigPlatformRuntimePathType,
 } from "./providers";
+export {
+  ModalImmutableProviderImageBuildError,
+  classifyModalImmutableProviderImageBuildFailure,
+  recoverModalImmutableProviderImageBuild,
+  type ModalImmutableProviderImageBuildFailureDisposition,
+} from "./providers/modal";
 export {
   classifyProviderSandboxFailure,
   isProviderSandboxGoneDuringRoutedOperation,
@@ -273,28 +291,38 @@ export {
   BrowserControlSessionClient,
   BrowserControlTransportError,
   BrowserControlUnsupportedError,
+  ComputerControlSessionClient,
   ComputerFrameEvidenceMismatchError,
   decodeComputerControlFrameMetadataHeader,
   provisionBrowserControlClient,
   validateComputerControlFrameEvidence,
   type BrowserControlPlacementSession,
+  type BrowserControlRequestOptions,
   type BrowserStateDownloadGrant,
   type BrowserStateUploadGrant,
   type BrowserViewGrant,
   type CapturePlacementBrowserStateInput,
+  type ComputerControlFrame,
+  type CreatePlacementComputerSessionInput,
   type CreatePlacementBrowserSessionInput,
+  type PlacementComputerSession,
+  type PlacementComputerSessionReference,
   type PlacementBrowserSession,
   type PlacementBrowserSessionReference,
   type PlacementBrowserNetworkRoute,
   type PlacementBrowserTransport,
   type PlacementBrowserStateCaptureReceipt,
-  type ComputerControlFrame,
   type ComputerControlFrameMetadata,
   type ComputerFrameEvidenceMismatchReason,
   type ExpectedComputerFrameEvidence,
   type ProvisionBrowserControlClientInput,
   type ProvisionBrowserControlClientResult,
   type RestorePlacementBrowserStateInput,
+  type TrustedRigPlatformSurface,
+  type TrustedRigPlatformSurfaceBinding,
+  type TrustedRigPlatformSurfaceController,
+  type TrustedRigPlatformSurfaceOperation,
+  type TrustedRigPlatformTerminalProbe,
 } from "./browser-control-client";
 
 // Host-owned rotating run credentials. Material lives outside the persisted
@@ -1750,7 +1778,10 @@ export async function establishSandboxSessionFromEnvelope(
   const backend =
     opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
   const createImageSource =
-    backend === "modal" && settings.modalImageId ? "provider_immutable" : "logical";
+    (backend === "modal" && settings.modalImageId) ||
+    (backend === "docker" && settings.dockerImageId)
+      ? "provider_immutable"
+      : "logical";
   const environment = opts.environment ?? collectSandboxEnvironment(settings);
   // Every fresh-create caller crosses this one async boundary, including API
   // interaction endpoints that do not run inside the turn worker. Resolve a
@@ -1879,14 +1910,18 @@ export async function establishSandboxSessionFromEnvelope(
       );
       if (
         createImageSource !== "provider_immutable" ||
-        backend !== "modal" ||
+        (backend !== "modal" && backend !== "docker") ||
         !isProviderSandboxNotFoundError(restoreClient.backendId, error)
       ) {
         throw error;
       }
       const fallbackBaseSettings =
         opts.logicalFallbackSettings ??
-        (settings.modalImageRef ? { ...settings, modalImageId: undefined } : null);
+        (backend === "modal" && settings.modalImageRef
+          ? { ...settings, modalImageId: undefined }
+          : backend === "docker" && settings.dockerImage
+            ? { ...settings, dockerImageId: undefined }
+            : null);
       if (!fallbackBaseSettings) {
         // An ID-only logical base is supported. Without the exact pre-selection
         // settings, clearing the optimized ID would silently boot Modal's
@@ -1898,7 +1933,7 @@ export async function establishSandboxSessionFromEnvelope(
         fallbackBaseSettings,
         workspaceArchive,
       );
-      await ensureModalRegistryImage(fallbackSettings);
+      if (backend === "modal") await ensureModalRegistryImage(fallbackSettings);
       const fallbackClient = (
         opts.clientFactory
           ? opts.clientFactory(backend, fallbackSettings, environment)
@@ -1907,7 +1942,7 @@ export async function establishSandboxSessionFromEnvelope(
       if (!fallbackClient?.create) {
         throw new SandboxConfigError(
           backend,
-          "Modal logical-image fallback does not support fresh creation",
+          `${backend} logical-image fallback does not support fresh creation`,
         );
       }
       const fallbackStarted = Date.now();

@@ -62,6 +62,7 @@ import {
 import {
   countVariableSets,
   beginRigChangeVerificationAttempt,
+  beginRigVersionVerificationAttempt,
   createVariableSet,
   decryptVariableSetValue,
   encryptVariableSetValue,
@@ -181,7 +182,9 @@ import {
 } from "../integrations/social-api";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
+  createRigVersionForApi,
   proposeRigChangeForApi,
+  resolveDeferredRigVersionVerificationRecovery,
   requireRigChangeForApi,
   requireRigForApi,
   assertAllowedVariableSetVariableName,
@@ -492,6 +495,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
   rig_verify: { allOf: ["rigs:use"] },
+  rig_create_version: { allOf: ["rigs:manage"] },
   rig_promote: { allOf: ["rigs:manage"] },
   sessions_list: { allOf: ["sessions:read"] },
   session_get: { allOf: ["sessions:read"] },
@@ -4070,12 +4074,12 @@ async function beginMcpRigVerificationAttempt(
   }
 }
 
-function verificationAttempt(change: {
-  verification?: Record<string, unknown> | null;
-}): number | string {
-  return typeof change.verification?.attempt === "number"
-    ? change.verification.attempt
-    : crypto.randomUUID();
+function verificationAttempt(change: { verification?: Record<string, unknown> | null }): string {
+  const attemptId = change.verification?.attemptId;
+  if (typeof attemptId !== "string") {
+    throw new Error("rig change verification attempt was not persisted");
+  }
+  return attemptId;
 }
 
 function registerRigTools(
@@ -4173,6 +4177,7 @@ function registerRigTools(
           await deps.workflowClient.startRigVerification({
             workspaceId: rig.workspaceId,
             changeId: change.id,
+            attemptId: attempt,
             workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
           });
         } catch {
@@ -4229,14 +4234,18 @@ function registerRigTools(
       "rig_verify",
       {
         description:
-          "Trigger rig verification. Pass changeId for a proposed change, or omit it to re-verify the active version's checks.",
+          "Trigger rig verification. Pass changeId for a proposed change, recoverDeferredVersion=true to resume the one unique inactive pending version, or omit both to re-verify the active version's checks.",
         inputSchema: {
           rigId: z4.string().uuid(),
           changeId: z4.string().uuid().optional(),
+          recoverDeferredVersion: z4.boolean().optional(),
         },
       },
-      async ({ rigId, changeId }) => {
+      async ({ rigId, changeId, recoverDeferredVersion }) => {
         const rig = await requireMutableRig(rigId);
+        if (changeId && recoverDeferredVersion) {
+          throw new Error("changeId and recoverDeferredVersion are mutually exclusive");
+        }
         if (changeId) {
           const change = await requireRigChangeForApi(deps.db, rig.workspaceId, rig.id, changeId);
           const verifying = await beginMcpRigVerificationAttempt(deps, rig.workspaceId, change.id);
@@ -4245,6 +4254,7 @@ function registerRigTools(
             await deps.workflowClient.startRigVerification({
               workspaceId: rig.workspaceId,
               changeId: change.id,
+              attemptId: attempt,
               workflowId: `rig-verification-change-${change.id}-attempt-${attempt}`,
             });
           } catch {
@@ -4298,20 +4308,133 @@ function registerRigTools(
             }),
           );
         }
+        if (recoverDeferredVersion) {
+          const recovery = await resolveDeferredRigVersionVerificationRecovery(
+            { db: deps.db },
+            rig.workspaceId,
+            rig.id,
+          );
+          try {
+            await deps.workflowClient.startRigVerification({
+              workspaceId: rig.workspaceId,
+              versionId: recovery.versionId,
+              attemptId: recovery.attemptId,
+              workflowId: `rig-verification-version-${recovery.versionId}-attempt-${recovery.attemptId}`,
+            });
+          } catch {
+            return json(
+              mcpMutationReceipt({
+                operation: "rig_verify",
+                committed: true,
+                outcome: "partial_failure",
+                changed: false,
+                resource: {
+                  type: "rig_version",
+                  id: recovery.versionId,
+                  version: recovery.version,
+                  state: "verification_pending",
+                },
+                relatedResources: [{ type: "rig", id: rig.id }],
+                idempotency: { status: "unknown" },
+                partialFailure: {
+                  stage: "verification_workflow_start",
+                  retryable: true,
+                },
+                warnings: [
+                  "The pending version and attempt are unchanged, but verification workflow dispatch could not be confirmed. Retry with recoverDeferredVersion=true.",
+                ],
+                facts: {
+                  verificationAttempt: recovery.attemptId,
+                  expectedActiveVersionId: recovery.expectedActiveVersionId,
+                },
+                nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+              }),
+            );
+          }
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_verify",
+              committed: true,
+              outcome: "accepted",
+              changed: false,
+              resource: {
+                type: "rig_version",
+                id: recovery.versionId,
+                version: recovery.version,
+                state: "verification_pending",
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              idempotency: { status: "applied" },
+              facts: {
+                verificationAttempt: recovery.attemptId,
+                expectedActiveVersionId: recovery.expectedActiveVersionId,
+              },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
+        }
         if (!rig.activeVersion) {
           throw new Error("rig has no active version");
         }
-        await deps.workflowClient.startRigVerification({
-          workspaceId: rig.workspaceId,
-          versionId: rig.activeVersion.id,
-          workflowId: `rig-verification-version-${rig.activeVersion.id}-${crypto.randomUUID()}`,
-        });
+        const verificationGrant = await resourceGrant();
+        const versionAttempt = await beginRigVersionVerificationAttempt(
+          deps.db,
+          {
+            workspaceId: rig.workspaceId,
+            rigId: rig.id,
+            versionId: rig.activeVersion.id,
+          },
+          {
+            allowAlreadyPending: true,
+            audit: {
+              accountId: verificationGrant.accountId,
+              subjectId: verificationGrant.subjectId,
+            },
+          },
+        );
+        try {
+          await deps.workflowClient.startRigVerification({
+            workspaceId: rig.workspaceId,
+            versionId: rig.activeVersion.id,
+            attemptId: versionAttempt.attemptId,
+            workflowId: `rig-verification-version-${rig.activeVersion.id}-attempt-${versionAttempt.attemptId}`,
+          });
+        } catch {
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_verify",
+              committed: true,
+              outcome: "partial_failure",
+              changed: !versionAttempt.reused,
+              resource: {
+                type: "rig_version",
+                id: rig.activeVersion.id,
+                version: rig.activeVersion.version,
+                state: "verification_pending",
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              idempotency: { status: "unknown" },
+              partialFailure: {
+                stage: "verification_workflow_start",
+                retryable: true,
+              },
+              warnings: [
+                "The verification attempt is committed and pending, but workflow dispatch could not be confirmed. Retry rig_verify; it will reuse the same pending attempt.",
+              ],
+              facts: {
+                verificationAttempt: versionAttempt.attemptId,
+                expectedActiveVersionId: versionAttempt.expectedActiveVersionId,
+              },
+              nextAction: { tool: "rig_verify", arguments: { rigId: rig.id } },
+            }),
+          );
+        }
         return json(
           mcpMutationReceipt({
             operation: "rig_verify",
             committed: true,
             outcome: "accepted",
-            changed: true,
+            changed: !versionAttempt.reused,
             resource: {
               type: "rig_version",
               id: rig.activeVersion.id,
@@ -4320,6 +4443,7 @@ function registerRigTools(
             },
             relatedResources: [{ type: "rig", id: rig.id }],
             idempotency: { status: "not_supported" },
+            facts: { verificationAttempt: versionAttempt.attemptId },
             nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
           }),
         );
@@ -4328,6 +4452,99 @@ function registerRigTools(
   }
 
   if (can("rigs:manage")) {
+    server.registerTool(
+      "rig_create_version",
+      {
+        description:
+          "Create an inactive manager-authored Rig version. For a Rig with no active version, pass expectedActiveVersionId=null and either baseVersionId or every definition field.",
+        inputSchema: {
+          rigId: z4.string().uuid(),
+          baseVersionId: z4.string().uuid().optional(),
+          expectedActiveVersionId: z4.string().uuid().nullable().optional(),
+          setupScript: z4
+            .string()
+            .max(1024 * 1024)
+            .nullable()
+            .optional(),
+          checks: z4
+            .array(
+              z4.object({
+                name: z4.string().min(1).max(120),
+                command: z4.string().min(1).max(8192),
+              }),
+            )
+            .max(100)
+            .optional(),
+          credentialHooks: z4.array(z4.string().min(1).max(200)).max(50).optional(),
+          defaultVariableSetIds: z4.array(z4.string().uuid()).max(25).optional(),
+          changelog: z4.string().max(4096).nullable().optional(),
+        },
+      },
+      async ({ rigId, ...request }) => {
+        const rig = await requireMutableRig(rigId);
+        const originGrant = { ...(await resourceGrant()), workspaceId: rig.workspaceId };
+        const version = await createRigVersionForApi({ db: deps.db }, originGrant, rig, request);
+        try {
+          const attempt = await beginRigVersionVerificationAttempt(
+            deps.db,
+            { workspaceId: rig.workspaceId, rigId: rig.id, versionId: version.id },
+            { allowAlreadyPending: true },
+          );
+          await deps.workflowClient.startRigVerification({
+            workspaceId: rig.workspaceId,
+            versionId: version.id,
+            attemptId: attempt.attemptId,
+            workflowId: `rig-verification-version-${version.id}-attempt-${attempt.attemptId}`,
+          });
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_create_version",
+              committed: true,
+              outcome: "created",
+              changed: true,
+              resource: {
+                type: "rig_version",
+                id: version.id,
+                version: version.version,
+                state: "verification_pending",
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: version.createdAt,
+              idempotency: { status: "not_supported" },
+              facts: { verificationAttempt: attempt.attemptId },
+              nextAction: { tool: "rig_get", arguments: { rigId: rig.id } },
+            }),
+          );
+        } catch {
+          return json(
+            mcpMutationReceipt({
+              operation: "rig_create_version",
+              committed: true,
+              outcome: "partial_failure",
+              changed: true,
+              resource: {
+                type: "rig_version",
+                id: version.id,
+                version: version.version,
+                state: "verification_pending",
+              },
+              relatedResources: [{ type: "rig", id: rig.id }],
+              timestamp: version.createdAt,
+              idempotency: { status: "unknown" },
+              partialFailure: { stage: "verification_workflow_start", retryable: true },
+              warnings: [
+                "The replacement version committed, but verification dispatch could not be confirmed.",
+              ],
+              nextAction: {
+                tool: "rig_verify",
+                arguments: { rigId: rig.id, recoverDeferredVersion: true },
+              },
+            }),
+          );
+        }
+      },
+    );
+
     server.registerTool(
       "rig_promote",
       {

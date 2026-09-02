@@ -2887,6 +2887,7 @@ export type FirstPartyMcpToolName =
   | "rig_get"
   | "rig_propose_change"
   | "rig_verify"
+  | "rig_create_version"
   | "rig_promote"
   | "sessions_list"
   | "session_get"
@@ -5152,7 +5153,7 @@ export type RigProviderImage = {
   providerBindingKeyHash: string | null;
   coldBootValidation?:
     | {
-        version: 1;
+        version: 1 | 2 | 3;
         checkedAt: string;
       }
     | undefined;
@@ -5183,6 +5184,7 @@ export type RigVersion = {
   providerImages: Partial<Record<SandboxBackend, RigProviderImage>>;
   createdBy: string | null;
   active: boolean;
+  verificationStatus?: "unverified" | "pending" | "passed" | "failed" | undefined;
   createdAt: string;
 };
 
@@ -5258,6 +5260,8 @@ export type RigCheckResult = {
 };
 
 export type RigChangeVerification = {
+  attemptId?: string | undefined;
+  attempt?: number | undefined;
   startedAt?: string | undefined;
   finishedAt?: string | undefined;
   log?: string | undefined;
@@ -5308,6 +5312,11 @@ export type RigDefinitionEditPayload = {
   credentialHooks?: string[] | undefined;
   defaultVariableSetIds?: string[] | undefined;
   changelog?: string | null | undefined;
+};
+
+export type CreateRigVersionRequest = RigDefinitionEditPayload & {
+  baseVersionId?: string | undefined;
+  expectedActiveVersionId?: string | null | undefined;
 };
 
 export type ProposeRigChangeRequest =

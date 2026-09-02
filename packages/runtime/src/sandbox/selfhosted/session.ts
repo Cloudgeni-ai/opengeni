@@ -1325,22 +1325,37 @@ export class SelfhostedSession {
     content: string | Uint8Array;
     createParents?: boolean;
     runAs?: string;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }): Promise<number> {
+    args.signal?.throwIfAborted();
     const path = selfhostedPlacementPrivatePath(args.path);
     const content = typeof args.content === "string" ? encoder.encode(args.content) : args.content;
     if (content.byteLength > SELFHOSTED_PLACEMENT_PRIVATE_MAX_BYTES) {
       throw new TypeError("selfhosted placement-private content is invalid");
     }
-    const result = await this.call({
-      $case: "fsWrite",
-      fsWrite: {
-        path,
-        content,
-        createParents: args.createParents ?? true,
-        append: false,
-        mode: 0o600,
+    const timeoutMs = Math.max(
+      1,
+      Math.min(
+        args.timeoutMs ?? this.timeoutMs,
+        (args.deadlineAtMs ?? Number.POSITIVE_INFINITY) - Date.now(),
+      ),
+    );
+    const result = await this.call(
+      {
+        $case: "fsWrite",
+        fsWrite: {
+          path,
+          content,
+          createParents: args.createParents ?? true,
+          append: false,
+          mode: 0o600,
+        },
       },
-    });
+      timeoutMs,
+    );
+    args.signal?.throwIfAborted();
     if (result.$case !== "fsWrite") {
       throw new Error(`selfhosted writePlacementPrivate: unexpected result ${result.$case}`);
     }
@@ -1400,11 +1415,24 @@ export class SelfhostedSession {
    * machine. The authority scope is supplied by the caller and remains local. */
   async ensureBrowserControl(
     request: BrowserControlEnsureRequest,
+    options: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal } = {},
   ): Promise<BrowserControlEnsureResponse> {
-    const result = await this.call({
-      $case: "browserControlEnsure",
-      browserControlEnsure: request,
-    });
+    options.signal?.throwIfAborted();
+    const timeoutMs = Math.max(
+      1,
+      Math.min(
+        options.timeoutMs ?? this.timeoutMs,
+        (options.deadlineAtMs ?? Number.POSITIVE_INFINITY) - Date.now(),
+      ),
+    );
+    const result = await this.call(
+      {
+        $case: "browserControlEnsure",
+        browserControlEnsure: request,
+      },
+      timeoutMs,
+    );
+    options.signal?.throwIfAborted();
     if (result.$case !== "browserControlEnsure") {
       throw new Error(`selfhosted ensureBrowserControl: unexpected result ${result.$case}`);
     }

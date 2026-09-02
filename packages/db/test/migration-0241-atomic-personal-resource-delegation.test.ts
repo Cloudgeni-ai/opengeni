@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase } from "@opengeni/testing";
+import {
+  acquireBlankTestDatabase,
+  testRigProviderImage,
+  testRigSurfaceReceipt,
+} from "@opengeni/testing";
 import { sql as drizzleSql } from "drizzle-orm";
 import { readFile } from "node:fs/promises";
 import postgres from "postgres";
@@ -600,11 +604,27 @@ describe("migration 0241 atomic personal-resource delegation", () => {
         set active = false
         where id = ${ids.rigVersion}
       `;
+      const mismatchedVersionId = crypto.randomUUID();
+      const mismatchedProviderImage = testRigProviderImage(mismatchedVersionId);
+      const mismatchedVerificationReceipt = testRigSurfaceReceipt(
+        mismatchedVersionId,
+        mismatchedProviderImage,
+      );
       const [mismatchedVersion] = await app<Array<{ id: string }>>`
         insert into rig_versions (
-          account_id, workspace_id, rig_id, version, default_variable_set_ids, active
+          id, account_id, workspace_id, rig_id, version, default_variable_set_ids,
+          verification, provider_images, active
         ) values (
-          ${ids.account}, ${ids.targetWorkspace}, ${ids.rig}, 2, '[]'::jsonb, true
+          ${mismatchedVersionId}, ${ids.account}, ${ids.targetWorkspace}, ${ids.rig}, 2,
+          '[]'::jsonb, ${app.json({
+            status: "passed",
+            attemptId: crypto.randomUUID(),
+            expectedActiveVersionId: null,
+            verifiedAt: "2026-08-30T12:00:00.000Z",
+            receipt: mismatchedVerificationReceipt,
+          })}, ${app.json({
+            [mismatchedProviderImage.backend]: mismatchedProviderImage,
+          })}, true
         ) returning id
       `;
       expect(mismatchedVersion?.id).toBeTruthy();
@@ -1259,12 +1279,23 @@ async function createFixture(
     values (${account!.id}, ${personalWorkspace!.id}, 'personal-rig') returning id
   `;
   const defaultIds = options.directOnly ? [] : [defaultVariableSet!.id];
+  const rigVersionId = crypto.randomUUID();
+  const rigVersionAttemptId = crypto.randomUUID();
+  const providerImage = testRigProviderImage(rigVersionId);
+  const verificationReceipt = testRigSurfaceReceipt(rigVersionId, providerImage);
   const [rigVersion] = await sql<Array<{ id: string }>>`
     insert into rig_versions (
-      account_id, workspace_id, rig_id, version, default_variable_set_ids, active
+      id, account_id, workspace_id, rig_id, version, default_variable_set_ids,
+      verification, provider_images, active
     ) values (
-      ${account!.id}, ${personalWorkspace!.id}, ${rig!.id}, 1,
-      ${sql.json(defaultIds)}, true
+      ${rigVersionId}, ${account!.id}, ${personalWorkspace!.id}, ${rig!.id}, 1,
+      ${sql.json(defaultIds)}, ${sql.json({
+        status: "passed",
+        attemptId: rigVersionAttemptId,
+        expectedActiveVersionId: null,
+        verifiedAt: "2026-08-30T12:00:00.000Z",
+        receipt: verificationReceipt,
+      })}, ${sql.json({ [providerImage.backend]: providerImage })}, true
     ) returning id
   `;
 

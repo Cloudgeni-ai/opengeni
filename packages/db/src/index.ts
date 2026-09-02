@@ -173,6 +173,11 @@ import type {
   WorkDiscoveryProjection,
 } from "@opengeni/contracts";
 import {
+  hasTrustedRigPlatformSurfaceValidationProvenance,
+  RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema,
+  type RigPlatformSurfaceValidationReceipt,
+} from "@opengeni/contracts/rig-platform-surface-validation";
+import {
   closePrivateSessionCreateCapability,
   openPrivateChildSessionCreateCapability,
   openPrivateSessionCreateCapability,
@@ -242,6 +247,7 @@ import {
   resolveWorkspaceMemoryPromptMode,
   RigChange as RigChangeContract,
   RigProviderImage as RigProviderImageContract,
+  RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
   SessionGoal as SessionGoalContract,
   SessionSystemUpdatePayload,
   renderSessionSystemUpdateBatch,
@@ -18152,13 +18158,26 @@ export class RigChangeTransitionError extends Error {
 export class RigActiveVersionChangedError extends Error {
   constructor(
     public readonly rigId: string,
-    public readonly expectedVersionId: string,
+    public readonly expectedVersionId: string | null,
     public readonly actualVersionId: string | null,
   ) {
     super(
-      `Rig ${rigId} moved since verification: expected active ${expectedVersionId}, current active ${actualVersionId ?? "none"}`,
+      `Rig ${rigId} moved since verification: expected active ${expectedVersionId ?? "none"}, current active ${actualVersionId ?? "none"}`,
     );
     this.name = "RigActiveVersionChangedError";
+  }
+}
+
+export class RigChangeVerificationAttemptStaleError extends Error {
+  constructor(
+    public readonly changeId: string,
+    public readonly expectedAttemptId: string,
+    public readonly actualAttemptId: string | null,
+  ) {
+    super(
+      `Rig change ${changeId} verification attempt is stale: expected ${expectedAttemptId}, current ${actualAttemptId ?? "none"}`,
+    );
+    this.name = "RigChangeVerificationAttemptStaleError";
   }
 }
 
@@ -18187,10 +18206,54 @@ export type RigVersionContentInput = {
   createdBy?: string | null;
 };
 
+export type RigVersionVerificationState = schema.RigVersionVerificationState;
+
+export class RigVersionVerificationRequiredError extends Error {
+  readonly name = "RigVersionVerificationRequiredError";
+
+  constructor(readonly versionId: string) {
+    super(`Rig version ${versionId} has no exact passing platform-surface validation receipt`);
+  }
+}
+
+export class RigVersionVerificationStateError extends Error {
+  readonly name = "RigVersionVerificationStateError";
+
+  constructor(
+    readonly versionId: string,
+    readonly status: string,
+  ) {
+    super(`Rig version ${versionId} cannot complete verification from state ${status}`);
+  }
+}
+
 function assertRigUsesPlatformImage(input: RigVersionContentInput | undefined): void {
   if (input?.image != null) {
     throw new RigImageOverrideUnsupportedError();
   }
+}
+
+function rigProviderImagesMatchSurfaceValidation(
+  images: RigProviderImages,
+  receipt: RigPlatformSurfaceValidationReceipt,
+  expected: { targetKind?: "change" | "version"; targetId: string },
+): boolean {
+  if (!hasTrustedRigPlatformSurfaceValidationProvenance(receipt)) return false;
+  const backend = receipt.binding.backendId as SandboxBackend;
+  const image = images[backend];
+  const imageIdentity = image?.imageId ?? image?.imageDigest ?? null;
+  return (
+    image?.backend === backend &&
+    image.status === "ready" &&
+    image.coldBootValidation?.version === RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION &&
+    (expected.targetKind === undefined || image.provenance.targetKind === expected.targetKind) &&
+    image.provenance.targetId === expected.targetId &&
+    receipt.binding.rigVersionId === expected.targetId &&
+    receipt.binding.sandboxGroupId === image.buildRequestId &&
+    imageIdentity !== null &&
+    receipt.provenance.providerImage === imageIdentity &&
+    receipt.provenance.providerImageId === imageIdentity
+  );
 }
 
 function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion {
@@ -18207,6 +18270,7 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
     providerImages: row.providerImages,
     createdBy: row.createdBy,
     active: row.active,
+    verificationStatus: row.verification.status,
     createdAt: row.createdAt.toISOString(),
   };
 }
@@ -18409,8 +18473,10 @@ async function loadRigHealthByActiveVersion(
   return healthByVersion;
 }
 
-// Creates the rig row AND its version 1 (active) in one transaction: a failure
-// leaves nothing behind. version-1 content comes from `initialVersion`.
+// Creates the rig row AND its version 1 in one transaction: a failure leaves
+// nothing behind. Every newly-authored version is inactive until an exact
+// verification receipt activates it; the database trigger enforces that rule
+// for stale and direct writers after the maintenance cutover.
 export async function createRig(
   db: Database,
   input: {
@@ -18423,6 +18489,8 @@ export async function createRig(
     description?: string | null;
     createdBy?: string | null;
     initialVersion?: RigVersionContentInput;
+    initialVerification?: RigVersionVerificationState;
+    activateInitialVersion?: boolean;
   },
 ): Promise<Rig> {
   assertRigUsesPlatformImage(input.initialVersion);
@@ -18446,6 +18514,8 @@ export async function createRig(
               defaultVariableSetIds: content.defaultVariableSetIds ?? [],
               changelog: content.changelog ?? null,
               createdBy: content.createdBy ?? input.createdBy ?? null,
+              verification: input.initialVerification ?? { status: "unverified" },
+              active: input.activateInitialVersion ?? false,
             })}::jsonb, ${input.allowOrganization === true}
           ) as value`,
         );
@@ -18486,14 +18556,15 @@ export async function createRig(
           defaultVariableSetIds: content.defaultVariableSetIds ?? [],
           changelog: content.changelog ?? null,
           providerImages: {},
+          verification: input.initialVerification ?? { status: "unverified" },
           createdBy: content.createdBy ?? input.createdBy ?? null,
-          active: true,
+          active: input.activateInitialVersion ?? false,
         })
         .returning();
       if (!versionRow) {
         throw new Error("Failed to create initial rig version");
       }
-      return mapRig(rigRow, mapRigVersion(versionRow), 1);
+      return mapRig(rigRow, versionRow.active ? mapRigVersion(versionRow) : null, 1);
     },
   );
 }
@@ -19489,7 +19560,11 @@ export async function createRigVersion(
   workspaceId: string,
   rigId: string,
   input: RigVersionContentInput,
-  options: { activate?: boolean } = {},
+  options: {
+    activate?: boolean;
+    verification?: RigVersionVerificationState;
+    expectedActiveVersionId?: string | null;
+  } = {},
 ): Promise<RigVersion> {
   assertRigUsesPlatformImage(input);
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -19501,6 +19576,27 @@ export async function createRigVersion(
       .limit(1);
     if (!rig) {
       throw new Error(`Rig not found: ${rigId}`);
+    }
+    if (Object.hasOwn(options, "expectedActiveVersionId")) {
+      const [active] = await scopedDb
+        .select({ id: schema.rigVersions.id })
+        .from(schema.rigVersions)
+        .where(
+          and(
+            eq(schema.rigVersions.workspaceId, workspaceId),
+            eq(schema.rigVersions.rigId, rigId),
+            eq(schema.rigVersions.active, true),
+          ),
+        )
+        .limit(1);
+      const actualActiveVersionId = active?.id ?? null;
+      if (actualActiveVersionId !== options.expectedActiveVersionId) {
+        throw new RigActiveVersionChangedError(
+          rigId,
+          options.expectedActiveVersionId ?? null,
+          actualActiveVersionId,
+        );
+      }
     }
     const [{ max } = { max: 0 }] = await scopedDb
       .select({
@@ -19537,6 +19633,7 @@ export async function createRigVersion(
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
         providerImages: {},
+        verification: options.verification ?? { status: "unverified" },
         createdBy: input.createdBy ?? null,
         active: options.activate ?? false,
       })
@@ -19559,6 +19656,8 @@ export async function createRigVersionForChangePromotion(
   changeId: string,
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
+    expectedVerificationAttemptId: string;
+    expectedVerificationExecutionGeneration: number;
     providerImages?: RigProviderImages;
   },
 ): Promise<{ version: RigVersion; change: RigChange }> {
@@ -19590,6 +19689,41 @@ export async function createRigVersionForChangePromotion(
     }
     if (currentChange.status === "merged" || currentChange.status === "rejected") {
       throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+    }
+    const changeVerification = mapRigChange(currentChange).verification;
+    const currentAttemptId =
+      typeof changeVerification?.attemptId === "string" ? changeVerification.attemptId : null;
+    const currentExecutionGeneration = rigVerificationExecutionGeneration(
+      changeVerification?.executionGeneration,
+    );
+    if (currentAttemptId !== input.expectedVerificationAttemptId) {
+      throw new RigChangeVerificationAttemptStaleError(
+        changeId,
+        input.expectedVerificationAttemptId,
+        currentAttemptId,
+      );
+    }
+    if (currentExecutionGeneration !== input.expectedVerificationExecutionGeneration) {
+      throw new RigChangeVerificationAttemptStaleError(
+        changeId,
+        input.expectedVerificationAttemptId,
+        currentAttemptId,
+      );
+    }
+    const validationReceipt =
+      changeVerification?.passed === true
+        ? RigPlatformSurfaceValidationReceiptSchema.safeParse(
+            changeVerification.platformSurfaceValidation,
+          )
+        : null;
+    if (
+      !validationReceipt?.success ||
+      !rigProviderImagesMatchSurfaceValidation(input.providerImages ?? {}, validationReceipt.data, {
+        targetKind: "change",
+        targetId: changeId,
+      })
+    ) {
+      throw new RigVersionVerificationRequiredError(changeId);
     }
     if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
       throw new RigActiveVersionChangedError(
@@ -19629,7 +19763,16 @@ export async function createRigVersionForChangePromotion(
       scopedDb,
       workspaceId,
       input.providerImages ?? {},
+      { targetKind: "change", targetId: changeId },
     );
+    if (
+      !rigProviderImagesMatchSurfaceValidation(providerImages, validationReceipt.data, {
+        targetKind: "change",
+        targetId: changeId,
+      })
+    ) {
+      throw new RigVersionVerificationRequiredError(changeId);
+    }
     await scopedDb
       .update(schema.rigVersions)
       .set({ active: false })
@@ -19643,6 +19786,7 @@ export async function createRigVersionForChangePromotion(
     const [versionRow] = await scopedDb
       .insert(schema.rigVersions)
       .values({
+        id: changeId,
         accountId: rig.accountId,
         workspaceId,
         rigId,
@@ -19654,6 +19798,14 @@ export async function createRigVersionForChangePromotion(
         defaultVariableSetIds: input.defaultVariableSetIds ?? [],
         changelog: input.changelog ?? null,
         providerImages,
+        verification: {
+          status: "passed",
+          attemptId: input.expectedVerificationAttemptId,
+          executionGeneration: input.expectedVerificationExecutionGeneration,
+          expectedActiveVersionId: input.expectedActiveVersionId,
+          verifiedAt: validationReceipt.data.checkedAt,
+          receipt: validationReceipt.data,
+        },
         createdBy: input.createdBy ?? null,
         active: true,
       })
@@ -19924,11 +20076,25 @@ async function retainRigProviderImageArtifacts(
   db: Database,
   workspaceId: string,
   images: RigProviderImages,
+  expectedProvenance?: { targetKind: "change" | "version"; targetId: string },
 ): Promise<RigProviderImages> {
   const retained: RigProviderImages = {};
   for (const [backend, image] of Object.entries(images) as Array<
     [SandboxBackend, RigProviderImage]
   >) {
+    if (
+      expectedProvenance &&
+      (image.provenance.targetKind !== expectedProvenance.targetKind ||
+        image.provenance.targetId !== expectedProvenance.targetId)
+    ) {
+      continue;
+    }
+    if (
+      image.status === "ready" &&
+      image.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+    ) {
+      continue;
+    }
     if (image.status !== "ready" || backend !== "modal") {
       retained[backend] = image;
       continue;
@@ -20013,7 +20179,10 @@ export async function claimRigVersionProviderImageBuild(
           const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
             [existing.backend]: existing,
           });
-          if (retained[existing.backend] && existing.coldBootValidation?.version === 1) {
+          if (
+            retained[existing.backend] &&
+            existing.coldBootValidation?.version === RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+          ) {
             return { status: "ready", image: existing };
           }
         }
@@ -20102,6 +20271,11 @@ export async function finalizeRigVersionProviderImageBuild(
       );
     }
     if (finalized.status === "ready") {
+      if (
+        finalized.coldBootValidation?.version !== RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION
+      ) {
+        return false;
+      }
       const retained = await retainRigProviderImageArtifacts(scopedDb, input.workspaceId, {
         [finalized.backend]: finalized,
       });
@@ -20149,6 +20323,7 @@ export async function activateRigVersion(
   workspaceId: string,
   rigId: string,
   versionId: string,
+  options: { requireVerification?: boolean } = {},
 ): Promise<RigVersion> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
@@ -20161,7 +20336,11 @@ export async function activateRigVersion(
       throw new Error(`Rig not found: ${rigId}`);
     }
     const [target] = await scopedDb
-      .select({ id: schema.rigVersions.id })
+      .select({
+        id: schema.rigVersions.id,
+        verification: schema.rigVersions.verification,
+        providerImages: schema.rigVersions.providerImages,
+      })
       .from(schema.rigVersions)
       .where(
         and(
@@ -20173,6 +20352,21 @@ export async function activateRigVersion(
       .limit(1);
     if (!target) {
       throw new Error(`Rig version not found: ${versionId}`);
+    }
+    if (options.requireVerification) {
+      const verification = target.verification;
+      const receipt =
+        verification.status === "passed"
+          ? RigPlatformSurfaceValidationReceiptSchema.safeParse(verification.receipt)
+          : null;
+      if (
+        !receipt?.success ||
+        !rigProviderImagesMatchSurfaceValidation(target.providerImages, receipt.data, {
+          targetId: versionId,
+        })
+      ) {
+        throw new RigVersionVerificationRequiredError(versionId);
+      }
     }
     await scopedDb
       .update(schema.rigVersions)
@@ -20203,6 +20397,572 @@ export async function activateRigVersion(
       .set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
     return mapRigVersion(row);
+  });
+}
+
+export type RigVersionVerificationAttempt = {
+  version: RigVersion;
+  attemptId: string;
+  executionGeneration: number;
+  expectedActiveVersionId: string | null;
+  requestedAt: string;
+  reused: boolean;
+};
+
+export type PendingInactiveRigVersionVerificationAttempt = {
+  versionId: string;
+  version: number;
+  attemptId: string;
+  expectedActiveVersionId: string | null;
+  requestedAt: string;
+};
+
+export type RigVerificationExecutionTarget =
+  | {
+      workspaceId: string;
+      attemptId: string;
+      changeId: string;
+      versionId?: never;
+    }
+  | {
+      workspaceId: string;
+      attemptId: string;
+      versionId: string;
+      changeId?: never;
+    };
+
+function rigVerificationExecutionGeneration(value: unknown): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : 1;
+}
+
+/** Current physical execution generation for a still-live logical attempt. */
+export async function getCurrentRigVerificationExecutionGeneration(
+  db: Database,
+  input: RigVerificationExecutionTarget,
+): Promise<number | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if ("changeId" in input) {
+      const [row] = await scopedDb
+        .select({
+          status: schema.rigChanges.status,
+          verification: schema.rigChanges.verification,
+          verificationCodecVersion: schema.rigChanges.verificationCodecVersion,
+        })
+        .from(schema.rigChanges)
+        .where(
+          and(
+            eq(schema.rigChanges.workspaceId, input.workspaceId),
+            eq(schema.rigChanges.id, input.changeId),
+          ),
+        )
+        .limit(1);
+      if (!row || row.status !== "verifying") return null;
+      const verification = fromPostgresLosslessJson(
+        row.verification,
+        row.verificationCodecVersion,
+      ) as Record<string, unknown> | null;
+      if (verification?.attemptId !== input.attemptId) return null;
+      return rigVerificationExecutionGeneration(verification.executionGeneration);
+    }
+
+    const [row] = await scopedDb
+      .select({ verification: schema.rigVersions.verification })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .limit(1);
+    if (
+      !row ||
+      row.verification.status !== "pending" ||
+      row.verification.attemptId !== input.attemptId
+    ) {
+      return null;
+    }
+    return rigVerificationExecutionGeneration(row.verification.executionGeneration);
+  });
+}
+
+/**
+ * Advance one failed physical execution while preserving the logical attempt.
+ * A concurrent caller that already advanced the row returns the newer value.
+ */
+export async function advanceRigVerificationExecutionGeneration(
+  db: Database,
+  input: RigVerificationExecutionTarget & { expectedExecutionGeneration: number },
+): Promise<number | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    if ("changeId" in input) {
+      const [row] = await scopedDb
+        .select({
+          status: schema.rigChanges.status,
+          verification: schema.rigChanges.verification,
+          verificationCodecVersion: schema.rigChanges.verificationCodecVersion,
+        })
+        .from(schema.rigChanges)
+        .where(
+          and(
+            eq(schema.rigChanges.workspaceId, input.workspaceId),
+            eq(schema.rigChanges.id, input.changeId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!row || row.status !== "verifying") return null;
+      const verification =
+        (fromPostgresLosslessJson(row.verification, row.verificationCodecVersion) as Record<
+          string,
+          unknown
+        > | null) ?? {};
+      if (verification.attemptId !== input.attemptId) return null;
+      const current = rigVerificationExecutionGeneration(verification.executionGeneration);
+      if (current !== input.expectedExecutionGeneration) return current;
+      const next = current + 1;
+      await scopedDb
+        .update(schema.rigChanges)
+        .set(
+          withLosslessContentWriteVersion(
+            {
+              verification: { ...verification, executionGeneration: next },
+              updatedAt: new Date(),
+            },
+            "verification",
+            "verificationCodecVersion",
+          ),
+        )
+        .where(
+          and(
+            eq(schema.rigChanges.workspaceId, input.workspaceId),
+            eq(schema.rigChanges.id, input.changeId),
+          ),
+        );
+      return next;
+    }
+
+    const [row] = await scopedDb
+      .select({ verification: schema.rigVersions.verification })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (
+      !row ||
+      row.verification.status !== "pending" ||
+      row.verification.attemptId !== input.attemptId
+    ) {
+      return null;
+    }
+    const current = rigVerificationExecutionGeneration(row.verification.executionGeneration);
+    if (current !== input.expectedExecutionGeneration) return current;
+    const next = current + 1;
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({ verification: { ...row.verification, executionGeneration: next } })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return next;
+  });
+}
+
+/**
+ * Read the inactive attempts that are already durably pending for one Rig.
+ * This never creates, supersedes, or rewrites verification state; callers use
+ * it only to recover transport dispatch for a previously authorized attempt.
+ */
+export async function listPendingInactiveRigVersionVerificationAttempts(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+): Promise<PendingInactiveRigVersionVerificationAttempt[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        versionId: schema.rigVersions.id,
+        version: schema.rigVersions.version,
+        active: schema.rigVersions.active,
+        verification: schema.rigVersions.verification,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      );
+    return rows.flatMap((row) => {
+      if (row.active || row.verification.status !== "pending") return [];
+      return [
+        {
+          versionId: row.versionId,
+          version: row.version,
+          attemptId: row.verification.attemptId,
+          expectedActiveVersionId: row.verification.expectedActiveVersionId,
+          requestedAt: row.verification.requestedAt,
+        },
+      ];
+    });
+  });
+}
+
+/**
+ * Atomically claim an opaque verification attempt for one exact version.
+ * Dispatch retries reuse a pending token; callers may omit that option to
+ * deliberately supersede a verifier whose completion must then be fenced.
+ */
+export async function beginRigVersionVerificationAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rigId: string;
+    versionId: string;
+  },
+  options: {
+    requestedAt?: string;
+    attemptId?: string;
+    allowAlreadyPending?: boolean;
+    audit?: { accountId: string; subjectId: string | null };
+  } = {},
+): Promise<RigVersionVerificationAttempt> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb
+      .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) throw new Error(`Rig not found: ${input.rigId}`);
+
+    const [target] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!target) throw new Error(`Rig version not found: ${input.versionId}`);
+
+    const state = target.verification;
+    if (
+      options.allowAlreadyPending &&
+      state.status === "pending" &&
+      typeof state.attemptId === "string"
+    ) {
+      return {
+        version: mapRigVersion(target),
+        attemptId: state.attemptId,
+        executionGeneration: rigVerificationExecutionGeneration(state.executionGeneration),
+        expectedActiveVersionId: state.expectedActiveVersionId,
+        requestedAt: state.requestedAt,
+        reused: true,
+      };
+    }
+
+    const [active] = await scopedDb
+      .select({ id: schema.rigVersions.id })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.active, true),
+        ),
+      )
+      .limit(1);
+    const attemptId = options.attemptId ?? randomUUID();
+    const requestedAt = options.requestedAt ?? new Date().toISOString();
+    const expectedActiveVersionId = target.active ? target.id : (active?.id ?? null);
+    const [row] = await scopedDb
+      .update(schema.rigVersions)
+      .set({
+        verification: {
+          status: "pending",
+          attemptId,
+          executionGeneration: 1,
+          expectedActiveVersionId,
+          requestedAt,
+        },
+      })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .returning();
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (options.audit) {
+      if (options.audit.accountId !== rig.accountId) {
+        throw new Error("Rig verification audit account does not match the Rig account");
+      }
+      await scopedDb.insert(schema.auditEvents).values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: rig.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: options.audit.subjectId,
+            action: "rig.version.verification.requested",
+            targetType: "rig",
+            targetId: input.rigId,
+            metadata: {
+              rigId: input.rigId,
+              versionId: input.versionId,
+              version: row.version,
+              attemptId,
+              executionGeneration: 1,
+              expectedActiveVersionId,
+            },
+          },
+          "metadata",
+          "metadataCodecVersion",
+        ),
+      );
+    }
+    return {
+      version: mapRigVersion(row),
+      attemptId,
+      executionGeneration: 1,
+      expectedActiveVersionId,
+      requestedAt,
+      reused: false,
+    };
+  });
+}
+
+export async function isCurrentRigVersionVerificationAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rigId: string;
+    versionId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ verification: schema.rigVersions.verification })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    return (
+      row.verification.status === "pending" &&
+      row.verification.attemptId === input.attemptId &&
+      rigVerificationExecutionGeneration(row.verification.executionGeneration) ===
+        input.executionGeneration
+    );
+  });
+}
+
+export async function failRigVersionVerification(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rigId: string;
+    versionId: string;
+    attemptId: string;
+    executionGeneration: number;
+    error: string;
+    verifiedAt?: string;
+  },
+): Promise<{ applied: boolean; stale: boolean }> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        verification: schema.rigVersions.verification,
+        active: schema.rigVersions.active,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (
+      row.verification.status === "failed" &&
+      row.verification.attemptId === input.attemptId &&
+      rigVerificationExecutionGeneration(row.verification.executionGeneration) ===
+        input.executionGeneration
+    ) {
+      return { applied: true, stale: false };
+    }
+    if (
+      row.verification.status !== "pending" ||
+      row.verification.attemptId !== input.attemptId ||
+      rigVerificationExecutionGeneration(row.verification.executionGeneration) !==
+        input.executionGeneration
+    ) {
+      return { applied: false, stale: true };
+    }
+    const expectedActiveVersionId = row.verification.expectedActiveVersionId;
+    await scopedDb
+      .update(schema.rigVersions)
+      .set({
+        verification: {
+          status: "failed",
+          attemptId: input.attemptId,
+          executionGeneration: input.executionGeneration,
+          expectedActiveVersionId,
+          verifiedAt: input.verifiedAt ?? new Date().toISOString(),
+          error: input.error.slice(0, 2_000),
+        },
+        active: row.active,
+      })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      );
+    return { applied: true, stale: false };
+  });
+}
+
+export async function completeRigVersionVerification(
+  db: Database,
+  input: {
+    workspaceId: string;
+    rigId: string;
+    versionId: string;
+    attemptId: string;
+    executionGeneration: number;
+    receipt: RigPlatformSurfaceValidationReceipt;
+    verifiedAt?: string;
+  },
+): Promise<{ version: RigVersion; applied: boolean; activated: boolean; stale: boolean }> {
+  const receipt = RigPlatformSurfaceValidationReceiptSchema.parse(input.receipt);
+  if (
+    !hasTrustedRigPlatformSurfaceValidationProvenance(receipt) ||
+    receipt.binding.rigVersionId !== input.versionId
+  ) {
+    throw new Error("Rig version validation receipt targets another version");
+  }
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [rig] = await scopedDb
+      .select({ id: schema.rigs.id })
+      .from(schema.rigs)
+      .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)))
+      .for("update")
+      .limit(1);
+    if (!rig) throw new Error(`Rig not found: ${input.rigId}`);
+    const [target] = await scopedDb
+      .select()
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!target) throw new Error(`Rig version not found: ${input.versionId}`);
+    if (
+      !rigProviderImagesMatchSurfaceValidation(target.providerImages, receipt, {
+        targetKind: "version",
+        targetId: input.versionId,
+      })
+    ) {
+      throw new RigVersionVerificationRequiredError(input.versionId);
+    }
+    const state = target.verification;
+    if (
+      state.status === "passed" &&
+      state.attemptId === input.attemptId &&
+      rigVerificationExecutionGeneration(state.executionGeneration) === input.executionGeneration
+    ) {
+      return {
+        version: mapRigVersion(target),
+        applied: true,
+        activated: target.active,
+        stale: !target.active,
+      };
+    }
+    if (
+      state.status !== "pending" ||
+      state.attemptId !== input.attemptId ||
+      rigVerificationExecutionGeneration(state.executionGeneration) !== input.executionGeneration
+    ) {
+      return { version: mapRigVersion(target), applied: false, activated: false, stale: true };
+    }
+    const expectedActiveVersionId = state.expectedActiveVersionId;
+    const [active] = await scopedDb
+      .select({ id: schema.rigVersions.id })
+      .from(schema.rigVersions)
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.rigId, input.rigId),
+          eq(schema.rigVersions.active, true),
+        ),
+      )
+      .limit(1);
+    const currentActiveVersionId = active?.id ?? null;
+    const stale = currentActiveVersionId !== expectedActiveVersionId;
+    if (!stale) {
+      await scopedDb
+        .update(schema.rigVersions)
+        .set({ active: false })
+        .where(
+          and(
+            eq(schema.rigVersions.workspaceId, input.workspaceId),
+            eq(schema.rigVersions.rigId, input.rigId),
+            eq(schema.rigVersions.active, true),
+          ),
+        );
+    }
+    const [row] = await scopedDb
+      .update(schema.rigVersions)
+      .set({
+        verification: {
+          status: "passed",
+          attemptId: input.attemptId,
+          executionGeneration: input.executionGeneration,
+          expectedActiveVersionId,
+          verifiedAt: input.verifiedAt ?? new Date().toISOString(),
+          receipt,
+        },
+        active: !stale,
+      })
+      .where(
+        and(
+          eq(schema.rigVersions.workspaceId, input.workspaceId),
+          eq(schema.rigVersions.id, input.versionId),
+        ),
+      )
+      .returning();
+    if (!row) throw new Error(`Rig version not found: ${input.versionId}`);
+    await scopedDb
+      .update(schema.rigs)
+      .set({ updatedAt: new Date() })
+      .where(and(eq(schema.rigs.workspaceId, input.workspaceId), eq(schema.rigs.id, input.rigId)));
+    return { version: mapRigVersion(row), applied: true, activated: !stale, stale };
   });
 }
 
@@ -20442,6 +21202,76 @@ export async function updateRigChangeStatus(
   });
 }
 
+export async function updateRigChangeStatusForVerificationAttempt(
+  db: Database,
+  workspaceId: string,
+  changeId: string,
+  attemptId: string,
+  executionGeneration: number,
+  input: {
+    status: RigChangeStatus;
+    verification?: Record<string, unknown> | null;
+    resultVersionId?: string | null;
+  },
+): Promise<{ change: RigChange; applied: boolean; stale: boolean }> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb
+      .select()
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) throw new Error(`Rig change not found: ${changeId}`);
+    const currentVerification =
+      (fromPostgresLosslessJson(current.verification, current.verificationCodecVersion) as Record<
+        string,
+        unknown
+      > | null) ?? {};
+    if (
+      currentVerification.attemptId !== attemptId ||
+      rigVerificationExecutionGeneration(currentVerification.executionGeneration) !==
+        executionGeneration
+    ) {
+      return { change: mapRigChange(current), applied: false, stale: true };
+    }
+    if (current.status === "merged" || current.status === "rejected") {
+      if (current.status === input.status) {
+        return { change: mapRigChange(current), applied: true, stale: false };
+      }
+      throw new RigChangeTransitionError(changeId, current.status, input.status);
+    }
+    const mergedVerification = input.verification
+      ? {
+          ...currentVerification,
+          ...input.verification,
+          attemptId,
+          executionGeneration,
+        }
+      : undefined;
+    const [row] = await scopedDb
+      .update(schema.rigChanges)
+      .set({
+        status: input.status,
+        ...(mergedVerification !== undefined
+          ? {
+              verification: mergedVerification,
+              verificationCodecVersion: LOSSLESS_CONTENT_CODEC_VERSION,
+            }
+          : {}),
+        ...(input.resultVersionId !== undefined ? { resultVersionId: input.resultVersionId } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .returning();
+    if (!row) throw new Error(`Rig change not found: ${changeId}`);
+    return { change: mapRigChange(row), applied: true, stale: false };
+  });
+}
+
 export async function beginRigChangeVerificationAttempt(
   db: Database,
   workspaceId: string,
@@ -20464,7 +21294,11 @@ export async function beginRigChangeVerificationAttempt(
       throw new Error(`Rig change not found: ${changeId}`);
     }
     if (current.status === "verifying") {
-      if (input.allowAlreadyVerifying) {
+      const currentVerification = fromPostgresLosslessJson(
+        current.verification,
+        current.verificationCodecVersion,
+      ) as Record<string, unknown> | null;
+      if (input.allowAlreadyVerifying && typeof currentVerification?.attemptId === "string") {
         return mapRigChange(current);
       }
       throw new RigChangeAlreadyVerifyingError(changeId);
@@ -20479,6 +21313,7 @@ export async function beginRigChangeVerificationAttempt(
       > | null) ?? {};
     const previousAttempt =
       typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
+    const attemptId = randomUUID();
     const [row] = await scopedDb
       .update(schema.rigChanges)
       .set(
@@ -20487,7 +21322,9 @@ export async function beginRigChangeVerificationAttempt(
             status: "verifying",
             verification: {
               ...previousVerification,
+              attemptId,
               attempt: previousAttempt + 1,
+              executionGeneration: 1,
               startedAt: input.startedAt,
               checkResults: [],
               finishedAt: null,
@@ -20508,6 +21345,44 @@ export async function beginRigChangeVerificationAttempt(
       throw new Error(`Rig change not found: ${changeId}`);
     }
     return mapRigChange(row);
+  });
+}
+
+export async function isCurrentRigChangeVerificationAttempt(
+  db: Database,
+  input: {
+    workspaceId: string;
+    changeId: string;
+    attemptId: string;
+    executionGeneration: number;
+  },
+): Promise<boolean> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        status: schema.rigChanges.status,
+        verification: schema.rigChanges.verification,
+        verificationCodecVersion: schema.rigChanges.verificationCodecVersion,
+      })
+      .from(schema.rigChanges)
+      .where(
+        and(
+          eq(schema.rigChanges.workspaceId, input.workspaceId),
+          eq(schema.rigChanges.id, input.changeId),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new Error(`Rig change not found: ${input.changeId}`);
+    const verification = fromPostgresLosslessJson(
+      row.verification,
+      row.verificationCodecVersion,
+    ) as Record<string, unknown> | null;
+    return (
+      row.status === "verifying" &&
+      verification?.attemptId === input.attemptId &&
+      rigVerificationExecutionGeneration(verification.executionGeneration) ===
+        input.executionGeneration
+    );
   });
 }
 
@@ -49725,6 +50600,385 @@ export type SandboxCheckpointArtifactRegistration = {
   objectId: string;
 };
 
+export type RigProviderImageCleanupObligationState =
+  | "building"
+  | "outcome_unknown"
+  | "build_failed"
+  | "delete_pending"
+  | "deleting"
+  | "delete_failed"
+  | "settled"
+  | "deleted";
+
+export type RigProviderImageCleanupObligation = {
+  id: string;
+  state: RigProviderImageCleanupObligationState;
+  buildRequestId: string;
+  objectId: string | null;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  sourceLeaseId: string;
+  sourceInstanceId: string;
+};
+
+export class RigProviderImageCleanupObligationConflictError extends Error {
+  readonly name = "RigProviderImageCleanupObligationConflictError";
+}
+
+export async function beginRigProviderImageCleanupObligation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sourceLeaseId: string;
+    sourceLeaseEpoch: number;
+    sourceInstanceId: string;
+    sourceWorkspaceGeneration: number;
+    providerBindingKey: string;
+    providerBinding: Record<string, unknown>;
+    buildRequestId: string;
+  },
+): Promise<RigProviderImageCleanupObligation> {
+  const providerIdentity = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  if (!providerIdentity || providerIdentity.key !== input.providerBindingKey) {
+    throw new Error("Modal Rig provider image cleanup binding is invalid");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(sql`
+        insert into rig_provider_image_cleanup_obligations (
+          account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provider_backend, provider_binding_key, provider_binding, build_request_id
+        ) values (
+          ${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId},
+          ${input.sourceLeaseId}, ${input.sourceLeaseEpoch}, ${input.sourceInstanceId},
+          ${input.sourceWorkspaceGeneration}, 'modal', ${providerIdentity.key},
+          ${JSON.stringify(providerIdentity.binding)}::jsonb, ${input.buildRequestId}
+        )
+        on conflict (
+          provider_backend, provider_binding_key, build_request_id, source_instance_id
+        ) do update set
+          state = case
+            when rig_provider_image_cleanup_obligations.state in (
+              'outcome_unknown', 'build_failed'
+            )
+              then 'building'
+            else rig_provider_image_cleanup_obligations.state
+          end,
+          last_delete_error = case
+            when rig_provider_image_cleanup_obligations.state in (
+              'outcome_unknown', 'build_failed'
+            )
+              then null
+            else rig_provider_image_cleanup_obligations.last_delete_error
+          end,
+          updated_at = now()
+      `);
+      const row = (
+        await scopedDb.execute<{
+          id: string;
+          account_id: string;
+          workspace_id: string;
+          sandbox_group_id: string;
+          source_lease_id: string;
+          source_lease_epoch: number | string;
+          source_instance_id: string;
+          source_workspace_generation: number | string;
+          provider_binding_key: string;
+          provider_binding: Record<string, unknown>;
+          build_request_id: string;
+          object_id: string | null;
+          state: RigProviderImageCleanupObligationState;
+        }>(sql`
+          select id, account_id, workspace_id, sandbox_group_id, source_lease_id,
+            source_lease_epoch, source_instance_id, source_workspace_generation,
+            provider_binding_key, provider_binding,
+            build_request_id, object_id, state
+          from rig_provider_image_cleanup_obligations
+          where provider_backend = 'modal'
+            and provider_binding_key = ${providerIdentity.key}
+            and build_request_id = ${input.buildRequestId}
+            and source_instance_id = ${input.sourceInstanceId}
+          limit 1
+        `)
+      )[0];
+      if (
+        !row ||
+        row.account_id !== input.accountId ||
+        row.workspace_id !== input.workspaceId ||
+        row.sandbox_group_id !== input.sandboxGroupId ||
+        row.source_lease_id !== input.sourceLeaseId ||
+        Number(row.source_lease_epoch) !== input.sourceLeaseEpoch ||
+        row.source_instance_id !== input.sourceInstanceId ||
+        Number(row.source_workspace_generation) !== input.sourceWorkspaceGeneration ||
+        canonicalModalCheckpointProviderBinding(row.provider_binding)?.key !== providerIdentity.key
+      ) {
+        throw new RigProviderImageCleanupObligationConflictError(
+          "Modal Rig provider image cleanup request identity collision",
+        );
+      }
+      return {
+        id: row.id,
+        state: row.state,
+        buildRequestId: row.build_request_id,
+        objectId: row.object_id,
+        providerBindingKey: row.provider_binding_key,
+        providerBinding: row.provider_binding,
+        sourceLeaseId: row.source_lease_id,
+        sourceInstanceId: row.source_instance_id,
+      };
+    },
+  );
+}
+
+export async function markRigProviderImageCleanupObligationOutcomeUnknown(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    error?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'outcome_unknown',
+          last_delete_error = ${input.error?.slice(0, 4000) ?? null},
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state = 'building'
+          and object_id is null
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function markRigProviderImageCleanupObligationBuildFailed(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    error?: string | null;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'build_failed',
+          last_delete_error = ${input.error?.slice(0, 4000) ?? null},
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state in ('building', 'outcome_unknown', 'build_failed')
+          and object_id is null
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function recordRigProviderImageCleanupObject(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    buildRequestId: string;
+    providerBindingKey: string;
+    objectId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          object_id = ${input.objectId},
+          state = case when state = 'settled' then state else 'delete_pending' end,
+          delete_after = case when state = 'settled' then null else now() + interval '5 minutes' end,
+          object_recorded_at = coalesce(object_recorded_at, now()),
+          delete_claim_id = null,
+          delete_claimed_at = null,
+          last_delete_error = null,
+          updated_at = now()
+        where id = ${input.obligationId}
+          and build_request_id = ${input.buildRequestId}
+          and provider_binding_key = ${input.providerBindingKey}
+          and state <> 'deleted'
+          and (object_id is null or object_id = ${input.objectId})
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function settleRigProviderImageCleanupObligation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    obligationId: string;
+    objectId: string;
+  },
+): Promise<boolean> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{ id: string }>(sql`
+        update rig_provider_image_cleanup_obligations set
+          state = 'settled', delete_after = null, delete_claim_id = null,
+          delete_claimed_at = null, last_delete_error = null,
+          settled_at = coalesce(settled_at, now()), updated_at = now()
+        where id = ${input.obligationId}
+          and object_id = ${input.objectId}
+          and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+        returning id
+      `);
+      return rows.length === 1;
+    },
+  );
+}
+
+export async function listRecoverableRigProviderImageCleanupObligationsForSource(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sourceLeaseId: string;
+    sourceInstanceId: string;
+  },
+): Promise<RigProviderImageCleanupObligation[]> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const rows = await scopedDb.execute<{
+        id: string;
+        state: RigProviderImageCleanupObligationState;
+        build_request_id: string;
+        object_id: string | null;
+        provider_binding_key: string;
+        provider_binding: Record<string, unknown>;
+        source_lease_id: string;
+        source_instance_id: string;
+      }>(sql`
+        select id, state, build_request_id, object_id, provider_binding_key,
+          provider_binding, source_lease_id, source_instance_id
+        from rig_provider_image_cleanup_obligations
+        where source_lease_id = ${input.sourceLeaseId}
+          and source_instance_id = ${input.sourceInstanceId}
+          and state in ('building', 'outcome_unknown')
+        order by created_at, id
+      `);
+      return rows.map(
+        (row: {
+          id: string;
+          state: RigProviderImageCleanupObligationState;
+          build_request_id: string;
+          object_id: string | null;
+          provider_binding_key: string;
+          provider_binding: Record<string, unknown>;
+          source_lease_id: string;
+          source_instance_id: string;
+        }) => ({
+          id: row.id,
+          state: row.state,
+          buildRequestId: row.build_request_id,
+          objectId: row.object_id,
+          providerBindingKey: row.provider_binding_key,
+          providerBinding: row.provider_binding,
+          sourceLeaseId: row.source_lease_id,
+          sourceInstanceId: row.source_instance_id,
+        }),
+      );
+    },
+  );
+}
+
+export type RigProviderImageCleanupGcClaim = {
+  id: string;
+  providerBackend: string;
+  providerBindingKey: string;
+  providerBinding: Record<string, unknown>;
+  buildRequestId: string;
+  objectId: string;
+  deleteAttempts: number;
+};
+
+export async function claimRigProviderImageCleanupObligationsForGc(
+  db: Database,
+  input: { claimId: string; limit: number; claimTtlMs: number },
+): Promise<RigProviderImageCleanupGcClaim[]> {
+  const rows = await rawRows<{
+    id: string;
+    provider_backend: string;
+    provider_binding_key: string;
+    provider_binding: Record<string, unknown>;
+    build_request_id: string;
+    object_id: string;
+    delete_attempts: number | string;
+  }>(
+    db,
+    sql`select * from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+      ${input.claimId}::uuid, ${input.limit}, ${input.claimTtlMs}
+    )`,
+  );
+  return rows.map((row) => ({
+    id: row.id,
+    providerBackend: row.provider_backend,
+    providerBindingKey: row.provider_binding_key,
+    providerBinding: row.provider_binding,
+    buildRequestId: row.build_request_id,
+    objectId: row.object_id,
+    deleteAttempts: Number(row.delete_attempts),
+  }));
+}
+
+export async function settleRigProviderImageCleanupObligationGc(
+  db: Database,
+  input: {
+    obligationId: string;
+    claimId: string;
+    deleted: boolean;
+    error?: string | null;
+    retryAfterMs: number;
+  },
+): Promise<boolean> {
+  const rows = await rawRows<{ settled: boolean }>(
+    db,
+    sql`select opengeni_private.settle_rig_provider_image_cleanup_obligation(
+      ${input.obligationId}::uuid, ${input.claimId}::uuid, ${input.deleted},
+      ${input.error?.slice(0, 4000) ?? null}, ${input.retryAfterMs}
+    ) as settled`,
+  );
+  return rows[0]?.settled === true;
+}
+
 export class SandboxCheckpointArtifactRegistrationConflictError extends Error {
   readonly name = "SandboxCheckpointArtifactRegistrationConflictError";
 }
@@ -49934,8 +51188,28 @@ export async function registerSandboxCheckpointArtifact(
               where id = ${row.id}
                 and state in ('delete_pending', 'delete_failed')
             `);
+            await scopedDb.execute(sql`
+              update rig_provider_image_cleanup_obligations set
+                state = 'settled', delete_after = null, delete_claim_id = null,
+                delete_claimed_at = null, last_delete_error = null,
+                settled_at = coalesce(settled_at, now()), updated_at = now()
+              where provider_backend = 'modal'
+                and provider_binding_key = ${providerIdentity.key}
+                and object_id = ${verified.descriptor.snapshotId}
+                and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+            `);
             return { id: row.id, state: "candidate", objectId: row.object_id };
           }
+          await scopedDb.execute(sql`
+            update rig_provider_image_cleanup_obligations set
+              state = 'settled', delete_after = null, delete_claim_id = null,
+              delete_claimed_at = null, last_delete_error = null,
+              settled_at = coalesce(settled_at, now()), updated_at = now()
+            where provider_backend = 'modal'
+              and provider_binding_key = ${providerIdentity.key}
+              and object_id = ${verified.descriptor.snapshotId}
+              and state in ('delete_pending', 'delete_failed', 'deleting', 'settled')
+          `);
           return { id: row.id, state: row.state, objectId: row.object_id };
         },
       );
@@ -49984,6 +51258,8 @@ export async function markSandboxCheckpointArtifactDeletePending(
             where version.workspace_id = ${input.workspaceId}
               and provider_image.value ->> 'artifactId' = artifact.id::text
               and provider_image.value ->> 'status' = 'ready'
+              and provider_image.value #>> '{coldBootValidation,version}' =
+                ${String(RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION)}
           )
           and not exists (
             select 1
@@ -49996,6 +51272,8 @@ export async function markSandboxCheckpointArtifactDeletePending(
               and change.status in ('verifying', 'proposed')
               and change.verification #>> '{providerImage,artifactId}' = artifact.id::text
               and change.verification #>> '{providerImage,status}' = 'ready'
+              and change.verification #>> '{providerImage,coldBootValidation,version}' =
+                ${String(RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION)}
           )
         returning artifact.id
       `);

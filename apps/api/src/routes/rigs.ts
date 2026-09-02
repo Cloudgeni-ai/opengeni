@@ -1,11 +1,12 @@
 import {
   CreateRigRequest,
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
-  RigDefinitionEditPayload,
   UpdateRigRequest,
 } from "@opengeni/contracts";
 import {
   beginRigChangeVerificationAttempt,
+  beginRigVersionVerificationAttempt,
   listRigs,
   RigChangeTransitionError,
 } from "@opengeni/db";
@@ -28,6 +29,8 @@ import {
   listRigVersionsForApi,
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
+  resolveDeferredRigVersionVerificationRecovery,
+  RigDeferredVerificationRecoveryError,
   requireRigChangeForApi,
   requireRigForApi,
   updateRigForApi,
@@ -62,6 +65,21 @@ async function parseRigRequest<T>(c: Context, schema: ZodType<T>, label: string)
             path: issue.path,
             code: issue.code,
           })),
+    },
+  });
+}
+
+function rigVersionDispatchDeferredError(versionId: string): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message:
+      "The Rig verification attempt is committed and pending, but OpenGeni could not confirm workflow dispatch. Retry this verification request; it will reuse the same pending attempt.",
+    retryable: true,
+    outcomeUnknown: true,
+    details: {
+      code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+      versionId,
+      verificationStatus: "pending",
     },
   });
 }
@@ -113,13 +131,16 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
-    const attempt =
-      typeof change.verification?.attempt === "number" ? change.verification.attempt : Date.now();
+    const attemptId = change.verification?.attemptId;
+    if (typeof attemptId !== "string") {
+      throw new Error("Rig change verification attempt was not persisted");
+    }
     try {
       await workflowClient.startRigVerification({
         workspaceId,
         changeId,
-        workflowId: `rig-verification-change-${changeId}-attempt-${attempt}`,
+        attemptId,
+        workflowId: `rig-verification-change-${changeId}-attempt-${attemptId}`,
       });
       return { change, started: true };
     } catch (error) {
@@ -129,7 +150,7 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
       deps.observability?.warn("rig change verification start failed", {
         workspaceId,
         changeId,
-        attempt,
+        attemptId,
         error: error instanceof Error ? error.message : String(error),
       });
       return { change, started: false };
@@ -138,31 +159,68 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   async function startVersionVerification(
     workspaceId: string,
+    rigId: string,
     versionId: string,
-    workflowId = `rig-verification-version-${versionId}-${crypto.randomUUID()}`,
+    requestingGrant?: { accountId: string; subjectId: string },
+  ): Promise<{
+    attempt: Awaited<ReturnType<typeof beginRigVersionVerificationAttempt>>;
+    started: boolean;
+  }> {
+    const attempt = await beginRigVersionVerificationAttempt(
+      db,
+      { workspaceId, rigId, versionId },
+      {
+        allowAlreadyPending: true,
+        ...(requestingGrant
+          ? {
+              audit: {
+                accountId: requestingGrant.accountId,
+                subjectId: requestingGrant.subjectId,
+              },
+            }
+          : {}),
+      },
+    );
+    try {
+      await dispatchVersionVerification(workspaceId, versionId, attempt.attemptId);
+      return { attempt, started: true };
+    } catch (error) {
+      // The pending attempt committed before Temporal dispatch. Keep the exact
+      // deterministic attempt reusable and report committed truth at callers.
+      deps.observability?.warn("rig version verification dispatch failed", {
+        workspaceId,
+        rigId,
+        versionId,
+        attemptId: attempt.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return { attempt, started: false };
+    }
+  }
+
+  async function dispatchVersionVerification(
+    workspaceId: string,
+    versionId: string,
+    attemptId: string,
   ): Promise<void> {
     await workflowClient.startRigVerification({
       workspaceId,
       versionId,
-      workflowId,
+      attemptId,
+      workflowId: `rig-verification-version-${versionId}-attempt-${attemptId}`,
     });
   }
 
   async function tryStartInitialVersionVerification(
     workspaceId: string,
+    rigId: string,
     versionId: string,
   ): Promise<boolean> {
     try {
-      await startVersionVerification(
-        workspaceId,
-        versionId,
-        `rig-verification-version-${versionId}-initial`,
-      );
-      return true;
+      return (await startVersionVerification(workspaceId, rigId, versionId)).started;
     } catch (error) {
-      // Creation already committed. The rig remains fully usable through its
-      // runtime setup fallback and can be re-verified explicitly; never turn a
-      // successful create into an unretryable 5xx because Temporal was down.
+      // Creation already committed, but the version remains inactive. Preserve
+      // the deterministic retry target without mistaking dispatch for proof.
       deps.observability?.warn("initial rig provider-image verification start failed", {
         workspaceId,
         versionId,
@@ -195,10 +253,14 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
     const rig = await createRigForApi({ db }, grant, payload, {
       allowOrganization,
     });
-    if (rig.activeVersion) {
-      const started = await tryStartInitialVersionVerification(workspaceId, rig.activeVersion.id);
-      if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
-    }
+    const [initialVersion] = await listRigVersionsForApi({ db }, workspaceId, rig.id);
+    if (!initialVersion) throw new Error("initial rig version was not persisted");
+    const started = await tryStartInitialVersionVerification(
+      workspaceId,
+      rig.id,
+      initialVersion.id,
+    );
+    if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(rig, 201);
   });
 
@@ -254,11 +316,79 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
-    const payload = await parseRigRequest(c, RigDefinitionEditPayload, "Rig version request");
+    const payload = await parseRigRequest(c, CreateRigVersionRequest, "Rig version request");
     const version = await createRigVersionForApi({ db }, grant, rig, payload);
-    const started = await tryStartInitialVersionVerification(rig.workspaceId, version.id);
+    const started = await tryStartInitialVersionVerification(rig.workspaceId, rig.id, version.id);
     if (!started) c.header("OpenGeni-Rig-Verification", "deferred");
     return c.json(version, 201);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/:versionId/verify", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:manage");
+    const versionId = c.req.param("versionId");
+    const versions = await listRigVersionsForApi({ db }, rig.workspaceId, rig.id);
+    if (!versions.some((version) => version.id === versionId)) {
+      throw new HTTPException(404, { message: "rig version not found" });
+    }
+    const verification = await startVersionVerification(rig.workspaceId, rig.id, versionId, grant);
+    if (!verification.started) {
+      throw rigVersionDispatchDeferredError(versionId);
+    }
+    return c.json({ ok: true, versionId }, 202);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/rigs/:rigId/versions/recover", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    let recovery;
+    try {
+      recovery = await resolveDeferredRigVersionVerificationRecovery(
+        { db },
+        rig.workspaceId,
+        rig.id,
+      );
+    } catch (error) {
+      if (error instanceof RigDeferredVerificationRecoveryError) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: error.message,
+          retryable: false,
+          outcomeUnknown: false,
+          details: {
+            code:
+              error.reason === "ambiguous"
+                ? "RIG_DEFERRED_VERIFICATION_AMBIGUOUS"
+                : "RIG_DEFERRED_VERIFICATION_NOT_FOUND",
+            candidateCount: error.candidateCount,
+          },
+        });
+      }
+      throw error;
+    }
+    try {
+      await dispatchVersionVerification(rig.workspaceId, recovery.versionId, recovery.attemptId);
+    } catch (error) {
+      deps.observability?.warn("deferred rig version verification recovery dispatch failed", {
+        workspaceId: rig.workspaceId,
+        rigId: rig.id,
+        versionId: recovery.versionId,
+        attemptId: recovery.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message:
+          "OpenGeni could not confirm Rig verification dispatch. Retry this recovery operation; it will reuse the same pending attempt.",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: recovery.versionId,
+        },
+      });
+    }
+    return c.json({ ok: true, versionId: recovery.versionId }, 202);
   });
 
   // Rollback / promote-activate: flips which existing version is active.
@@ -334,11 +464,19 @@ export function registerRigRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/rigs/:rigId/verify", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const { rig } = await requireRigMutation(c, workspaceId, "rigs:use");
+    const { grant, rig } = await requireRigMutation(c, workspaceId, "rigs:use");
     if (!rig.activeVersion) {
       return c.json({ error: "rig has no active version" }, 422);
     }
-    await startVersionVerification(rig.workspaceId, rig.activeVersion.id);
+    const verification = await startVersionVerification(
+      rig.workspaceId,
+      rig.id,
+      rig.activeVersion.id,
+      grant,
+    );
+    if (!verification.started) {
+      throw rigVersionDispatchDeferredError(rig.activeVersion.id);
+    }
     return c.json({ ok: true, versionId: rig.activeVersion.id }, 202);
   });
 }

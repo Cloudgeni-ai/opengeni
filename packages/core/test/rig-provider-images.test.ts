@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RigChangeVerification, RigProviderImage, RigVersion } from "@opengeni/contracts";
+import type { RigPlatformSurfaceValidationReceipt } from "@opengeni/contracts/rig-platform-surface-validation";
 import {
   rigProviderImageBuildRequestId,
   rigProviderImageContentHash,
@@ -46,14 +47,53 @@ function readyImage(definition: RigVersion = version): RigProviderImage {
     imageDigest: null,
     artifactId: "55555555-5555-4555-8555-555555555555",
     providerBindingKeyHash: `sha256:${"4".repeat(64)}`,
+    coldBootValidation: {
+      version: 3,
+      checkedAt: "2026-08-10T00:00:00.500Z",
+    },
     provenance: {
       kind: "rig_verification",
-      targetKind: "version",
+      targetKind: "change",
       targetId: definition.id,
     },
     startedAt: "2026-08-10T00:00:00.000Z",
     finishedAt: "2026-08-10T00:00:01.000Z",
     error: null,
+  };
+}
+
+function surfaceReceipt(
+  image: RigProviderImage,
+  targetId = version.id,
+): RigPlatformSurfaceValidationReceipt {
+  const imageIdentity = image.imageId ?? image.imageDigest;
+  if (!imageIdentity) throw new Error("ready test provider image has no immutable identity");
+  return {
+    version: 3,
+    checkedAt: "2026-08-10T00:00:00.750Z",
+    binding: {
+      leaseId: "11111111-1111-4111-8111-111111111111",
+      sandboxGroupId: image.buildRequestId,
+      leaseEpoch: 1,
+      workspaceGeneration: 1,
+      instanceId: "sb-derived-image",
+      backendId: image.backend,
+      rigVersionId: targetId,
+    },
+    provenance: {
+      authority: "deployment_control_plane",
+      providerImage: imageIdentity,
+      providerImageId: imageIdentity,
+    },
+    terminal: { status: "disabled" },
+    browser: {
+      status: "passed",
+      browserSessionId: "22222222-2222-4222-8222-222222222222",
+      controllerGeneration: "sb-derived-image",
+      targetId: "page-1",
+      observedTargetGeneration: "page-generation-1",
+    },
+    computer: { status: "disabled" },
   };
 }
 
@@ -103,13 +143,22 @@ describe("rig provider image identity", () => {
 
   test("promotion copies only a finalized build matching the exact promoted definition", () => {
     const image = readyImage();
-    const verification = { providerImage: image } as RigChangeVerification;
-    expect(rigProviderImagesFromVerification(verification, version)).toEqual({ modal: image });
+    const verification = {
+      providerImage: image,
+      platformSurfaceValidation: surfaceReceipt(image),
+    } as RigChangeVerification;
+    expect(rigProviderImagesFromVerification(verification, version, version.id)).toEqual({
+      modal: image,
+    });
     expect(
-      rigProviderImagesFromVerification(verification, {
-        ...version,
-        setupScript: `${version.setupScript}\necho planted-stale-image`,
-      }),
+      rigProviderImagesFromVerification(
+        verification,
+        {
+          ...version,
+          setupScript: `${version.setupScript}\necho planted-stale-image`,
+        },
+        version.id,
+      ),
     ).toEqual({});
     expect(
       rigProviderImagesFromVerification(
@@ -122,6 +171,42 @@ describe("rig provider image identity", () => {
           },
         } as RigChangeVerification,
         version,
+        version.id,
+      ),
+    ).toEqual({});
+    expect(
+      rigProviderImagesFromVerification(
+        {
+          providerImage: {
+            ...image,
+            coldBootValidation: {
+              version: 1,
+              checkedAt: "2026-08-10T00:00:00.500Z",
+            },
+          },
+        } as RigChangeVerification,
+        version,
+        version.id,
+      ),
+    ).toEqual({});
+    expect(rigProviderImagesFromVerification(verification, version, crypto.randomUUID())).toEqual(
+      {},
+    );
+    expect(
+      rigProviderImagesFromVerification(
+        {
+          ...verification,
+          platformSurfaceValidation: {
+            ...surfaceReceipt(image),
+            provenance: {
+              authority: "deployment_control_plane",
+              providerImage: DEPLOYMENT_BASE,
+              providerImageId: DEPLOYMENT_BASE,
+            },
+          },
+        },
+        version,
+        version.id,
       ),
     ).toEqual({});
   });

@@ -43,12 +43,18 @@ type ExecCapableSession = {
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike>;
   execCommand?: (args: {
     cmd: string;
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
 };
 
@@ -63,6 +69,8 @@ export type EnsureBrowserControlServerOptions = {
   timeoutMs?: number;
   adminTokenFile: string;
   allowedOrigins?: readonly string[];
+  signal?: AbortSignal;
+  deadlineAtMs?: number;
 };
 
 export type EnsureBrowserControlServerResult = {
@@ -78,14 +86,16 @@ export function buildBrowserControlServerScript(
   const tokenFile = absolutePath(options.adminTokenFile, "browser controller admin token file");
   const allowedOrigins = normalizeOrigins(options.allowedOrigins ?? []);
   return [
-    "mkdir -p /tmp/opengeni-browserd &&",
+    "export PATH=/usr/bin:/bin:/usr/local/bin &&",
+    "/usr/bin/mkdir -p /tmp/opengeni-browserd &&",
     `if ! test -x ${BROWSER_CONTROL_SERVER_BIN}; then echo 'opengeni-browserd-up is not installed on this sandbox image' >&2; exit 16; fi &&`,
-    "flock -w 30 --close /tmp/opengeni-browserd/up.outer.lock",
-    `env OPENGENI_BROWSERD_PORT=${port}`,
+    "/usr/bin/flock -w 30 --close /tmp/opengeni-browserd/up.outer.lock",
+    `/usr/bin/env PATH=/usr/bin:/bin:/usr/local/bin OPENGENI_BROWSERD_PORT=${port}`,
     `OPENGENI_BROWSERD_ROOT=${shellQuote(BROWSER_CONTROL_STATE_DIRECTORY)}`,
     `OPENGENI_BROWSERD_ADMIN_TOKEN_FILE=${shellQuote(tokenFile)}`,
     `OPENGENI_BROWSERD_ALLOWED_ORIGINS=${shellQuote(allowedOrigins.join(","))}`,
     "OPENGENI_CODEMODE_TOKEN_FILE=/dev/null",
+    "/bin/bash",
     BROWSER_CONTROL_SERVER_BIN,
   ].join(" ");
 }
@@ -94,6 +104,7 @@ export async function ensureBrowserControlServer(
   session: unknown,
   options: EnsureBrowserControlServerOptions,
 ): Promise<EnsureBrowserControlServerResult> {
+  options.signal?.throwIfAborted();
   const target = session as ExecCapableSession;
   if (typeof target?.exec !== "function" && typeof target?.execCommand !== "function") {
     throw new BrowserControlServerUnsupportedError(
@@ -113,14 +124,21 @@ export async function ensureBrowserControlServer(
         workdir: PLACEMENT_CONTROLLER_WORKDIR,
         yieldTimeMs: timeoutMs,
         maxOutputTokens: 4_000,
+        timeoutMs,
+        ...(options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
     : await target.execCommand!({
         cmd,
         workdir: PLACEMENT_CONTROLLER_WORKDIR,
         yieldTimeMs: timeoutMs,
         maxOutputTokens: 4_000,
+        timeoutMs,
+        ...(options.deadlineAtMs === undefined ? {} : { deadlineAtMs: options.deadlineAtMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
   const output = outputOf(result);
+  options.signal?.throwIfAborted();
   const exitCode = exitCodeOf(result) ?? inferExitCode(output);
   if (exitCode !== 0) throw new BrowserControlServerError(exitCode, output);
   const marker = (output.match(/OPENGENI_BROWSERD_UP[^\n]*/) ?? [""])[0];
@@ -133,23 +151,29 @@ export async function ensureBrowserControlServer(
   return { port, marker };
 }
 
-export async function tearDownBrowserControlServer(session: unknown): Promise<void> {
+export async function tearDownBrowserControlServer(
+  session: unknown,
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<void> {
+  options.signal?.throwIfAborted();
   const target = session as ExecCapableSession;
+  const timeoutMs = boundedTimeout(options.timeoutMs ?? 15_000);
   if (target?.exec) {
     await target.exec({
-      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      cmd: `/bin/bash ${BROWSER_CONTROL_SERVER_DOWN_BIN}`,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
-      yieldTimeMs: 15_000,
+      yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,
     });
   } else if (target?.execCommand) {
     await target.execCommand({
-      cmd: BROWSER_CONTROL_SERVER_DOWN_BIN,
+      cmd: `/bin/bash ${BROWSER_CONTROL_SERVER_DOWN_BIN}`,
       workdir: PLACEMENT_CONTROLLER_WORKDIR,
-      yieldTimeMs: 15_000,
+      yieldTimeMs: timeoutMs,
       maxOutputTokens: 4_000,
     });
   }
+  options.signal?.throwIfAborted();
 }
 
 function outputOf(result: ExecResultLike | string): string {

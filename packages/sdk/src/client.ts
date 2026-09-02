@@ -235,6 +235,7 @@ import type {
   ResolveVariableSetAttachmentsRequest,
   ResolveVariableSetAttachmentsResponse,
   CreateRigRequest,
+  CreateRigVersionRequest,
   CreateWorkspaceRequest,
   EnsureWorkspaceRequest,
   EnsureWorkspaceResponse,
@@ -5502,6 +5503,46 @@ export class OpenGeniClient {
     return await this.requestJson<RigVersion[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`,
+    );
+  }
+
+  /** Create an inactive manager-authored version and start its verification. */
+  async createRigVersion(
+    workspaceId: string,
+    rigId: string,
+    request: CreateRigVersionRequest,
+  ): Promise<RigVersion> {
+    return await this.requestJson<RigVersion>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions`,
+      request,
+    );
+  }
+
+  /** Start or retry one exact version verification (rigs:manage). */
+  async verifyRigVersion(
+    workspaceId: string,
+    rigId: string,
+    versionId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/${versionId}/verify`,
+    );
+  }
+
+  /**
+   * Resume the one unique inactive version whose verification attempt is
+   * already pending (rigs:use). The server refuses zero or ambiguous candidates
+   * and never creates a new attempt through this operation.
+   */
+  async recoverDeferredRigVerification(
+    workspaceId: string,
+    rigId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    return await this.requestJson<{ ok: boolean; versionId: string }>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/rigs/${rigId}/versions/recover`,
     );
   }
 

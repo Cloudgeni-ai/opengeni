@@ -7,6 +7,8 @@
 import type { Settings } from "@opengeni/config";
 import type { CapabilityDescriptor, SandboxBackend } from "@opengeni/contracts";
 import type { RuntimeMetricsHooks } from "../../metrics";
+import type { TrustedRigPlatformSurface } from "../browser-control-client";
+import type { TrustedRigPlatformRuntimeManifest } from "./trusted-rig-platform-runtime-integrity";
 
 export interface ProviderConstructionContext {
   settings: Settings;
@@ -43,6 +45,43 @@ export type ProviderImmutableImageBuildInput = {
 export type ProviderExpirationRenewalInput = {
   settings: Settings;
   instanceId: string;
+};
+
+export type ProviderTrustedRigPlatformSurfaceInput = {
+  settings: Settings;
+  session: unknown;
+  instanceId: string;
+  providerImage: string;
+  /** Optional assertion only. Providers must discover the image identity from
+   * the exact live instance and must never use this value to select an image. */
+  expectedProviderImageId?: string;
+  /** Exact pristine deployment image used only to host the trusted validation
+   * runtime. When omitted, the live instance image is also the authority image.
+   * Cold-boot verification passes the original platform image so candidate
+   * derived bytes are inspected but never execute protected validation code. */
+  runtimeAuthorityImageId?: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
+  /** Manifest already read and verified through the provider-owned exact-instance
+   * filesystem boundary before any candidate shell command was allowed. */
+  runtimeManifest: TrustedRigPlatformRuntimeManifest;
+};
+
+export type ProviderTrustedRigPlatformRuntimeInspectionInput = {
+  settings: Settings;
+  session: unknown;
+  instanceId: string;
+  providerImage: string;
+  /** Optional assertion only. Providers must discover the image identity from
+   * the exact live instance and must never use this value to select an image. */
+  expectedProviderImageId?: string;
+  expectedRuntimeManifest?: TrustedRigPlatformRuntimeManifest;
+  timeoutMs: number;
+  deadlineAtMs?: number;
+  signal?: AbortSignal;
 };
 
 /**
@@ -150,6 +189,16 @@ export interface ProviderRegistration {
   buildImmutableImage?(
     input: ProviderImmutableImageBuildInput,
   ): Promise<ProviderImmutableImageBuildResult>;
+  /** Construct a provider/control-plane-owned validation authority for one
+   * exact committed verifier lease. Omission is an explicit fail-closed signal. */
+  createTrustedRigPlatformSurface?(
+    input: ProviderTrustedRigPlatformSurfaceInput,
+  ): Promise<TrustedRigPlatformSurface>;
+  /** Read protected helper/runtime bytes through a provider-owned filesystem
+   * boundary before any candidate command is invoked. */
+  inspectTrustedRigPlatformRuntime?(
+    input: ProviderTrustedRigPlatformRuntimeInspectionInput,
+  ): Promise<TrustedRigPlatformRuntimeManifest>;
   /** Refresh a renewable provider expiration for one exact live instance.
    * Omission means the provider has no renewable TTL contract. */
   renewExpiration?(input: ProviderExpirationRenewalInput): Promise<void>;

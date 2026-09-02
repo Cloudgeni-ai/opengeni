@@ -188,9 +188,10 @@ async function flush() {
   });
 }
 
-async function waitForOrganizationApiKeyReads() {
-  const deadline = Date.now() + 1_000;
-  while (listOrganizationApiKeys.mock.calls.length < 2 && Date.now() < deadline) {
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
     // The developer section is loaded through React.lazy. On a busy runner,
     // StrictMode's two effect passes may settle after more than one tick.
     await act(async () => {
@@ -276,7 +277,12 @@ describe("organization billing StrictMode ownership", () => {
         </StrictMode>,
       );
     });
-    await waitForOrganizationApiKeyReads();
+    await waitFor(
+      () =>
+        listOrganizationApiKeys.mock.calls.length >= 2 &&
+        container.textContent?.includes("No organization API keys yet") === true,
+      "organization API key reads did not settle under StrictMode",
+    );
 
     expect(listOrganizationApiKeys.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(

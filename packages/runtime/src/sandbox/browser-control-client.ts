@@ -112,32 +112,57 @@ export type BrowserControlPlacementSession = {
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    tty?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike | string>;
   execCommand?: (args: {
     cmd: string;
     workdir?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    tty?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
-  readFile?: (args: { path: string; maxBytes?: number }) => Promise<string | Uint8Array>;
+  readFile?: (args: {
+    path: string;
+    maxBytes?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }) => Promise<string | Uint8Array>;
   writeFile?: (args: {
     path: string;
     content: string | Uint8Array;
     createParents?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
   writePlacementPrivate?: (args: {
     path: string;
     content: string | Uint8Array;
     createParents?: boolean;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<unknown>;
-  deletePlacementPrivate?: (path: string) => Promise<void>;
   writeStdin?: (args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
-  resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
+  resolveExposedPort?: (
+    port: number,
+    options?: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal },
+  ) => Promise<ExposedPortEndpoint>;
   /** Signed OpenSandbox Channel B must host-fetch. Never fall through to in-box curl. */
   requireHostFetchController?: boolean;
   runtimeMetrics?: {
@@ -148,6 +173,7 @@ export type BrowserControlPlacementSession = {
   };
   ensureBrowserControl?: (
     request: BrowserControlEnsureRequest,
+    options?: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal },
   ) => Promise<BrowserControlEnsureResponse>;
   openBrowserFrames?: (
     request: BrowserFramesOpenRequest,
@@ -155,7 +181,20 @@ export type BrowserControlPlacementSession = {
   openComputerFrames?: (
     request: ComputerFramesOpenRequest,
   ) => Promise<{ channel: StreamChannel; endpoint: ExposedPortEndpoint }>;
-  finalizeOpStreamOps?: () => Promise<void>;
+  finalizeOpStreamOps?: (options?: {
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }) => Promise<void>;
+  /** Physically cancel an exec whose provider start/retained process has not
+   * settled yet. Provisioning waits for this cancellation before cleanup. */
+  cancelPendingExecCommand?: () => Promise<void>;
+  /**
+   * Provider/deployment-owned validation authority. Rig setup executes as root
+   * inside the placement and therefore cannot be allowed to install, replace,
+   * or emulate this worker-memory capability.
+   */
+  trustedRigPlatformSurface?: TrustedRigPlatformSurface;
 };
 
 export type ComputerControlFrame = {
@@ -354,6 +393,9 @@ export type ProvisionBrowserControlClientInput = {
   allowedOrigins?: readonly string[];
   port?: number;
   timeoutMs?: number;
+  /** Absolute caller work boundary shared by every provisioning sub-operation. */
+  deadlineAtMs?: number;
+  signal?: AbortSignal;
   /** Native connected-machine sidecar authority. Ignored by image-backed
    * placements, whose browserd is already supervised inside the sandbox image. */
   nativeAuthority?: {
@@ -362,9 +404,75 @@ export type ProvisionBrowserControlClientInput = {
   };
 };
 
+export type TrustedRigPlatformSurfaceBinding = {
+  authority: "deployment_control_plane";
+  backendId: string;
+  instanceId: string;
+  providerImage: string;
+  providerImageId: string;
+  runtimeAuthorityImageId: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
+  runtimeManifestDigest: string;
+};
+
+export type TrustedRigPlatformSurfaceOperation = {
+  backendId: string;
+  instanceId: string;
+  providerImage: string;
+  providerImageId: string;
+  leaseId: string;
+  leaseEpoch: number;
+  workspaceGeneration: number;
+  sandboxGroupId: string;
+  rigVersionId: string;
+  timeoutMs: number;
+  deadlineAtMs?: number;
+  signal?: AbortSignal;
+};
+
+export type TrustedRigPlatformTerminalProbe = {
+  cwd: "/workspace";
+  uid: 0;
+  bunVersion: "1.4.0";
+  interactive: true;
+};
+
+export type TrustedRigPlatformSurfaceController = Pick<
+  BrowserControlClient,
+  | "createSession"
+  | "sessionClient"
+  | "endSession"
+  | "createComputerSession"
+  | "computerSessionClient"
+  | "endComputerSession"
+>;
+
+export type TrustedRigPlatformSurface = {
+  binding: TrustedRigPlatformSurfaceBinding;
+  runTerminalProbe(
+    input: TrustedRigPlatformSurfaceOperation,
+  ): Promise<TrustedRigPlatformTerminalProbe>;
+  provisionController(
+    input: TrustedRigPlatformSurfaceOperation & {
+      adminToken: string;
+      allowedOrigins: readonly string[];
+    },
+  ): Promise<{ client: TrustedRigPlatformSurfaceController }>;
+  tearDownController(input: TrustedRigPlatformSurfaceOperation): Promise<void>;
+};
+
 export type ProvisionBrowserControlClientResult = {
   client: BrowserControlClient;
   server: EnsureBrowserControlServerResult;
+};
+
+export type BrowserControlRequestOptions = {
+  timeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 export class BrowserControlTransportError extends Error {
@@ -400,25 +508,130 @@ export class BrowserControlUnsupportedError extends Error {
   readonly name = "BrowserControlUnsupportedError";
 }
 
+type ProvisionOperationBudget = {
+  deadlineAtMs: number;
+  signal?: AbortSignal;
+};
+
+function provisionOperationBudget(
+  input: ProvisionBrowserControlClientInput,
+): ProvisionOperationBudget {
+  const now = Date.now();
+  const relativeDeadline = now + boundedTimeout(input.timeoutMs ?? 60_000);
+  const requestedDeadline = input.deadlineAtMs;
+  if (requestedDeadline !== undefined && !Number.isFinite(requestedDeadline)) {
+    throw new BrowserControlProtocolError("browser controller provisioning deadline is invalid");
+  }
+  return {
+    deadlineAtMs:
+      requestedDeadline === undefined
+        ? relativeDeadline
+        : Math.min(relativeDeadline, Math.floor(requestedDeadline)),
+    ...(input.signal ? { signal: input.signal } : {}),
+  };
+}
+
+function cleanupProvisionOperationBudget(
+  input: ProvisionBrowserControlClientInput,
+): ProvisionOperationBudget {
+  const timeoutMs = Math.max(1, Math.min(15_000, boundedTimeout(input.timeoutMs ?? 60_000)));
+  return { deadlineAtMs: Date.now() + timeoutMs };
+}
+
+function remainingProvisionOperationMs(budget: ProvisionOperationBudget): number {
+  budget.signal?.throwIfAborted();
+  const remaining = Math.floor(budget.deadlineAtMs - Date.now());
+  if (remaining <= 0) {
+    throw new BrowserControlTransportError("browser controller provisioning deadline was reached");
+  }
+  return Math.max(1, Math.min(MAX_REQUEST_TIMEOUT_MS, remaining));
+}
+
+async function awaitProvisionOperation<T>(
+  budget: ProvisionOperationBudget,
+  operation: (options: {
+    timeoutMs: number;
+    deadlineAtMs: number;
+    signal: AbortSignal;
+  }) => Promise<T>,
+  cancel?: () => Promise<void>,
+): Promise<T> {
+  const timeoutMs = remainingProvisionOperationMs(budget);
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let removeAbortListener = (): void => undefined;
+  const deadlineError = new BrowserControlTransportError(
+    "browser controller provisioning deadline was reached",
+  );
+  timer = setTimeout(() => controller.abort(deadlineError), timeoutMs);
+  if (budget.signal) {
+    const onAbort = (): void =>
+      controller.abort(budget.signal?.reason ?? new Error("operation aborted"));
+    removeAbortListener = () => budget.signal?.removeEventListener("abort", onAbort);
+    budget.signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const operationPromise = Promise.resolve().then(() =>
+    operation({
+      timeoutMs,
+      deadlineAtMs: budget.deadlineAtMs,
+      signal: controller.signal,
+    }),
+  );
+  try {
+    const winner = await Promise.race([
+      operationPromise.then(
+        (value) => ({ kind: "completed" as const, value }),
+        (error) => ({ kind: "failed" as const, error }),
+      ),
+      new Promise<{ kind: "aborted"; reason: unknown }>((resolve) => {
+        const onAbort = (): void =>
+          resolve({ kind: "aborted", reason: controller.signal.reason ?? deadlineError });
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+    if (winner.kind === "completed") return winner.value;
+    if (winner.kind === "failed") throw winner.error;
+
+    // Abort the provider operation, then wait until its exact promise settles
+    // before any authority-file or sidecar cleanup may begin.
+    await cancel?.().catch(() => undefined);
+    await operationPromise.catch(() => undefined);
+    throw winner.reason;
+  } finally {
+    if (timer) clearTimeout(timer);
+    removeAbortListener();
+  }
+}
+
 /** Install one placement-stable admin credential and start the pinned controller. */
 export async function provisionBrowserControlClient(
   session: BrowserControlPlacementSession,
   input: ProvisionBrowserControlClientInput,
 ): Promise<ProvisionBrowserControlClientResult> {
+  input.signal?.throwIfAborted();
   requirePlacementProvisioningSurface(session);
   const adminToken = requireToken(input.adminToken, "browser controller admin token");
+  const budget = provisionOperationBudget(input);
   if (session.ensureBrowserControl) {
     if (!input.nativeAuthority) {
       throw new BrowserControlProtocolError(
         "connected browser placement is missing its controller authority scope",
       );
     }
-    const ensured = await session.ensureBrowserControl({
-      scopeId: input.nativeAuthority.scopeId,
-      scopeGeneration: input.nativeAuthority.scopeGeneration,
-      adminToken,
-      allowedOrigins: [...(input.allowedOrigins ?? [])],
-    });
+    const ensured = await awaitProvisionOperation(
+      budget,
+      async (options) =>
+        await session.ensureBrowserControl!(
+          {
+            scopeId: input.nativeAuthority!.scopeId,
+            scopeGeneration: input.nativeAuthority!.scopeGeneration,
+            adminToken,
+            allowedOrigins: [...(input.allowedOrigins ?? [])],
+          },
+          options,
+        ),
+    );
     const port = boundedPort(ensured.port);
     nativeControllerPorts.set(nativeControllerKey(input.nativeAuthority), port);
     return {
@@ -427,6 +640,7 @@ export async function provisionBrowserControlClient(
         port,
         nativeAuthority: input.nativeAuthority,
         ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
       server: { port, marker: `agent:${ensured.sidecarGeneration}` },
     };
@@ -441,7 +655,8 @@ export async function provisionBrowserControlClient(
     await runChecked(
       session,
       `umask 077; install -d -m 0700 -- ${shellQuote(parent)}; printf '%s\\n' ${shellQuote(COMMAND_OK)}`,
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
     await writePrivateFile(
       session,
@@ -450,32 +665,55 @@ export async function provisionBrowserControlClient(
         content: `${adminToken}\n`,
         createParents: false,
       },
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
     await runChecked(
       session,
       `chmod 0600 -- ${shellQuote(temporaryTokenFile)}; mv -f -- ${shellQuote(temporaryTokenFile)} ${shellQuote(adminTokenFile)}; printf '%s\\n' ${shellQuote(COMMAND_OK)}`,
-      input.timeoutMs,
+      remainingProvisionOperationMs(budget),
+      budget,
     );
-    const server = await ensureBrowserControlServer(session, {
-      adminTokenFile,
-      ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
-      ...(input.port === undefined ? {} : { port: input.port }),
-      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
-    });
+    const server = await awaitProvisionOperation(
+      budget,
+      async ({ timeoutMs, deadlineAtMs, signal }) =>
+        await ensureBrowserControlServer(session, {
+          adminTokenFile,
+          ...(input.allowedOrigins ? { allowedOrigins: input.allowedOrigins } : {}),
+          ...(input.port === undefined ? {} : { port: input.port }),
+          timeoutMs,
+          deadlineAtMs,
+          signal,
+        }),
+      session.cancelPendingExecCommand?.bind(session),
+    );
     const client = new BrowserControlClient(session, {
       adminToken,
       port: server.port,
       ...(input.nativeAuthority ? { nativeAuthority: input.nativeAuthority } : {}),
       ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
     if (input.allowedOrigins && input.allowedOrigins.length > 0) {
-      await client.addAllowedOrigins(input.allowedOrigins);
+      await awaitProvisionOperation(
+        budget,
+        async ({ timeoutMs, signal }) =>
+          await client.addAllowedOrigins(input.allowedOrigins!, {
+            timeoutMs,
+            signal,
+          }),
+      );
     }
     return { client, server };
   } finally {
-    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`);
-    await session.finalizeOpStreamOps?.().catch(() => undefined);
+    const cleanupBudget = cleanupProvisionOperationBudget(input);
+    await runBestEffort(session, `rm -f -- ${shellQuote(temporaryTokenFile)}`, cleanupBudget);
+    if (session.finalizeOpStreamOps) {
+      await awaitProvisionOperation(
+        cleanupBudget,
+        async (options) => await session.finalizeOpStreamOps!(options),
+      ).catch(() => undefined);
+    }
   }
 }
 
@@ -484,6 +722,7 @@ export class BrowserControlClient {
   private readonly session: BrowserControlPlacementSession;
   private readonly adminToken: string;
   private readonly timeoutMs: number;
+  private readonly signal: AbortSignal | undefined;
   private readonly nativeAuthority: { scopeId: string; scopeGeneration: string } | undefined;
 
   constructor(
@@ -492,6 +731,7 @@ export class BrowserControlClient {
       adminToken: string;
       port?: number;
       timeoutMs?: number;
+      signal?: AbortSignal;
       nativeAuthority?: { scopeId: string; scopeGeneration: string };
     },
   ) {
@@ -500,10 +740,14 @@ export class BrowserControlClient {
     this.adminToken = requireToken(options.adminToken, "browser controller admin token");
     this.port = boundedPort(options.port ?? BROWSER_CONTROL_PORT);
     this.timeoutMs = boundedTimeout(options.timeoutMs ?? 60_000);
+    this.signal = options.signal;
     this.nativeAuthority = options.nativeAuthority;
   }
 
-  async addAllowedOrigins(origins: readonly string[]): Promise<readonly string[]> {
+  async addAllowedOrigins(
+    origins: readonly string[],
+    options: BrowserControlRequestOptions = {},
+  ): Promise<readonly string[]> {
     if (origins.length === 0 || origins.length > 64) {
       throw new RangeError("browser controller origin list size is invalid");
     }
@@ -513,6 +757,7 @@ export class BrowserControlClient {
       path: "/v1/origins",
       token: this.adminToken,
       body: { origins: normalized },
+      ...options,
     });
     if (!isRecord(data) || !Array.isArray(data.origins)) {
       throw new BrowserControlProtocolError("browser controller returned malformed origins");
@@ -520,7 +765,10 @@ export class BrowserControlClient {
     return data.origins.map((origin) => normalizeOrigin(origin));
   }
 
-  async createSession(input: CreatePlacementBrowserSessionInput): Promise<PlacementBrowserSession> {
+  async createSession(
+    input: CreatePlacementBrowserSessionInput,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<PlacementBrowserSession> {
     const reference = parseReference(input);
     const restore = input.restore ? browserStateRestoreRequest(input.restore) : null;
     let data: unknown;
@@ -545,7 +793,14 @@ export class BrowserControlClient {
             : {}),
           ...(restore ? { restore: restore.wire } : {}),
         },
-        ...(restore ? { timeoutMs: BROWSER_STATE_TRANSFER_TIMEOUT_MS } : {}),
+        ...(restore
+          ? {
+              timeoutMs: Math.min(BROWSER_STATE_TRANSFER_TIMEOUT_MS, options.timeoutMs ?? Infinity),
+            }
+          : options.timeoutMs === undefined
+            ? {}
+            : { timeoutMs: options.timeoutMs }),
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
     } finally {
       restore?.dataKey.fill(0);
@@ -569,6 +824,7 @@ export class BrowserControlClient {
 
   async createComputerSession(
     input: CreatePlacementComputerSessionInput,
+    options: BrowserControlRequestOptions = {},
   ): Promise<PlacementComputerSession> {
     const reference = parseComputerReference(input);
     const data = await this.requestJson({
@@ -581,6 +837,7 @@ export class BrowserControlClient {
         controlToken: requireToken(input.controlToken, "computer control token"),
         viewToken: requireToken(input.viewToken, "computer view token"),
       },
+      ...options,
     });
     if (!isRecord(data) || !Array.isArray(data.targets)) {
       throw new BrowserControlProtocolError(
@@ -615,7 +872,7 @@ export class BrowserControlClient {
 
   async endSession(
     reference: PlacementBrowserSessionReference,
-    options: { removeState: boolean },
+    options: { removeState: boolean } & BrowserControlRequestOptions,
   ): Promise<void> {
     const binding = parseReference(reference);
     const data = await this.requestJson({
@@ -626,6 +883,8 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
       },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError("browser controller returned malformed end receipt");
@@ -634,7 +893,7 @@ export class BrowserControlClient {
 
   async endComputerSession(
     reference: PlacementComputerSessionReference,
-    options: { removeState: boolean },
+    options: { removeState: boolean } & BrowserControlRequestOptions,
   ): Promise<void> {
     const binding = parseComputerReference(reference);
     const data = await this.requestJson({
@@ -645,6 +904,8 @@ export class BrowserControlClient {
         controllerGeneration: binding.controllerGeneration,
         removeState: options.removeState,
       },
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
     if (!isRecord(data) || data.ended !== true) {
       throw new BrowserControlProtocolError(
@@ -936,6 +1197,7 @@ export class BrowserControlClient {
     token: string;
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<unknown> {
     return await this.requestJson(input);
   }
@@ -946,6 +1208,7 @@ export class BrowserControlClient {
     token: string;
     expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
+    signal?: AbortSignal;
   }): Promise<ComputerControlFrame> {
     return await this.requestBytes(input);
   }
@@ -957,9 +1220,12 @@ export class BrowserControlClient {
       token: string;
       body?: unknown;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
     retryNativeEndpoint = true,
   ): Promise<unknown> {
+    const requestSignal = input.signal ?? this.signal;
+    requestSignal?.throwIfAborted();
     // Image-backed placements expose browserd through the provider tunnel. Use
     // that actual data plane for control too: one authenticated HTTP request,
     // instead of materializing files and starting curl through the sandbox exec
@@ -988,7 +1254,7 @@ export class BrowserControlClient {
           try {
             return await requestExposedController(
               endpoint,
-              input,
+              { ...input, ...(requestSignal ? { signal: requestSignal } : {}) },
               this.timeoutMs,
               this.session.runtimeMetrics,
             );
@@ -1097,6 +1363,7 @@ export class BrowserControlClient {
       if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
         throw new BrowserControlProtocolError("browser controller response is too large");
       }
+      requestSignal?.throwIfAborted();
       return parseEnvelope(responseText, status);
     } catch (error) {
       if (
@@ -1130,9 +1397,12 @@ export class BrowserControlClient {
       token: string;
       expectedFrameEvidence: ExpectedComputerFrameEvidence;
       timeoutMs?: number;
+      signal?: AbortSignal;
     },
     retryNativeEndpoint = true,
   ): Promise<ComputerControlFrame> {
+    const requestSignal = input.signal ?? this.signal;
+    requestSignal?.throwIfAborted();
     const requireHostFetch = this.session.requireHostFetchController === true;
     if (this.session.resolveExposedPort && !this.session.ensureBrowserControl) {
       try {
@@ -1148,7 +1418,11 @@ export class BrowserControlClient {
         }
         if (hostFetchAllowed) {
           try {
-            return await requestExposedControllerBytes(endpoint, input, this.timeoutMs);
+            return await requestExposedControllerBytes(
+              endpoint,
+              { ...input, ...(requestSignal ? { signal: requestSignal } : {}) },
+              this.timeoutMs,
+            );
           } catch (error) {
             if (
               retryNativeEndpoint &&
@@ -1281,12 +1555,18 @@ export class BrowserControlClient {
     const key = nativeControllerKey(this.nativeAuthority);
     const cached = nativeControllerPorts.get(key);
     if (cached !== undefined) return cached;
-    const ensured = await this.session.ensureBrowserControl({
-      scopeId: this.nativeAuthority.scopeId,
-      scopeGeneration: this.nativeAuthority.scopeGeneration,
-      adminToken: this.adminToken,
-      allowedOrigins: [],
-    });
+    const ensured = await this.session.ensureBrowserControl(
+      {
+        scopeId: this.nativeAuthority.scopeId,
+        scopeGeneration: this.nativeAuthority.scopeGeneration,
+        adminToken: this.adminToken,
+        allowedOrigins: [],
+      },
+      {
+        timeoutMs: this.timeoutMs,
+        ...(this.signal ? { signal: this.signal } : {}),
+      },
+    );
     const port = boundedPort(ensured.port);
     nativeControllerPorts.set(key, port);
     return port;
@@ -1317,11 +1597,12 @@ export class BrowserControlSessionClient {
     this.viewToken = requireToken(input.viewToken, "browser view token");
   }
 
-  async listTargets(): Promise<BrowserTargetValue[]> {
+  async listTargets(options: BrowserControlRequestOptions = {}): Promise<BrowserTargetValue[]> {
     const data = await this.parent.requestForSession({
       method: "GET",
       path: this.path("targets"),
       token: this.viewToken,
+      ...options,
     });
     if (!Array.isArray(data)) {
       throw new BrowserControlProtocolError("browser controller returned malformed targets");
@@ -1388,13 +1669,17 @@ export class BrowserControlSessionClient {
     return receipt;
   }
 
-  async openTarget(url?: string): Promise<BrowserObservationValue> {
+  async openTarget(
+    url?: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "POST",
         path: this.path("targets"),
         token: this.controlToken,
         body: url === undefined ? {} : { url: boundedUrl(url) },
+        ...options,
       }),
     );
   }
@@ -1422,12 +1707,16 @@ export class BrowserControlSessionClient {
     return data.map((target) => BrowserTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<BrowserObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<BrowserObservationValue> {
     return BrowserObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
         token: this.viewToken,
+        ...options,
       }),
     );
   }
@@ -1606,11 +1895,12 @@ export class ComputerControlSessionClient {
     this.viewToken = requireToken(input.viewToken, "computer view token");
   }
 
-  async listTargets(): Promise<ComputerTargetValue[]> {
+  async listTargets(options: BrowserControlRequestOptions = {}): Promise<ComputerTargetValue[]> {
     const data = await this.parent.requestForSession({
       method: "GET",
       path: this.path("targets"),
       token: this.viewToken,
+      ...options,
     });
     if (!Array.isArray(data)) {
       throw new BrowserControlProtocolError(
@@ -1620,12 +1910,16 @@ export class ComputerControlSessionClient {
     return data.map((target) => ComputerTarget.parse(target));
   }
 
-  async observe(targetId: string): Promise<ComputerObservationValue> {
+  async observe(
+    targetId: string,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<ComputerObservationValue> {
     return ComputerObservation.parse(
       await this.parent.requestForSession({
         method: "GET",
         path: this.targetPath(targetId, "observation"),
         token: this.viewToken,
+        ...options,
       }),
     );
   }
@@ -1638,6 +1932,7 @@ export class ComputerControlSessionClient {
       maxWidth?: number;
       maxHeight?: number;
     } = {},
+    requestOptions: BrowserControlRequestOptions = {},
   ): Promise<ComputerControlFrame> {
     const query = new URLSearchParams();
     if (options.format !== undefined) query.set("format", options.format);
@@ -1654,6 +1949,7 @@ export class ComputerControlSessionClient {
         controllerGeneration: this.reference.controllerGeneration,
         targetId: requireOpaqueId(targetId, "computer target id"),
       },
+      ...requestOptions,
     });
   }
 
@@ -1667,7 +1963,10 @@ export class ComputerControlSessionClient {
     );
   }
 
-  async action(command: ComputerActionCommandValue): Promise<ComputerActionReceiptValue> {
+  async action(
+    command: ComputerActionCommandValue,
+    options: BrowserControlRequestOptions = {},
+  ): Promise<ComputerActionReceiptValue> {
     const parsed = ComputerActionCommand.parse(command);
     if (
       parsed.computerSessionId !== this.reference.computerSessionId ||
@@ -1681,6 +1980,7 @@ export class ComputerControlSessionClient {
         path: this.path("actions"),
         token: this.controlToken,
         body: parsed,
+        ...options,
       }),
     );
   }
@@ -1786,6 +2086,7 @@ async function requestExposedController(
     token: string;
     body?: unknown;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
   defaultTimeoutMs: number,
   metrics?: {
@@ -1812,7 +2113,7 @@ async function requestExposedController(
     },
     ...(body === undefined ? {} : { body }),
     redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: requestAbortSignal(input.signal, timeoutMs),
   });
   const responseText = await response.text();
   if (Buffer.byteLength(responseText) > BROWSER_CONTROL_MAX_JSON_BYTES) {
@@ -1846,6 +2147,7 @@ async function requestExposedControllerBytes(
     token: string;
     expectedFrameEvidence: ExpectedComputerFrameEvidence;
     timeoutMs?: number;
+    signal?: AbortSignal;
   },
   defaultTimeoutMs: number,
 ): Promise<ComputerControlFrame> {
@@ -1861,7 +2163,7 @@ async function requestExposedControllerBytes(
       accept: "image/jpeg, image/png",
     },
     redirect: "manual",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: requestAbortSignal(input.signal, timeoutMs),
   });
   if (!response.ok) {
     const responseText = await response.text();
@@ -1878,6 +2180,11 @@ async function requestExposedControllerBytes(
   }
   const data = new Uint8Array(await response.arrayBuffer());
   return computerControlFrame(data, response.headers, input.expectedFrameEvidence);
+}
+
+function requestAbortSignal(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
 function computerControlFrame(
@@ -2531,14 +2838,29 @@ async function writePrivateFile(
     createParents?: boolean;
   },
   timeoutMs = 60_000,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
   if (session.writePlacementPrivate) {
-    await session.writePlacementPrivate(input);
+    if (budget) {
+      await awaitProvisionOperation(
+        budget,
+        async (options) => await session.writePlacementPrivate!({ ...input, ...options }),
+      );
+    } else {
+      await session.writePlacementPrivate(input);
+    }
     return;
   }
   if (session.writeFile) {
     try {
-      await session.writeFile(input);
+      if (budget) {
+        await awaitProvisionOperation(
+          budget,
+          async (options) => await session.writeFile!({ ...input, ...options }),
+        );
+      } else {
+        await session.writeFile(input);
+      }
       return;
     } catch (error) {
       if (
@@ -2564,6 +2886,7 @@ async function writePrivateFile(
       session,
       `umask 077; install -d -m 0700 -- ${shellQuote(parent)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
       timeoutMs,
+      budget,
     );
   }
   if (bytes.byteLength === 0) {
@@ -2571,6 +2894,7 @@ async function writePrivateFile(
       session,
       `umask 077; : > ${shellQuote(path)}; chmod 0600 -- ${shellQuote(path)}; printf '%s\n' ${shellQuote(COMMAND_OK)}`,
       timeoutMs,
+      budget,
     );
     return;
   }
@@ -2590,19 +2914,29 @@ async function writePrivateFile(
     `chmod 0600 -- ${shellQuote(path)};`,
     `printf '%s\n' ${shellQuote(COMMAND_OK)}`,
   ].join(" ");
-  const started = session.exec
-    ? await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 250,
-        maxOutputTokens: 2_000,
-      })
-    : await session.execCommand!({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 250,
-        maxOutputTokens: 2_000,
-      });
+  const start = async (options?: {
+    signal: AbortSignal;
+    deadlineAtMs: number;
+    timeoutMs: number;
+  }) =>
+    session.exec
+      ? await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
+          maxOutputTokens: 2_000,
+          ...(options ?? {}),
+        })
+      : await session.execCommand!({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: Math.min(250, budget ? remainingProvisionOperationMs(budget) : 250),
+          maxOutputTokens: 2_000,
+          ...(options ?? {}),
+        });
+  const started = budget
+    ? await awaitProvisionOperation(budget, start, session.cancelPendingExecCommand?.bind(session))
+    : await start();
   const startedSessionId =
     typeof started === "string"
       ? (() => {
@@ -2617,12 +2951,24 @@ async function writePrivateFile(
       "browser private file transport did not yield an input session",
     );
   }
-  const output = await session.writeStdin({
-    sessionId: startedSessionId,
-    chars: payload,
-    yieldTimeMs: boundedTimeout(timeoutMs),
-    maxOutputTokens: 2_000,
-  });
+  const write = async (
+    remainingMs = boundedTimeout(timeoutMs),
+    options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+  ) =>
+    await session.writeStdin!({
+      sessionId: startedSessionId,
+      chars: payload,
+      yieldTimeMs: remainingMs,
+      maxOutputTokens: 2_000,
+      ...(options ?? {}),
+    });
+  const output = budget
+    ? await awaitProvisionOperation(
+        budget,
+        async (options) => await write(options.timeoutMs, options),
+        session.cancelPendingExecCommand?.bind(session),
+      )
+    : await write();
   const terminal = parseExecResponseBanner(output);
   if (
     terminal.kind === "invalid" ||
@@ -2638,21 +2984,34 @@ async function runChecked(
   session: BrowserControlPlacementSession,
   command: string,
   timeoutMs = 60_000,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
-  const bounded = boundedTimeout(timeoutMs);
-  const result = session.exec
-    ? await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: bounded,
-        maxOutputTokens: 2_000,
-      })
-    : await session.execCommand!({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: bounded,
-        maxOutputTokens: 2_000,
-      });
+  const run = async (
+    remainingMs = boundedTimeout(timeoutMs),
+    options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+  ) =>
+    session.exec
+      ? await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: remainingMs,
+          maxOutputTokens: 2_000,
+          ...(options ?? {}),
+        })
+      : await session.execCommand!({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: remainingMs,
+          maxOutputTokens: 2_000,
+          ...(options ?? {}),
+        });
+  const result = budget
+    ? await awaitProvisionOperation(
+        budget,
+        async (options) => await run(options.timeoutMs, options),
+        session.cancelPendingExecCommand?.bind(session),
+      )
+    : await run();
   const output = commandOutput(result);
   const exitCode = typeof result === "object" && result ? result.exitCode : undefined;
   if ((typeof exitCode === "number" && exitCode !== 0) || !output.includes(COMMAND_OK)) {
@@ -2663,22 +3022,39 @@ async function runChecked(
 async function runBestEffort(
   session: BrowserControlPlacementSession,
   command: string,
+  budget?: ProvisionOperationBudget,
 ): Promise<void> {
   try {
-    if (session.exec) {
-      await session.exec({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 15_000,
-        maxOutputTokens: 100,
-      });
-    } else if (session.execCommand) {
-      await session.execCommand({
-        cmd: command,
-        workdir: placementControllerWorkdir(session),
-        yieldTimeMs: 15_000,
-        maxOutputTokens: 100,
-      });
+    const run = async (
+      timeoutMs = 15_000,
+      options?: { signal: AbortSignal; deadlineAtMs: number; timeoutMs: number },
+    ) => {
+      if (session.exec) {
+        await session.exec({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: timeoutMs,
+          maxOutputTokens: 100,
+          ...(options ?? {}),
+        });
+      } else if (session.execCommand) {
+        await session.execCommand({
+          cmd: command,
+          workdir: placementControllerWorkdir(session),
+          yieldTimeMs: timeoutMs,
+          maxOutputTokens: 100,
+          ...(options ?? {}),
+        });
+      }
+    };
+    if (budget) {
+      await awaitProvisionOperation(
+        budget,
+        async (options) => await run(Math.min(15_000, options.timeoutMs), options),
+        session.cancelPendingExecCommand?.bind(session),
+      );
+    } else {
+      await run();
     }
   } catch {
     // UUID-scoped request directories contain no durable state.

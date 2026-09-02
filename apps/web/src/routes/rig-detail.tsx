@@ -34,6 +34,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+import { deferredRigVerificationView } from "@/lib/rig-status";
 
 // Live cadence: fast enough that a verifying change resolves without a manual
 // refresh, slow enough to stay quiet.
@@ -60,7 +61,9 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
   }, [variableSets.variableSets]);
 
   const versionLabel = useMemo(() => {
-    const byId = new Map(versions.versions.map((version) => [version.id, `v${version.version}`]));
+    const byId = new Map(
+      (versions.versions ?? []).map((version) => [version.id, `v${version.version}`]),
+    );
     return (id: string | null) => (id ? (byId.get(id) ?? null) : null);
   }, [versions.versions]);
 
@@ -106,6 +109,9 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
 
   const current = rig.rig;
   const active = current.activeVersion;
+  const deferredVerification = versions.versions
+    ? deferredRigVerificationView(versions.versions)
+    : null;
   const pendingChanges = changes.changes.filter(
     (change) => change.status === "proposed" || change.status === "verifying",
   ).length;
@@ -168,7 +174,16 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               variant="ghost"
               size="sm"
               className="h-9"
-              disabled={rig.mutating}
+              disabled={rig.mutating || (!isDefaultRig && (!active || current.scope === "user"))}
+              title={
+                !isDefaultRig
+                  ? current.scope === "user"
+                    ? "Personal Rigs cannot be a workspace default"
+                    : !active
+                      ? "Only an active Rig can be the workspace default"
+                      : undefined
+                  : undefined
+              }
               onClick={async () => {
                 const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
                 if (!acceptedTransition) return;
@@ -260,6 +275,15 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
             variableSetName={variableSetName}
             canUse={canView}
             mutating={rig.mutating}
+            deferredVerification={deferredVerification}
+            versionsLoading={versions.loading}
+            versionsError={versions.error}
+            onRetryVersions={() => void versions.refresh()}
+            onRecoverDeferred={async () => {
+              const result = await rig.recoverDeferredVerification();
+              if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+              return result;
+            }}
             onVerify={rig.verify}
           />
         </TabsContent>
@@ -267,9 +291,13 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
         <TabsContent value="setup" className="mt-5">
           <RigSetupSection
             activeVersion={active}
+            versions={versions.versions}
+            versionsLoading={versions.loading}
+            versionsError={versions.error}
             rigScope={current.scope}
             variableSets={variableSets.variableSets}
             canPropose={canView}
+            canManage={canManage}
             mutating={rig.mutating}
             onPropose={async (request) => {
               const result = await rig.proposeChange(request);
@@ -277,16 +305,24 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               return result;
             }}
             onProposed={() => setTab("changes")}
+            onCreateVersion={async (request) => {
+              const result = await rig.createVersion(request);
+              if (result) await versions.refresh();
+              return result;
+            }}
+            onRetryVersions={() => void versions.refresh()}
           />
         </TabsContent>
 
         <TabsContent value="versions" className="mt-5">
-          {versions.error && versions.versions.length === 0 ? (
+          {versions.error && versions.versions === null ? (
             <LoadErrorState
               title="Couldn't load versions"
               error={versions.error}
               onRetry={() => void versions.refresh()}
             />
+          ) : versions.versions === null ? (
+            <Skeleton className="h-40 w-full rounded-lg" />
           ) : (
             <RigVersionsTimeline
               versions={versions.versions}
@@ -294,6 +330,17 @@ export function RigDetailRoute({ workspaceId, rigId }: { workspaceId: string; ri
               variableSetName={variableSetName}
               canManage={canManage}
               mutating={rig.mutating}
+              deferredVerification={deferredRigVerificationView(versions.versions)}
+              onRecoverDeferred={async () => {
+                const result = await rig.recoverDeferredVerification();
+                if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+                return result;
+              }}
+              onVerifyVersion={async (versionId) => {
+                const result = await rig.verifyVersion(versionId);
+                if (result) await Promise.all([versions.refresh(), changes.refresh()]);
+                return result;
+              }}
               onActivate={async (versionId) => {
                 const result = await rig.activateVersion(versionId);
                 await versions.refresh();

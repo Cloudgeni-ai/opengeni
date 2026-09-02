@@ -17,6 +17,7 @@ export default defineConfig({
     "src/model-picker-order.ts",
     "src/organization-recovery.ts",
     "src/personal-github.ts",
+    "src/rig-platform-surface-validation.ts",
     "src/session-titles.ts",
     "src/slack-bot-scopes.ts",
     "src/editable-artifacts.ts",

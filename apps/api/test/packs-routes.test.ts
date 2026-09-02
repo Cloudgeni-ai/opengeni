@@ -4,7 +4,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
-  createRig,
+  createRig as createInactiveRig,
   deleteWorkspace,
   listInstalledPortableSkills,
   type DbClient,
@@ -12,6 +12,7 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -373,6 +374,85 @@ describe("Pack routes", () => {
       ),
     ).toHaveLength(0);
   }, 60_000);
+
+  test("reports a selected validation-pending Rig as unverified and blocks installation", async () => {
+    if (!available || !client) return;
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const packId = `pack-route-pending-rig-${suffix}`;
+    const rigName = `Pending Pack Rig ${suffix}`;
+    const registered = await request("/packs", {
+      method: "POST",
+      body: JSON.stringify({
+        id: packId,
+        name: packId,
+        description: "Requires a validated compute environment.",
+        role: "infrastructure",
+        category: "deployment",
+        version: "1.0.0",
+        rig: { required: true, requireVerified: true },
+        skills: [],
+      }),
+    });
+    expect(registered.status).toBe(201);
+
+    const rig = await createInactiveRig(client.db, {
+      accountId,
+      workspaceId,
+      name: rigName,
+      createdBy: subjectId,
+      initialVersion: { setupScript: "true" },
+      initialVerification: {
+        status: "pending",
+        attemptId: "11111111-2222-4333-8444-555555555555",
+        expectedActiveVersionId: null,
+        requestedAt: "2026-08-30T12:00:00.000Z",
+      },
+      activateInitialVersion: false,
+    });
+    expect(rig.activeVersion).toBeNull();
+
+    const previewResponse = await request(`/packs/${packId}/installation-preview`, {
+      method: "POST",
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = (await previewResponse.json()) as {
+      manifestDigest: string;
+      ready: boolean;
+      blockers: string[];
+      rig: {
+        status: string;
+        requestedRigId: string | null;
+        rigId: string | null;
+        rigVersionId: string | null;
+        name: string | null;
+      };
+    };
+    expect(preview).toMatchObject({
+      ready: false,
+      blockers: ["Verify the selected compute environment before installing this Pack"],
+      rig: {
+        status: "unverified",
+        requestedRigId: rig.id,
+        rigId: rig.id,
+        rigVersionId: null,
+        name: rigName,
+      },
+    });
+
+    const install = await request(`/packs/${packId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedManifestDigest: preview.manifestDigest,
+        rigId: rig.id,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(install.status).toBe(422);
+    expect(await install.text()).toContain(
+      "Verify the selected compute environment before installing this Pack",
+    );
+  });
 
   test("blocks v2 Pack sandboxImage requirements while Rig images are disabled", async () => {
     if (!available || !client) return;

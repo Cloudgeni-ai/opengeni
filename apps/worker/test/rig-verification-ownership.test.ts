@@ -4,9 +4,13 @@ import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import type { Database, LeaseSnapshot } from "@opengeni/db";
 import type { Observability } from "@opengeni/observability";
-import type { EstablishedSandboxSession } from "@opengeni/runtime";
+import type {
+  EstablishedSandboxSession,
+  TrustedRigPlatformRuntimeManifest,
+} from "@opengeni/runtime";
 import {
   RIG_VERIFICATION_OWNERS_DISABLED_MESSAGE,
+  rigVerificationLeaseHolderId,
   runWithOwnedRigVerificationSandbox,
   type RigVerificationActivityLifecycle,
   type RigVerificationOwnershipDependencies,
@@ -17,8 +21,28 @@ const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const WORKSPACE_ID = "22222222-2222-4222-8222-222222222222";
 const GROUP_ID = "33333333-3333-4333-8333-333333333333";
 const VERSION_ID = "44444444-4444-4444-8444-444444444444";
-const HOLDER_UUID = "55555555-5555-4555-8555-555555555555";
+const ATTEMPT_ID = "55555555-5555-4555-8555-555555555555";
+const HOLDER_ID = rigVerificationLeaseHolderId({
+  targetKind: "version",
+  targetId: VERSION_ID,
+  attemptId: ATTEMPT_ID,
+  executionGeneration: 3,
+});
 const db = {} as Database;
+const runtimeManifest = {
+  version: 2,
+  digest: `sha256:${"a".repeat(64)}`,
+  entries: [
+    {
+      path: "/usr/local/bin/opengeni-browserd-up",
+      resolvedPath: "/usr/local/bin/opengeni-browserd-up",
+      fileType: "regular",
+      mode: 0o100755,
+      sizeBytes: 1,
+      sha256: `sha256:${"b".repeat(64)}`,
+    },
+  ],
+} as TrustedRigPlatformRuntimeManifest;
 
 const settings = testSettings({
   sandboxBackend: "modal",
@@ -73,9 +97,11 @@ type HarnessOptions = {
   commitError?: Error;
   commitResult?: boolean;
   terminateResult?: boolean;
+  inspectionError?: Error;
   readinessResult?: unknown;
   markError?: Error;
   failError?: Error;
+  reconcileError?: Error;
   controllerFactory?: RigVerificationOwnershipDependencies["createCancellationController"];
 };
 
@@ -110,12 +136,12 @@ function harness(options: HarnessOptions = {}) {
   })) as unknown as RigVerificationOwnershipDependencies["createCancellationController"];
 
   const dependencies = {
-    randomUUID: () => HOLDER_UUID,
     acquire: async (_db, input) => {
       events.push("acquire");
       expect(input.sandboxGroupId).toBe(GROUP_ID);
       expect(input.image).toBe(settings.modalImageRef);
       expect(input.rigVersionId).toBe(VERSION_ID);
+      expect(input.holderId).toBe(HOLDER_ID);
       return {
         role: options.acquireRole ?? "spawner",
         lease: snapshot(),
@@ -191,6 +217,55 @@ function harness(options: HarnessOptions = {}) {
       expect(target?.instanceId).toBe("sb-verifier");
       return options.terminateResult ?? true;
     },
+    inspectTrustedRuntime: async (input) => {
+      events.push("inspect-runtime");
+      expect(input).toMatchObject({
+        backend: "modal",
+        instanceId: "sb-verifier",
+        providerImage: settings.modalImageRef,
+      });
+      if (options.inspectionError) throw options.inspectionError;
+      return runtimeManifest;
+    },
+    attachTrustedSurface: async (input) => {
+      events.push("attach-surface");
+      expect(input).toMatchObject({
+        backend: "modal",
+        instanceId: "sb-verifier",
+        providerImage: settings.modalImageRef,
+        leaseId: "lease-1",
+        leaseEpoch: 8,
+        sandboxGroupId: GROUP_ID,
+        rigVersionId: VERSION_ID,
+        runtimeManifest,
+      });
+      Object.defineProperty(input.session as object, "trustedRigPlatformSurface", {
+        value: {
+          binding: {
+            authority: "deployment_control_plane",
+            backendId: "modal",
+            instanceId: "sb-verifier",
+            providerImage: settings.modalImageRef!,
+            providerImageId: "im-platform-base",
+            runtimeAuthorityImageId: "im-platform-base",
+            leaseId: "lease-1",
+            leaseEpoch: 8,
+            workspaceGeneration: 0,
+            sandboxGroupId: GROUP_ID,
+            rigVersionId: VERSION_ID,
+            runtimeManifestDigest: runtimeManifest.digest,
+          },
+        },
+        configurable: false,
+        writable: false,
+      });
+      return true;
+    },
+    reconcileProviderImageBuilds: async () => {
+      events.push("reconcile-provider-images");
+      if (options.reconcileError) throw options.reconcileError;
+      return 0;
+    },
     createCancellationController: options.controllerFactory ?? defaultControllerFactory,
   } as unknown as RigVerificationOwnershipDependencies;
 
@@ -214,6 +289,7 @@ function harness(options: HarnessOptions = {}) {
         sandboxGroupId: GROUP_ID,
         rigVersionId: VERSION_ID,
         sessionIdPrefix: "rig-verification-test",
+        holderId: HOLDER_ID,
         ...(lifecycle ? { lifecycle } : {}),
       },
       callback,
@@ -224,6 +300,25 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("rig verification canonical lease ownership", () => {
+  test("derives a stable holder from the exact target, attempt, and generation", () => {
+    expect(
+      rigVerificationLeaseHolderId({
+        targetKind: "version",
+        targetId: VERSION_ID,
+        attemptId: ATTEMPT_ID,
+        executionGeneration: 3,
+      }),
+    ).toBe(HOLDER_ID);
+    expect(
+      rigVerificationLeaseHolderId({
+        targetKind: "version",
+        targetId: VERSION_ID,
+        attemptId: ATTEMPT_ID,
+        executionGeneration: 4,
+      }),
+    ).not.toBe(HOLDER_ID);
+  });
+
   test("the default-off rollout gate fails before lease acquire or provider create", async () => {
     const state = harness({ ownersEnabled: false });
     await expect(state.run(async () => true)).rejects.toThrow(
@@ -240,17 +335,24 @@ describe("rig verification canonical lease ownership", () => {
         return "passed";
       }),
     ).resolves.toBe("passed");
-    expect(state.events.slice(0, 8)).toEqual([
+    expect(state.events.slice(0, 10)).toEqual([
       "acquire",
       "establish:start",
       "record",
       "tag",
       "establish:return",
+      "inspect-runtime",
       "readiness",
       "commit",
+      "attach-surface",
       "run",
     ]);
-    expect(state.events.indexOf("quiesce")).toBeLessThan(state.events.indexOf("terminate"));
+    expect(state.events.indexOf("quiesce")).toBeLessThan(
+      state.events.indexOf("reconcile-provider-images"),
+    );
+    expect(state.events.indexOf("reconcile-provider-images")).toBeLessThan(
+      state.events.indexOf("terminate"),
+    );
     expect(state.markEpochs).toEqual([8]);
     expect(state.failEpochs).toEqual([7]);
     expect(state.releaseGrace).toEqual([1]);
@@ -274,6 +376,16 @@ describe("rig verification canonical lease ownership", () => {
     expect(state.events).not.toContain("commit");
     expect(state.events).toContain("terminate");
     expect(state.events.at(-1)).toBe("release");
+  });
+
+  test("provider runtime integrity is proven before any candidate command", async () => {
+    const state = harness({ inspectionError: new Error("runtime integrity mismatch") });
+    await expect(state.run(async () => true)).rejects.toThrow("runtime integrity mismatch");
+    expect(state.events).toContain("inspect-runtime");
+    expect(state.events).not.toContain("readiness");
+    expect(state.events).not.toContain("commit");
+    expect(state.events).not.toContain("attach-surface");
+    expect(state.events).toContain("terminate");
   });
 
   test("provider creation failure rolls back the exact warming epoch without waiting for TTL", async () => {
@@ -311,6 +423,20 @@ describe("rig verification canonical lease ownership", () => {
     expect(state.events).not.toContain("fail-warming");
     expect(state.events.at(-1)).toBe("release");
     expect(state.releaseGrace).toEqual([1]);
+  });
+
+  test("an ambiguous provider-image build prevents source termination and leaves it to the reaper", async () => {
+    const state = harness({ reconcileError: new Error("snapshot request still ambiguous") });
+    await expect(state.run(async () => true)).resolves.toBe(true);
+    expect(state.events).toContain("reconcile-provider-images");
+    expect(state.events).not.toContain("terminate");
+    expect(state.events).not.toContain("mark-warm-lost");
+    expect(state.events.at(-1)).toBe("release");
+    expect(state.warnings).toEqual([
+      expect.objectContaining({
+        context: expect.objectContaining({ operation: "provider_image_build_reconciliation" }),
+      }),
+    ]);
   });
 
   test("DB cleanup failures cannot suppress provider termination or holder release", async () => {
@@ -355,6 +481,7 @@ describe("rig verification canonical lease ownership", () => {
     const abort = new AbortController();
     const lifecycle: RigVerificationActivityLifecycle = {
       signal: abort.signal,
+      workDeadlineAtMs: null,
       cleanupDeadlineAtMs: null,
       dispose: () => undefined,
     };

@@ -11,7 +11,12 @@ import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
 import { formatTimestamp } from "@/lib/format";
 import { withOccurrenceKeys } from "@/lib/react-key";
-import { rigActorLabel, rigCheckHealthView, versionHasChecks } from "@/lib/rig-status";
+import {
+  rigActorLabel,
+  rigCheckHealthView,
+  versionHasChecks,
+  type DeferredRigVerificationView,
+} from "@/lib/rig-status";
 import type { Rig, RigChange, RigChangeVerification } from "@/types";
 
 export function RigOverview({
@@ -20,6 +25,11 @@ export function RigOverview({
   variableSetName,
   canUse,
   mutating,
+  deferredVerification,
+  versionsLoading,
+  versionsError,
+  onRetryVersions,
+  onRecoverDeferred,
   onVerify,
 }: {
   rig: Rig;
@@ -27,14 +37,86 @@ export function RigOverview({
   variableSetName: (id: string) => string;
   canUse: boolean;
   mutating: boolean;
+  deferredVerification: DeferredRigVerificationView | null;
+  versionsLoading: boolean;
+  versionsError: Error | null;
+  onRetryVersions: () => void;
+  onRecoverDeferred: () => Promise<unknown>;
   onVerify: () => Promise<{ ok: boolean; versionId: string } | null>;
 }) {
   const active = rig.activeVersion;
   if (!active) {
+    if (versionsError && deferredVerification === null) {
+      return (
+        <Notice
+          tone="failed"
+          title="Couldn't load version recovery state"
+          action={
+            <Button type="button" variant="secondary" size="sm" onClick={onRetryVersions}>
+              Retry
+            </Button>
+          }
+        >
+          OpenGeni couldn't determine whether an inactive version is available to recover.
+        </Notice>
+      );
+    }
+    if (versionsLoading || deferredVerification === null) {
+      return (
+        <Notice tone="muted" title="Loading version recovery state">
+          Checking inactive versions before showing recovery actions.
+        </Notice>
+      );
+    }
+    if (deferredVerification.state === "available") {
+      return (
+        <Notice
+          tone="waiting"
+          title={`Version ${deferredVerification.version} is waiting for verification`}
+          action={
+            canUse ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={mutating}
+                onClick={async () => {
+                  const result = await onRecoverDeferred();
+                  if (result) {
+                    toast.success("Verification resumed", {
+                      description:
+                        "OpenGeni reused the saved pending attempt; no Rig or version was recreated.",
+                    });
+                  }
+                }}
+              >
+                {mutating ? (
+                  <Loader2Icon className="size-3.5 animate-spin" />
+                ) : (
+                  <RotateCwIcon className="size-3.5" />
+                )}
+                Resume verification
+              </Button>
+            ) : undefined
+          }
+        >
+          The Rig is saved but not active. Resume its existing pending attempt without creating a
+          second Rig or selecting a historical version.
+        </Notice>
+      );
+    }
+    if (deferredVerification.state === "ambiguous") {
+      return (
+        <Notice tone="waiting" title="More than one version is waiting for verification">
+          Recovery is unavailable because {deferredVerification.candidateCount} inactive versions
+          have pending attempts. A Rig manager must choose and verify the exact version.
+        </Notice>
+      );
+    }
     return (
       <Notice tone="waiting" title="This rig has no active version">
-        Create a version by proposing and promoting a change, then it will materialize into
-        sandboxes.
+        No deferred pending attempt is available to resume. A Rig manager can verify an exact
+        inactive version.
       </Notice>
     );
   }

@@ -12,9 +12,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 
 import {
   createDb,
-  createRig,
+  createRig as createInactiveRig,
   createRigChange,
-  createRigVersion,
   createVariableSet,
   listRigVersions,
   recordAuditEvent,
@@ -23,6 +22,8 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  createVerifiedTestRig as createRig,
+  createVerifiedTestRigVersion as createRigVersion,
   freePort,
   startProcess,
   startTestServices,
@@ -167,7 +168,6 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
     description: "Node + Python toolchain the app team builds on.",
     createdBy: "user:you",
     initialVersion: {
-      image: "ghcr.io/opengeni/dev:base",
       setupScript: "apt-get update\napt-get install -y ripgrep jq",
       checks: [
         { name: "ripgrep present", command: "rg --version" },
@@ -201,27 +201,17 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
   let setup = "apt-get update\napt-get install -y ripgrep jq";
   for (let index = 0; index < changelogs.length; index += 1) {
     setup += `\n# ${changelogs[index]}\napt-get install -y tool-${index}`;
-    await createRigVersion(
-      db,
-      workspaceId,
-      dev.id,
-      {
-        image:
-          index >= changelogs.length - 2
-            ? "ghcr.io/opengeni/dev:2026-06"
-            : "ghcr.io/opengeni/dev:base",
-        setupScript: setup,
-        checks: [
-          { name: "ripgrep present", command: "rg --version" },
-          { name: "jq present", command: "jq --version" },
-          ...(index >= 4 ? [{ name: "docker present", command: "docker --version" }] : []),
-        ],
-        defaultVariableSetIds: [stagingAws.id, prodDb.id],
-        changelog: changelogs[index] ?? null,
-        createdBy: actors[index % actors.length] ?? null,
-      },
-      { activate: true },
-    );
+    await createRigVersion(db, workspaceId, dev.id, {
+      setupScript: setup,
+      checks: [
+        { name: "ripgrep present", command: "rg --version" },
+        { name: "jq present", command: "jq --version" },
+        ...(index >= 4 ? [{ name: "docker present", command: "docker --version" }] : []),
+      ],
+      defaultVariableSetIds: [stagingAws.id, prodDb.id],
+      changelog: changelogs[index] ?? null,
+      createdBy: actors[index % actors.length] ?? null,
+    });
   }
   const devVersions = await listRigVersions(db, workspaceId, dev.id);
   const activeVersion = devVersions.find((version) => version.active) ?? devVersions[0]!;
@@ -370,14 +360,13 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
     proposedBy: "session:2b3c4d5e-6f70-8192-a3b4-c5d6e7f8091a",
   });
 
-  // 3) A CI runner rig with checks that have never been verified (unknown health).
-  await createRig(db, {
+  // 3) An inactive CI runner whose checks have never been verified.
+  await createInactiveRig(db, {
     ...ws,
     name: "ci-runner",
     description: "Ephemeral executor for the CI pipeline.",
     createdBy: "system",
     initialVersion: {
-      image: "ghcr.io/opengeni/ci:base",
       setupScript: "apt-get install -y make gcc",
       checks: [
         { name: "make present", command: "make --version" },
@@ -397,7 +386,6 @@ async function seed(db: Database, accountId: string, workspaceId: string) {
     description: "Older toolchain kept for the reporting pipeline.",
     createdBy: "user:you",
     initialVersion: {
-      image: "ghcr.io/opengeni/legacy:base",
       setupScript: "apt-get install -y python2 make",
       checks: [
         { name: "python2 present", command: "python2 --version" },

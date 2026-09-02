@@ -71,6 +71,7 @@ import type {
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
+  CreateRigVersionRequest,
   UpdateRigRequest,
   ProposeRigChangeRequest,
   PublishBrowserRevisionRequest,
@@ -1339,6 +1340,79 @@ export class MockOpenGeniClient implements SessionClientLike {
     return this.rigVersions
       .filter((candidate) => candidate.rigId === rigId)
       .sort((a, b) => b.version - a.version);
+  }
+
+  async createRigVersion(
+    _workspaceId: string,
+    rigId: string,
+    request: CreateRigVersionRequest,
+  ): Promise<RigVersion> {
+    const rig = await this.getRig(_workspaceId, rigId);
+    const activeVersionId = rig.activeVersion?.id ?? null;
+    if (
+      (!rig.activeVersion && request.expectedActiveVersionId !== null) ||
+      (Object.hasOwn(request, "expectedActiveVersionId") &&
+        request.expectedActiveVersionId !== activeVersionId)
+    ) {
+      throw new Error("the Rig active version changed");
+    }
+    const base = request.baseVersionId
+      ? this.rigVersions.find(
+          (candidate) => candidate.rigId === rigId && candidate.id === request.baseVersionId,
+        )
+      : rig.activeVersion;
+    if (request.baseVersionId && !base) {
+      throw new Error(`rig version not found: ${request.baseVersionId}`);
+    }
+    const now = new Date().toISOString();
+    const version: RigVersion = {
+      id: `${rigId}-v${rig.versionCount + 1}`,
+      rigId,
+      version: rig.versionCount + 1,
+      image: null,
+      setupScript:
+        request.setupScript === undefined ? (base?.setupScript ?? null) : request.setupScript,
+      checks: request.checks ?? base?.checks ?? [],
+      credentialHooks: request.credentialHooks ?? base?.credentialHooks ?? [],
+      defaultVariableSetIds: request.defaultVariableSetIds ?? base?.defaultVariableSetIds ?? [],
+      changelog: request.changelog ?? "Manager-created version",
+      providerImages: {},
+      createdBy: "user:demo",
+      active: false,
+      verificationStatus: "pending",
+      createdAt: now,
+    };
+    this.rigVersions.push(version);
+    rig.versionCount += 1;
+    rig.updatedAt = now;
+    return version;
+  }
+
+  async recoverDeferredRigVerification(
+    _workspaceId: string,
+    rigId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    const candidates = this.rigVersions.filter(
+      (version) =>
+        version.rigId === rigId && !version.active && version.verificationStatus === "pending",
+    );
+    if (candidates.length !== 1) {
+      throw new Error("Rig deferred verification recovery requires one pending version");
+    }
+    return { ok: true, versionId: candidates[0]!.id };
+  }
+
+  async verifyRigVersion(
+    _workspaceId: string,
+    rigId: string,
+    versionId: string,
+  ): Promise<{ ok: boolean; versionId: string }> {
+    const version = this.rigVersions.find(
+      (candidate) => candidate.rigId === rigId && candidate.id === versionId,
+    );
+    if (!version) throw new Error(`rig version not found: ${versionId}`);
+    version.verificationStatus = "pending";
+    return { ok: true, versionId };
   }
 
   async activateRigVersion(

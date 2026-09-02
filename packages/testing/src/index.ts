@@ -9,3 +9,4 @@ export * from "./settings";
 export * from "./fakes";
 export * from "./mcp";
 export * from "./screenshot";
+export * from "./rigs";

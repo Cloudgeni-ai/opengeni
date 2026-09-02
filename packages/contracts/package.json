@@ -78,6 +78,10 @@
       "types": "./src/organization-recovery.ts",
       "default": "./src/organization-recovery.ts"
     },
+    "./rig-platform-surface-validation": {
+      "types": "./src/rig-platform-surface-validation.ts",
+      "default": "./src/rig-platform-surface-validation.ts"
+    },
     "./codex-provider-account-authority": {
       "types": "./src/codex-provider-account-authority.ts",
       "default": "./src/codex-provider-account-authority.ts"

@@ -35,6 +35,7 @@ import {
 } from "@/lib/session-restart-operation-controller";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
+import { activeSessionRigs } from "@/lib/rig-selectability";
 import type { Session, SessionEvent } from "@/types";
 
 export function SessionInspector(props: {
@@ -55,6 +56,7 @@ export function SessionInspector(props: {
   );
   const [selectedVariableSetIds, setSelectedVariableSetIds] = useState(sessionVariableSetIds);
   const [selectedRigId, setSelectedRigId] = useState(props.session.rigId ?? "");
+  const activeRigs = useMemo(() => activeSessionRigs(rigs.rigs), [rigs.rigs]);
   const [savingVariableSets, setSavingVariableSets] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [runtimeFailure, setRuntimeFailure] = useState<string | null>(null);
@@ -76,6 +78,15 @@ export function SessionInspector(props: {
     setSelectedVariableSetIds(sessionVariableSetIds);
     setSelectedRigId(props.session.rigId ?? "");
   }, [props.session.id, props.session.rigId, sessionVariableSetIds]);
+  useEffect(() => {
+    if (
+      selectedRigId &&
+      !rigs.loading &&
+      !activeRigs.some((candidate) => candidate.id === selectedRigId)
+    ) {
+      setSelectedRigId("");
+    }
+  }, [activeRigs, rigs.loading, selectedRigId]);
   const selectedChanged =
     selectedVariableSetIds.join("\u0000") !== sessionVariableSetIds.join("\u0000");
   const availableVariableSets = variableSets.variableSets.filter(
@@ -380,7 +391,7 @@ export function SessionInspector(props: {
                       className="h-8 w-full text-xs"
                     >
                       <option value="">No rig</option>
-                      {rigs.rigs.map((rig) => (
+                      {activeRigs.map((rig) => (
                         <option key={rig.id} value={rig.id}>
                           {rig.name}
                           {rig.activeVersion ? ` (v${rig.activeVersion.version})` : ""}

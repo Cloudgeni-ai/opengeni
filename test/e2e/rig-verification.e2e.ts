@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  beginRigChangeVerificationAttempt,
+  beginRigVersionVerificationAttempt,
   bootstrapWorkspace,
   createDb,
-  createRig,
   createRigChange,
   dbSql,
   getRig,
@@ -20,6 +21,7 @@ import {
 } from "@opengeni/runtime";
 import {
   buildSandboxImage,
+  createVerifiedTestRig as createRig,
   startTestServices,
   testSettings,
   type TestServices,
@@ -49,6 +51,7 @@ describe("real Docker rig verification e2e", () => {
       dockerNetwork: services.dockerNetwork,
       sandboxPreparationProfiles: [],
       rigSetupTimeoutMs: 60_000,
+      rigVerificationLeaseOwnershipEnabled: true,
     }) as Settings;
     const access = await bootstrapWorkspace(db.db, {
       accountExternalSource: "opengeni:local",
@@ -90,12 +93,32 @@ describe("real Docker rig verification e2e", () => {
       proposedBy: "session:e2e",
     });
 
-    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    const verified = await verifyChange(change.id);
     if (verified.status !== "merged") {
       console.error("A10 verification payload", JSON.stringify(verified.verification, null, 2));
     }
     expect(verified.status).toBe("merged");
     expect(verified.verification?.passed).toBe(true);
+    expect(verified.verification?.platformSurfaceValidation).toMatchObject({
+      version: 2,
+      binding: {
+        sandboxGroupId: change.id,
+        rigVersionId: change.id,
+        backendId: "docker",
+      },
+      provenance: {
+        authority: "deployment_control_plane",
+        providerImage: "opengeni-sandbox:local",
+      },
+      terminal: {
+        status: "passed",
+        cwd: "/workspace",
+        uid: 0,
+        bunVersion: "1.4.0",
+        interactive: true,
+      },
+      browser: { status: "passed" },
+    });
     expect(verified.resultVersionId).toBeString();
 
     const promotedRig = await getRig(db.db, workspaceId, rig.id);
@@ -129,7 +152,7 @@ describe("real Docker rig verification e2e", () => {
       proposedBy: "session:dirty-proposer",
     });
 
-    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    const verified = await verifyChange(change.id);
     if (verified.status !== "rejected") {
       console.error("A11 verification payload", JSON.stringify(verified.verification, null, 2));
     }
@@ -174,12 +197,22 @@ describe("real Docker rig verification e2e", () => {
       proposedBy: "session:redaction",
     });
 
-    const verified = await verifier().verifyRigChange({ workspaceId, changeId: change.id });
+    const verified = await verifyChange(change.id);
     const storedSerialized = JSON.stringify(verified.verification);
     expect(verified.status).toBe("proposed");
     expect(storedSerialized).toContain(secret);
 
-    await verifier().verifyRigVersion({ workspaceId, versionId: rig.activeVersion!.id });
+    const attempt = await beginRigVersionVerificationAttempt(db.db, {
+      workspaceId,
+      rigId: rig.id,
+      versionId: rig.activeVersion!.id,
+    });
+    await verifier().verifyRigVersion({
+      workspaceId,
+      versionId: rig.activeVersion!.id,
+      attemptId: attempt.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    });
     const [audit] = await db.db.transaction(async (tx) => {
       await setRlsContext(tx as never, { accountId, workspaceId });
       return await tx.execute<{ metadata: unknown }>(dbSql`
@@ -205,6 +238,28 @@ function verifier() {
         db: db.db,
       }) as ActivityServices,
   );
+}
+
+async function verifyChange(changeId: string) {
+  const attempted = await beginRigChangeVerificationAttempt(db.db, workspaceId, changeId, {
+    startedAt: new Date().toISOString(),
+  });
+  const verification = attempted.verification as {
+    attemptId?: unknown;
+    executionGeneration?: unknown;
+  } | null;
+  if (
+    typeof verification?.attemptId !== "string" ||
+    typeof verification.executionGeneration !== "number"
+  ) {
+    throw new Error("Rig change verification attempt did not persist its durable fence");
+  }
+  return await verifier().verifyRigChange({
+    workspaceId,
+    changeId,
+    attemptId: verification.attemptId,
+    executionGeneration: verification.executionGeneration,
+  });
 }
 
 async function expectFreshMaterializationHasTool(

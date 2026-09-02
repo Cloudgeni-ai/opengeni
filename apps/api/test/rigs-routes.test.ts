@@ -2,13 +2,21 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  rigProviderImageBuildRequestId,
+  rigProviderImageContentHash,
+  rigProviderImageSetupHash,
+} from "@opengeni/core";
 import { sql } from "drizzle-orm";
 import {
+  beginRigVersionVerificationAttempt,
+  completeRigVersionVerification,
   createDb,
   createRigVersion,
   createSession,
   createVariableSet,
   getRigChange,
+  listPendingInactiveRigVersionVerificationAttempts,
   listRigVersions,
   updateRigChangeStatus,
   withWorkspaceSessionActivityRls,
@@ -16,7 +24,12 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig,
+  createVerifiedTestRigVersion,
+  installTestRigProviderImage,
   testSettings,
+  testRigProviderImage,
+  testRigSurfaceReceipt,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createApp } from "../src/app";
@@ -113,6 +126,40 @@ async function auditActions(workspaceId: string, targetId: string): Promise<stri
   return rows.map((r) => r.action);
 }
 
+async function rigVersionState(versionId: string): Promise<{
+  active: boolean;
+  verification: Record<string, unknown>;
+}> {
+  const [row] = await shared!.admin<
+    Array<{ active: boolean; verification: Record<string, unknown> }>
+  >`
+    select active, verification from rig_versions where id = ${versionId}
+  `;
+  if (!row) throw new Error(`Rig version not found: ${versionId}`);
+  return row;
+}
+
+async function activateInitialVersion(workspaceId: string, rigId: string) {
+  const [version] = await listRigVersions(client.db, workspaceId, rigId);
+  if (!version) throw new Error("initial version missing");
+  const attempt = await beginRigVersionVerificationAttempt(
+    client.db,
+    { workspaceId, rigId, versionId: version.id },
+    { allowAlreadyPending: true },
+  );
+  const image = await installTestRigProviderImage(client.db, workspaceId, version.id);
+  const result = await completeRigVersionVerification(client.db, {
+    workspaceId,
+    rigId,
+    versionId: version.id,
+    attemptId: attempt.attemptId,
+    executionGeneration: attempt.executionGeneration,
+    receipt: testRigSurfaceReceipt(version.id, image),
+  });
+  expect(result.activated).toBe(true);
+  return version;
+}
+
 describe("rig route permission matrix", () => {
   test("default Variable Set references require independent attach and use permissions", async () => {
     if (!available) return;
@@ -181,8 +228,10 @@ describe("rig route permission matrix", () => {
     });
     expect(created.status).toBe(201);
     const rig = await created.json();
-    expect(rig.activeVersion.version).toBe(1);
-    expect(rig.activeVersion.image).toBeNull();
+    expect(rig.activeVersion).toBeNull();
+    const initialVersion = (await listRigVersions(client.db, ws.workspaceId, rig.id))[0]!;
+    expect(initialVersion.version).toBe(1);
+    expect(initialVersion.image).toBeNull();
 
     const explicitImage = await app().request(base, {
       method: "POST",
@@ -221,11 +270,15 @@ describe("rig route permission matrix", () => {
     });
 
     // Activate: rigs:manage only.
-    const versionId = rig.activeVersion.id;
+    const versionId = initialVersion.id;
     const activatePath = `${base}/${rig.id}/versions/${versionId}/activate`;
     expect((await app().request(activatePath, { method: "POST", headers: useOnly })).status).toBe(
       403,
     );
+    expect((await app().request(activatePath, { method: "POST", headers: manage })).status).toBe(
+      422,
+    );
+    await activateInitialVersion(ws.workspaceId, rig.id);
     expect((await app().request(activatePath, { method: "POST", headers: manage })).status).toBe(
       200,
     );
@@ -270,6 +323,7 @@ describe("rig route permission matrix", () => {
     // Every mutation wrote an audit row.
     expect(await auditActions(ws.workspaceId, rig.id)).toEqual([
       "rig.created",
+      "rig.version.verification.requested",
       "rig.updated",
       "rig.version.activated",
       "rig.change.proposed",
@@ -287,6 +341,7 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "del" }),
     });
     const rig = await created.json();
+    await activateInitialVersion(ws.workspaceId, rig.id);
 
     const session = await createSession(client.db, {
       accountId: ws.accountId,
@@ -328,6 +383,9 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "retry-verify" }),
     });
     const rig = await created.json();
+    const [initialVersion] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(initialVersion).toBeDefined();
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: use,
@@ -336,11 +394,15 @@ describe("rig route permission matrix", () => {
     expect(proposed.status).toBe(201);
     const change = await proposed.json();
     expect(calls).toHaveLength(2);
-    expect((calls[0] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-version-${rig.activeVersion.id}-initial`,
+    const initialCall = calls[0] as { attemptId: string; workflowId: string };
+    expect(initialCall.attemptId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(initialCall.workflowId).toBe(
+      `rig-verification-version-${initialVersion!.id}-attempt-${initialCall.attemptId}`,
     );
-    expect((calls[1] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-1`,
+    const firstChangeCall = calls[1] as { attemptId: string; workflowId: string };
+    expect(firstChangeCall.attemptId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(firstChangeCall.workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-${firstChangeCall.attemptId}`,
     );
 
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
@@ -355,8 +417,10 @@ describe("rig route permission matrix", () => {
     const retryBody = await retry.json();
     expect(retryBody.status).toBe("verifying");
     expect(calls).toHaveLength(3);
-    expect((calls[2] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-2`,
+    const retryCall = calls[2] as { attemptId: string; workflowId: string };
+    expect(retryCall.attemptId).not.toBe(firstChangeCall.attemptId);
+    expect(retryCall.workflowId).toBe(
+      `rig-verification-change-${change.id}-attempt-${retryCall.attemptId}`,
     );
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("verifying");
 
@@ -366,21 +430,20 @@ describe("rig route permission matrix", () => {
     });
     expect(duplicate.status).toBe(202);
     expect(calls).toHaveLength(4);
-    expect((calls[3] as { workflowId: string }).workflowId).toBe(
-      `rig-verification-change-${change.id}-attempt-2`,
-    );
+    expect(calls[3]).toEqual(retryCall);
   });
 
-  test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
+  test("repeated version verification requests reuse one in-flight attempt", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
     const http = createApp({
       settings,
       db: client.db,
       bus: {} as never,
       workflowClient: {
-        startRigVerification: async () => {
-          throw new Error("temporal unavailable");
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
+          calls.push(input);
         },
       } as never,
       managedAuth: null,
@@ -390,12 +453,429 @@ describe("rig route permission matrix", () => {
     const created = await http.request(base, {
       method: "POST",
       headers: manage,
+      body: JSON.stringify({ name: "version-single-flight" }),
+    });
+    const rig = await created.json();
+    const version = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo historical",
+    });
+
+    const endpoint = `${base}/${rig.id}/versions/${version.id}/verify`;
+    const first = await http.request(endpoint, { method: "POST", headers: manage });
+    const second = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(first.status).toBe(202);
+    expect(second.status).toBe(202);
+    expect((await first.json()).versionId).toBe(version.id);
+    expect((await second.json()).versionId).toBe(version.id);
+    expect(calls).toHaveLength(3);
+    const attemptId = calls[1]!.attemptId;
+    expect(attemptId).toMatch(/^[0-9a-f-]{36}$/u);
+    expect(new Set(calls.slice(1).map((call) => call.workflowId))).toEqual(
+      new Set([`rig-verification-version-${version.id}-attempt-${attemptId}`]),
+    );
+    expect(calls.slice(1).every((call) => call.attemptId === attemptId)).toBe(true);
+    const audits = await shared!.admin<
+      Array<{ subject_id: string | null; metadata: Record<string, unknown> }>
+    >`
+      select subject_id, metadata from audit_events
+      where workspace_id = ${ws.workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${version.id}
+        and metadata ->> 'attemptId' = ${attemptId}
+      order by occurred_at asc
+    `;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      subject_id: "user:m",
+      metadata: {
+        rigId: rig.id,
+        versionId: version.id,
+        version: version.version,
+        attemptId,
+        expectedActiveVersionId: null,
+      },
+    });
+  });
+
+  test("exact-version dispatch outage returns committed pending truth and reuses one attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; versionId: string; attemptId: string }> = [];
+    let dispatcherAvailable = true;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: {
+          workflowId: string;
+          versionId: string;
+          attemptId: string;
+        }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "exact-version-dispatch-outage" }),
+    });
+    const rig = await created.json();
+    const initialVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    const candidate = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo candidate",
+    });
+    dispatcherAvailable = false;
+    const endpoint = `${base}/${rig.id}/versions/${candidate.id}/verify`;
+
+    const first = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: candidate.id,
+          verificationStatus: "pending",
+        },
+      },
+    });
+    const stateAfterFirst = await rigVersionState(candidate.id);
+    expect(stateAfterFirst).toMatchObject({
+      active: false,
+      verification: { status: "pending" },
+    });
+
+    const second = await http.request(endpoint, { method: "POST", headers: manage });
+    expect(second.status).toBe(503);
+    expect(await second.json()).toMatchObject({
+      error: {
+        details: { versionId: candidate.id, verificationStatus: "pending" },
+      },
+    });
+    expect(await rigVersionState(candidate.id)).toEqual(stateAfterFirst);
+    const failedDispatches = calls.slice(-2);
+    expect(failedDispatches).toHaveLength(2);
+    expect(failedDispatches[1]).toEqual(failedDispatches[0]);
+    expect(failedDispatches[0]?.workflowId).toBe(
+      `rig-verification-version-${candidate.id}-attempt-${failedDispatches[0]?.attemptId}`,
+    );
+    const current = await http.request(`${base}/${rig.id}`, { headers: manage });
+    expect((await current.json()).activeVersion.id).toBe(initialVersion.id);
+  });
+
+  test("active-version dispatch outage returns committed pending truth and reuses one attempt", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; versionId: string; attemptId: string }> = [];
+    let dispatcherAvailable = true;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: {
+          workflowId: string;
+          versionId: string;
+          attemptId: string;
+        }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const use = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "active-version-dispatch-outage" }),
+    });
+    const rig = await created.json();
+    const activeVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    dispatcherAvailable = false;
+    const endpoint = `${base}/${rig.id}/verify`;
+
+    const first = await http.request(endpoint, { method: "POST", headers: use });
+    expect(first.status).toBe(503);
+    expect(await first.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: activeVersion.id,
+          verificationStatus: "pending",
+        },
+      },
+    });
+    const stateAfterFirst = await rigVersionState(activeVersion.id);
+    expect(stateAfterFirst).toMatchObject({
+      active: true,
+      verification: { status: "pending" },
+    });
+
+    const second = await http.request(endpoint, { method: "POST", headers: use });
+    expect(second.status).toBe(503);
+    expect(await rigVersionState(activeVersion.id)).toEqual(stateAfterFirst);
+    const failedDispatches = calls.slice(-2);
+    expect(failedDispatches).toHaveLength(2);
+    expect(failedDispatches[1]).toEqual(failedDispatches[0]);
+    expect(failedDispatches[0]?.workflowId).toBe(
+      `rig-verification-version-${activeVersion.id}-attempt-${failedDispatches[0]?.attemptId}`,
+    );
+    const audits = await shared!.admin<
+      Array<{ subject_id: string | null; metadata: Record<string, unknown> }>
+    >`
+      select subject_id, metadata from audit_events
+      where workspace_id = ${ws.workspaceId}
+        and action = 'rig.version.verification.requested'
+        and metadata ->> 'versionId' = ${activeVersion.id}
+        and metadata ->> 'attemptId' = ${failedDispatches[0]!.attemptId}
+      order by occurred_at asc
+    `;
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      subject_id: "user:u",
+      metadata: {
+        rigId: rig.id,
+        versionId: activeVersion.id,
+        attemptId: failedDispatches[0]!.attemptId,
+        expectedActiveVersionId: activeVersion.id,
+      },
+    });
+  });
+
+  test("exact version verification is manager-only and use-only denial has zero side effects", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
+          calls.push(input);
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manager = {
+      authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]),
+    };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "manager-exact-version" }),
+    });
+    const rig = await created.json();
+    const [pendingBefore] = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore).toBeDefined();
+    const callsBefore = [...calls];
+    const auditsBefore = await auditActions(ws.workspaceId, rig.id);
+
+    const denied = await http.request(
+      `${base}/${rig.id}/versions/${pendingBefore!.versionId}/verify`,
+      { method: "POST", headers: useOnly },
+    );
+    expect(denied.status).toBe(403);
+    expect(calls).toEqual(callsBefore);
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual([pendingBefore]);
+    expect(await auditActions(ws.workspaceId, rig.id)).toEqual(auditsBefore);
+
+    const accepted = await http.request(
+      `${base}/${rig.id}/versions/${pendingBefore!.versionId}/verify`,
+      { method: "POST", headers: manager },
+    );
+    expect(accepted.status).toBe(202);
+    expect(calls).toHaveLength(callsBefore.length + 1);
+    expect(calls.at(-1)?.attemptId).toBe(pendingBefore!.attemptId);
+  });
+
+  test("a committed rig create survives an unavailable initial verification dispatcher", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ workflowId: string; attemptId: string }> = [];
+    let dispatcherAvailable = false;
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: { workflowId: string; attemptId: string }) => {
+          calls.push(input);
+          if (!dispatcherAvailable) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
       body: JSON.stringify({ name: "deferred-initial-verification" }),
     });
     expect(created.status).toBe(201);
     expect(created.headers.get("OpenGeni-Rig-Verification")).toBe("deferred");
     const rig = await created.json();
+    expect(rig.activeVersion).toBeNull();
+    const [version] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(version?.active).toBe(false);
+    expect(version?.verificationStatus).toBe("pending");
     expect((await http.request(`${base}/${rig.id}`, { headers: manage })).status).toBe(200);
+    expect(
+      (
+        await http.request(`${base}/${rig.id}/versions/${version!.id}/activate`, {
+          method: "POST",
+          headers: manage,
+        })
+      ).status,
+    ).toBe(422);
+
+    const [pendingBefore] = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore?.versionId).toBe(version!.id);
+    const deferredRecovery = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(deferredRecovery.status).toBe(503);
+    expect(await deferredRecovery.json()).toMatchObject({
+      error: {
+        code: "upstream_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: {
+          code: "RIG_VERIFICATION_DISPATCH_DEFERRED",
+          versionId: version!.id,
+        },
+      },
+    });
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual([pendingBefore]);
+
+    dispatcherAvailable = true;
+    const recovered = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(recovered.status).toBe(202);
+    expect(await recovered.json()).toEqual({ ok: true, versionId: version!.id });
+    expect(calls.map((call) => call.attemptId)).toEqual([
+      pendingBefore!.attemptId,
+      pendingBefore!.attemptId,
+      pendingBefore!.attemptId,
+    ]);
+    const [{ count } = { count: 0 }] = await shared!.admin<Array<{ count: number }>>`
+      select count(*)::int as count from rigs
+      where workspace_id = ${ws.workspaceId} and name = 'deferred-initial-verification'
+    `;
+    expect(Number(count)).toBe(1);
+  });
+
+  test("deferred version recovery fails closed on zero or ambiguous pending candidates", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: unknown) => {
+          calls.push(input);
+          throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manager = {
+      authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]),
+    };
+    const useOnly = { authorization: await bearer(ws, "user:u", ["rigs:use"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "ambiguous-deferred-version" }),
+    });
+    const rig = await created.json();
+    const secondPending = await createRigVersion(client.db, ws.workspaceId, rig.id, {
+      setupScript: "echo second",
+    });
+    await beginRigVersionVerificationAttempt(client.db, {
+      workspaceId: ws.workspaceId,
+      rigId: rig.id,
+      versionId: secondPending.id,
+    });
+    const pendingBefore = await listPendingInactiveRigVersionVerificationAttempts(
+      client.db,
+      ws.workspaceId,
+      rig.id,
+    );
+    expect(pendingBefore).toHaveLength(2);
+    const callsBeforeAmbiguous = calls.length;
+    const ambiguous = await http.request(`${base}/${rig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(ambiguous.status).toBe(409);
+    expect(await ambiguous.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: false,
+        details: { code: "RIG_DEFERRED_VERIFICATION_AMBIGUOUS", candidateCount: 2 },
+      },
+    });
+    expect(calls).toHaveLength(callsBeforeAmbiguous);
+    expect(
+      await listPendingInactiveRigVersionVerificationAttempts(client.db, ws.workspaceId, rig.id),
+    ).toEqual(pendingBefore);
+
+    const activeRigResponse = await app().request(base, {
+      method: "POST",
+      headers: manager,
+      body: JSON.stringify({ name: "no-deferred-version" }),
+    });
+    const activeRig = await activeRigResponse.json();
+    await activateInitialVersion(ws.workspaceId, activeRig.id);
+    const none = await http.request(`${base}/${activeRig.id}/versions/recover`, {
+      method: "POST",
+      headers: useOnly,
+    });
+    expect(none.status).toBe(409);
+    expect(await none.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        details: { code: "RIG_DEFERRED_VERIFICATION_NOT_FOUND", candidateCount: 0 },
+      },
+    });
+    expect(calls).toHaveLength(callsBeforeAmbiguous);
   });
 
   test("a committed proposal reports deferred dispatch and retries the same verification attempt", async () => {
@@ -414,7 +894,13 @@ describe("rig route permission matrix", () => {
       } as never,
       managedAuth: null,
     } as never);
-    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:use",
+        "rigs:manage",
+        "variable-sets:attach",
+      ]),
+    };
     const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
     const created = await http.request(base, {
       method: "POST",
@@ -422,6 +908,7 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "deferred-change-verification" }),
     });
     const rig = await created.json();
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: manage,
@@ -454,6 +941,7 @@ describe("rig route permission matrix", () => {
       body: JSON.stringify({ name: "stale-promote", setupScript: "echo v1" }),
     });
     const rig = await created.json();
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const proposed = await http.request(`${base}/${rig.id}/changes`, {
       method: "POST",
       headers: manage,
@@ -463,17 +951,45 @@ describe("rig route permission matrix", () => {
       }),
     });
     const change = await proposed.json();
+    const candidateDefinition = {
+      setupScript: "echo edited",
+      checks: [],
+      credentialHooks: [],
+      defaultVariableSetIds: [],
+    };
+    const contentHash = rigProviderImageContentHash({
+      backend: "docker",
+      sourceImage: "example.invalid/opengeni:test",
+      definition: candidateDefinition,
+    });
+    const providerImage = {
+      ...testRigProviderImage(change.id, "change"),
+      contentHash,
+      setupHash: rigProviderImageSetupHash(candidateDefinition),
+      buildRequestId: rigProviderImageBuildRequestId({
+        targetId: change.id,
+        backend: "docker",
+        contentHash,
+      }),
+    };
     await updateRigChangeStatus(client.db, ws.workspaceId, change.id, {
       status: "proposed",
-      verification: { passed: true },
+      verification: {
+        passed: true,
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
+      },
     });
-    await createRigVersion(
+    const independentlyPromoted = await createVerifiedTestRigVersion(
       client.db,
       ws.workspaceId,
       rig.id,
-      { setupScript: "echo independently-promoted" },
-      { activate: true },
+      {
+        setupScript: "echo independently-promoted",
+      },
     );
+    const auditBeforePromote = await auditActions(ws.workspaceId, rig.id);
+    const workflowCallsBeforePromote = calls.length;
 
     const promoted = await http.request(`${base}/${rig.id}/changes/${change.id}/promote`, {
       method: "POST",
@@ -482,7 +998,123 @@ describe("rig route permission matrix", () => {
     expect(promoted.status).toBe(409);
     const versions = await listRigVersions(client.db, ws.workspaceId, rig.id);
     expect(versions).toHaveLength(2);
+    expect(versions.find((version) => version.active)?.id).toBe(independentlyPromoted.id);
     expect((await getRigChange(client.db, ws.workspaceId, change.id))?.status).toBe("proposed");
+    expect(await auditActions(ws.workspaceId, rig.id)).toEqual(auditBeforePromote);
+    expect(calls).toHaveLength(workflowCallsBeforePromote);
+  });
+
+  test("manager-authored versions stay inactive when verification dispatch is deferred", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: Array<{ versionId: string; attemptId: string; workflowId: string }> = [];
+    const http = createApp({
+      settings,
+      db: client.db,
+      bus: {} as never,
+      workflowClient: {
+        startRigVerification: async (input: {
+          versionId: string;
+          attemptId: string;
+          workflowId: string;
+        }) => {
+          calls.push(input);
+          if (calls.length === 2) throw new Error("temporal unavailable");
+        },
+      } as never,
+      managedAuth: null,
+    } as never);
+    const manage = { authorization: await bearer(ws, "user:m", ["rigs:use", "rigs:manage"]) };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "direct-version-pending", setupScript: "echo v1" }),
+    });
+    const rig = await created.json();
+    const initialVersion = await activateInitialVersion(ws.workspaceId, rig.id);
+    const authored = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ setupScript: "echo v2" }),
+    });
+    expect(authored.status).toBe(201);
+    expect(authored.headers.get("OpenGeni-Rig-Verification")).toBe("deferred");
+    const version = await authored.json();
+    expect(version.active).toBe(false);
+    const fetched = await http.request(`${base}/${rig.id}`, { headers: manage });
+    expect((await fetched.json()).activeVersion.id).toBe(initialVersion.id);
+    const activation = await http.request(`${base}/${rig.id}/versions/${version.id}/activate`, {
+      method: "POST",
+      headers: manage,
+    });
+    expect(activation.status).toBe(422);
+    const retried = await http.request(`${base}/${rig.id}/versions/${version.id}/verify`, {
+      method: "POST",
+      headers: manage,
+    });
+    expect(retried.status).toBe(202);
+    expect(calls[1]?.attemptId).toBe(calls[2]?.attemptId);
+    expect(calls[1]?.workflowId).toBe(calls[2]?.workflowId);
+    expect(calls[2]?.workflowId).toBe(
+      `rig-verification-version-${version.id}-attempt-${calls[2]?.attemptId}`,
+    );
+  });
+
+  test("managers can recover a Rig with no active version only through an explicit null CAS", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const calls: unknown[] = [];
+    const http = appWithWorkflow(calls);
+    const manage = {
+      authorization: await bearer(ws, "user:m", [
+        "rigs:use",
+        "rigs:manage",
+        "variable-sets:attach",
+      ]),
+    };
+    const base = `/v1/workspaces/${ws.workspaceId}/rigs`;
+    const created = await http.request(base, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ name: "replacement-recovery", setupScript: "echo initial" }),
+    });
+    const rig = await created.json();
+    const [initial] = await listRigVersions(client.db, ws.workspaceId, rig.id);
+    expect(initial).toBeDefined();
+
+    const implicit = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({ baseVersionId: initial!.id }),
+    });
+    expect(implicit.status).toBe(422);
+
+    const replacement = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({
+        baseVersionId: initial!.id,
+        expectedActiveVersionId: null,
+        changelog: "recover from failed initial verification",
+      }),
+    });
+    expect(replacement.status).toBe(201);
+    expect(await replacement.json()).toMatchObject({ active: false, setupScript: "echo initial" });
+
+    await activateInitialVersion(ws.workspaceId, rig.id);
+    const stale = await http.request(`${base}/${rig.id}/versions`, {
+      method: "POST",
+      headers: manage,
+      body: JSON.stringify({
+        expectedActiveVersionId: null,
+        setupScript: null,
+        checks: [],
+        credentialHooks: [],
+        defaultVariableSetIds: [],
+      }),
+    });
+    expect(stale.status).toBe(409);
   });
 
   test("workspace default rig setter is rigs:manage gated, validates rigId, and clears", async () => {
@@ -512,6 +1144,14 @@ describe("rig route permission matrix", () => {
     });
     expect(invalid.status).toBe(422);
 
+    const inactive = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manage,
+      body: JSON.stringify({ rigId: rig.id }),
+    });
+    expect(inactive.status).toBe(422);
+
+    await activateInitialVersion(ws.workspaceId, rig.id);
     const set = await app().request(`${base}/default-rig`, {
       method: "PUT",
       headers: manage,
@@ -529,6 +1169,85 @@ describe("rig route permission matrix", () => {
     });
     expect(cleared.status).toBe(200);
     expect((await cleared.json()).defaultRigId).toBeNull();
+  });
+
+  test("workspace defaults reject personal Rigs while shared scopes remain resolvable", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const managerSubject = `user:${crypto.randomUUID()}`;
+    const memberSubject = `user:${crypto.randomUUID()}`;
+    const [memberPersonalWorkspace] = await shared!.admin<Array<{ id: string }>>`
+      insert into workspaces (account_id, name)
+      values (${ws.accountId}, 'member personal workspace') returning id
+    `;
+    await shared!.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${memberPersonalWorkspace!.id}, ${ws.accountId})
+    `;
+    await shared!.admin`
+      insert into organization_memberships (
+        account_id, subject_id, status, personal_workspace_id, authorization_revision
+      ) values
+        (${ws.accountId}, ${managerSubject}, 'active', ${ws.workspaceId}, 1),
+        (${ws.accountId}, ${memberSubject}, 'active', ${memberPersonalWorkspace!.id}, 1)
+    `;
+    await shared!.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id) values
+        (${ws.accountId}, ${ws.workspaceId}, ${managerSubject}),
+        (${ws.accountId}, ${ws.workspaceId}, ${memberSubject})
+    `;
+    const personal = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "user",
+      subjectId: managerSubject,
+      name: "manager personal rig",
+    });
+    const workspaceRig = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "workspace",
+      subjectId: managerSubject,
+      name: "shared workspace rig",
+    });
+    const organizationRig = await createVerifiedTestRig(client.db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      scope: "organization",
+      subjectId: managerSubject,
+      allowOrganization: true,
+      name: "shared organization rig",
+    });
+    const base = `/v1/workspaces/${ws.workspaceId}`;
+    const manager = {
+      authorization: await bearer(ws, managerSubject, ["rigs:manage", "rigs:use"]),
+    };
+    const member = { authorization: await bearer(ws, memberSubject, ["rigs:use"]) };
+
+    const personalDefault = await app().request(`${base}/default-rig`, {
+      method: "PUT",
+      headers: manager,
+      body: JSON.stringify({ rigId: personal.id }),
+    });
+    expect(personalDefault.status).toBe(422);
+    expect(await personalDefault.text()).toContain("personal rig");
+    const hiddenPersonal = await app().request(`${base}/rigs/${personal.id}`, {
+      headers: member,
+    });
+    expect(hiddenPersonal.status).toBe(404);
+
+    for (const sharedRig of [workspaceRig, organizationRig]) {
+      const set = await app().request(`${base}/default-rig`, {
+        method: "PUT",
+        headers: manager,
+        body: JSON.stringify({ rigId: sharedRig.id }),
+      });
+      expect(set.status).toBe(200);
+      expect((await set.json()).defaultRigId).toBe(sharedRig.id);
+      const resolved = await app().request(`${base}/rigs/${sharedRig.id}`, { headers: member });
+      expect(resolved.status).toBe(200);
+      expect((await resolved.json()).id).toBe(sharedRig.id);
+    }
   });
 
   test("name collision is a 409; unknown defaultVariableSetId is a 422", async () => {

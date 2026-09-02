@@ -2,7 +2,7 @@
 // to it. Editing never mutates the active version directly (versions are
 // immutable) — it proposes a `definition_edit` change that must pass verification
 // in a clean sandbox before a human promotes it into a new version.
-import { PencilIcon } from "lucide-react";
+import { PencilIcon, RotateCwIcon } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 
@@ -15,7 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import type {
+  CreateRigVersionRequest,
   ProposeRigChangeRequest,
   ResourceAuthorityScope,
   RigVersion,
@@ -24,25 +26,71 @@ import type {
 
 export function RigSetupSection({
   activeVersion,
+  versions,
+  versionsLoading,
+  versionsError,
   rigScope,
   variableSets,
   canPropose,
+  canManage,
   mutating,
   onPropose,
   onProposed,
+  onCreateVersion,
+  onRetryVersions,
 }: {
   activeVersion: RigVersion | null;
+  versions: RigVersion[] | null;
+  versionsLoading: boolean;
+  versionsError: Error | null;
   rigScope: ResourceAuthorityScope;
   variableSets: VariableSet[];
   canPropose: boolean;
+  canManage: boolean;
   mutating: boolean;
   onPropose: (request: ProposeRigChangeRequest) => Promise<unknown>;
   /** Called after a successful propose so the detail view can jump to Changes. */
   onProposed: () => void;
+  onCreateVersion: (request: CreateRigVersionRequest) => Promise<unknown>;
+  onRetryVersions: () => void;
 }) {
   const [editing, setEditing] = useState(false);
 
   if (!activeVersion) {
+    if (canManage) {
+      if (versionsError && versions === null) {
+        return (
+          <Notice
+            tone="failed"
+            title="Couldn't load replacement-version history"
+            action={
+              <Button type="button" variant="secondary" size="sm" onClick={onRetryVersions}>
+                Retry
+              </Button>
+            }
+          >
+            OpenGeni couldn't determine which inactive versions are available as exact recovery
+            bases.
+          </Notice>
+        );
+      }
+      if (versionsLoading || versions === null) {
+        return (
+          <Notice tone="muted" title="Loading replacement-version history">
+            Checking inactive versions before enabling manager recovery.
+          </Notice>
+        );
+      }
+      return (
+        <ReplacementVersionEditor
+          versions={versions}
+          rigScope={rigScope}
+          variableSets={variableSets}
+          mutating={mutating}
+          onSubmit={onCreateVersion}
+        />
+      );
+    }
     return (
       <Notice tone="muted" title="No active version to edit">
         This rig has no active version yet.
@@ -106,6 +154,120 @@ export function RigSetupSection({
           </p>
         )}
       </Section>
+    </div>
+  );
+}
+
+function ReplacementVersionEditor({
+  versions,
+  rigScope,
+  variableSets,
+  mutating,
+  onSubmit,
+}: {
+  versions: RigVersion[];
+  rigScope: ResourceAuthorityScope;
+  variableSets: VariableSet[];
+  mutating: boolean;
+  onSubmit: (request: CreateRigVersionRequest) => Promise<unknown>;
+}) {
+  const inactiveVersions = versions.filter((version) => !version.active);
+  const [baseVersionId, setBaseVersionId] = useState("");
+  const [draft, setDraft] = useState<RigDefinitionDraft>({
+    setupScript: "",
+    checks: [],
+    defaultVariableSetIds: [],
+  });
+  const [changelog, setChangelog] = useState("");
+
+  function selectBase(nextId: string) {
+    setBaseVersionId(nextId);
+    const base = inactiveVersions.find((version) => version.id === nextId);
+    if (base) {
+      setDraft({
+        setupScript: base.setupScript ?? "",
+        checks: base.checks.map((check) => ({ ...check })),
+        defaultVariableSetIds: [...base.defaultVariableSetIds],
+      });
+    }
+  }
+
+  async function submit() {
+    const request: CreateRigVersionRequest = {
+      expectedActiveVersionId: null,
+      ...(baseVersionId
+        ? { baseVersionId }
+        : {
+            setupScript: draft.setupScript.trim() ? draft.setupScript : null,
+            checks: cleanRigChecks(draft.checks),
+            credentialHooks: [],
+            defaultVariableSetIds: draft.defaultVariableSetIds,
+          }),
+      ...(changelog.trim() ? { changelog: changelog.trim() } : {}),
+    };
+    const result = await onSubmit(request);
+    if (result) {
+      toast.success("Replacement version created", {
+        description: "It remains inactive until its saved verification attempt passes.",
+      });
+    }
+  }
+
+  return (
+    <div className="grid gap-4 rounded-lg border border-border bg-surface p-4">
+      <div>
+        <h3 className="text-sm font-medium">Create a replacement version</h3>
+        <p className="mt-0.5 text-xs text-fg-muted">
+          This Rig has no active version. Recovery is pinned to that exact state and cannot
+          overwrite a version activated by another manager.
+        </p>
+      </div>
+
+      {inactiveVersions.length > 0 ? (
+        <div className="grid gap-1.5">
+          <Label htmlFor="replacement-rig-base">Historical base</Label>
+          <Select
+            id="replacement-rig-base"
+            value={baseVersionId}
+            disabled={mutating}
+            onChange={(event) => selectBase(event.target.value)}
+          >
+            <option value="">Complete replacement definition</option>
+            {inactiveVersions.map((version) => (
+              <option key={version.id} value={version.id}>
+                Version {version.version}
+              </option>
+            ))}
+          </Select>
+        </div>
+      ) : null}
+
+      <RigDefinitionFields
+        value={draft}
+        onChange={setDraft}
+        variableSets={variableSets}
+        rigScope={rigScope}
+        disabled={mutating || Boolean(baseVersionId)}
+        idPrefix="replacement-rig"
+      />
+
+      <div className="grid gap-1.5">
+        <Label htmlFor="replacement-rig-changelog">Changelog</Label>
+        <Input
+          id="replacement-rig-changelog"
+          value={changelog}
+          onChange={(event) => setChangelog(event.target.value)}
+          placeholder="Why this replacement is needed"
+          className="h-9"
+        />
+      </div>
+
+      <div className="flex justify-end">
+        <Button type="button" size="sm" disabled={mutating} onClick={() => void submit()}>
+          <RotateCwIcon className="size-3.5" />
+          Create and verify replacement
+        </Button>
+      </div>
     </div>
   );
 }

@@ -18,6 +18,8 @@ export async function rigVerificationWorkflow(input: RigVerificationWorkflowInpu
     await rigVerificationActivities.verifyRigChange({
       workspaceId: input.workspaceId,
       changeId: input.changeId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
     });
     return;
   }
@@ -25,6 +27,8 @@ export async function rigVerificationWorkflow(input: RigVerificationWorkflowInpu
     await rigVerificationActivities.verifyRigVersion({
       workspaceId: input.workspaceId,
       versionId: input.versionId,
+      attemptId: input.attemptId,
+      executionGeneration: input.executionGeneration,
     });
   }
 }

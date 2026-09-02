@@ -931,6 +931,119 @@ describe("BrowserControlClient", () => {
     }
   });
 
+  test("a managed write is aborted and settled before cleanup can run", async () => {
+    let execCalls = 0;
+    let writeSettled = false;
+    let lateWrite = false;
+    let cleanupSawSettledWrite = false;
+    const session: BrowserControlPlacementSession = {
+      exec: async ({ cmd }) => {
+        execCalls += 1;
+        if (cmd.includes("rm -f")) cleanupSawSettledWrite = writeSettled;
+        return { output: "OPENGENI_BROWSER_CONTROL_CLIENT_OK", exitCode: 0 };
+      },
+      writePlacementPrivate: async ({ signal }) =>
+        await new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(() => {
+            lateWrite = true;
+          }, 120);
+          const abort = (): void => {
+            clearTimeout(timer);
+            writeSettled = true;
+            reject(signal?.reason ?? new Error("write aborted"));
+          };
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        }),
+    };
+    const startedAt = Date.now();
+    await expect(
+      provisionBrowserControlClient(session, {
+        adminToken,
+        timeoutMs: 10_000,
+        deadlineAtMs: Date.now() + 40,
+      }),
+    ).rejects.toThrow("provisioning deadline was reached");
+    await Bun.sleep(140);
+    expect(execCalls).toBe(2);
+    expect(writeSettled).toBe(true);
+    expect(cleanupSawSettledWrite).toBe(true);
+    expect(lateWrite).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
+  test("managed provisioning recomputes the remaining absolute budget for every command", async () => {
+    const placement = await localPlacement({ fakeControllerStartup: true });
+    const yields: number[] = [];
+    const innerExec = placement.session.exec!;
+    placement.session.exec = async (args) => {
+      yields.push(args.yieldTimeMs ?? 0);
+      await Bun.sleep(10);
+      return await innerExec(args);
+    };
+    await provisionBrowserControlClient(placement.session, {
+      adminToken,
+      timeoutMs: 2_000,
+      deadlineAtMs: Date.now() + 500,
+    });
+    expect(yields.length).toBeGreaterThanOrEqual(3);
+    const workYields = yields.slice(0, -1);
+    expect(workYields.at(-1)!).toBeLessThan(workYields[0]!);
+    expect(workYields.every((value, index) => index === 0 || value <= workYields[index - 1]!)).toBe(
+      true,
+    );
+    // Temporary-token cleanup owns a fresh reserve and therefore is not
+    // constrained by the already-consumed work deadline.
+    expect(yields.at(-1)!).toBeGreaterThan(workYields.at(-1)!);
+  });
+
+  test("cancellation aborts and settles native controller ensure", async () => {
+    const cancellation = new AbortController();
+    let ensureCalls = 0;
+    let ensureSettled = false;
+    let lateSidecar = false;
+    const session: BrowserControlPlacementSession = {
+      exec: async () => ({ output: "", exitCode: 0 }),
+      writeFile: async () => {
+        throw new Error("native provisioning must not write controller authority files");
+      },
+      ensureBrowserControl: async (_request, options) => {
+        ensureCalls += 1;
+        return await new Promise<never>((_resolve, reject) => {
+          const timer = setTimeout(() => {
+            lateSidecar = true;
+          }, 120);
+          const abort = (): void => {
+            clearTimeout(timer);
+            ensureSettled = true;
+            reject(options?.signal?.reason ?? new Error("native ensure aborted"));
+          };
+          if (options?.signal?.aborted) abort();
+          else options?.signal?.addEventListener("abort", abort, { once: true });
+        });
+      },
+    };
+    setTimeout(() => cancellation.abort(new Error("native provisioning cancelled")), 20);
+    const startedAt = Date.now();
+    await expect(
+      provisionBrowserControlClient(session, {
+        adminToken,
+        timeoutMs: 10_000,
+        deadlineAtMs: Date.now() + 5_000,
+        signal: cancellation.signal,
+        nativeAuthority: {
+          scopeId: `workspace:attached:${randomUUID()}`,
+          scopeGeneration: "connection-1",
+        },
+      }),
+    ).rejects.toThrow("native provisioning cancelled");
+    await Bun.sleep(140);
+    expect(ensureCalls).toBe(1);
+    expect(ensureSettled).toBe(true);
+    expect(lateSidecar).toBe(false);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
   test("uses the standard exec and writeStdin surface when writeFile is unavailable", async () => {
     const server = Bun.serve({
       port: 0,

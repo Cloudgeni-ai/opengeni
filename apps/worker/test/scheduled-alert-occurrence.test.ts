@@ -2,9 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   createDb,
   claimSessionWorkForAttempt,
-  createRig,
   createRigChange,
-  createRigVersion,
   createRigVersionForChangePromotion,
   createScheduledTask,
   createSession,
@@ -21,7 +19,11 @@ import {
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
+  createVerifiedTestRig as createRig,
+  createVerifiedTestRigVersion,
   MemoryEventBus,
+  testRigProviderImage,
+  testRigSurfaceReceipt,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -1143,13 +1145,18 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
+    const attemptId = crypto.randomUUID();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(client.db, workspace.workspaceId, change.id, {
       status: "proposed",
       verification: {
+        attemptId,
         startedAt: "2026-08-14T00:00:00.000Z",
         finishedAt: "2026-08-14T00:01:00.000Z",
         passed: true,
         checkResults: [],
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
     const promoted = await createRigVersionForChangePromotion(
@@ -1159,7 +1166,10 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       change.id,
       {
         expectedActiveVersionId: rig.activeVersion!.id,
+        expectedVerificationAttemptId: attemptId,
+        expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
+        providerImages: { [providerImage.backend]: providerImage },
       },
     );
     const responder = await createSession(client.db, {
@@ -1174,13 +1184,9 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       rigId: rig.id,
       rigVersionId: promoted.version.id,
     });
-    await createRigVersion(
-      client.db,
-      workspace.workspaceId,
-      rig.id,
-      { credentialHooks: ["azure-monitor"] },
-      { activate: true },
-    );
+    await createVerifiedTestRigVersion(client.db, workspace.workspaceId, rig.id, {
+      credentialHooks: ["azure-monitor"],
+    });
     const task = await taskFixture(workspace, alertMetadata(), {
       runMode: "existing_session",
       responderSessionId: responder.id,
@@ -1267,13 +1273,18 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       kind: "definition_edit",
       payload: { credentialHooks: ["azure-monitor"] },
     });
+    const attemptId = crypto.randomUUID();
+    const providerImage = testRigProviderImage(change.id, "change");
     await updateRigChangeStatus(client.db, personalWorkspace!.id, change.id, {
       status: "proposed",
       verification: {
+        attemptId,
         startedAt: "2026-08-16T20:00:00.000Z",
         finishedAt: "2026-08-16T20:01:00.000Z",
         passed: true,
         checkResults: [],
+        providerImage,
+        platformSurfaceValidation: testRigSurfaceReceipt(change.id, providerImage),
       },
     });
     const frozen = await createRigVersionForChangePromotion(
@@ -1283,7 +1294,10 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       change.id,
       {
         expectedActiveVersionId: rig.activeVersion!.id,
+        expectedVerificationAttemptId: attemptId,
+        expectedVerificationExecutionGeneration: 1,
         credentialHooks: ["azure-monitor"],
+        providerImages: { [providerImage.backend]: providerImage },
       },
     );
     const responder = await createSession(client.db, {
@@ -1298,13 +1312,9 @@ describe("scheduled alert canonical responder session (real PostgreSQL)", () => 
       rigId: rig.id,
       rigVersionId: frozen.version.id,
     });
-    await createRigVersion(
-      client.db,
-      personalWorkspace!.id,
-      rig.id,
-      { credentialHooks: ["azure-monitor"] },
-      { activate: true },
-    );
+    await createVerifiedTestRigVersion(client.db, personalWorkspace!.id, rig.id, {
+      credentialHooks: ["azure-monitor"],
+    });
     const task = await taskFixture(workspace, alertMetadata(), {
       runMode: "existing_session",
       responderSessionId: responder.id,

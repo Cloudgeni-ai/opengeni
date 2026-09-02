@@ -95,7 +95,11 @@ export interface RoutableBackendSession {
   /** Release op-stream replay retention only after the caller has durably
    * accepted every settled result. Routing proxies aggregate this hook across
    * every Connected Machine backend reached during their lifetime. */
-  finalizeOpStreamOps?(): Promise<void>;
+  finalizeOpStreamOps?(options?: {
+    timeoutMs?: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -675,16 +679,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * in memory. A failed backend stays registered so a later durability hook can
    * retry it, while successful backends are forgotten immediately.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(
+    options: { timeoutMs?: number; deadlineAtMs?: number; signal?: AbortSignal } = {},
+  ): Promise<void> {
+    options.signal?.throwIfAborted();
     const failures: unknown[] = [];
     for (const backend of [...this.opStreamBackends]) {
       try {
-        await backend.finalizeOpStreamOps?.();
+        await backend.finalizeOpStreamOps?.(options);
         this.opStreamBackends.delete(backend);
       } catch (error) {
         failures.push(error);
       }
     }
+    options.signal?.throwIfAborted();
     if (failures.length > 0) {
       throw new AggregateError(failures, "one or more routed op-stream finalizers failed");
     }

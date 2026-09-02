@@ -19,6 +19,7 @@ import {
   SessionGoalStatus,
   SessionStatus,
 } from "./session-topology-primitives";
+import { RigPlatformSurfaceValidationReceipt as RigPlatformSurfaceValidationReceiptSchema } from "./rig-platform-surface-validation";
 
 export * from "./slack-bot-scopes";
 export * from "./slack-task-policy";
@@ -38,6 +39,10 @@ export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
 export * from "./session-topology-primitives";
+export type {
+  RigPlatformSurfaceValidationBinding,
+  RigPlatformSurfaceValidationReceipt,
+} from "./rig-platform-surface-validation";
 export * from "./agent-topology";
 export * from "./work-claims";
 
@@ -795,6 +800,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "rig_get",
   "rig_propose_change",
   "rig_verify",
+  "rig_create_version",
   "rig_promote",
   "sessions_list",
   "session_get",
@@ -8119,6 +8125,11 @@ export type RigCheck = z.infer<typeof RigCheck>;
 export const RigProviderImageBuildStatus = z.enum(["building", "ready", "failed", "unsupported"]);
 export type RigProviderImageBuildStatus = z.infer<typeof RigProviderImageBuildStatus>;
 
+/** Current proof protocol for immutable provider images. Versions 1 and 2
+ * remain readable during rolling upgrades, but they are never eligible for
+ * reuse because neither binds activation evidence to the exact derived image. */
+export const RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION = 3 as const;
+
 export const RigProviderImage = z
   .object({
     backend: SandboxBackend,
@@ -8142,7 +8153,11 @@ export const RigProviderImage = z
     // until an explicit verification cold-boots this exact image.
     coldBootValidation: z
       .object({
-        version: z.literal(1),
+        version: z.union([
+          z.literal(1),
+          z.literal(2),
+          z.literal(RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION),
+        ]),
         checkedAt: z.string().datetime(),
       })
       .optional(),
@@ -8252,6 +8267,9 @@ export const RigVersion = z.object({
   // Attribution: 'user:<subject>' | 'session:<id>' | 'system'.
   createdBy: z.string().nullable(),
   active: z.boolean(),
+  // Public lifecycle summary only. Attempt tokens, activation CAS identity,
+  // receipts, and failure detail remain server-internal verification state.
+  verificationStatus: z.enum(["unverified", "pending", "passed", "failed"]).optional(),
   createdAt: z.string(),
 });
 export type RigVersion = z.infer<typeof RigVersion>;
@@ -8272,8 +8290,8 @@ export const Rig = z.object({
   name: z.string(),
   description: z.string().nullable(),
   createdBy: z.string().nullable(),
-  // The rig's currently-active version (present after create; nullable so a
-  // partial/list read can omit it without a schema change).
+  // The rig's currently-active version. Newly created rigs remain null until
+  // mandatory platform-surface validation activates version 1.
   activeVersion: RigVersion.nullable(),
   // Summary for the currently active version. null only when there is no active
   // version; otherwise "unknown" means the active version has no verification.
@@ -8301,30 +8319,37 @@ export type RigCheckResult = z.infer<typeof RigCheckResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
-export const RigChangeVerification = z
-  .object({
-    startedAt: z.string().optional(),
-    finishedAt: z.string().optional(),
-    log: z.string().optional(),
-    platformCheckResults: z.array(RigCheckResult).optional(),
-    checkResults: z.array(RigCheckResult).optional(),
-  })
-  .passthrough();
+export const RigChangeVerification = /* @__PURE__ */ (() =>
+  z
+    .object({
+      attemptId: z.string().uuid().optional(),
+      attempt: z.number().int().positive().optional(),
+      executionGeneration: z.number().int().positive().optional(),
+      startedAt: z.string().optional(),
+      finishedAt: z.string().optional(),
+      log: z.string().optional(),
+      platformCheckResults: z.array(RigCheckResult).optional(),
+      checkResults: z.array(RigCheckResult).optional(),
+      platformSurfacePreflight: RigPlatformSurfaceValidationReceiptSchema.optional(),
+      platformSurfaceValidation: RigPlatformSurfaceValidationReceiptSchema.optional(),
+    })
+    .passthrough())();
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
 
-export const RigChange = z.object({
-  id: z.string().uuid(),
-  rigId: z.string().uuid(),
-  baseVersionId: z.string().uuid().nullable(),
-  kind: RigChangeKind,
-  payload: z.record(z.string(), z.unknown()),
-  status: RigChangeStatus,
-  proposedBy: z.string().nullable(),
-  verification: RigChangeVerification.nullable(),
-  resultVersionId: z.string().uuid().nullable(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+export const RigChange = /* @__PURE__ */ (() =>
+  z.object({
+    id: z.string().uuid(),
+    rigId: z.string().uuid(),
+    baseVersionId: z.string().uuid().nullable(),
+    kind: RigChangeKind,
+    payload: z.record(z.string(), z.unknown()),
+    status: RigChangeStatus,
+    proposedBy: z.string().nullable(),
+    verification: RigChangeVerification.nullable(),
+    resultVersionId: z.string().uuid().nullable(),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  }))();
 export type RigChange = z.infer<typeof RigChange>;
 
 // Rig setup payloads are transferred to sandboxes in bounded chunks. Keep the
@@ -8420,6 +8445,16 @@ export const RigDefinitionEditPayload = z.object({
   changelog: z.string().max(4096).nullish(),
 });
 export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
+
+// Direct manager-authored versions normally inherit from the active version.
+// A Rig with no active version can be recovered only through an explicit
+// fail-closed CAS (`expectedActiveVersionId: null`) plus either an exact
+// historical base or a complete replacement definition.
+export const CreateRigVersionRequest = RigDefinitionEditPayload.extend({
+  baseVersionId: z.string().uuid().optional(),
+  expectedActiveVersionId: z.string().uuid().nullable().optional(),
+});
+export type CreateRigVersionRequest = z.infer<typeof CreateRigVersionRequest>;
 
 export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),

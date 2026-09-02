@@ -1,0 +1,307 @@
+import { createHash } from "node:crypto";
+import {
+  BrowserControlTransportError,
+  provisionBrowserControlClient,
+  type BrowserControlPlacementSession,
+  type TrustedRigPlatformSurface,
+  type TrustedRigPlatformSurfaceBinding,
+  type TrustedRigPlatformSurfaceOperation,
+} from "../browser-control-client";
+
+export type TrustedRigPlatformSidecar = BrowserControlPlacementSession & {
+  readonly sidecarId: string;
+  assertRuntimeIntegrity(options: {
+    timeoutMs: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void>;
+  terminate(options: { timeoutMs: number; deadlineAtMs?: number }): Promise<void>;
+};
+
+export type TrustedRigPlatformSidecarPurpose = "terminal" | "controller";
+
+export type TrustedRigPlatformSidecarFactory = (
+  input: TrustedRigPlatformSurfaceOperation,
+  purpose: TrustedRigPlatformSidecarPurpose,
+) => Promise<TrustedRigPlatformSidecar>;
+
+function sameOperation(
+  binding: TrustedRigPlatformSurfaceBinding,
+  input: TrustedRigPlatformSurfaceOperation,
+): boolean {
+  return (
+    input.backendId === binding.backendId &&
+    input.instanceId === binding.instanceId &&
+    input.providerImage === binding.providerImage &&
+    input.providerImageId === binding.providerImageId &&
+    input.leaseId === binding.leaseId &&
+    input.leaseEpoch === binding.leaseEpoch &&
+    input.workspaceGeneration === binding.workspaceGeneration &&
+    input.sandboxGroupId === binding.sandboxGroupId &&
+    input.rigVersionId === binding.rigVersionId
+  );
+}
+
+function assertOperation(
+  binding: TrustedRigPlatformSurfaceBinding,
+  input: TrustedRigPlatformSurfaceOperation,
+): void {
+  if (!sameOperation(binding, input)) {
+    throw new Error("trusted Rig platform surface operation changed its exact binding");
+  }
+  input.signal?.throwIfAborted();
+  if (
+    !Number.isSafeInteger(input.timeoutMs) ||
+    input.timeoutMs < 1 ||
+    (input.deadlineAtMs !== undefined && input.deadlineAtMs <= Date.now())
+  ) {
+    throw new BrowserControlTransportError("trusted Rig platform surface deadline was reached");
+  }
+}
+
+function operationDeadline(input: TrustedRigPlatformSurfaceOperation): number {
+  return Math.min(
+    Date.now() + input.timeoutMs,
+    input.deadlineAtMs === undefined ? Number.POSITIVE_INFINITY : input.deadlineAtMs,
+  );
+}
+
+function remainingMs(deadlineAtMs: number): number {
+  const remaining = Math.floor(deadlineAtMs - Date.now());
+  if (remaining <= 0) {
+    throw new BrowserControlTransportError("trusted Rig platform surface deadline was reached");
+  }
+  return Math.max(1, Math.min(10 * 60_000, remaining));
+}
+
+async function terminateSidecar(
+  sidecar: TrustedRigPlatformSidecar,
+  input: TrustedRigPlatformSurfaceOperation,
+): Promise<void> {
+  const cleanupDeadlineAtMs = Date.now() + Math.max(1, Math.min(15_000, input.timeoutMs));
+  await sidecar.terminate({
+    timeoutMs: remainingMs(cleanupDeadlineAtMs),
+    deadlineAtMs: cleanupDeadlineAtMs,
+  });
+}
+
+async function settleCreation(
+  create: Promise<TrustedRigPlatformSidecar>,
+  input: TrustedRigPlatformSurfaceOperation,
+): Promise<TrustedRigPlatformSidecar> {
+  const deadlineAtMs = operationDeadline(input);
+  const timeoutMs = remainingMs(deadlineAtMs);
+  const controller = new AbortController();
+  const onAbort = (): void =>
+    controller.abort(input.signal?.reason ?? new Error("operation aborted"));
+  if (input.signal?.aborted) onAbort();
+  else input.signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new BrowserControlTransportError("trusted Rig platform surface deadline was reached"),
+      ),
+    timeoutMs,
+  );
+  try {
+    const winner = await Promise.race([
+      create.then((sidecar) => ({ kind: "created" as const, sidecar })),
+      new Promise<{ kind: "aborted"; reason: unknown }>((resolve) => {
+        const settle = (): void => resolve({ kind: "aborted", reason: controller.signal.reason });
+        if (controller.signal.aborted) settle();
+        else controller.signal.addEventListener("abort", settle, { once: true });
+      }),
+    ]);
+    if (winner.kind === "created") return winner.sidecar;
+
+    // A provider adapter must carry the operation signal/deadline into its
+    // create call, but keep a final local guard for a buggy or older provider.
+    // Never pin the verifier lease on a promise that ignores cancellation.
+    // If that request eventually materializes, terminate its exact sidecar in
+    // the background; provider-specific adapters also recover by stable name.
+    void create.then(async (late) => await terminateSidecar(late, input)).catch(() => undefined);
+    throw winner.reason;
+  } finally {
+    clearTimeout(timer);
+    input.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+function commandOutput(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") return "";
+  const value = result as { output?: unknown; stdout?: unknown; stderr?: unknown };
+  return [value.output, value.stdout, value.stderr]
+    .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+    .join("\n");
+}
+
+function commandExitCode(result: unknown): number | null {
+  if (!result || typeof result !== "object") return null;
+  const value = (result as { exitCode?: unknown }).exitCode;
+  return typeof value === "number" ? value : null;
+}
+
+function terminalProbeCommand(): string {
+  return [
+    "set -eu",
+    "export PATH=/usr/bin:/bin:/usr/local/bin",
+    'test "$PWD" = /workspace',
+    'test "$(/usr/bin/id -u)" = 0',
+    'test "$(/usr/local/bin/bun --version)" = 1.4.0',
+    "test -t 1",
+    "printf '%s\\n' OPENGENI_TRUSTED_TERMINAL_OK",
+  ].join("\n");
+}
+
+function desktopStartupCommand(binding: TrustedRigPlatformSurfaceBinding): string {
+  const suffix = createHash("sha256")
+    .update(`${binding.leaseId}\0${binding.leaseEpoch}\0${binding.workspaceGeneration}`, "utf8")
+    .digest("hex")
+    .slice(0, 16);
+  return [
+    "set -eu",
+    "export PATH=/usr/bin:/bin:/usr/local/bin",
+    `export HOME=/tmp/opengeni-rig-surface-home-${suffix}`,
+    '/usr/bin/install -d -m 0700 "$HOME"',
+    "STREAM_PORT=6080 DESKTOP_W=1280 DESKTOP_H=800 /bin/bash /usr/local/bin/opengeni-desktop-up",
+  ].join("\n");
+}
+
+export function createTrustedRigPlatformSurface(input: {
+  binding: TrustedRigPlatformSurfaceBinding;
+  desktopEnabled: boolean;
+  createSidecar: TrustedRigPlatformSidecarFactory;
+}): TrustedRigPlatformSurface {
+  const binding = Object.freeze({ ...input.binding });
+  let phase: "idle" | "terminal" | "controller" | "closed" = "idle";
+  let controllerSidecar: TrustedRigPlatformSidecar | null = null;
+
+  const assertIdle = (): void => {
+    if (phase !== "idle") {
+      throw new Error(`trusted Rig platform surface cannot start another phase from ${phase}`);
+    }
+  };
+
+  const assertIntegrity = async (
+    current: TrustedRigPlatformSidecar,
+    operation: TrustedRigPlatformSurfaceOperation,
+  ): Promise<void> => {
+    await current.assertRuntimeIntegrity({
+      timeoutMs: operation.timeoutMs,
+      ...(operation.deadlineAtMs === undefined ? {} : { deadlineAtMs: operation.deadlineAtMs }),
+      ...(operation.signal ? { signal: operation.signal } : {}),
+    });
+  };
+
+  return Object.freeze({
+    binding,
+    async runTerminalProbe(operation) {
+      assertOperation(binding, operation);
+      assertIdle();
+      phase = "terminal";
+      let current: TrustedRigPlatformSidecar | null = null;
+      let failed = false;
+      let failure: unknown;
+      let probe: {
+        cwd: "/workspace";
+        uid: 0;
+        bunVersion: "1.4.0";
+        interactive: true;
+      } | null = null;
+      try {
+        current = await settleCreation(input.createSidecar(operation, "terminal"), operation);
+        await assertIntegrity(current, operation);
+        const result = await current.exec!({
+          cmd: terminalProbeCommand(),
+          workdir: "/workspace",
+          tty: true,
+          yieldTimeMs: operation.timeoutMs,
+          timeoutMs: operation.timeoutMs,
+          ...(operation.deadlineAtMs === undefined ? {} : { deadlineAtMs: operation.deadlineAtMs }),
+          ...(operation.signal ? { signal: operation.signal } : {}),
+          maxOutputTokens: 2_000,
+        });
+        await assertIntegrity(current, operation);
+        if (
+          commandExitCode(result) !== 0 ||
+          !commandOutput(result).includes("OPENGENI_TRUSTED_TERMINAL_OK")
+        ) {
+          throw new Error("trusted Rig platform terminal probe failed");
+        }
+        probe = { cwd: "/workspace", uid: 0, bunVersion: "1.4.0", interactive: true };
+      } catch (error) {
+        failed = true;
+        failure = error;
+      }
+      if (current) {
+        try {
+          await terminateSidecar(current, operation);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+      }
+      if (failed) {
+        phase = "closed";
+        throw failure;
+      }
+      phase = "idle";
+      return probe!;
+    },
+    async provisionController(operation) {
+      assertOperation(binding, operation);
+      assertIdle();
+      phase = "controller";
+      let current: TrustedRigPlatformSidecar | null = null;
+      try {
+        current = await settleCreation(input.createSidecar(operation, "controller"), operation);
+        controllerSidecar = current;
+        await assertIntegrity(current, operation);
+        if (input.desktopEnabled) {
+          const result = await current.exec!({
+            cmd: desktopStartupCommand(binding),
+            workdir: "/workspace",
+            yieldTimeMs: operation.timeoutMs,
+            timeoutMs: operation.timeoutMs,
+            ...(operation.deadlineAtMs === undefined
+              ? {}
+              : { deadlineAtMs: operation.deadlineAtMs }),
+            ...(operation.signal ? { signal: operation.signal } : {}),
+            maxOutputTokens: 4_000,
+          });
+          if (commandExitCode(result) !== 0) {
+            throw new Error(`trusted Rig desktop startup failed: ${commandOutput(result)}`);
+          }
+          await assertIntegrity(current, operation);
+        }
+        const provisioned = await provisionBrowserControlClient(current, {
+          adminToken: operation.adminToken,
+          allowedOrigins: operation.allowedOrigins,
+          timeoutMs: operation.timeoutMs,
+          ...(operation.deadlineAtMs === undefined ? {} : { deadlineAtMs: operation.deadlineAtMs }),
+          ...(operation.signal ? { signal: operation.signal } : {}),
+        });
+        await assertIntegrity(current, operation);
+        return { client: provisioned.client };
+      } catch (error) {
+        phase = "closed";
+        controllerSidecar = null;
+        if (current) await terminateSidecar(current, operation).catch(() => undefined);
+        throw error;
+      }
+    },
+    async tearDownController(operation) {
+      assertOperation(binding, operation);
+      if (phase === "closed") return;
+      const current = controllerSidecar;
+      controllerSidecar = null;
+      phase = "closed";
+      if (!current) return;
+      await assertIntegrity(current, operation);
+      await terminateSidecar(current, operation);
+    },
+  });
+}
