@@ -34,6 +34,10 @@ export type SessionRecoveryBacklog = {
   quiescence_missing: number;
   projection_stale: number;
 };
+export type ContextCompactionPendingSummary = {
+  pendingCount: number;
+  oldestStartedAt: Date | null;
+};
 
 export type TemporalTurnTaskQueueStats = {
   approximateBacklogCount?: unknown;
@@ -49,6 +53,7 @@ const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const modelRequestTrackers = new WeakMap<Observability, ModelRequestLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
 const modelCacheCounterTotals = new WeakMap<Observability, Map<string, number>>();
+const initializedContextCompactionMetrics = new WeakSet<Observability>();
 
 // A worker process reaching one trillion tokens in one provider/cache counter is
 // already far outside an ordinary scrape lifetime. Refuse further increments
@@ -61,6 +66,18 @@ const WORKER_DEATH_RECOVERY_OUTCOMES: readonly WorkerDeathRecoveryOutcome[] = [
   "exhausted",
 ];
 const WORKER_DEATH_TIMEOUT_TYPES = ["heartbeat", "schedule_to_start"] as const;
+const CONTEXT_COMPACTION_TRIGGERS = ["auto", "operator", "proactive", "overflow"] as const;
+
+export type ContextCompactionTrigger = (typeof CONTEXT_COMPACTION_TRIGGERS)[number];
+
+const CONTEXT_COMPACTION_STARTS_METRIC = {
+  name: "opengeni_context_compaction_starts_total",
+  help: "Total durable context compaction starts, by trigger.",
+} as const;
+const CONTEXT_COMPACTIONS_METRIC = {
+  name: "opengeni_context_compactions_total",
+  help: "Total completed context compactions, by trigger.",
+} as const;
 
 export function observabilityEventLogger(observability: Observability): EventLogger {
   return {
@@ -344,6 +361,29 @@ export function initializeWorkerOutcomeMetrics(observability: Observability): vo
       });
     }
   }
+}
+
+/**
+ * Publish every bounded compaction lifecycle series before the first event.
+ * The zero counters make the closed trigger catalog explicit before a scrape.
+ * Alerting uses the separate durable control-worker projection below; these
+ * process-local counters are lifecycle-rate diagnostics only.
+ */
+export function initializeContextCompactionMetrics(observability: Observability): void {
+  if (initializedContextCompactionMetrics.has(observability)) return;
+  for (const trigger of CONTEXT_COMPACTION_TRIGGERS) {
+    observability.incrementCounter({
+      ...CONTEXT_COMPACTION_STARTS_METRIC,
+      labels: { trigger },
+      amount: 0,
+    });
+    observability.incrementCounter({
+      ...CONTEXT_COMPACTIONS_METRIC,
+      labels: { trigger },
+      amount: 0,
+    });
+  }
+  initializedContextCompactionMetrics.add(observability);
 }
 
 export function recordWorkerDeathRecoveryMetrics(
@@ -811,6 +851,96 @@ export function startSessionRecoveryMonitor(input: {
         lastReadSucceeded = false;
         recordStatus();
         input.observability.warn("session recovery monitor: durable aggregate read failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
+}
+
+export function recordContextCompactionPendingGauges(
+  observability: Observability,
+  summary: ContextCompactionPendingSummary,
+  nowMs = Date.now(),
+): void {
+  const oldestStartedAtMs = summary.oldestStartedAt?.getTime();
+  const oldestPendingAgeSeconds =
+    oldestStartedAtMs === undefined || !Number.isFinite(oldestStartedAtMs)
+      ? 0
+      : Math.max(0, (nowMs - oldestStartedAtMs) / 1_000);
+  observability.setGauge({
+    name: "opengeni_context_compaction_pending",
+    help: "Current exact active attempts whose latest automatic compaction landmark is still started.",
+    value: nonnegativeFinite(summary.pendingCount),
+  });
+  observability.setGauge({
+    name: "opengeni_context_compaction_oldest_pending_age_seconds",
+    help: "Age in seconds of the oldest durably pending automatic compaction, or zero when none are pending.",
+    value: oldestPendingAgeSeconds,
+  });
+}
+
+export function startContextCompactionPendingMonitor(input: {
+  observability: Observability;
+  read: () => Promise<ContextCompactionPendingSummary>;
+  intervalMs?: number;
+  now?: () => number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 60_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_context_compaction_monitor_last_read_success",
+      "Whether the latest durable context-compaction aggregate read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_context_compaction_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful durable context-compaction aggregate read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_context_compaction_monitor_fresh",
+      "Whether durable context-compaction pending gauges have a successful read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
+  const refresh = () => {
+    recordStatus();
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((summary) => {
+        recordContextCompactionPendingGauges(input.observability, summary, now());
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
+      .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
+        input.observability.warn("context compaction monitor: durable aggregate read failed", {
           error: error instanceof Error ? error.message : String(error),
         });
       })
@@ -1751,15 +1881,14 @@ export function recordSessionEventPublishLatency(
   });
 }
 
-// Context tokens per response span a wide range; buckets track the pressure toward
-// a model's window so "sessions are running hot but never compacting" is queryable.
+// Context tokens per response span a wide range; buckets retain context-pressure
+// diagnostics while compaction alerting follows the durable model-aware start.
 const MODEL_INPUT_TOKENS_BUCKETS = [
   1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 150_000, 200_000, 300_000, 500_000, 1_000_000,
 ];
 
-/** Observed input (context) tokens per model response — the context-pressure
- *  signal. Paired with `opengeni_context_compactions_total`, it makes the
- *  "compaction never firing while contexts run hot" failure mode expressible. */
+/** Observed input (context) tokens per model response for context-pressure
+ *  dashboards and provider diagnostics. */
 export function recordModelInputTokens(
   observability: Observability,
   provider: string,
@@ -1778,15 +1907,24 @@ export function recordModelInputTokens(
   });
 }
 
-/** A context compaction actually fired, by trigger (operator | overflow | proactive
- *  | auto). The rate of this — against the input-tokens histogram above — is how an
- *  operator sees compaction working (or silently not). */
-export function recordContextCompaction(observability: Observability, trigger: string): void {
-  observability.incrementCounter({
-    name: "opengeni_context_compactions_total",
-    help: "Total context compactions performed, by trigger.",
-    labels: { trigger },
-  });
+/** A context compaction successfully completed, by bounded trigger. */
+export function recordContextCompaction(
+  observability: Observability,
+  trigger: ContextCompactionTrigger,
+): void {
+  observability.incrementCounter({ ...CONTEXT_COMPACTIONS_METRIC, labels: { trigger } });
+}
+
+/**
+ * A durable context-compaction start, recorded only after the attempt-fenced
+ * `compaction.started` transaction commits. This is the model-aware threshold
+ * signal; it does not guess from a static token count shared by unlike models.
+ */
+export function recordContextCompactionStarted(
+  observability: Observability,
+  trigger: ContextCompactionTrigger,
+): void {
+  observability.incrementCounter({ ...CONTEXT_COMPACTION_STARTS_METRIC, labels: { trigger } });
 }
 
 const MODEL_CONTEXT_CONTRIBUTION_TOKEN_BUCKETS = [1, 8, 32, 128, 512, 2_048, 8_192];

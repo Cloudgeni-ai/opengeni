@@ -347,6 +347,11 @@ exact workspace- or organization-scoped machine target and seed the session's
 active pointer before its first turn. A targetless generated schedule cannot
 resolve to `selfhosted`; ingress rejects that configuration, and dispatch
 revalidates the frozen target rather than falling back to managed compute.
+Manual and generated creates preflight the target's current liveness and
+workspace root before insertion, then recheck durable target authority and
+commit the active pointer in the same transaction as the session row. A
+rejected target therefore leaves no queued session shell for discovery or
+parent-tree projections to mistake for live work.
 
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
@@ -662,7 +667,10 @@ interruption that would fence the terminal checkpoint write. A durable
 `compacted` or `skipped` landmark becomes the handoff: the ordinary turn settles
 `superseded` before another model request, while standalone maintenance completes
 and the waiting Steer is claimed next. Pause and Cancel retain immediate
-interruption semantics.
+interruption semantics. Automatic starts also maintain one content-free private
+pending projection keyed by exact attempt; terminal landmarks, attempt closure,
+and active-attempt replacement clear it so control-worker alerting survives
+turn-worker loss without exporting session identity.
 
 Pause and Resume are desired-state commands with durable semantic receipts. A
 fresh key allocates a control revision, events, interruptions, and wakes only

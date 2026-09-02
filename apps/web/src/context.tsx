@@ -56,6 +56,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Toaster } from "@/components/ui/sonner";
 import type { AnalyticsEventName, AnalyticsProperties } from "@/lib/analytics";
+import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "@/lib/bootstrap-error";
 import { ManagedAuthSessionUnavailableError } from "@/lib/managed-auth-form";
 import { signOutWithAuthoritativeReconciliation } from "@/lib/managed-auth-transition";
 import { unlinkGitHubInstallationWithReconciliation } from "@/lib/github-installation-unlink";
@@ -554,7 +555,8 @@ export function RootRouteComponent() {
   const [sessionCreationHandoff, setSessionCreationHandoff] =
     useState<SessionCreationHandoff | null>(null);
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
-  const [configError, setConfigError] = useState<string | null>(null);
+  const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
+  const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
@@ -567,7 +569,7 @@ export function RootRouteComponent() {
     string | null
   >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
-  const [accessError, setAccessError] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -859,14 +861,13 @@ export function RootRouteComponent() {
         if (cancelled) {
           return;
         }
-        const message = error instanceof Error ? error.message : String(error);
-        setConfigError(message);
-        toast.error("Failed to load client config", { description: message });
+        const presentation = bootstrapErrorPresentation(error, "client_configuration");
+        setConfigError(presentation);
       });
     return () => {
       cancelled = true;
     };
-  }, [isPublicDevHarness]);
+  }, [configRequestVersion, isPublicDevHarness]);
 
   useEffect(() => {
     if (!clientConfig) {
@@ -986,12 +987,10 @@ export function RootRouteComponent() {
         ) {
           return;
         }
-        toast.error("Failed to load workspace access", {
-          description: String(error),
-        });
+        const presentation = bootstrapErrorPresentation(error, "workspace_access");
         setAccessContext(null);
         setWorkspaces([]);
-        setAccessError(error instanceof Error ? error.message : String(error));
+        setAccessError(presentation);
       })
       .finally(() => {
         if (
@@ -2616,7 +2615,22 @@ export function RootRouteComponent() {
   ) : !clientConfig && !configError ? (
     <LoadingPanel label="Loading OpenGeni" />
   ) : configError ? (
-    <ProblemPanel title="Client configuration unavailable" description={configError} />
+    <ProblemPanel
+      title={configError.title}
+      description={configError.description}
+      action={
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={() => {
+            setConfigError(null);
+            setConfigRequestVersion((version) => version + 1);
+          }}
+        >
+          Try again
+        </Button>
+      }
+    />
   ) : keyAuthRequired && !hasAccessKey ? (
     <AccessKeyPanel
       authMode={clientConfig?.auth.mode}
@@ -2657,8 +2671,8 @@ export function RootRouteComponent() {
     </Suspense>
   ) : accessError && !accessLoading ? (
     <ProblemPanel
-      title="Workspace access unavailable"
-      description={accessError}
+      title={accessError.title}
+      description={accessError.description}
       action={
         <Button
           type="button"
