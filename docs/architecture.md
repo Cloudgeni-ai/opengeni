@@ -1173,29 +1173,37 @@ can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
 
-When provider-deadline rotation aborts an Agents SDK run, the SDK closes the
-readable stream before its completion promise rejects. Iterator EOF is therefore
-not terminal success authority: the worker must await SDK completion and route
-its rejection through `sandbox_deadline_rotation` recovery before settling
-`turn.completed`.
+Provider-deadline rotation is an explicit preemption boundary. Once the durable
+lead-time request fences new mutations, each live turn aborts immediately rather
+than waiting for a turn-side snapshot that can be blocked by that turn's own
+mutation admission or an earlier provider capture. The attempt finalizer drains
+every tool and credential writer before releasing its holder; only the resulting
+zero-holder reaper may take over an in-flight same-request capture, publish the
+exact workspace generation, and terminate the old provider. When this abort
+reaches an Agents SDK run, the SDK closes the readable stream before its
+completion promise rejects. Iterator EOF is therefore not terminal success
+authority: the worker must await SDK completion and route its rejection through
+`sandbox_deadline_rotation` recovery before settling `turn.completed`.
 
 BrowserSession and ComputerSession interaction holders are durable placement
 authority, not UI-presence leases, so an active controller never expires merely
-because its heartbeat timestamp is old. A requested finite-lifetime Modal lease
-that has reached its absolute provider deadline is the narrow exception: the
-global lifecycle reaper marks each exact controller resource `lost`, settles a
-prepared operation as a deterministic deadline failure or a dispatched operation
-as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
-then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
-The deadline batch admits only leases that still carry interaction holders, so
-unrelated overdue turn/direct/process-held leases cannot starve it, and includes
-an exact lease that entered `draining` before the deadline. The same global
+because its heartbeat timestamp is old. A requested finite-lifetime Modal
+rotation is the narrow exception: at the lead-time rotation boundary, the global
+lifecycle reaper marks each exact controller resource `lost`, settles a prepared
+operation as a deterministic rotation failure or a dispatched operation as
+`outcome_unknown`, preserves the controller binding for cleanup evidence, and
+then lets the ordinary holder/orphan and lease-drain transaction rotate the box
+while capture headroom remains. The deadline batch admits only leases that still
+carry interaction holders, so unrelated overdue turn/direct/process-held leases
+cannot starve it, and includes an exact lease that entered `draining` before the
+deadline. The same global
 reaper inventories due lease-free Connected Machine and attached-device
 transitions under its owner-only FORCE-RLS capability, acquires every affected
 workspace advisory fence in canonical UUID order, and only then opens mutation
-visibility. This deadline override remains batch-bounded and does not impose a
-maximum duration on healthy interaction sessions before the provider identity
-itself expires.
+visibility. This rotation override remains batch-bounded and imposes no
+independent age limit on healthy interaction sessions; it interrupts only when
+the underlying finite provider identity has entered its mandatory handoff
+window.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
