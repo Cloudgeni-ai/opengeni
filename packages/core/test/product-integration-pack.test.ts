@@ -13,7 +13,7 @@ import {
 } from "../src/domain/packs";
 
 describe("OpenGeni Product Integration Pack", () => {
-  test("is a built-in implementation-only Pack that grants no runtime capability", () => {
+  test("is a built-in implementation Pack with enforced session-selected Skill scope", () => {
     const pack = getCapabilityPack(OPENGENI_PRODUCT_INTEGRATION_PACK_ID);
 
     expect(pack).toBe(OPENGENI_PRODUCT_INTEGRATION_PACK);
@@ -25,7 +25,9 @@ describe("OpenGeni Product Integration Pack", () => {
         audience: "integration-agent",
         purpose: "implementation-guidance",
         implementationOnly: true,
-        grantsRuntimeCapabilities: false,
+        skillActivation: "session-selected",
+        installationExposure: "none",
+        grantsExecutableCapabilities: false,
         customerRuntimeProfile: "generated-during-integration",
       },
     });
@@ -42,6 +44,8 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(pack?.sandboxImage).toBeUndefined();
     expect(pack?.sandboxProviderImages).toBeUndefined();
     expect(capabilityPackRequiresInstallationPlan(pack!)).toBe(true);
+    expect(pack?.description).toContain("inactive until one implementation session selects");
+    expect(pack?.skills[0]?.description).toContain("installation alone does not expose");
   });
 
   test("materializes one valid immutable Skill with complete progressive-disclosure references", () => {
@@ -94,6 +98,7 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(data).toContain("OpenAPI 3.0 or 3.1");
     expect(data).toContain("distinct control-plane resources");
     expect(data).toContain("credential brokerage, not zero-knowledge storage");
+    expect(runtime).toContain("Installation keeps its Skill inactive");
     expect(runtime).toContain("Do not attach this generic implementation Skill");
     expect(runtime).toContain("not retransmitted on every turn");
     expect(runtime).toContain("same account balance");

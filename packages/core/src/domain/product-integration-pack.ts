@@ -5,26 +5,27 @@ export const OPENGENI_PRODUCT_INTEGRATION_PACK_ID = "opengeni-product-integratio
 /**
  * Version-aligned implementation guidance for customer-side coding agents.
  *
- * This is intentionally an instruction-only Pack. Installing it must not add
- * runtime tools, credentials, connectors, knowledge, compute, or a customer
- * agent persona to the workspace where the integration is being built.
+ * This is intentionally an instruction-only Pack. Installation adds no tools,
+ * credentials, connectors, knowledge, compute, or customer-agent persona. Its
+ * immutable Skill is installed as session-selected and enters model context
+ * only when one implementation session opts in explicitly.
  */
 export const OPENGENI_PRODUCT_INTEGRATION_SKILL = {
   name: "opengeni-product-integration",
   description:
-    "Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Use in the implementation workspace, not as behavior for the customer-facing runtime agent.",
+    "Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Select only for an implementation session; installation alone does not expose it to other agents.",
   activationMode: "session_selected",
   files: [
     {
       path: "SKILL.md",
       content: `---
 name: opengeni-product-integration
-description: Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Use in the implementation workspace, not as behavior for the customer-facing runtime agent.
+description: Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Select only for an implementation session; installation alone does not expose it to other agents.
 ---
 
 # OpenGeni product integration
 
-Use this Skill to add OpenGeni capabilities to an external product. It guides the coding or implementation agent. It is not a runtime chatbot persona and must not be copied into the customer-facing sessions the integration creates.
+Use this Skill to add OpenGeni capabilities to an external product. It guides the coding or implementation agent. Pack installation keeps it inactive; explicitly select it only for the implementation session. Do not attach it to customer-facing runtime sessions.
 
 The desired outcome is a native-feeling product experience backed by a standalone OpenGeni deployment, with the product retaining authority over its users, tenants, business data, and UI. Adapt to the customer's system instead of imposing a sample architecture, framework, cloud, release process, or chat design.
 
@@ -72,7 +73,7 @@ Do not turn this list into a mandatory questionnaire. Infer first, ask only what
 
 ## Completion standard
 
-An integration is not complete merely because one chat returned an answer. Verify tenant isolation, authenticated routing, idempotent provisioning and session creation, credential containment and rotation, explicit tool selection, event recovery, failure presentation, framework-native UI behavior, and the agreed delivery workflow. Leave the customer with concise operational knowledge and a customer-specific runtime profile without leaking this implementation Skill into runtime chats.
+An integration is not complete merely because one chat returned an answer. Verify tenant isolation, authenticated routing, idempotent provisioning and session creation, credential containment and rotation, explicit tool selection, event recovery, failure presentation, framework-native UI behavior, and the agreed delivery workflow. Leave the customer with concise operational knowledge and a customer-specific runtime profile without attaching this generic implementation Skill to runtime chats.
 `,
     },
     {
@@ -357,7 +358,7 @@ Test expiry, revocation, insufficient scope, wrong audience, wrong tenant, provi
 
 ## Generate customer-specific runtime behavior
 
-This Pack teaches the implementation agent. The implementation agent should derive the customer-facing agent's runtime profile from the customer's product intent and system, then store it with the customer's integration code or configuration. Do not attach this generic implementation Skill to end-user chat sessions.
+This Pack teaches the implementation agent. Installation keeps its Skill inactive until one session explicitly selects it. The implementation agent should derive the customer-facing agent's runtime profile from the customer's product intent and system, then store that profile with the customer's integration code or configuration. Do not attach this generic implementation Skill to end-user runtime chats.
 
 A runtime profile may contain:
 
@@ -470,7 +471,7 @@ export const OPENGENI_PRODUCT_INTEGRATION_PACK = {
   id: OPENGENI_PRODUCT_INTEGRATION_PACK_ID,
   name: "OpenGeni Product Integration",
   description:
-    "Help an implementation agent add OpenGeni to an external product with adaptive discovery, tenant-safe boundaries, framework-native UI, authorized data tools, and the customer's chosen delivery autonomy.",
+    "Help an implementation agent add OpenGeni to an external product with adaptive discovery, tenant-safe boundaries, framework-native UI, authorized data tools, and the customer's chosen delivery autonomy. Installation stays inactive until one implementation session selects the Skill.",
   role: "software-engineering",
   category: "product-integration",
   version: "0.1.0",
@@ -485,7 +486,9 @@ export const OPENGENI_PRODUCT_INTEGRATION_PACK = {
     audience: "integration-agent",
     purpose: "implementation-guidance",
     implementationOnly: true,
-    grantsRuntimeCapabilities: false,
+    skillActivation: "session-selected",
+    installationExposure: "none",
+    grantsExecutableCapabilities: false,
     customerRuntimeProfile: "generated-during-integration",
   },
 } satisfies CapabilityPack;

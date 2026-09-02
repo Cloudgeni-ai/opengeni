@@ -877,7 +877,7 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
                   {skill.activationMode === "session_selected"
                     ? "Installed, then selected per session"
                     : "Installs as an immutable Skill"}{" "}
-                  · {skill.files.length} reviewed file
+                  · {skill.files.length} included file
                   {skill.files.length === 1 ? "" : "s"}
                 </div>
               </div>

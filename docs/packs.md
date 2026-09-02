@@ -20,12 +20,13 @@ provider registration and repository binding remain separate credential and
 resource authorities. See [`pr-review-pack.md`](pr-review-pack.md).
 
 The built-in `opengeni-product-integration` Pack installs implementation-agent
-guidance for adding OpenGeni to an external product. It deliberately declares
-no runtime tools, connectors, credentials, knowledge, compute, automations, or
-customer-agent persona. The implementation agent derives a customer-specific
-runtime profile from the host product; the generic integration Skill must not
-be attached to those customer-facing sessions. Its canonical product contract
-is [`product-integration.md`](product-integration.md).
+guidance for adding OpenGeni to an external product. It declares no executable
+tools, connectors, credentials, knowledge, compute, automations, or
+customer-agent persona. Its installed Skill is `session_selected`, so
+installation alone adds it to no session. An implementation session opts in
+explicitly and derives a customer-specific runtime profile from the host
+product. Its canonical product contract is
+[`product-integration.md`](product-integration.md).
 
 ## Product model
 
@@ -254,12 +255,14 @@ setup, exact-head fencing, and webhook semantics are documented in
 The instruction-only `opengeni-product-integration` Pack uses the reviewed
 preview/install lifecycle because its Skill becomes an ordinary immutable
 workspace Skill component. That Skill is `session_selected`: installing the
-Pack does not expose its descriptor or files to any agent. In the web console,
-reopen the installed Pack and choose **Start with Pack** to attach it to one new
-implementation session. Through the SDK, pass the reviewed inline component's
-`capabilityId` in `installedSkillIds` when creating that session. Customer-facing
-sessions omit that field, so they cannot inherit the generic implementation
-instructions even when they share the installation workspace.
+Pack does not expose its descriptor or files through ordinary agent runtime
+resolution. In the web console, reopen the installed Pack and choose **Start
+with Pack** to attach it to one new implementation session. Through the SDK,
+pass the reviewed inline component's `capabilityId` in `installedSkillIds` when
+creating that session. Customer-facing sessions omit that field, so they do not
+receive the generic implementation instructions even when they share the
+installation workspace. A dedicated implementation workspace can provide
+additional operational separation, but is not required for Skill activation.
 
 The Skill is version-aligned with the OpenGeni release and teaches adaptive
 repository discovery, workspace isolation decisions, explicit tool policy,
