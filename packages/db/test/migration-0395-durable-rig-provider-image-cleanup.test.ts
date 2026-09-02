@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  canonicalDockerProviderImageBinding,
   canonicalModalCheckpointProviderBinding,
   encodeNativeSnapshotRef,
 } from "@opengeni/contracts";
@@ -38,6 +39,16 @@ if (!providerIdentity) {
 }
 const providerBinding = providerIdentity.binding;
 const providerBindingKey = providerIdentity.key;
+const dockerProviderIdentity = canonicalDockerProviderImageBinding({
+  version: 1,
+  endpoint: "unix:///var/run/docker.sock",
+  daemonId: "daemon-a",
+});
+if (!dockerProviderIdentity) {
+  throw new Error("migration 0395 fixture has an invalid Docker provider binding");
+}
+const dockerProviderBinding = dockerProviderIdentity.binding;
+const dockerProviderBindingKey = dockerProviderIdentity.key;
 
 describe("migration 0395 durable Rig provider image cleanup", () => {
   test("persists pre-creation identity and protects registered artifacts from cleanup", async () => {
@@ -52,6 +63,11 @@ describe("migration 0395 durable Rig provider image cleanup", () => {
     expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_binding_shape_check");
     expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_binding_key_check");
     expect(source).toContain("CONSTRAINT rig_provider_image_cleanup_object_check");
+    expect(source).toContain("provider_backend IN ('modal', 'docker')");
+    expect(source).toContain("provider_backend = 'docker'");
+    expect(source).toContain("provider_image.value ->> 'imageId' = obligation.object_id");
+    expect(source).toContain("lease.id = obligation.source_lease_id");
+    expect(source).toContain("pg_catalog.now() - interval '15 minutes'");
     expect(schemaSource).toContain('"rig_provider_image_cleanup_backend_check"');
     expect(schemaSource).toContain('"rig_provider_image_cleanup_binding_shape_check"');
     expect(schemaSource).toContain('"rig_provider_image_cleanup_binding_key_check"');
@@ -338,6 +354,168 @@ describe("migration 0395 durable Rig provider image cleanup", () => {
         where id = ${protectedObligationId}
       `;
       expect(protectedRow?.state).toBe("settled");
+
+      const dockerAccountId = crypto.randomUUID();
+      const dockerWorkspaceId = crypto.randomUUID();
+      const dockerRigId = crypto.randomUUID();
+      const dockerVersionId = crypto.randomUUID();
+      const dockerObligationId = crypto.randomUUID();
+      const dockerSourceLeaseId = crypto.randomUUID();
+      const dockerImageId = `sha256:${"d".repeat(64)}`;
+      await sql`
+        insert into managed_accounts (id, name)
+        values (${dockerAccountId}, 'Docker cleanup account')
+      `;
+      await sql`
+        insert into workspaces (id, account_id, name)
+        values (${dockerWorkspaceId}, ${dockerAccountId}, 'Docker cleanup workspace')
+      `;
+      await sql`
+        insert into rigs (id, account_id, workspace_id, name)
+        values (${dockerRigId}, ${dockerAccountId}, ${dockerWorkspaceId}, 'Docker cleanup rig')
+      `;
+      await sql`set session_replication_role = replica`;
+      try {
+        await sql`
+          insert into rig_versions (
+            id, account_id, workspace_id, rig_id, version, provider_images
+          ) values (
+            ${dockerVersionId}, ${dockerAccountId}, ${dockerWorkspaceId}, ${dockerRigId}, 1,
+            ${sql.json({
+              docker: {
+                backend: "docker",
+                status: "ready",
+                imageId: dockerImageId,
+                buildRequestId: "docker-ready-request",
+              },
+            })}::jsonb
+          )
+        `;
+      } finally {
+        await sql`set session_replication_role = origin`;
+      }
+      await sql`
+        insert into rig_provider_image_cleanup_obligations (
+          id, account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provider_backend, provider_binding_key, provider_binding, build_request_id,
+          object_id, state, delete_after
+        ) values (
+          ${dockerObligationId}, ${dockerAccountId}, ${dockerWorkspaceId},
+          ${crypto.randomUUID()}, ${dockerSourceLeaseId}, 3, 'docker-source', 0,
+          'docker', ${dockerProviderBindingKey},
+          ${sql.json(dockerProviderBinding)}::jsonb, 'docker-ready-request',
+          ${dockerImageId}, 'delete_pending', now()
+        )
+      `;
+
+      const protectedDockerClaims = await sql<Array<{ id: string }>>`
+        select id from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+          ${crypto.randomUUID()}::uuid, 10, 60000::bigint
+        )
+      `;
+      expect([...protectedDockerClaims]).toEqual([]);
+      const [settledDocker] = await sql<Array<{ state: string }>>`
+        select state from rig_provider_image_cleanup_obligations
+        where id = ${dockerObligationId}
+      `;
+      expect(settledDocker?.state).toBe("settled");
+
+      await sql`delete from rig_versions where id = ${dockerVersionId}`;
+      await sql`
+        update rig_provider_image_cleanup_obligations
+        set settled_at = now() - interval '1 hour'
+        where id = ${dockerObligationId}
+      `;
+      const dockerClaimId = crypto.randomUUID();
+      const reclaimedDocker = await sql<
+        Array<{ id: string; provider_backend: string; object_id: string; delete_attempts: number }>
+      >`
+        select id, provider_backend, object_id, delete_attempts
+        from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+          ${dockerClaimId}::uuid, 10, 60000::bigint
+        )
+      `;
+      expect([...reclaimedDocker]).toEqual([
+        {
+          id: dockerObligationId,
+          provider_backend: "docker",
+          object_id: dockerImageId,
+          delete_attempts: 1,
+        },
+      ]);
+      const [dockerRetrySettled] = await sql<Array<{ settled: boolean }>>`
+        select opengeni_private.settle_rig_provider_image_cleanup_obligation(
+          ${dockerObligationId}::uuid, ${dockerClaimId}::uuid, false,
+          'image is referenced by another repository', 60000::bigint
+        ) as settled
+      `;
+      expect(dockerRetrySettled?.settled).toBe(true);
+      const [dockerRetry] = await sql<Array<{ state: string; last_delete_error: string | null }>>`
+        select state, last_delete_error
+        from rig_provider_image_cleanup_obligations
+        where id = ${dockerObligationId}
+      `;
+      expect(dockerRetry).toEqual({
+        state: "delete_failed",
+        last_delete_error: "image is referenced by another repository",
+      });
+
+      const sourceProtectedObligationId = crypto.randomUUID();
+      const sourceProtectedLeaseId = crypto.randomUUID();
+      const sourceProtectedGroupId = crypto.randomUUID();
+      const sourceProtectedImageId = `sha256:${"e".repeat(64)}`;
+      await sql`
+        insert into sandbox_leases (
+          id, account_id, workspace_id, sandbox_group_id, liveness, instance_id,
+          backend, lease_epoch, expires_at
+        ) values (
+          ${sourceProtectedLeaseId}, ${dockerAccountId}, ${dockerWorkspaceId},
+          ${sourceProtectedGroupId}, 'warm', 'docker-live-source', 'docker', 7,
+          now() + interval '1 hour'
+        )
+      `;
+      await sql`
+        insert into rig_provider_image_cleanup_obligations (
+          id, account_id, workspace_id, sandbox_group_id, source_lease_id,
+          source_lease_epoch, source_instance_id, source_workspace_generation,
+          provider_backend, provider_binding_key, provider_binding, build_request_id,
+          object_id, state, delete_after
+        ) values (
+          ${sourceProtectedObligationId}, ${dockerAccountId}, ${dockerWorkspaceId},
+          ${sourceProtectedGroupId}, ${sourceProtectedLeaseId}, 7, 'docker-live-source', 0,
+          'docker', ${dockerProviderBindingKey},
+          ${sql.json(dockerProviderBinding)}::jsonb, 'docker-source-protected-request',
+          ${sourceProtectedImageId}, 'delete_pending', now()
+        )
+      `;
+      const sourceProtectedClaims = await sql<Array<{ id: string }>>`
+        select id from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+          ${crypto.randomUUID()}::uuid, 10, 60000::bigint
+        )
+      `;
+      expect([...sourceProtectedClaims]).toEqual([]);
+      await sql`
+        update sandbox_leases set liveness = 'cold', instance_id = null
+        where id = ${sourceProtectedLeaseId}
+      `;
+      const sourceReleasedClaimId = crypto.randomUUID();
+      const sourceReleasedClaims = await sql<Array<{ id: string; object_id: string }>>`
+        select id, object_id
+        from opengeni_private.claim_rig_provider_image_cleanup_obligations(
+          ${sourceReleasedClaimId}::uuid, 10, 60000::bigint
+        )
+      `;
+      expect([...sourceReleasedClaims]).toEqual([
+        { id: sourceProtectedObligationId, object_id: sourceProtectedImageId },
+      ]);
+      const [sourceReleasedSettled] = await sql<Array<{ settled: boolean }>>`
+        select opengeni_private.settle_rig_provider_image_cleanup_obligation(
+          ${sourceProtectedObligationId}::uuid, ${sourceReleasedClaimId}::uuid,
+          true, null, 1000::bigint
+        ) as settled
+      `;
+      expect(sourceReleasedSettled?.settled).toBe(true);
     } finally {
       await appSql?.end().catch(() => undefined);
       await runtimeClient?.close().catch(() => undefined);

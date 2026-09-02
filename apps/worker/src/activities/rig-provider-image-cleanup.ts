@@ -6,25 +6,27 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
-  classifyModalImmutableProviderImageBuildFailure,
-  recoverModalImmutableProviderImageBuild,
+  classifyImmutableProviderImageBuildFailure,
+  recoverImmutableProviderImageBuild,
 } from "@opengeni/runtime/sandbox";
 
 export type ReconcileRigProviderImageCleanupDependencies = {
   list: typeof listRecoverableRigProviderImageCleanupObligationsForSource;
-  recover: typeof recoverModalImmutableProviderImageBuild;
+  recover: typeof recoverImmutableProviderImageBuild;
+  classify: typeof classifyImmutableProviderImageBuildFailure;
   markFailed: typeof markRigProviderImageCleanupObligationBuildFailed;
   record: typeof recordRigProviderImageCleanupObject;
 };
 
 const defaultDependencies: ReconcileRigProviderImageCleanupDependencies = {
   list: listRecoverableRigProviderImageCleanupObligationsForSource,
-  recover: recoverModalImmutableProviderImageBuild,
+  recover: recoverImmutableProviderImageBuild,
+  classify: classifyImmutableProviderImageBuildFailure,
   markFailed: markRigProviderImageCleanupObligationBuildFailed,
   record: recordRigProviderImageCleanupObject,
 };
 
-/** Resolve every ambiguous Modal image build owned by one exact source sandbox
+/** Resolve every ambiguous provider image build owned by one exact source sandbox
  * before that sandbox is terminated. A worker restart enters this same path
  * through the global reaper, using the durable request id instead of the dead
  * activity's in-memory promise. */
@@ -54,16 +56,18 @@ export async function reconcileRigProviderImageCleanupObligationsForSource(
     if (remainingMs <= 0) {
       throw new Error("Rig provider image cleanup reconciliation deadline was reached");
     }
-    let result: Awaited<ReturnType<typeof recoverModalImmutableProviderImageBuild>>;
+    let result: Awaited<ReturnType<typeof recoverImmutableProviderImageBuild>>;
     try {
-      result = await dependencies.recover(input.settings, {
-        sandboxId: input.sourceInstanceId,
+      result = await dependencies.recover({
+        backend: obligation.providerBackend,
+        settings: input.settings,
+        sourceInstanceId: input.sourceInstanceId,
         requestId: obligation.buildRequestId,
         timeoutMs: remainingMs,
         expectedProviderBindingKey: obligation.providerBindingKey,
       });
     } catch (error) {
-      if (classifyModalImmutableProviderImageBuildFailure(error) !== "definitive_rejection") {
+      if (dependencies.classify(obligation.providerBackend, error) !== "definitive_rejection") {
         throw error;
       }
       const persisted = await dependencies.markFailed(input.db, {
@@ -76,18 +80,21 @@ export async function reconcileRigProviderImageCleanupObligationsForSource(
       });
       if (!persisted) {
         throw new Error(
-          "Modal Rig provider image recovery could not persist the definitive rejection",
+          `${obligation.providerBackend} Rig provider image recovery could not persist the definitive rejection`,
           { cause: error },
         );
       }
       continue;
     }
     if (
-      result.backend !== "modal" ||
+      !result ||
+      result.backend !== obligation.providerBackend ||
       !result.imageId ||
       result.providerBindingKey !== obligation.providerBindingKey
     ) {
-      throw new Error("Modal Rig provider image recovery returned another provider identity");
+      throw new Error(
+        `${obligation.providerBackend} Rig provider image recovery returned another provider identity`,
+      );
     }
     const persisted = await dependencies.record(input.db, {
       accountId: input.accountId,
@@ -98,7 +105,9 @@ export async function reconcileRigProviderImageCleanupObligationsForSource(
       objectId: result.imageId,
     });
     if (!persisted) {
-      throw new Error("Modal Rig provider image recovery could not persist the exact image id");
+      throw new Error(
+        `${obligation.providerBackend} Rig provider image recovery could not persist the exact image id`,
+      );
     }
     recorded += 1;
   }

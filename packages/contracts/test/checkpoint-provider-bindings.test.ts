@@ -1,5 +1,53 @@
 import { describe, expect, test } from "bun:test";
-import { canonicalModalCheckpointProviderBinding } from "../src/checkpoint-provider-bindings";
+import {
+  canonicalDockerProviderImageBinding,
+  canonicalModalCheckpointProviderBinding,
+} from "../src/checkpoint-provider-bindings";
+
+describe("Docker provider image binding identity", () => {
+  test("canonicalizes the exact endpoint and daemon identity without context aliases", () => {
+    expect(
+      canonicalDockerProviderImageBinding({
+        version: 1,
+        endpoint: "unix:///var/run/docker.sock",
+        daemonId: "ABCDEF0123456789",
+        contextName: "mutable-alias-must-not-survive",
+      }),
+    ).toEqual({
+      binding: {
+        version: 1,
+        endpoint: "unix:///var/run/docker.sock",
+        daemonId: "ABCDEF0123456789",
+      },
+      key: JSON.stringify({
+        version: 1,
+        endpoint: "unix:///var/run/docker.sock",
+        daemonId: "ABCDEF0123456789",
+      }),
+    });
+  });
+
+  test("rejects empty, control-bearing, and over-contract identities", () => {
+    expect(canonicalDockerProviderImageBinding(null)).toBeNull();
+    expect(
+      canonicalDockerProviderImageBinding({ version: 1, endpoint: "", daemonId: "daemon-a" }),
+    ).toBeNull();
+    expect(
+      canonicalDockerProviderImageBinding({
+        version: 1,
+        endpoint: "unix:///var/run/docker.sock\nforged",
+        daemonId: "daemon-a",
+      }),
+    ).toBeNull();
+    expect(
+      canonicalDockerProviderImageBinding({
+        version: 1,
+        endpoint: `unix:///${"x".repeat(800)}`,
+        daemonId: "daemon-a",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("Modal checkpoint provider binding identity", () => {
   test("canonicalizes one exact non-secret wire identity", () => {

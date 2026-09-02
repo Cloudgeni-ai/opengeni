@@ -37,7 +37,7 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
 });
 const PLATFORM_IMAGE = "registry.example.com/opengeni-desktop@sha256:platform";
 const RUNTIME_MANIFEST = {
-  version: 2,
+  version: 3,
   digest: `sha256:${"a".repeat(64)}`,
   entries: [
     {
@@ -49,6 +49,8 @@ const RUNTIME_MANIFEST = {
       sha256: `sha256:${"b".repeat(64)}`,
     },
   ],
+  absentPaths: [],
+  directoryInventories: [],
 } as TrustedRigPlatformRuntimeManifest;
 
 function platformSettings(overrides: Partial<Settings> = {}): Settings {
@@ -228,6 +230,7 @@ describe("build-once rig provider image runtime", () => {
             return {
               id: "77777777-7777-4777-8777-777777777777",
               state: "building",
+              providerBackend: "modal",
               buildRequestId: rigProviderImageBuildRequestId({
                 targetId: VERSION_ID,
                 backend: "modal",
@@ -359,6 +362,7 @@ describe("build-once rig provider image runtime", () => {
           beginCleanupObligation: async () => ({
             id: "77777777-7777-4777-8777-777777777777",
             state: "building",
+            providerBackend: "modal",
             buildRequestId: rigProviderImageBuildRequestId({
               targetId: VERSION_ID,
               backend: "modal",

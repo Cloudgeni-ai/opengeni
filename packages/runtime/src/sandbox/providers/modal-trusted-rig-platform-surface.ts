@@ -44,6 +44,7 @@ type ModalSidecar = {
   filesystem: {
     readBytes(path: string): Promise<Uint8Array>;
     stat(path: string): Promise<ModalFileInfo>;
+    listFiles(path: string): AsyncIterable<ModalFileInfo>;
     writeBytes(data: Uint8Array | ArrayBuffer | Buffer, path: string): Promise<void>;
   };
   terminate(): Promise<void>;
@@ -62,6 +63,7 @@ type ModalFileInfo = {
 type ModalFilesystem = {
   readBytes(path: string): Promise<Uint8Array>;
   stat(path: string): Promise<ModalFileInfo>;
+  listFiles(path: string): AsyncIterable<ModalFileInfo>;
 };
 
 type ModalRigSession = BrowserControlPlacementSession & {
@@ -215,9 +217,30 @@ async function captureModalTrustedRigPlatformRuntime(input: {
   return await captureTrustedRigPlatformRuntimeManifest({
     settings: input.settings,
     ...(input.signal ? { signal: input.signal } : {}),
-    inspectPath: async (path) =>
-      modalPathMetadata(await run(async () => await input.filesystem.stat(path))),
+    inspectPath: async (path) => {
+      try {
+        return modalPathMetadata(await run(async () => await input.filesystem.stat(path)));
+      } catch (error) {
+        if (isNotFound(error)) {
+          return { path, type: "missing", sizeBytes: 0, mode: 0, symlinkTarget: null };
+        }
+        throw error;
+      }
+    },
     readBytes: async (path) => await run(async () => await input.filesystem.readBytes(path)),
+    listDirectory: async (path) => {
+      const entries: string[] = [];
+      await run(async () => {
+        for await (const info of input.filesystem.listFiles(path)) {
+          const prefix = `${path}/`;
+          if (!info.path.startsWith(prefix) || info.path.slice(prefix.length).includes("/")) {
+            throw new Error(`Modal returned a non-child loader inventory path for ${path}`);
+          }
+          entries.push(info.path.slice(prefix.length));
+        }
+      });
+      return entries;
+    },
   });
 }
 
@@ -300,6 +323,7 @@ async function createModalSidecar(
     typeof images?.fromId !== "function" ||
     typeof candidateFilesystem?.readBytes !== "function" ||
     typeof candidateFilesystem?.stat !== "function" ||
+    typeof candidateFilesystem?.listFiles !== "function" ||
     !sidecars ||
     typeof sidecars.create !== "function" ||
     typeof sidecars.get !== "function" ||
@@ -495,7 +519,8 @@ export async function inspectModalTrustedRigPlatformRuntime(
     (input.expectedProviderImageId !== undefined &&
       input.expectedProviderImageId !== providerImageId) ||
     typeof filesystem?.readBytes !== "function" ||
-    typeof filesystem?.stat !== "function"
+    typeof filesystem?.stat !== "function" ||
+    typeof filesystem?.listFiles !== "function"
   ) {
     throw new Error(
       "Modal trusted Rig runtime inspection requires the exact live provider filesystem",

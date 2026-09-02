@@ -1,8 +1,8 @@
 -- deployment-mode: rolling
--- Durable Modal Rig provider-image cleanup obligations. As of 2026-08-31,
--- snapshot creation can outlive the activity process that started it; persist
--- the idempotent request before creation and let replacement workers discover
--- and GC the exact late image.
+-- Durable Modal and Docker Rig provider-image cleanup obligations. As of
+-- 2026-09-02, provider image creation can outlive the activity process that
+-- started it; persist the idempotent request before creation and let
+-- replacement workers discover and GC the exact late image.
 
 CREATE TABLE rig_provider_image_cleanup_obligations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -36,32 +36,65 @@ CREATE TABLE rig_provider_image_cleanup_obligations (
     AND octet_length(build_request_id) BETWEEN 1 AND 256
   ),
   CONSTRAINT rig_provider_image_cleanup_backend_check CHECK (
-    provider_backend = 'modal'
+    provider_backend IN ('modal', 'docker')
   ),
   CONSTRAINT rig_provider_image_cleanup_binding_shape_check CHECK (
     jsonb_typeof(provider_binding) = 'object'
-    AND provider_binding = jsonb_build_object(
-      'version', 1,
-      'serverUrl', provider_binding ->> 'serverUrl',
-      'workspaceName', provider_binding ->> 'workspaceName',
-      'environment', provider_binding ->> 'environment'
+    AND (
+      (
+        provider_backend = 'modal'
+        AND provider_binding = jsonb_build_object(
+          'version', 1,
+          'serverUrl', provider_binding ->> 'serverUrl',
+          'workspaceName', provider_binding ->> 'workspaceName',
+          'environment', provider_binding ->> 'environment'
+        )
+        AND coalesce(octet_length(provider_binding ->> 'serverUrl'), 0) > 0
+        AND coalesce(octet_length(provider_binding ->> 'workspaceName'), 0) > 0
+        AND provider_binding ->> 'environment' IS NOT NULL
+      )
+      OR (
+        provider_backend = 'docker'
+        AND provider_binding = jsonb_build_object(
+          'version', 1,
+          'endpoint', provider_binding ->> 'endpoint',
+          'daemonId', provider_binding ->> 'daemonId'
+        )
+        AND octet_length(provider_binding ->> 'endpoint') BETWEEN 1 AND 768
+        AND octet_length(provider_binding ->> 'daemonId') BETWEEN 1 AND 192
+        AND provider_binding ->> 'endpoint' !~ '[[:cntrl:]]'
+        AND provider_binding ->> 'daemonId' ~ '^[A-Za-z0-9._:+/-]+$'
+      )
     )
-    AND coalesce(octet_length(provider_binding ->> 'serverUrl'), 0) > 0
-    AND coalesce(octet_length(provider_binding ->> 'workspaceName'), 0) > 0
-    AND provider_binding ->> 'environment' IS NOT NULL
   ),
   CONSTRAINT rig_provider_image_cleanup_binding_key_check CHECK (
     octet_length(provider_binding_key) BETWEEN 1 AND 1024
     AND provider_binding_key::jsonb = provider_binding
-    AND provider_binding_key = format(
-      '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
-      to_jsonb(provider_binding ->> 'serverUrl')::text,
-      to_jsonb(provider_binding ->> 'workspaceName')::text,
-      to_jsonb(provider_binding ->> 'environment')::text
-    )
+    AND provider_binding_key = CASE provider_backend
+      WHEN 'modal' THEN format(
+        '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
+        to_jsonb(provider_binding ->> 'serverUrl')::text,
+        to_jsonb(provider_binding ->> 'workspaceName')::text,
+        to_jsonb(provider_binding ->> 'environment')::text
+      )
+      WHEN 'docker' THEN format(
+        '{"version":1,"endpoint":%s,"daemonId":%s}',
+        to_jsonb(provider_binding ->> 'endpoint')::text,
+        to_jsonb(provider_binding ->> 'daemonId')::text
+      )
+      ELSE NULL
+    END
   ),
   CONSTRAINT rig_provider_image_cleanup_object_check CHECK (
-    object_id IS NULL OR octet_length(object_id) BETWEEN 1 AND 1024
+    object_id IS NULL
+    OR (
+      provider_backend = 'modal'
+      AND octet_length(object_id) BETWEEN 1 AND 1024
+    )
+    OR (
+      provider_backend = 'docker'
+      AND object_id ~ '^sha256:[0-9a-f]{64}$'
+    )
   ),
   CONSTRAINT rig_provider_image_cleanup_obligations_state_check CHECK (
     state IN (
@@ -132,12 +165,82 @@ BEGIN
         updated_at = pg_catalog.now()
       WHERE obligation.object_id IS NOT NULL
         AND obligation.state IN ('delete_pending', 'delete_failed', 'deleting')
-        AND EXISTS (
-          SELECT 1 FROM %1$I.sandbox_checkpoint_artifacts artifact
-          WHERE artifact.provider_backend = obligation.provider_backend
-            AND artifact.provider_binding_key = obligation.provider_binding_key
-            AND artifact.object_id = obligation.object_id
-            AND artifact.state <> 'deleted'
+        AND (
+          EXISTS (
+            SELECT 1 FROM %1$I.sandbox_checkpoint_artifacts artifact
+            WHERE artifact.provider_backend = obligation.provider_backend
+              AND artifact.provider_binding_key = obligation.provider_binding_key
+              AND artifact.object_id = obligation.object_id
+              AND artifact.state <> 'deleted'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM %1$I.rig_versions version
+            CROSS JOIN LATERAL pg_catalog.jsonb_each(version.provider_images) provider_image
+            WHERE provider_image.key = obligation.provider_backend
+              AND provider_image.value ->> 'imageId' = obligation.object_id
+              AND provider_image.value ->> 'buildRequestId' = obligation.build_request_id
+              AND provider_image.value ->> 'status' = 'ready'
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM %1$I.rig_changes change
+            JOIN %1$I.rig_versions base
+              ON base.id = change.base_version_id
+             AND base.workspace_id = change.workspace_id
+             AND base.active = true
+            WHERE change.status IN ('verifying', 'proposed')
+              AND change.verification #>> '{providerImage,backend}'
+                = obligation.provider_backend
+              AND change.verification #>> '{providerImage,imageId}' = obligation.object_id
+              AND change.verification #>> '{providerImage,buildRequestId}'
+                = obligation.build_request_id
+              AND change.verification #>> '{providerImage,status}' = 'ready'
+          )
+        );
+
+      UPDATE %1$I.rig_provider_image_cleanup_obligations obligation SET
+        state = 'delete_pending',
+        delete_after = pg_catalog.now(),
+        delete_claim_id = null,
+        delete_claimed_at = null,
+        last_delete_error = null,
+        updated_at = pg_catalog.now()
+      WHERE obligation.provider_backend = 'docker'
+        AND obligation.object_id IS NOT NULL
+        AND obligation.state = 'settled'
+        AND coalesce(obligation.settled_at, obligation.object_recorded_at, obligation.created_at)
+          < pg_catalog.now() - interval '15 minutes'
+        AND NOT EXISTS (
+          SELECT 1 FROM %1$I.sandbox_leases lease
+          WHERE lease.id = obligation.source_lease_id
+            AND lease.lease_epoch = obligation.source_lease_epoch
+            AND lease.instance_id = obligation.source_instance_id
+            AND lease.backend = obligation.provider_backend
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM %1$I.rig_versions version
+          CROSS JOIN LATERAL pg_catalog.jsonb_each(version.provider_images) provider_image
+          WHERE provider_image.key = obligation.provider_backend
+            AND provider_image.value ->> 'imageId' = obligation.object_id
+            AND provider_image.value ->> 'buildRequestId' = obligation.build_request_id
+            AND provider_image.value ->> 'status' = 'ready'
+        )
+        AND NOT EXISTS (
+          SELECT 1
+          FROM %1$I.rig_changes change
+          JOIN %1$I.rig_versions base
+            ON base.id = change.base_version_id
+           AND base.workspace_id = change.workspace_id
+           AND base.active = true
+          WHERE change.status IN ('verifying', 'proposed')
+            AND change.verification #>> '{providerImage,backend}'
+              = obligation.provider_backend
+            AND change.verification #>> '{providerImage,imageId}' = obligation.object_id
+            AND change.verification #>> '{providerImage,buildRequestId}'
+              = obligation.build_request_id
+            AND change.verification #>> '{providerImage,status}' = 'ready'
         );
 
       WITH stale_claims AS MATERIALIZED (
@@ -176,6 +279,37 @@ BEGIN
               AND artifact.provider_binding_key = obligation.provider_binding_key
               AND artifact.object_id = obligation.object_id
               AND artifact.state <> 'deleted'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM %1$I.sandbox_leases lease
+            WHERE lease.id = obligation.source_lease_id
+              AND lease.lease_epoch = obligation.source_lease_epoch
+              AND lease.instance_id = obligation.source_instance_id
+              AND lease.backend = obligation.provider_backend
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM %1$I.rig_versions version
+            CROSS JOIN LATERAL pg_catalog.jsonb_each(version.provider_images) provider_image
+            WHERE provider_image.key = obligation.provider_backend
+              AND provider_image.value ->> 'imageId' = obligation.object_id
+              AND provider_image.value ->> 'buildRequestId' = obligation.build_request_id
+              AND provider_image.value ->> 'status' = 'ready'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM %1$I.rig_changes change
+            JOIN %1$I.rig_versions base
+              ON base.id = change.base_version_id
+             AND base.workspace_id = change.workspace_id
+             AND base.active = true
+            WHERE change.status IN ('verifying', 'proposed')
+              AND change.verification #>> '{providerImage,backend}'
+                = obligation.provider_backend
+              AND change.verification #>> '{providerImage,imageId}' = obligation.object_id
+              AND change.verification #>> '{providerImage,buildRequestId}'
+                = obligation.build_request_id
+              AND change.verification #>> '{providerImage,status}' = 'ready'
           )
         ORDER BY coalesce(obligation.delete_after, obligation.created_at), obligation.id
         FOR UPDATE SKIP LOCKED

@@ -159,7 +159,9 @@ export {
 } from "./sandbox-snapshots";
 
 export {
+  canonicalDockerProviderImageBinding,
   canonicalModalCheckpointProviderBinding,
+  type DockerProviderImageBinding,
   type ModalCheckpointProviderBinding,
 } from "./checkpoint-provider-bindings";
 

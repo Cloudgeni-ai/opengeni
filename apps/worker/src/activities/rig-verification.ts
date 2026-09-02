@@ -52,7 +52,7 @@ import {
 import {
   attachProviderTrustedRigPlatformSurface,
   buildImmutableProviderImage,
-  classifyModalImmutableProviderImageBuildFailure,
+  classifyImmutableProviderImageBuildFailure,
   createTurnToolCancellationController,
   describeNativeSnapshotArchive,
   encodeNativeSnapshotRef,
@@ -62,7 +62,7 @@ import {
   sandboxCommandOutput,
   serializeEstablishedSandboxEnvelope,
   providerSupportsImmutableImageBuild,
-  resolveModalCheckpointProviderBindingForSession,
+  resolveImmutableProviderImageBinding,
   tagModalSandbox,
   terminateManagedSandboxSession,
   verifySandboxExecReadiness,
@@ -1270,7 +1270,7 @@ export async function buildVerifiedRigProviderImage(
   },
   dependencies: {
     buildImmutableProviderImage: typeof buildImmutableProviderImage;
-    resolveProviderBinding: typeof resolveModalCheckpointProviderBindingForSession;
+    resolveProviderBinding: typeof resolveImmutableProviderImageBinding;
     beginCleanupObligation: typeof beginRigProviderImageCleanupObligation;
     recordCleanupObject: typeof recordRigProviderImageCleanupObject;
     settleCleanupObligation: typeof settleRigProviderImageCleanupObligation;
@@ -1278,7 +1278,7 @@ export async function buildVerifiedRigProviderImage(
     markCleanupOutcomeUnknown: typeof markRigProviderImageCleanupObligationOutcomeUnknown;
   } = {
     buildImmutableProviderImage,
-    resolveProviderBinding: resolveModalCheckpointProviderBindingForSession,
+    resolveProviderBinding: resolveImmutableProviderImageBinding,
     beginCleanupObligation: beginRigProviderImageCleanupObligation,
     recordCleanupObject: recordRigProviderImageCleanupObject,
     settleCleanupObligation: settleRigProviderImageCleanupObligation,
@@ -1450,11 +1450,16 @@ export async function buildVerifiedRigProviderImage(
       1,
       Math.min(input.settings.sandboxSnapshotTimeoutMs, remainingWorkMs),
     );
-    if (backend === "modal") {
-      const providerBinding = await dependencies.resolveProviderBinding(
-        input.settings,
-        input.established.session,
-      );
+    if (backend === "modal" || backend === "docker") {
+      const providerBinding = await dependencies.resolveProviderBinding({
+        backend,
+        settings: input.settings,
+        session: input.established.session,
+        timeoutMs: buildTimeoutMs,
+      });
+      if (!providerBinding) {
+        throw new Error(`${backend} provider image build has no cleanup binding resolver`);
+      }
       cleanupObligation = await dependencies.beginCleanupObligation(input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1463,6 +1468,7 @@ export async function buildVerifiedRigProviderImage(
         sourceLeaseEpoch: input.ownership.leaseEpoch,
         sourceInstanceId: input.ownership.instanceId,
         sourceWorkspaceGeneration: input.ownership.workspaceGeneration,
+        providerBackend: backend,
         providerBindingKey: providerBinding.key,
         providerBinding: providerBinding.binding,
         buildRequestId: building.buildRequestId,
@@ -1474,14 +1480,17 @@ export async function buildVerifiedRigProviderImage(
       session: input.established.session,
       requestId: building.buildRequestId,
       timeoutMs: buildTimeoutMs,
+      ...(cleanupObligation
+        ? { expectedProviderBindingKey: cleanupObligation.providerBindingKey }
+        : {}),
     });
     let providerBuildRejected = false;
     const trackedBuildPromise = buildPromise.then(
       (result) => {
         if (
-          backend === "modal" &&
           cleanupObligation &&
           result?.imageId &&
+          result.backend === cleanupObligation.providerBackend &&
           result.providerBindingKey === cleanupObligation.providerBindingKey
         ) {
           void dependencies
@@ -1513,7 +1522,7 @@ export async function buildVerifiedRigProviderImage(
     } catch (error) {
       if (providerBuildRejected && cleanupObligation?.state === "building") {
         const markCleanupFailure =
-          classifyModalImmutableProviderImageBuildFailure(error) === "definitive_rejection"
+          classifyImmutableProviderImageBuildFailure(backend, error) === "definitive_rejection"
             ? dependencies.markCleanupBuildFailed
             : dependencies.markCleanupOutcomeUnknown;
         await markCleanupFailure(input.db, {
@@ -1533,12 +1542,16 @@ export async function buildVerifiedRigProviderImage(
     if (!built || (!built.imageId && !built.imageDigest)) {
       throw new Error("provider image builder returned no immutable image identity");
     }
-    if (backend === "modal") {
+    if (backend === "modal" || backend === "docker") {
       if (!built.imageId || !built.providerBindingKey || !built.providerBinding) {
-        throw new Error("Modal provider image build returned incomplete ownership identity");
+        throw new Error(`${backend} provider image build returned incomplete ownership identity`);
       }
-      if (!cleanupObligation || cleanupObligation.providerBindingKey !== built.providerBindingKey) {
-        throw new Error("Modal provider image build returned another provider binding");
+      if (
+        !cleanupObligation ||
+        cleanupObligation.providerBackend !== backend ||
+        cleanupObligation.providerBindingKey !== built.providerBindingKey
+      ) {
+        throw new Error(`${backend} provider image build returned another provider binding`);
       }
       const objectRecorded = await dependencies.recordCleanupObject(input.db, {
         accountId: input.accountId,
@@ -1549,7 +1562,17 @@ export async function buildVerifiedRigProviderImage(
         objectId: built.imageId,
       });
       if (!objectRecorded) {
-        throw new Error("Modal provider image build could not persist its exact image id");
+        throw new Error(`${backend} provider image build could not persist its exact image id`);
+      }
+    }
+    if (backend === "modal") {
+      if (
+        !cleanupObligation ||
+        !built.imageId ||
+        !built.providerBindingKey ||
+        !built.providerBinding
+      ) {
+        throw new Error("Modal provider image build returned incomplete artifact ownership");
       }
       const archiveBytes = encodeNativeSnapshotRef({
         provider: "modal_snapshot_filesystem",
@@ -1632,9 +1655,10 @@ export async function buildVerifiedRigProviderImage(
       imageId: built.imageId,
       imageDigest: built.imageDigest,
       artifactId,
-      providerBindingKeyHash: built.providerBindingKey
-        ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
-        : null,
+      providerBindingKeyHash:
+        backend === "modal" && built.providerBindingKey
+          ? rigProviderImageProviderBindingKeyHash(built.providerBindingKey)
+          : null,
       coldBootValidation: {
         version: RIG_PROVIDER_IMAGE_COLD_BOOT_VALIDATION_VERSION,
         checkedAt: coldBootVerification.checkedAt,

@@ -792,7 +792,13 @@ export const modalProvider: ProviderRegistration = {
     }
     return REPEATABLE_CONFIGURED_WORKSPACE_CAPTURE;
   },
-  async buildImmutableImage({ settings, session, requestId, timeoutMs }) {
+  async buildImmutableImage({
+    settings,
+    session,
+    requestId,
+    timeoutMs,
+    expectedProviderBindingKey,
+  }) {
     const mutable = session as MutableModalSandboxSession;
     const sandboxId = mutable.state?.sandboxId;
     const sandboxes = mutable.modal?.sandboxes;
@@ -808,6 +814,10 @@ export const modalProvider: ProviderRegistration = {
       snapshotHandle = await sandboxes.fromId(sandboxId);
       if (typeof snapshotHandle.snapshotFilesystem !== "function") {
         throw new Error("Modal provider image build requires snapshotFilesystem support");
+      }
+      const binding = await resolveModalCheckpointProviderBindingForSession(settings, session);
+      if (expectedProviderBindingKey && binding.key !== expectedProviderBindingKey) {
+        throw new Error("Modal provider image build credential binding changed before dispatch");
       }
       snapshotRequestStarted = true;
       const image = (await snapshotHandle.snapshotFilesystem({
@@ -825,7 +835,6 @@ export const modalProvider: ProviderRegistration = {
       if (!imageId) {
         throw new Error("Modal provider image snapshot returned no immutable image id");
       }
-      const binding = await resolveModalCheckpointProviderBindingForSession(settings, session);
       result = {
         provider: "modal",
         backend: "modal",
@@ -850,6 +859,26 @@ export const modalProvider: ProviderRegistration = {
     if (failure) throw failure;
     return result!;
   },
+  resolveImmutableImageBinding: async ({ settings, session }) => {
+    if (!session) throw new Error("Modal provider image binding requires a live session");
+    return await resolveModalCheckpointProviderBindingForSession(settings, session);
+  },
+  recoverImmutableImageBuild: async ({
+    settings,
+    sourceInstanceId,
+    requestId,
+    timeoutMs,
+    expectedProviderBindingKey,
+  }) =>
+    await recoverModalImmutableProviderImageBuild(settings, {
+      sandboxId: sourceInstanceId,
+      requestId,
+      timeoutMs,
+      expectedProviderBindingKey,
+    }),
+  deleteImmutableImage: async ({ settings, imageId, expectedProviderBindingKey }) =>
+    await deleteModalCheckpointSnapshot(settings, expectedProviderBindingKey, imageId),
+  classifyImmutableImageBuildFailure: classifyModalImmutableProviderImageBuildFailure,
   createTrustedRigPlatformSurface: createModalTrustedRigPlatformSurface,
   inspectTrustedRigPlatformRuntime: inspectModalTrustedRigPlatformRuntime,
   descriptor: CAPABILITY_DESCRIPTORS.modal,

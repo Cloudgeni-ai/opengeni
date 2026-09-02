@@ -30,7 +30,7 @@ const HOLDER_ID = rigVerificationLeaseHolderId({
 });
 const db = {} as Database;
 const runtimeManifest = {
-  version: 2,
+  version: 3,
   digest: `sha256:${"a".repeat(64)}`,
   entries: [
     {
@@ -42,6 +42,8 @@ const runtimeManifest = {
       sha256: `sha256:${"b".repeat(64)}`,
     },
   ],
+  absentPaths: [],
+  directoryInventories: [],
 } as TrustedRigPlatformRuntimeManifest;
 
 const settings = testSettings({

@@ -25,7 +25,9 @@ import { opensandboxProvider } from "./opensandbox";
 import { runloopProvider } from "./runloop";
 import { selfhostedProvider } from "./selfhosted";
 import type {
+  ProviderImmutableImageBuildFailureDisposition,
   ProviderImmutableImageBuildResult,
+  ProviderImmutableImageBinding,
   ProviderRegistration,
   ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
@@ -173,6 +175,23 @@ export function assertProviderRegistryInvariants(): void {
         `Provider "${backend}" has an unexpected trusted Rig platform surface posture`,
       );
     }
+    const immutableImageLifecycle = [
+      registration.buildImmutableImage,
+      registration.resolveImmutableImageBinding,
+      registration.recoverImmutableImageBuild,
+      registration.deleteImmutableImage,
+      registration.classifyImmutableImageBuildFailure,
+    ];
+    const immutableImageLifecycleSupported = immutableImageLifecycle.every(
+      (member) => typeof member === "function",
+    );
+    if (
+      immutableImageLifecycleSupported !== (backend === "modal" || backend === "docker") ||
+      immutableImageLifecycle.some((member) => typeof member === "function") !==
+        immutableImageLifecycleSupported
+    ) {
+      throw new Error(`Provider "${backend}" has an incomplete immutable image lifecycle`);
+    }
   }
 }
 
@@ -252,6 +271,7 @@ export async function buildImmutableProviderImage(input: {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+  expectedProviderBindingKey?: string;
 }): Promise<ProviderImmutableImageBuildResult | null> {
   const build = PROVIDER_REGISTRY[input.backend].buildImmutableImage;
   if (!build) return null;
@@ -260,7 +280,60 @@ export async function buildImmutableProviderImage(input: {
     session: input.session,
     requestId: input.requestId,
     timeoutMs: input.timeoutMs,
+    ...(input.expectedProviderBindingKey
+      ? { expectedProviderBindingKey: input.expectedProviderBindingKey }
+      : {}),
   });
+}
+
+export async function resolveImmutableProviderImageBinding(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  session?: unknown;
+  timeoutMs: number;
+}): Promise<ProviderImmutableImageBinding | null> {
+  const resolve = PROVIDER_REGISTRY[input.backend].resolveImmutableImageBinding;
+  if (!resolve) return null;
+  return await resolve({
+    settings: input.settings,
+    ...(input.session !== undefined ? { session: input.session } : {}),
+    timeoutMs: input.timeoutMs,
+  });
+}
+
+export async function recoverImmutableProviderImageBuild(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  sourceInstanceId: string;
+  requestId: string;
+  timeoutMs: number;
+  expectedProviderBindingKey: string;
+}): Promise<ProviderImmutableImageBuildResult | null> {
+  const recover = PROVIDER_REGISTRY[input.backend].recoverImmutableImageBuild;
+  if (!recover) return null;
+  return await recover(input);
+}
+
+export async function deleteImmutableProviderImage(input: {
+  backend: SandboxBackend;
+  settings: Settings;
+  requestId: string;
+  imageId: string;
+  timeoutMs: number;
+  expectedProviderBindingKey: string;
+}): Promise<"deleted" | "not_found" | null> {
+  const remove = PROVIDER_REGISTRY[input.backend].deleteImmutableImage;
+  if (!remove) return null;
+  return await remove(input);
+}
+
+export function classifyImmutableProviderImageBuildFailure(
+  backend: SandboxBackend,
+  error: unknown,
+): ProviderImmutableImageBuildFailureDisposition {
+  return (
+    PROVIDER_REGISTRY[backend].classifyImmutableImageBuildFailure?.(error) ?? "outcome_unknown"
+  );
 }
 
 export async function attachProviderTrustedRigPlatformSurface(
@@ -342,7 +415,11 @@ export type {
   ProviderConstructionContext,
   ProviderExactResumeMode,
   ProviderImmutableImageBuildInput,
+  ProviderImmutableImageBuildFailureDisposition,
   ProviderImmutableImageBuildResult,
+  ProviderImmutableImageBinding,
+  ProviderImmutableImageDeleteInput,
+  ProviderImmutableImageRecoveryInput,
   ProviderTrustedRigPlatformRuntimeInspectionInput,
   ProviderTrustedRigPlatformSurfaceInput,
   ProviderExpirationRenewalInput,

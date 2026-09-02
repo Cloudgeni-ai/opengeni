@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -281,6 +281,19 @@ async function inspectDockerContainerPath(input: {
       },
       (response) => {
         response.resume();
+        if (response.statusCode === 404) {
+          finish({
+            ok: true,
+            value: {
+              path: input.path,
+              type: "missing",
+              sizeBytes: 0,
+              mode: 0,
+              symlinkTarget: null,
+            },
+          });
+          return;
+        }
         if (response.statusCode !== 200) {
           finish({
             ok: false,
@@ -334,6 +347,7 @@ async function captureDockerTrustedRigPlatformRuntime(input: {
   const connection = await resolveDockerDaemonConnection(input);
   const directory = await mkdtemp(join(tmpdir(), "opengeni-rig-runtime-"));
   let nextFile = 0;
+  let nextDirectory = 0;
   try {
     return await captureTrustedRigPlatformRuntimeManifest({
       settings: input.settings,
@@ -358,6 +372,16 @@ async function captureDockerTrustedRigPlatformRuntime(input: {
           throw new Error(`Docker copied a non-regular trusted Rig runtime path for ${path}`);
         }
         return await readFile(localPath);
+      },
+      listDirectory: async (path) => {
+        const localPath = join(directory, `dir-${String(nextDirectory++).padStart(3, "0")}`);
+        await mkdir(localPath, { mode: 0o700 });
+        await dockerCommand({
+          args: ["cp", `${input.containerId}:${path}/.`, localPath],
+          timeoutMs: inspectionRemainingMs(input.deadlineAtMs),
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+        return (await readdir(localPath, { withFileTypes: true })).map((entry) => entry.name);
       },
     });
   } finally {

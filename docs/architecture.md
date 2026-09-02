@@ -1152,7 +1152,10 @@ policy enables it, a real ComputerSession with native image evidence and a
 benign action. Before the worker invokes any candidate shell command, the
 Docker or Modal adapter reads a bounded manifest of the exact platform helper,
 runtime, shell, and browser-engine bytes through its provider-owned filesystem
-boundary. A derived provider image must match the pristine deployment manifest
+boundary. ELF entrypoints recursively bind their interpreter, shared-object
+closure, resolved symlink targets, dynamic-loader preload/cache/configuration,
+configuration-directory membership, and explicit absence of optional loader
+inputs. A derived provider image must match the pristine deployment manifest
 before readiness or native validation can run. Native validation then rechecks
 the mutable candidate around every protected phase while trusted commands run
 inside fresh provider-owned sidecars booted from the pristine deployment
@@ -1165,16 +1168,22 @@ the version in one active-version-CAS transaction; deferred dispatch, enabled
 surface `unsupported`, binding drift, invalid evidence, and cleanup failure all
 leave the version inactive.
 
-Modal Rig image snapshot ownership is persisted before provider dispatch.
+Modal and Docker Rig image ownership is persisted before provider dispatch.
 Docker commits the exact verifier container under a deterministic request tag,
 validates its ownership labels and immutable daemon image ID, and reuses only
-that object after an acknowledgement-loss retry. Typed, authoritative provider
-refusals settle the cleanup obligation as terminal `build_failed`; timeout,
-cancellation, transport, malformed, and untyped failures remain
-`outcome_unknown` and may retry only the exact durable request against the
-original sandbox and provider binding. A late externally managed image can
-still move either state into bounded checkpoint garbage collection before
-source teardown.
+that object after an acknowledgement-loss retry. Its cleanup record privately
+binds the canonical Docker endpoint and daemon ID; the public Rig image still
+keeps only the physical image ID, separate from the logical source image.
+Typed, authoritative provider refusals settle the cleanup obligation as
+terminal `build_failed`; timeout, cancellation, transport, malformed, and
+untyped failures remain `outcome_unknown` and may retry only the exact durable
+request against the original provider binding. Late, failed, or superseded
+objects enter bounded garbage collection. Ready Rig/change references and the
+exact live source lease block deletion. Docker deletion verifies the persisted
+daemon, request label, and exact content-addressed image ID, treats not-found as
+success, refuses images with unrelated repository tags, never uses tag-only or
+forced deletion, and retains retry/error state when the daemon reports another
+live reference.
 
 Sandbox snapshots and provider-native checkpoints are recovery artifacts, not
 session history. Capturing a workspace requires proof that no unaccounted writer

@@ -7,6 +7,10 @@ import { NoopSnapshotSpec } from "@openai/agents/sandbox";
 import { execFile } from "node:child_process";
 import { isAbsolute } from "node:path";
 import { promisify } from "node:util";
+import {
+  canonicalDockerProviderImageBinding,
+  type DockerProviderImageBinding,
+} from "@opengeni/contracts";
 import { CAPABILITY_DESCRIPTORS } from "../capabilities";
 import { SandboxConfigError, SandboxExactResumeInstanceUnavailableError } from "../errors";
 import {
@@ -30,6 +34,7 @@ const DOCKER_BUILD_REQUEST_ID =
 const DOCKER_RIG_PROVIDER_IMAGE_LABEL = "io.opengeni.rig-provider-image";
 const DOCKER_RIG_PROVIDER_REQUEST_LABEL = "io.opengeni.rig-provider-build-request";
 const DOCKER_RIG_PROVIDER_IMAGE_VERSION = "1";
+const DOCKER_PROVIDER_IMAGE_OPERATION_TIMEOUT_MS = 30_000;
 
 type DockerResumeState = {
   containerId?: unknown;
@@ -94,7 +99,7 @@ function dockerImageInspectProvesMissing(error: unknown, image: string): boolean
   );
 }
 
-type DockerImmutableImageCommand = (
+export type DockerImmutableImageCommand = (
   args: string[],
   timeoutMs: number,
 ) => Promise<{ stdout: string; stderr: string }>;
@@ -109,7 +114,102 @@ function dockerRigProviderImageTag(requestId: string): string {
   return `opengeni-rig-provider:${requestId.toLowerCase()}`;
 }
 
+function dockerImmutableImageDeadline(timeoutMs: number, operation: string): () => number {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error(`${operation} requires a finite timeout`);
+  }
+  const deadlineAtMs = Date.now() + timeoutMs;
+  return () => {
+    const remaining = Math.floor(deadlineAtMs - Date.now());
+    if (remaining <= 0) throw new Error(`${operation} deadline was reached`);
+    return Math.max(1, remaining);
+  };
+}
+
+function parsedDockerJsonString(value: string, label: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value.trim());
+  } catch {
+    throw new Error(`Docker ${label} returned a malformed identity`);
+  }
+  if (typeof parsed !== "string" || parsed.length === 0) {
+    throw new Error(`Docker ${label} returned no identity`);
+  }
+  return parsed;
+}
+
+function dockerDaemonCommandArgs(endpoint: string, args: readonly string[]): string[] {
+  return ["--host", endpoint, ...args];
+}
+
+export async function resolveDockerProviderImageBinding(
+  _settings: ProviderImmutableImageBuildInput["settings"],
+  timeoutMs: number,
+  command: DockerImmutableImageCommand = runDockerImmutableImageCommand,
+): Promise<{ key: string; binding: DockerProviderImageBinding }> {
+  const remainingMs = dockerImmutableImageDeadline(
+    timeoutMs,
+    "Docker provider image binding resolution",
+  );
+  const endpoint = parsedDockerJsonString(
+    (
+      await command(
+        ["context", "inspect", "--format", "{{json .Endpoints.docker.Host}}"],
+        remainingMs(),
+      )
+    ).stdout,
+    "context inspection",
+  );
+  const endpointIdentity = canonicalDockerProviderImageBinding({
+    version: 1,
+    endpoint,
+    daemonId: "pending",
+  });
+  if (!endpointIdentity) throw new Error("Docker provider image endpoint is invalid");
+  const daemonId = parsedDockerJsonString(
+    (
+      await command(
+        dockerDaemonCommandArgs(endpointIdentity.binding.endpoint, [
+          "info",
+          "--format",
+          "{{json .ID}}",
+        ]),
+        remainingMs(),
+      )
+    ).stdout,
+    "daemon inspection",
+  );
+  const identity = canonicalDockerProviderImageBinding({ version: 1, endpoint, daemonId });
+  if (!identity) throw new Error("Docker provider image daemon binding is invalid");
+  return identity;
+}
+
+export class DockerImmutableProviderImageBuildError extends Error {
+  readonly name = "DockerImmutableProviderImageBuildError";
+
+  constructor(
+    readonly disposition: "definitive_rejection" | "outcome_unknown",
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+export function classifyDockerImmutableProviderImageBuildFailure(
+  error: unknown,
+): "definitive_rejection" | "outcome_unknown" {
+  try {
+    return error instanceof DockerImmutableProviderImageBuildError
+      ? error.disposition
+      : "outcome_unknown";
+  } catch {
+    return "outcome_unknown";
+  }
+}
+
 async function inspectDockerRigProviderImage(input: {
+  endpoint: string;
   tag: string;
   requestId: string;
   timeoutMs: number;
@@ -118,13 +218,13 @@ async function inspectDockerRigProviderImage(input: {
   let result: Awaited<ReturnType<DockerImmutableImageCommand>>;
   try {
     result = await input.command(
-      [
+      dockerDaemonCommandArgs(input.endpoint, [
         "image",
         "inspect",
         "--format",
         `{{.Id}}\n{{index .Config.Labels "${DOCKER_RIG_PROVIDER_IMAGE_LABEL}"}}\n{{index .Config.Labels "${DOCKER_RIG_PROVIDER_REQUEST_LABEL}"}}`,
         input.tag,
-      ],
+      ]),
       input.timeoutMs,
     );
   } catch (error) {
@@ -151,86 +251,283 @@ export async function buildDockerImmutableImage(
   input: ProviderImmutableImageBuildInput,
   command: DockerImmutableImageCommand = runDockerImmutableImageCommand,
 ): Promise<ProviderImmutableImageBuildResult> {
-  const session = input.session as { state?: { containerId?: unknown } };
-  const containerId = session.state?.containerId;
-  if (typeof containerId !== "string" || !DOCKER_CONTAINER_ID.test(containerId)) {
-    throw new Error("Docker provider image build requires an exact live container identity");
-  }
-  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1) {
-    throw new Error("Docker provider image build requires a finite timeout");
-  }
-  const deadlineAtMs = Date.now() + input.timeoutMs;
-  const remainingMs = (): number => {
-    const remaining = Math.floor(deadlineAtMs - Date.now());
-    if (remaining <= 0) throw new Error("Docker provider image build deadline was reached");
-    return Math.max(1, remaining);
-  };
-  const tag = dockerRigProviderImageTag(input.requestId);
-  const existing = await inspectDockerRigProviderImage({
-    tag,
-    requestId: input.requestId,
-    timeoutMs: remainingMs(),
-    command,
-  });
-  if (existing) {
+  let priorObjectAbsenceProven = false;
+  let commitStarted = false;
+  try {
+    const session = input.session as { state?: { containerId?: unknown } };
+    const containerId = session.state?.containerId;
+    if (typeof containerId !== "string" || !DOCKER_CONTAINER_ID.test(containerId)) {
+      throw new DockerImmutableProviderImageBuildError(
+        "definitive_rejection",
+        new Error("Docker provider image build requires an exact live container identity"),
+      );
+    }
+    const remainingMs = dockerImmutableImageDeadline(
+      input.timeoutMs,
+      "Docker provider image build",
+    );
+    const binding = await resolveDockerProviderImageBinding(input.settings, remainingMs(), command);
+    if (input.expectedProviderBindingKey && binding.key !== input.expectedProviderBindingKey) {
+      throw new Error("Docker provider image build daemon binding changed before dispatch");
+    }
+    const tag = dockerRigProviderImageTag(input.requestId);
+    const existing = await inspectDockerRigProviderImage({
+      endpoint: binding.binding.endpoint,
+      tag,
+      requestId: input.requestId,
+      timeoutMs: remainingMs(),
+      command,
+    });
+    if (existing) {
+      return {
+        provider: "docker",
+        backend: "docker",
+        imageId: existing,
+        imageDigest: null,
+        providerBindingKey: binding.key,
+        providerBinding: binding.binding,
+      };
+    }
+    priorObjectAbsenceProven = true;
+
+    const inspected = await command(
+      dockerDaemonCommandArgs(binding.binding.endpoint, [
+        "inspect",
+        "--type",
+        "container",
+        "--format",
+        "{{.Id}}\n{{.State.Running}}",
+        containerId,
+      ]),
+      remainingMs(),
+    );
+    const [resolvedContainerId, running] = inspected.stdout.trim().split(/\r?\n/u);
+    if (
+      !resolvedContainerId ||
+      !/^[0-9a-f]{64}$/u.test(resolvedContainerId) ||
+      !resolvedContainerId.startsWith(containerId) ||
+      running !== "true"
+    ) {
+      throw new Error("Docker provider image build requires the exact container to be running");
+    }
+
+    commitStarted = true;
+    const committed = await command(
+      dockerDaemonCommandArgs(binding.binding.endpoint, [
+        "commit",
+        "--pause=true",
+        "--change",
+        `LABEL ${DOCKER_RIG_PROVIDER_IMAGE_LABEL}=${DOCKER_RIG_PROVIDER_IMAGE_VERSION}`,
+        "--change",
+        `LABEL ${DOCKER_RIG_PROVIDER_REQUEST_LABEL}=${input.requestId}`,
+        resolvedContainerId,
+        tag,
+      ]),
+      remainingMs(),
+    );
+    const committedImageId = committed.stdout.trim();
+    if (!DOCKER_IMAGE_ID.test(committedImageId)) {
+      throw new Error("Docker provider image commit returned no immutable image id");
+    }
+    const imageId = await inspectDockerRigProviderImage({
+      endpoint: binding.binding.endpoint,
+      tag,
+      requestId: input.requestId,
+      timeoutMs: remainingMs(),
+      command,
+    });
+    if (imageId !== committedImageId) {
+      throw new Error("Docker provider image tag changed before publication");
+    }
     return {
       provider: "docker",
       backend: "docker",
-      imageId: existing,
+      imageId,
       imageDigest: null,
-      providerBindingKey: null,
-      providerBinding: null,
+      providerBindingKey: binding.key,
+      providerBinding: binding.binding,
     };
+  } catch (error) {
+    if (error instanceof DockerImmutableProviderImageBuildError) throw error;
+    throw new DockerImmutableProviderImageBuildError(
+      commitStarted || !priorObjectAbsenceProven ? "outcome_unknown" : "definitive_rejection",
+      error,
+    );
   }
+}
 
-  const inspected = await command(
-    ["inspect", "--type", "container", "--format", "{{.Id}}\n{{.State.Running}}", containerId],
-    remainingMs(),
-  );
-  const [resolvedContainerId, running] = inspected.stdout.trim().split(/\r?\n/u);
+export async function recoverDockerImmutableProviderImageBuild(
+  settings: ProviderImmutableImageBuildInput["settings"],
+  input: {
+    requestId: string;
+    timeoutMs: number;
+    expectedProviderBindingKey: string;
+  },
+  command: DockerImmutableImageCommand = runDockerImmutableImageCommand,
+): Promise<ProviderImmutableImageBuildResult> {
+  try {
+    const remainingMs = dockerImmutableImageDeadline(
+      input.timeoutMs,
+      "Docker provider image recovery",
+    );
+    const binding = await resolveDockerProviderImageBinding(settings, remainingMs(), command);
+    if (binding.key !== input.expectedProviderBindingKey) {
+      throw new Error("Docker provider image recovery daemon binding changed");
+    }
+    const imageId = await inspectDockerRigProviderImage({
+      endpoint: binding.binding.endpoint,
+      tag: dockerRigProviderImageTag(input.requestId),
+      requestId: input.requestId,
+      timeoutMs: remainingMs(),
+      command,
+    });
+    if (!imageId) {
+      throw new DockerImmutableProviderImageBuildError(
+        "definitive_rejection",
+        new Error("Docker provider image recovery found no caller-owned image"),
+      );
+    }
+    return {
+      provider: "docker",
+      backend: "docker",
+      imageId,
+      imageDigest: null,
+      providerBindingKey: binding.key,
+      providerBinding: binding.binding,
+    };
+  } catch (error) {
+    if (error instanceof DockerImmutableProviderImageBuildError) throw error;
+    throw new DockerImmutableProviderImageBuildError("outcome_unknown", error);
+  }
+}
+
+async function inspectDockerRigProviderImageForDeletion(input: {
+  endpoint: string;
+  imageId: string;
+  timeoutMs: number;
+  command: DockerImmutableImageCommand;
+}): Promise<{
+  imageId: string;
+  version: string;
+  requestId: string;
+  repoTags: readonly string[];
+} | null> {
+  let result: Awaited<ReturnType<DockerImmutableImageCommand>>;
+  try {
+    result = await input.command(
+      dockerDaemonCommandArgs(input.endpoint, [
+        "image",
+        "inspect",
+        "--format",
+        "{{json .Id}}\n{{json .Config.Labels}}\n{{json .RepoTags}}",
+        input.imageId,
+      ]),
+      input.timeoutMs,
+    );
+  } catch (error) {
+    if (dockerImageInspectProvesMissing(error, input.imageId)) return null;
+    throw error;
+  }
+  const [rawImageId, rawLabels, rawRepoTags] = result.stdout.trim().split(/\r?\n/u);
+  let labels: unknown;
+  let repoTags: unknown;
+  try {
+    labels = JSON.parse(rawLabels ?? "null");
+    repoTags = JSON.parse(rawRepoTags ?? "null");
+  } catch {
+    throw new Error("Docker provider image inspection returned malformed ownership metadata");
+  }
+  const imageId = parsedDockerJsonString(rawImageId ?? "", "image inspection");
   if (
-    !resolvedContainerId ||
-    !/^[0-9a-f]{64}$/u.test(resolvedContainerId) ||
-    !resolvedContainerId.startsWith(containerId) ||
-    running !== "true"
+    !DOCKER_IMAGE_ID.test(imageId) ||
+    !labels ||
+    typeof labels !== "object" ||
+    Array.isArray(labels) ||
+    (repoTags !== null &&
+      (!Array.isArray(repoTags) || repoTags.some((tag) => typeof tag !== "string")))
   ) {
-    throw new Error("Docker provider image build requires the exact container to be running");
+    throw new Error("Docker provider image inspection returned malformed ownership metadata");
   }
+  return {
+    imageId,
+    version: String((labels as Record<string, unknown>)[DOCKER_RIG_PROVIDER_IMAGE_LABEL] ?? ""),
+    requestId: String((labels as Record<string, unknown>)[DOCKER_RIG_PROVIDER_REQUEST_LABEL] ?? ""),
+    repoTags: (repoTags ?? []) as string[],
+  };
+}
 
-  const committed = await command(
-    [
-      "commit",
-      "--pause=true",
-      "--change",
-      `LABEL ${DOCKER_RIG_PROVIDER_IMAGE_LABEL}=${DOCKER_RIG_PROVIDER_IMAGE_VERSION}`,
-      "--change",
-      `LABEL ${DOCKER_RIG_PROVIDER_REQUEST_LABEL}=${input.requestId}`,
-      resolvedContainerId,
-      tag,
-    ],
-    remainingMs(),
-  );
-  const committedImageId = committed.stdout.trim();
-  if (!DOCKER_IMAGE_ID.test(committedImageId)) {
-    throw new Error("Docker provider image commit returned no immutable image id");
+export async function deleteDockerImmutableProviderImage(
+  settings: ProviderImmutableImageBuildInput["settings"],
+  input: {
+    requestId: string;
+    imageId: string;
+    timeoutMs?: number;
+    expectedProviderBindingKey: string;
+  },
+  command: DockerImmutableImageCommand = runDockerImmutableImageCommand,
+): Promise<"deleted" | "not_found"> {
+  if (!DOCKER_IMAGE_ID.test(input.imageId)) {
+    throw new Error("Docker provider image deletion requires an exact immutable image id");
   }
-  const imageId = await inspectDockerRigProviderImage({
+  const remainingMs = dockerImmutableImageDeadline(
+    input.timeoutMs ?? DOCKER_PROVIDER_IMAGE_OPERATION_TIMEOUT_MS,
+    "Docker provider image deletion",
+  );
+  const binding = await resolveDockerProviderImageBinding(settings, remainingMs(), command);
+  if (binding.key !== input.expectedProviderBindingKey) {
+    throw new Error("Docker provider image deletion daemon binding changed");
+  }
+  const tag = dockerRigProviderImageTag(input.requestId);
+  const taggedImageId = await inspectDockerRigProviderImage({
+    endpoint: binding.binding.endpoint,
     tag,
     requestId: input.requestId,
     timeoutMs: remainingMs(),
     command,
   });
-  if (imageId !== committedImageId) {
-    throw new Error("Docker provider image tag changed before publication");
+  if (taggedImageId && taggedImageId !== input.imageId) {
+    throw new Error("Docker provider image deletion tag resolves to another image id");
   }
-  return {
-    provider: "docker",
-    backend: "docker",
-    imageId,
-    imageDigest: null,
-    providerBindingKey: null,
-    providerBinding: null,
-  };
+  const image = await inspectDockerRigProviderImageForDeletion({
+    endpoint: binding.binding.endpoint,
+    imageId: input.imageId,
+    timeoutMs: remainingMs(),
+    command,
+  });
+  if (!image) {
+    if (taggedImageId) {
+      throw new Error("Docker provider image changed during exact deletion inspection");
+    }
+    return "not_found";
+  }
+  if (
+    image.imageId !== input.imageId ||
+    image.version !== DOCKER_RIG_PROVIDER_IMAGE_VERSION ||
+    image.requestId !== input.requestId
+  ) {
+    throw new Error("Docker provider image deletion refused another build protocol object");
+  }
+  const unexpectedTags = image.repoTags.filter((repoTag) => repoTag !== tag);
+  if (unexpectedTags.length > 0) {
+    throw new Error("Docker provider image deletion refused a shared repository reference");
+  }
+  try {
+    await command(
+      dockerDaemonCommandArgs(binding.binding.endpoint, ["image", "rm", input.imageId]),
+      remainingMs(),
+    );
+  } catch (error) {
+    if (dockerImageInspectProvesMissing(error, input.imageId)) return "not_found";
+    throw error;
+  }
+  const after = await inspectDockerRigProviderImageForDeletion({
+    endpoint: binding.binding.endpoint,
+    imageId: input.imageId,
+    timeoutMs: remainingMs(),
+    command,
+  });
+  if (after) throw new Error("Docker provider image remained after exact deletion");
+  return "deleted";
 }
 
 class OpenGeniDockerSandboxClient extends DockerSandboxClient {
@@ -335,6 +632,33 @@ export const dockerProvider: ProviderRegistration = {
     preserveWorkspaceForDiscard: preserveDockerWorkspaceForDiscard,
   },
   buildImmutableImage: buildDockerImmutableImage,
+  resolveImmutableImageBinding: async ({ settings, timeoutMs }) =>
+    await resolveDockerProviderImageBinding(settings, timeoutMs),
+  recoverImmutableImageBuild: async ({
+    settings,
+    requestId,
+    timeoutMs,
+    expectedProviderBindingKey,
+  }) =>
+    await recoverDockerImmutableProviderImageBuild(settings, {
+      requestId,
+      timeoutMs,
+      expectedProviderBindingKey,
+    }),
+  deleteImmutableImage: async ({
+    settings,
+    requestId,
+    imageId,
+    timeoutMs,
+    expectedProviderBindingKey,
+  }) =>
+    await deleteDockerImmutableProviderImage(settings, {
+      requestId,
+      imageId,
+      timeoutMs,
+      expectedProviderBindingKey,
+    }),
+  classifyImmutableImageBuildFailure: classifyDockerImmutableProviderImageBuildFailure,
   createTrustedRigPlatformSurface: createDockerTrustedRigPlatformSurface,
   inspectTrustedRigPlatformRuntime: inspectDockerTrustedRigPlatformRuntime,
   descriptor: CAPABILITY_DESCRIPTORS.docker,

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
+  assertTrustedRigPlatformRuntimeMatches,
   attachProviderTrustedRigPlatformSurface,
   captureTrustedRigPlatformRuntimeManifest,
   inspectProviderTrustedRigPlatformRuntime,
@@ -50,6 +51,12 @@ function textStream(value: string): ReadableStream<string> {
 }
 
 const BROWSER_ENGINE = "/usr/lib/chromium/chromium";
+const ABSENT_RUNTIME_PATHS = new Set([
+  "/etc/ld.so.preload",
+  "/etc/ld.so.cache",
+  "/etc/ld.so.conf",
+  "/etc/ld.so.conf.d",
+]);
 const RUNTIME_DIRECTORIES = new Set([
   "/bin",
   "/etc",
@@ -74,6 +81,11 @@ function pristineRuntimeBytes(path: string): Uint8Array {
 }
 
 function pristineRuntimeMetadata(path: string) {
+  if (ABSENT_RUNTIME_PATHS.has(path)) {
+    const error = new Error(`missing ${path}`);
+    error.name = "NotFoundError";
+    throw error;
+  }
   const directory = RUNTIME_DIRECTORIES.has(path);
   return {
     name: path.slice(path.lastIndexOf("/") + 1),
@@ -90,6 +102,15 @@ function pristineRuntimeMetadata(path: string) {
 }
 
 function pristineTrustedRuntimeMetadata(path: string) {
+  if (ABSENT_RUNTIME_PATHS.has(path)) {
+    return {
+      path,
+      type: "missing" as const,
+      sizeBytes: 0,
+      mode: 0,
+      symlinkTarget: null,
+    };
+  }
   const metadata = pristineRuntimeMetadata(path);
   return {
     path: metadata.path,
@@ -98,6 +119,10 @@ function pristineTrustedRuntimeMetadata(path: string) {
     mode: metadata.mode,
     symlinkTarget: metadata.symlinkTarget,
   };
+}
+
+async function* emptyRuntimeDirectoryListing(): AsyncIterable<never> {
+  yield* [] as never[];
 }
 
 function dockerPathMetadataHeader(input: {
@@ -135,7 +160,276 @@ async function runtimeManifest(
   });
 }
 
+function syntheticElf64(input: {
+  interpreter?: string;
+  needed?: readonly string[];
+  runpath?: readonly string[];
+}): Uint8Array {
+  const bytes = new Uint8Array(2_048);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  view.setUint16(18, 62, true);
+  view.setBigUint64(32, 64n, true);
+  view.setUint16(54, 56, true);
+  view.setUint16(56, input.interpreter ? 3 : 2, true);
+
+  const writeProgramHeader = (
+    index: number,
+    type: number,
+    offset: number,
+    virtualAddress: number,
+    size: number,
+  ) => {
+    const header = 64 + index * 56;
+    view.setUint32(header, type, true);
+    view.setBigUint64(header + 8, BigInt(offset), true);
+    view.setBigUint64(header + 16, BigInt(virtualAddress), true);
+    view.setBigUint64(header + 32, BigInt(size), true);
+    view.setBigUint64(header + 40, BigInt(size), true);
+  };
+  writeProgramHeader(0, 1, 0, 0x40_0000, bytes.byteLength);
+
+  let programHeaderIndex = 1;
+  if (input.interpreter) {
+    const interpreter = new TextEncoder().encode(`${input.interpreter}\0`);
+    bytes.set(interpreter, 0x180);
+    writeProgramHeader(programHeaderIndex, 3, 0x180, 0x40_0180, interpreter.byteLength);
+    programHeaderIndex += 1;
+  }
+
+  const strings: number[] = [0];
+  const stringOffsets = new Map<string, number>();
+  for (const value of [...(input.needed ?? []), ...(input.runpath ?? [])]) {
+    if (stringOffsets.has(value)) continue;
+    const offset = strings.length;
+    strings.push(...new TextEncoder().encode(value), 0);
+    stringOffsets.set(value, offset);
+  }
+  bytes.set(strings, 0x500);
+  const dynamic: Array<[number, number]> = [
+    [5, 0x40_0500],
+    [10, strings.length],
+    ...(input.needed ?? []).map((value) => [1, stringOffsets.get(value)!] as [number, number]),
+    ...(input.runpath ?? []).map((value) => [29, stringOffsets.get(value)!] as [number, number]),
+    [0, 0],
+  ];
+  for (const [index, [tag, value]] of dynamic.entries()) {
+    const offset = 0x280 + index * 16;
+    view.setBigInt64(offset, BigInt(tag), true);
+    view.setBigUint64(offset + 8, BigInt(value), true);
+  }
+  writeProgramHeader(programHeaderIndex, 2, 0x280, 0x40_0280, dynamic.length * 16);
+  return bytes;
+}
+
+function syntheticGlibcLoaderCache(entries: readonly (readonly [string, string])[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const magic = encoder.encode("glibc-ld.so.cache1.1");
+  const headerBytes = 48;
+  const entryBytes = 24;
+  const strings: number[] = [];
+  const offsets = entries.map(([name, path]) => {
+    const nameOffset = headerBytes + entries.length * entryBytes + strings.length;
+    strings.push(...encoder.encode(name), 0);
+    const pathOffset = headerBytes + entries.length * entryBytes + strings.length;
+    strings.push(...encoder.encode(path), 0);
+    return { nameOffset, pathOffset };
+  });
+  const bytes = new Uint8Array(headerBytes + entries.length * entryBytes + strings.length);
+  const view = new DataView(bytes.buffer);
+  bytes.set(magic);
+  view.setUint32(20, entries.length, true);
+  view.setUint32(24, strings.length, true);
+  view.setUint8(28, 2);
+  for (const [index, offset] of offsets.entries()) {
+    const entryOffset = headerBytes + index * entryBytes;
+    view.setUint32(entryOffset, 0x303, true);
+    view.setUint32(entryOffset + 4, offset.nameOffset, true);
+    view.setUint32(entryOffset + 8, offset.pathOffset, true);
+  }
+  bytes.set(strings, headerBytes + entries.length * entryBytes);
+  return bytes;
+}
+
+async function captureRuntimeFixture(
+  input: {
+    bytes?: ReadonlyMap<string, Uint8Array>;
+    directories?: ReadonlySet<string>;
+    symlinks?: ReadonlyMap<string, string>;
+    inventories?: ReadonlyMap<string, readonly string[]>;
+  } = {},
+): Promise<TrustedRigPlatformRuntimeManifest> {
+  const bytes = input.bytes ?? new Map();
+  const directories = new Set([...RUNTIME_DIRECTORIES, ...(input.directories ?? [])]);
+  const symlinks = input.symlinks ?? new Map();
+  return await captureTrustedRigPlatformRuntimeManifest({
+    settings: testSettings({
+      sandboxBackend: "modal",
+      sandboxDesktopEnabled: false,
+      sandboxTerminalEnabled: false,
+    }),
+    inspectPath: async (path) => {
+      const symlinkTarget = symlinks.get(path);
+      if (symlinkTarget) {
+        return {
+          path,
+          type: "symlink",
+          sizeBytes: symlinkTarget.length,
+          mode: 0o120777,
+          symlinkTarget,
+        } as const;
+      }
+      if (directories.has(path)) {
+        return { path, type: "directory", sizeBytes: 0, mode: 0o040755, symlinkTarget: null };
+      }
+      const contents = bytes.get(path);
+      if (contents) {
+        return {
+          path,
+          type: "file",
+          sizeBytes: contents.byteLength,
+          mode: 0o100755,
+          symlinkTarget: null,
+        } as const;
+      }
+      return pristineTrustedRuntimeMetadata(path);
+    },
+    readBytes: async (path) => bytes.get(path) ?? pristineRuntimeBytes(path),
+    listDirectory: async (path) => input.inventories?.get(path) ?? [],
+  });
+}
+
 describe("provider-owned trusted Rig platform surfaces", () => {
+  test("binds the ELF interpreter and recursively resolved shared-object closure", async () => {
+    const bytes = new Map<string, Uint8Array>([
+      [
+        "/bin/bash",
+        syntheticElf64({
+          interpreter: "/lib64/ld-opengeni.so.2",
+          needed: ["libdirect.so"],
+          runpath: ["/usr/lib/opengeni-test"],
+        }),
+      ],
+      [
+        "/usr/lib/opengeni-test/libdirect.so",
+        syntheticElf64({ needed: ["libtransitive.so"], runpath: ["/usr/lib/opengeni-test"] }),
+      ],
+      ["/usr/lib/opengeni-test/libtransitive.so", syntheticElf64({})],
+      ["/usr/lib/ld-opengeni.so.2", syntheticElf64({})],
+    ]);
+    const expected = await captureRuntimeFixture({
+      bytes,
+      directories: new Set(["/lib64", "/usr/lib/opengeni-test"]),
+      symlinks: new Map([["/lib64/ld-opengeni.so.2", "/usr/lib/ld-opengeni.so.2"]]),
+    });
+
+    expect(expected.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "/lib64/ld-opengeni.so.2",
+          resolvedPath: "/usr/lib/ld-opengeni.so.2",
+        }),
+        expect.objectContaining({ path: "/usr/lib/opengeni-test/libdirect.so" }),
+        expect.objectContaining({ path: "/usr/lib/opengeni-test/libtransitive.so" }),
+      ]),
+    );
+
+    const mutatedBytes = new Map(bytes);
+    mutatedBytes.set(
+      "/usr/lib/opengeni-test/libtransitive.so",
+      new TextEncoder().encode("root-mutated-transitive-library"),
+    );
+    const actual = await captureRuntimeFixture({
+      bytes: mutatedBytes,
+      directories: new Set(["/lib64", "/usr/lib/opengeni-test"]),
+      symlinks: new Map([["/lib64/ld-opengeni.so.2", "/usr/lib/ld-opengeni.so.2"]]),
+    });
+    expect(() => assertTrustedRigPlatformRuntimeMatches(expected, actual)).toThrow(
+      "runtime integrity mismatch at /usr/lib/opengeni-test/libtransitive.so",
+    );
+  });
+
+  test("binds every loader-cache candidate for a required shared object", async () => {
+    const cachedLibrary = "/opt/loader-cache/glibc-hwcaps/x86-64-v3/libcached.so";
+    const loaderCache = syntheticGlibcLoaderCache([["libcached.so", cachedLibrary]]);
+    const bytes = new Map<string, Uint8Array>([
+      ["/bin/bash", syntheticElf64({ needed: ["libcached.so"] })],
+      ["/etc/ld.so.cache", loaderCache],
+      [cachedLibrary, syntheticElf64({})],
+    ]);
+    const directories = new Set([
+      "/opt/loader-cache",
+      "/opt/loader-cache/glibc-hwcaps",
+      "/opt/loader-cache/glibc-hwcaps/x86-64-v3",
+    ]);
+    const expected = await captureRuntimeFixture({ bytes, directories });
+    expect(expected.entries).toContainEqual(expect.objectContaining({ path: cachedLibrary }));
+
+    const mutatedBytes = new Map(bytes);
+    mutatedBytes.set(cachedLibrary, new TextEncoder().encode("root-mutated-cache-library"));
+    const actual = await captureRuntimeFixture({ bytes: mutatedBytes, directories });
+    expect(() => assertTrustedRigPlatformRuntimeMatches(expected, actual)).toThrow(
+      `runtime integrity mismatch at ${cachedLibrary}`,
+    );
+  });
+
+  test("rejects a root-added dynamic-loader preload before protected execution", async () => {
+    const expected = await captureRuntimeFixture();
+    const preload = new TextEncoder().encode("/usr/lib/opengeni-test/libpreload.so\n");
+    const actual = await captureRuntimeFixture({
+      bytes: new Map([
+        ["/etc/ld.so.preload", preload],
+        ["/usr/lib/opengeni-test/libpreload.so", syntheticElf64({})],
+      ]),
+      directories: new Set(["/usr/lib/opengeni-test"]),
+    });
+
+    expect(expected.absentPaths).toContain("/etc/ld.so.preload");
+    expect(() => assertTrustedRigPlatformRuntimeMatches(expected, actual)).toThrow(
+      "runtime integrity mismatch at /etc/ld.so.preload",
+    );
+  });
+
+  test("binds loader cache bytes and loader configuration directory membership", async () => {
+    const loaderCacheV1 = syntheticGlibcLoaderCache([]);
+    const loaderCacheV2 = syntheticGlibcLoaderCache([["libunused.so", "/usr/lib/libunused.so"]]);
+    const expected = await captureRuntimeFixture({
+      bytes: new Map([
+        ["/etc/ld.so.cache", loaderCacheV1],
+        ["/etc/ld.so.conf", new TextEncoder().encode("include /etc/ld.so.conf.d/*.conf\n")],
+        ["/etc/ld.so.conf.d/runtime.conf", new TextEncoder().encode("/usr/lib\n")],
+      ]),
+      directories: new Set(["/etc/ld.so.conf.d"]),
+      inventories: new Map([["/etc/ld.so.conf.d", ["runtime.conf"]]]),
+    });
+    const changedCache = await captureRuntimeFixture({
+      bytes: new Map([
+        ["/etc/ld.so.cache", loaderCacheV2],
+        ["/etc/ld.so.conf", new TextEncoder().encode("include /etc/ld.so.conf.d/*.conf\n")],
+        ["/etc/ld.so.conf.d/runtime.conf", new TextEncoder().encode("/usr/lib\n")],
+      ]),
+      directories: new Set(["/etc/ld.so.conf.d"]),
+      inventories: new Map([["/etc/ld.so.conf.d", ["runtime.conf"]]]),
+    });
+    expect(() => assertTrustedRigPlatformRuntimeMatches(expected, changedCache)).toThrow(
+      "runtime integrity mismatch at /etc/ld.so.cache",
+    );
+
+    const addedConfig = await captureRuntimeFixture({
+      bytes: new Map([
+        ["/etc/ld.so.cache", loaderCacheV1],
+        ["/etc/ld.so.conf", new TextEncoder().encode("include /etc/ld.so.conf.d/*.conf\n")],
+        ["/etc/ld.so.conf.d/override.conf", new TextEncoder().encode("/opt/lib\n")],
+        ["/etc/ld.so.conf.d/runtime.conf", new TextEncoder().encode("/usr/lib\n")],
+      ]),
+      directories: new Set(["/etc/ld.so.conf.d"]),
+      inventories: new Map([["/etc/ld.so.conf.d", ["override.conf", "runtime.conf"]]]),
+    });
+    expect(() => assertTrustedRigPlatformRuntimeMatches(expected, addedConfig)).toThrow(
+      "runtime integrity mismatch at /etc/ld.so.conf.d",
+    );
+  });
+
   test("the Docker adapter isolates controller traffic from the root-owned verifier container", async () => {
     const source = await Bun.file(
       new URL("../src/sandbox/providers/docker-trusted-rig-platform-surface.ts", import.meta.url),
@@ -190,6 +484,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       filesystem: {
         readBytes: async (path: string) => pristineRuntimeBytes(path),
         stat: async (path: string) => pristineRuntimeMetadata(path),
+        listFiles: emptyRuntimeDirectoryListing,
         writeBytes: async () => undefined,
       },
       terminate: async () => 0,
@@ -213,6 +508,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         filesystem: {
           readBytes: async (path: string) => pristineRuntimeBytes(path),
           stat: async (path: string) => pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
         experimentalSidecars: {
           create: async (_name: string, _image: unknown, options?: { timeoutMs?: number }) => {
@@ -328,6 +624,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       filesystem: {
         readBytes: async (path: string) => pristineRuntimeBytes(path),
         stat: async (path: string) => pristineRuntimeMetadata(path),
+        listFiles: emptyRuntimeDirectoryListing,
         writeBytes: async () => undefined,
       },
       terminate: async () => 0,
@@ -341,6 +638,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         filesystem: {
           readBytes: async (path: string) => pristineRuntimeBytes(path),
           stat: async (path: string) => pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
         experimentalSidecars: {
           create: async (name: string) => {
@@ -425,6 +723,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
                   }
                 : metadata;
             },
+            listFiles: emptyRuntimeDirectoryListing,
           },
           experimentalSidecars: {
             create: async () => {
@@ -498,6 +797,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
                       mode: 0o040755,
                     };
               },
+              listFiles: emptyRuntimeDirectoryListing,
             },
             experimentalSidecars: {
               create: async () => {
@@ -551,6 +851,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
                   symlinkTarget: "/workspace/local",
                 }
               : pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
       },
     };
@@ -668,6 +969,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
                 symlinkTarget: "/workspace/bun",
               }
             : pristineRuntimeMetadata(path),
+        listFiles: emptyRuntimeDirectoryListing,
         writeBytes: async () => undefined,
       },
       terminate: async () => {
@@ -682,6 +984,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         filesystem: {
           readBytes: async (path: string) => pristineRuntimeBytes(path),
           stat: async (path: string) => pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
         experimentalSidecars: {
           create: async (name: string) => {
@@ -748,6 +1051,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
       filesystem: {
         readBytes: async (path: string) => pristineRuntimeBytes(path),
         stat: async (path: string) => pristineRuntimeMetadata(path),
+        listFiles: emptyRuntimeDirectoryListing,
         writeBytes: async () => undefined,
       },
       terminate: async () => {
@@ -770,6 +1074,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
                   symlinkTarget: "/workspace/forged-browserd-up",
                 }
               : pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
         experimentalSidecars: {
           create: async (name: string) => {
@@ -1009,6 +1314,7 @@ describe("provider-owned trusted Rig platform surfaces", () => {
         filesystem: {
           readBytes: async (path: string) => pristineRuntimeBytes(path),
           stat: async (path: string) => pristineRuntimeMetadata(path),
+          listFiles: emptyRuntimeDirectoryListing,
         },
         experimentalSidecars: {
           create: async (_name: string, _image: unknown, options?: { signal?: AbortSignal }) => {

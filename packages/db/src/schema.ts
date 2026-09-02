@@ -8541,10 +8541,10 @@ export const rigProviderImageCleanupObligationStateValues = [
 ] as const;
 
 /**
- * Durable pre-creation ownership for Modal Rig provider-image requests. The
- * caller-owned build request id is persisted before snapshotFilesystem starts,
- * so a replacement worker can resume/discover the exact provider operation and
- * hand any unpublished image to GC without the original promise surviving.
+ * Durable pre-creation ownership for Modal and Docker Rig provider-image
+ * requests. The caller-owned request id is persisted before provider dispatch,
+ * so a replacement worker can recover the exact operation and hand any
+ * unpublished image to GC without the original promise surviving.
  */
 export const rigProviderImageCleanupObligations = pgTable(
   "rig_provider_image_cleanup_obligations",
@@ -8600,35 +8600,65 @@ export const rigProviderImageCleanupObligations = pgTable(
     ),
     providerBackendValid: check(
       "rig_provider_image_cleanup_backend_check",
-      sql`${table.providerBackend} = 'modal'`,
+      sql`${table.providerBackend} in ('modal', 'docker')`,
     ),
     providerBindingShapeValid: check(
       "rig_provider_image_cleanup_binding_shape_check",
       sql`jsonb_typeof(${table.providerBinding}) = 'object'
-        and ${table.providerBinding} = jsonb_build_object(
-          'version', 1,
-          'serverUrl', ${table.providerBinding} ->> 'serverUrl',
-          'workspaceName', ${table.providerBinding} ->> 'workspaceName',
-          'environment', ${table.providerBinding} ->> 'environment'
+        and (
+          (
+            ${table.providerBackend} = 'modal'
+            and ${table.providerBinding} = jsonb_build_object(
+              'version', 1,
+              'serverUrl', ${table.providerBinding} ->> 'serverUrl',
+              'workspaceName', ${table.providerBinding} ->> 'workspaceName',
+              'environment', ${table.providerBinding} ->> 'environment'
+            )
+            and coalesce(octet_length(${table.providerBinding} ->> 'serverUrl'), 0) > 0
+            and coalesce(octet_length(${table.providerBinding} ->> 'workspaceName'), 0) > 0
+            and ${table.providerBinding} ->> 'environment' is not null
+          )
+          or (
+            ${table.providerBackend} = 'docker'
+            and ${table.providerBinding} = jsonb_build_object(
+              'version', 1,
+              'endpoint', ${table.providerBinding} ->> 'endpoint',
+              'daemonId', ${table.providerBinding} ->> 'daemonId'
+            )
+            and octet_length(${table.providerBinding} ->> 'endpoint') between 1 and 768
+            and octet_length(${table.providerBinding} ->> 'daemonId') between 1 and 192
+            and ${table.providerBinding} ->> 'endpoint' !~ '[[:cntrl:]]'
+            and ${table.providerBinding} ->> 'daemonId' ~ '^[A-Za-z0-9._:+/-]+$'
+          )
         )
-        and coalesce(octet_length(${table.providerBinding} ->> 'serverUrl'), 0) > 0
-        and coalesce(octet_length(${table.providerBinding} ->> 'workspaceName'), 0) > 0
-        and ${table.providerBinding} ->> 'environment' is not null`,
+      `,
     ),
     providerBindingKeyValid: check(
       "rig_provider_image_cleanup_binding_key_check",
       sql`octet_length(${table.providerBindingKey}) between 1 and 1024
         and ${table.providerBindingKey}::jsonb = ${table.providerBinding}
-        and ${table.providerBindingKey} = format(
-          '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
-          to_jsonb(${table.providerBinding} ->> 'serverUrl')::text,
-          to_jsonb(${table.providerBinding} ->> 'workspaceName')::text,
-          to_jsonb(${table.providerBinding} ->> 'environment')::text
-        )`,
+        and ${table.providerBindingKey} = case ${table.providerBackend}
+          when 'modal' then format(
+            '{"version":1,"serverUrl":%s,"workspaceName":%s,"environment":%s}',
+            to_jsonb(${table.providerBinding} ->> 'serverUrl')::text,
+            to_jsonb(${table.providerBinding} ->> 'workspaceName')::text,
+            to_jsonb(${table.providerBinding} ->> 'environment')::text
+          )
+          when 'docker' then format(
+            '{"version":1,"endpoint":%s,"daemonId":%s}',
+            to_jsonb(${table.providerBinding} ->> 'endpoint')::text,
+            to_jsonb(${table.providerBinding} ->> 'daemonId')::text
+          )
+          else null
+        end`,
     ),
     providerObjectValid: check(
       "rig_provider_image_cleanup_object_check",
-      sql`${table.objectId} is null or octet_length(${table.objectId}) between 1 and 1024`,
+      sql`${table.objectId} is null
+        or (${table.providerBackend} = 'modal'
+          and octet_length(${table.objectId}) between 1 and 1024)
+        or (${table.providerBackend} = 'docker'
+          and ${table.objectId} ~ '^sha256:[0-9a-f]{64}$')`,
     ),
     stateValid: check(
       "rig_provider_image_cleanup_obligations_state_check",

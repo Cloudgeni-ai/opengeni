@@ -17,6 +17,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Context } from "@temporalio/activity";
 import { OpLostReason, OpState, type OpStatus } from "@opengeni/agent-proto";
+import type { SandboxBackend } from "@opengeni/contracts";
 import {
   accrueWarmSeconds,
   adoptLegacyModalCheckpointArtifact,
@@ -85,6 +86,7 @@ import {
   cancelSelfhostedOp,
   assertConsistentSandboxProviderIdentity,
   createSandboxClientForBackend,
+  deleteImmutableProviderImage,
   deleteModalCheckpointSnapshot,
   deserializeSandboxSessionStateEnvelope,
   establishSandboxSessionFromEnvelope,
@@ -983,12 +985,19 @@ async function gcSandboxCheckpointArtifacts(
     SANDBOX_MAINTENANCE_ITEM_CONCURRENCY,
     async (claim) => {
       try {
-        if (claim.providerBackend !== "modal") {
+        const outcome = await deleteImmutableProviderImage({
+          backend: claim.providerBackend as SandboxBackend,
+          settings,
+          requestId: claim.buildRequestId,
+          imageId: claim.objectId,
+          timeoutMs: Math.max(1, Math.min(settings.sandboxSnapshotTimeoutMs, 30_000)),
+          expectedProviderBindingKey: claim.providerBindingKey,
+        });
+        if (!outcome) {
           throw new Error(
             `Unsupported Rig provider image cleanup backend ${claim.providerBackend}`,
           );
         }
-        await deleteModalCheckpointSnapshot(settings, claim.providerBindingKey, claim.objectId);
         const settled = await settleRigProviderImageCleanupObligationGc(db, {
           obligationId: claim.id,
           claimId,
@@ -2650,7 +2659,7 @@ async function terminateDrainableBox(
   // lease draining for a later sweep (NEVER terminate a box whose files we
   // could not capture). A persist CAS miss means the box was re-armed and left
   // running, so the cold commit is skipped.
-  if (backend === "modal" && lease.instanceId) {
+  if ((backend === "modal" || backend === "docker") && lease.instanceId) {
     await reconcileRigProviderImageCleanupObligationsForSource({
       db,
       settings,

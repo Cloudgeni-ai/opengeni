@@ -40,6 +40,32 @@ export type ProviderImmutableImageBuildInput = {
   session: unknown;
   requestId: string;
   timeoutMs: number;
+  expectedProviderBindingKey?: string;
+};
+
+export type ProviderImmutableImageBinding = {
+  key: string;
+  binding: Record<string, unknown>;
+};
+
+export type ProviderImmutableImageBuildFailureDisposition =
+  | "definitive_rejection"
+  | "outcome_unknown";
+
+export type ProviderImmutableImageRecoveryInput = {
+  settings: Settings;
+  sourceInstanceId: string;
+  requestId: string;
+  timeoutMs: number;
+  expectedProviderBindingKey: string;
+};
+
+export type ProviderImmutableImageDeleteInput = {
+  settings: Settings;
+  requestId: string;
+  imageId: string;
+  timeoutMs: number;
+  expectedProviderBindingKey: string;
 };
 
 export type ProviderExpirationRenewalInput = {
@@ -189,6 +215,23 @@ export interface ProviderRegistration {
   buildImmutableImage?(
     input: ProviderImmutableImageBuildInput,
   ): Promise<ProviderImmutableImageBuildResult>;
+  /** Resolve the exact non-secret provider namespace/daemon that owns image
+   * creation and deletion. Required as a complete lifecycle with build. */
+  resolveImmutableImageBinding?(input: {
+    settings: Settings;
+    session?: unknown;
+    timeoutMs: number;
+  }): Promise<ProviderImmutableImageBinding>;
+  /** Recover one caller-idempotent build after worker loss without selecting a
+   * broader provider object. Required as a complete lifecycle with build. */
+  recoverImmutableImageBuild?(
+    input: ProviderImmutableImageRecoveryInput,
+  ): Promise<ProviderImmutableImageBuildResult>;
+  /** Delete one exact physical image under the persisted provider binding. */
+  deleteImmutableImage?(input: ProviderImmutableImageDeleteInput): Promise<"deleted" | "not_found">;
+  classifyImmutableImageBuildFailure?(
+    error: unknown,
+  ): ProviderImmutableImageBuildFailureDisposition;
   /** Construct a provider/control-plane-owned validation authority for one
    * exact committed verifier lease. Omission is an explicit fail-closed signal. */
   createTrustedRigPlatformSurface?(

@@ -14,6 +14,11 @@ const PROVIDER_BINDING_KEY = JSON.stringify({
   workspaceName: "workspace-a",
   environment: "main",
 });
+const DOCKER_PROVIDER_BINDING_KEY = JSON.stringify({
+  version: 1,
+  endpoint: "unix:///var/run/docker.sock",
+  daemonId: "daemon-a",
+});
 
 describe("durable Rig provider image cleanup reconciliation", () => {
   test("a replacement worker discovers an outcome-unknown request and persists its late image", async () => {
@@ -41,6 +46,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             {
               id: OBLIGATION_ID,
               state: "outcome_unknown",
+              providerBackend: "modal",
               buildRequestId: "rig-provider-image-request",
               objectId: null,
               providerBindingKey: PROVIDER_BINDING_KEY,
@@ -50,9 +56,10 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             },
           ];
         },
-        recover: async (_settings, input) => {
+        recover: async (input) => {
           calls.push("recover");
-          expect(input.sandboxId).toBe(INSTANCE_ID);
+          expect(input.backend).toBe("modal");
+          expect(input.sourceInstanceId).toBe(INSTANCE_ID);
           expect(input.requestId).toBe("rig-provider-image-request");
           expect(input.expectedProviderBindingKey).toBe(PROVIDER_BINDING_KEY);
           expect(input.timeoutMs).toBeGreaterThan(0);
@@ -65,6 +72,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             providerBinding: JSON.parse(PROVIDER_BINDING_KEY),
           };
         },
+        classify: () => "outcome_unknown",
         markFailed: async () => {
           throw new Error("a recovered image must be recorded, not terminalized");
         },
@@ -111,6 +119,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
           {
             id: OBLIGATION_ID,
             state: "outcome_unknown",
+            providerBackend: "modal",
             buildRequestId: "rig-provider-image-request",
             objectId: null,
             providerBindingKey: PROVIDER_BINDING_KEY,
@@ -122,6 +131,10 @@ describe("durable Rig provider image cleanup reconciliation", () => {
         recover: async () => {
           throw rejection;
         },
+        classify: (_backend, error) =>
+          error instanceof ModalImmutableProviderImageBuildError
+            ? error.disposition
+            : "outcome_unknown",
         markFailed: async (_db, input) => {
           marked.push(input);
           return true;
@@ -170,6 +183,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             {
               id: OBLIGATION_ID,
               state: "outcome_unknown",
+              providerBackend: "modal",
               buildRequestId: "rig-provider-image-request",
               objectId: null,
               providerBindingKey: PROVIDER_BINDING_KEY,
@@ -181,6 +195,10 @@ describe("durable Rig provider image cleanup reconciliation", () => {
           recover: async () => {
             throw rejection;
           },
+          classify: (_backend, error) =>
+            error instanceof ModalImmutableProviderImageBuildError
+              ? error.disposition
+              : "outcome_unknown",
           markFailed: async () => {
             marked = true;
             return true;
@@ -210,6 +228,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             {
               id: OBLIGATION_ID,
               state: "outcome_unknown",
+              providerBackend: "modal",
               buildRequestId: "rig-provider-image-request",
               objectId: null,
               providerBindingKey: PROVIDER_BINDING_KEY,
@@ -226,6 +245,7 @@ describe("durable Rig provider image cleanup reconciliation", () => {
             providerBindingKey: PROVIDER_BINDING_KEY.replace("workspace-a", "workspace-b"),
             providerBinding: JSON.parse(PROVIDER_BINDING_KEY.replace("workspace-a", "workspace-b")),
           }),
+          classify: () => "outcome_unknown",
           markFailed: async () => {
             throw new Error("successful recovery must validate before terminalization");
           },
@@ -237,5 +257,62 @@ describe("durable Rig provider image cleanup reconciliation", () => {
       ),
     ).rejects.toThrow("another provider identity");
     expect(recorded).toBe(false);
+  });
+
+  test("dispatches Docker recovery with the persisted daemon binding and exact request", async () => {
+    const calls: unknown[] = [];
+    const imageId = `sha256:${"a".repeat(64)}`;
+    const recovered = await reconcileRigProviderImageCleanupObligationsForSource(
+      {
+        db: {} as never,
+        settings: testSettings({ sandboxBackend: "docker" }),
+        accountId: ACCOUNT_ID,
+        workspaceId: WORKSPACE_ID,
+        sourceLeaseId: LEASE_ID,
+        sourceInstanceId: INSTANCE_ID,
+        timeoutMs: 5_000,
+      },
+      {
+        list: async () => [
+          {
+            id: OBLIGATION_ID,
+            state: "outcome_unknown",
+            providerBackend: "docker",
+            buildRequestId: "rig-provider-image-request",
+            objectId: null,
+            providerBindingKey: DOCKER_PROVIDER_BINDING_KEY,
+            providerBinding: JSON.parse(DOCKER_PROVIDER_BINDING_KEY),
+            sourceLeaseId: LEASE_ID,
+            sourceInstanceId: INSTANCE_ID,
+          },
+        ],
+        recover: async (input) => {
+          calls.push(input);
+          return {
+            provider: "docker",
+            backend: "docker",
+            imageId,
+            imageDigest: null,
+            providerBindingKey: DOCKER_PROVIDER_BINDING_KEY,
+            providerBinding: JSON.parse(DOCKER_PROVIDER_BINDING_KEY),
+          };
+        },
+        classify: () => "outcome_unknown",
+        markFailed: async () => false,
+        record: async (_db, input) => {
+          expect(input.objectId).toBe(imageId);
+          return true;
+        },
+      },
+    );
+
+    expect(recovered).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      backend: "docker",
+      sourceInstanceId: INSTANCE_ID,
+      requestId: "rig-provider-image-request",
+      expectedProviderBindingKey: DOCKER_PROVIDER_BINDING_KEY,
+    });
   });
 });

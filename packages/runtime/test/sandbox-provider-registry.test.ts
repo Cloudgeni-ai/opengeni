@@ -79,11 +79,19 @@ describe("provider registry — descriptor invariants + backendId assertion", ()
   });
 
   test("immutable provider image builds are explicit and unsupported by default", () => {
-    expect(providerSupportsImmutableImageBuild("modal")).toBe(true);
-    expect(providerSupportsImmutableImageBuild("docker")).toBe(true);
+    const lifecycleHooks = [
+      "buildImmutableImage",
+      "resolveImmutableImageBinding",
+      "recoverImmutableImageBuild",
+      "deleteImmutableImage",
+      "classifyImmutableImageBuildFailure",
+    ] as const;
     for (const backend of SandboxBackend.options) {
-      if (backend === "modal" || backend === "docker") continue;
-      expect(providerSupportsImmutableImageBuild(backend)).toBe(false);
+      const supported = backend === "modal" || backend === "docker";
+      expect(providerSupportsImmutableImageBuild(backend)).toBe(supported);
+      for (const hook of lifecycleHooks) {
+        expect(typeof PROVIDER_REGISTRY[backend][hook] === "function").toBe(supported);
+      }
     }
   });
 

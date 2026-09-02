@@ -199,6 +199,7 @@ import {
   McpPersonalConnectionDelegations,
   SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS,
   backendForNativeSnapshotProvider,
+  canonicalDockerProviderImageBinding,
   canonicalModalCheckpointProviderBinding,
   decodeNativeSnapshotRef,
   OPENGENI_SANDBOX_PROVIDER_INSTANCE_ID_FIELD,
@@ -50613,6 +50614,7 @@ export type RigProviderImageCleanupObligationState =
 export type RigProviderImageCleanupObligation = {
   id: string;
   state: RigProviderImageCleanupObligationState;
+  providerBackend: "modal" | "docker";
   buildRequestId: string;
   objectId: string | null;
   providerBindingKey: string;
@@ -50625,6 +50627,15 @@ export class RigProviderImageCleanupObligationConflictError extends Error {
   readonly name = "RigProviderImageCleanupObligationConflictError";
 }
 
+function canonicalRigProviderImageCleanupBinding(
+  providerBackend: "modal" | "docker",
+  binding: unknown,
+): { key: string; binding: Record<string, unknown> } | null {
+  return providerBackend === "modal"
+    ? canonicalModalCheckpointProviderBinding(binding)
+    : canonicalDockerProviderImageBinding(binding);
+}
+
 export async function beginRigProviderImageCleanupObligation(
   db: Database,
   input: {
@@ -50635,14 +50646,18 @@ export async function beginRigProviderImageCleanupObligation(
     sourceLeaseEpoch: number;
     sourceInstanceId: string;
     sourceWorkspaceGeneration: number;
+    providerBackend: "modal" | "docker";
     providerBindingKey: string;
     providerBinding: Record<string, unknown>;
     buildRequestId: string;
   },
 ): Promise<RigProviderImageCleanupObligation> {
-  const providerIdentity = canonicalModalCheckpointProviderBinding(input.providerBinding);
+  const providerIdentity = canonicalRigProviderImageCleanupBinding(
+    input.providerBackend,
+    input.providerBinding,
+  );
   if (!providerIdentity || providerIdentity.key !== input.providerBindingKey) {
-    throw new Error("Modal Rig provider image cleanup binding is invalid");
+    throw new Error(`${input.providerBackend} Rig provider image cleanup binding is invalid`);
   }
   return await withRlsContext(
     db,
@@ -50656,7 +50671,7 @@ export async function beginRigProviderImageCleanupObligation(
         ) values (
           ${input.accountId}, ${input.workspaceId}, ${input.sandboxGroupId},
           ${input.sourceLeaseId}, ${input.sourceLeaseEpoch}, ${input.sourceInstanceId},
-          ${input.sourceWorkspaceGeneration}, 'modal', ${providerIdentity.key},
+          ${input.sourceWorkspaceGeneration}, ${input.providerBackend}, ${providerIdentity.key},
           ${JSON.stringify(providerIdentity.binding)}::jsonb, ${input.buildRequestId}
         )
         on conflict (
@@ -50688,6 +50703,7 @@ export async function beginRigProviderImageCleanupObligation(
           source_lease_epoch: number | string;
           source_instance_id: string;
           source_workspace_generation: number | string;
+          provider_backend: "modal" | "docker";
           provider_binding_key: string;
           provider_binding: Record<string, unknown>;
           build_request_id: string;
@@ -50696,10 +50712,10 @@ export async function beginRigProviderImageCleanupObligation(
         }>(sql`
           select id, account_id, workspace_id, sandbox_group_id, source_lease_id,
             source_lease_epoch, source_instance_id, source_workspace_generation,
-            provider_binding_key, provider_binding,
+            provider_backend, provider_binding_key, provider_binding,
             build_request_id, object_id, state
           from rig_provider_image_cleanup_obligations
-          where provider_backend = 'modal'
+          where provider_backend = ${input.providerBackend}
             and provider_binding_key = ${providerIdentity.key}
             and build_request_id = ${input.buildRequestId}
             and source_instance_id = ${input.sourceInstanceId}
@@ -50715,15 +50731,18 @@ export async function beginRigProviderImageCleanupObligation(
         Number(row.source_lease_epoch) !== input.sourceLeaseEpoch ||
         row.source_instance_id !== input.sourceInstanceId ||
         Number(row.source_workspace_generation) !== input.sourceWorkspaceGeneration ||
-        canonicalModalCheckpointProviderBinding(row.provider_binding)?.key !== providerIdentity.key
+        row.provider_backend !== input.providerBackend ||
+        canonicalRigProviderImageCleanupBinding(row.provider_backend, row.provider_binding)?.key !==
+          providerIdentity.key
       ) {
         throw new RigProviderImageCleanupObligationConflictError(
-          "Modal Rig provider image cleanup request identity collision",
+          `${input.providerBackend} Rig provider image cleanup request identity collision`,
         );
       }
       return {
         id: row.id,
         state: row.state,
+        providerBackend: row.provider_backend,
         buildRequestId: row.build_request_id,
         objectId: row.object_id,
         providerBindingKey: row.provider_binding_key,
@@ -50882,12 +50901,13 @@ export async function listRecoverableRigProviderImageCleanupObligationsForSource
         state: RigProviderImageCleanupObligationState;
         build_request_id: string;
         object_id: string | null;
+        provider_backend: "modal" | "docker";
         provider_binding_key: string;
         provider_binding: Record<string, unknown>;
         source_lease_id: string;
         source_instance_id: string;
       }>(sql`
-        select id, state, build_request_id, object_id, provider_binding_key,
+        select id, state, provider_backend, build_request_id, object_id, provider_binding_key,
           provider_binding, source_lease_id, source_instance_id
         from rig_provider_image_cleanup_obligations
         where source_lease_id = ${input.sourceLeaseId}
@@ -50901,6 +50921,7 @@ export async function listRecoverableRigProviderImageCleanupObligationsForSource
           state: RigProviderImageCleanupObligationState;
           build_request_id: string;
           object_id: string | null;
+          provider_backend: "modal" | "docker";
           provider_binding_key: string;
           provider_binding: Record<string, unknown>;
           source_lease_id: string;
@@ -50908,6 +50929,7 @@ export async function listRecoverableRigProviderImageCleanupObligationsForSource
         }) => ({
           id: row.id,
           state: row.state,
+          providerBackend: row.provider_backend,
           buildRequestId: row.build_request_id,
           objectId: row.object_id,
           providerBindingKey: row.provider_binding_key,
