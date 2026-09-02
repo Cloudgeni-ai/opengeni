@@ -409,6 +409,11 @@ export async function runTurnStreamAttempt(
       });
     }
   };
+  const cancelParallelSessionTitle = async (): Promise<void> => {
+    if (parallelSessionTitleFinished) return;
+    parallelSessionTitleFinished = true;
+    await parallelSessionTitle?.cancel();
+  };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
@@ -1898,6 +1903,6 @@ export async function runTurnStreamAttempt(
       }
     }
   } finally {
-    await finishParallelSessionTitle();
+    await cancelParallelSessionTitle();
   }
 }

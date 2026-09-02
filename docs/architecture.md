@@ -619,10 +619,12 @@ Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
 main model/tool loop. When the durable title is still pending and exact session
 tool policy permits naming, the production runtime starts one bounded tool-less
 title request in parallel with the ordinary stream, meters it independently,
-and aborts/joins it before atomic turn settlement. The title write uses the
-generic session-title lifecycle and still loses to a human rename. Custom
-runtimes without the optional auxiliary seam retain the serialized
-`set_session_title` compatibility path.
+and joins it before atomic turn settlement. A normal fast response waits for the
+already-running bounded title request instead of cancelling it; exceptional or
+cancelled exits abort and join it. The title write uses the generic session-title
+lifecycle and still loses to a human rename. Custom runtimes without the
+optional auxiliary seam retain the serialized `set_session_title` compatibility
+path.
 
 ### 5.2 Lifecycle overview
 
