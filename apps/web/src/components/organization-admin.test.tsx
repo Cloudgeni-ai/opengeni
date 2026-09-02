@@ -463,7 +463,7 @@ describe("organization administration component fences", () => {
     expect(button(container, "Create new workspace")).toBeInstanceOf(HTMLButtonElement);
     expect(container.querySelector('input[aria-label="New workspace name"]')).toBeNull();
     const workspaceSettingsLink = container.querySelector<HTMLAnchorElement>(
-      'a[aria-label="Open Company platform workspace settings"]',
+      'a[aria-label="Manage Company platform workspace settings"]',
     );
     expect(workspaceSettingsLink?.getAttribute("href")).toBe(
       "/workspaces/workspace-company/settings?section=general",

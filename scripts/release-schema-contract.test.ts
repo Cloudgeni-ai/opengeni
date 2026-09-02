@@ -2,13 +2,28 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { copyFile, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { buildSchemaContract } from "./release-schema-contract";
+import { buildSchemaContract as buildCompleteSchemaContract } from "./release-schema-contract";
 
 const directories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true })));
 });
+
+async function buildSchemaContract(directory?: string) {
+  // Keep the shared published-history fixtures projected before the optional
+  // 0392-0396 compatibility migrations. This branch's 0397 contract is
+  // asserted separately below.
+  return directory === undefined
+    ? await contractWithoutMigrations([
+        "0392_context_compaction_pending_observability.sql",
+        "0393_workspace_memory_and_learning_defaults.sql",
+        "0394_session_selected_skill_activation.sql",
+        "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
+        "0396_model_call_equivalent_credit_cost.sql",
+      ])
+    : await buildCompleteSchemaContract(directory);
+}
 
 describe("release schema contract", () => {
   test("installs the workspace activity initializer before its conflict-safe backfill", async () => {
@@ -109,6 +124,21 @@ describe("release schema contract", () => {
     );
   });
 
+  test("registers sandbox deadline rotation preemption before workspace management", async () => {
+    const completeSourceContract = await buildCompleteSchemaContract();
+    expect(completeSourceContract.latestMigration).toBe(
+      "0398_organization_workspace_management_entry.sql",
+    );
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
+      ),
+    ).toMatchObject({
+      sha256: "8bf2a1a39eb2518a661d89b17910fa702e084bbb4213c395a951903e135039df",
+      deploymentMode: "rolling",
+    });
+  });
+
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
     const mcpOauthAuthorizationServer = completeSourceContract.migrations.some(
@@ -165,6 +195,26 @@ describe("release schema contract", () => {
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
+    const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
+      ...completeSourceContractWithModelCallEquivalentCreditCost,
+    };
+    const organizationWorkspaceManagementEntry =
+      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
+        (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+      );
+    if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
+      const organizationWorkspaceManagementEntryIndex =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+        );
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
+          organizationWorkspaceManagementEntryIndex - 1
+        ]?.path ?? completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration;
+    } else if (organizationWorkspaceManagementEntry) {
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        "0396_model_call_equivalent_credit_cost.sql";
+    }
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
     const sessionSelectedSkillActivationIndex =
       completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
@@ -364,6 +414,7 @@ describe("release schema contract", () => {
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
+      "0398_organization_workspace_management_entry.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
@@ -414,11 +465,23 @@ describe("release schema contract", () => {
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
     );
+    const sandboxDeadlineRotationPreemption = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
+    );
 
     expect(completeSourceContract).toMatchObject({
+      ...(sandboxDeadlineRotationPreemption
+        ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
+        : {}),
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
+        (organizationWorkspaceManagementEntry &&
+        completeSourceContract.migrations.some(
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+        )
+          ? 1
+          : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         migrationsBeforeAutomaticSessionTitles.length +
         (automaticSessionTitlePolicyFence ? 1 : 0) +
@@ -566,6 +629,11 @@ describe("release schema contract", () => {
         ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
     });
+    expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
+      organizationWorkspaceManagementEntry
+        ? "0398_organization_workspace_management_entry.sql"
+        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+    );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
         ? "0393_workspace_memory_and_learning_defaults.sql"
@@ -663,6 +731,26 @@ describe("release schema contract", () => {
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
+    const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
+      ...completeSourceContractWithModelCallEquivalentCreditCost,
+    };
+    const organizationWorkspaceManagementEntry =
+      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
+        (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+      );
+    if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
+      const organizationWorkspaceManagementEntryIndex =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+        );
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
+          organizationWorkspaceManagementEntryIndex - 1
+        ]?.path ?? completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration;
+    } else if (organizationWorkspaceManagementEntry) {
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        "0396_model_call_equivalent_credit_cost.sql";
+    }
     const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
     const sessionSelectedSkillActivationIndex =
       completeSourceContractWithSessionSelectedSkillActivation.migrations.findIndex(
@@ -712,6 +800,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0398_organization_workspace_management_entry.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
@@ -721,6 +810,7 @@ describe("release schema contract", () => {
       "0238_supergrok_realtime_model.sql",
       "0239_supergrok_video_funding.sql",
       "0240_model_context_user_messages.sql",
+      "0397_sandbox_deadline_rotation_preemption.sql",
       "0249_personal_resource_delegation_authority_correction.sql",
       "0250_direct_retained_process_owner_liveness.sql",
       "0251_connected_machine_operation_policy.sql",
@@ -1020,6 +1110,12 @@ describe("release schema contract", () => {
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
+        (organizationWorkspaceManagementEntry &&
+        completeSourceContract.migrations.some(
+          (migration) => migration.path === "0398_organization_workspace_management_entry.sql",
+        )
+          ? 1
+          : 0) +
         (contextCompactionPendingObservability ? 1 : 0) +
         (atomicConnectedMachineAttachments ? 347 : routedSlackHandles ? 346 : 345) +
         (documentAuthorityReclassification ? 1 : 0) +
@@ -1182,6 +1278,11 @@ describe("release schema contract", () => {
         ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
     });
+    expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
+      organizationWorkspaceManagementEntry
+        ? "0398_organization_workspace_management_entry.sql"
+        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+    );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
         ? "0393_workspace_memory_and_learning_defaults.sql"
@@ -3281,12 +3382,12 @@ async function contractWithoutMigrations(excludedPaths: readonly string[]) {
   const source = join(import.meta.dir, "../packages/db/drizzle");
   const directory = await mkdtemp(join(tmpdir(), "opengeni-schema-contract-filtered-"));
   directories.push(directory);
-  const excluded = new Set(excludedPaths);
+  const excluded = new Set([...excludedPaths, "0397_sandbox_deadline_rotation_preemption.sql"]);
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith(".sql") || excluded.has(entry.name)) continue;
     await copyFile(join(source, entry.name), join(directory, entry.name));
   }
-  return await buildSchemaContract(directory);
+  return await buildCompleteSchemaContract(directory);
 }
 
 async function fixture(files: Array<[string, string]>): Promise<string> {

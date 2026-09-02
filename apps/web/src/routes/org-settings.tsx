@@ -583,6 +583,7 @@ export function OrgSettingsRoute({
                     name,
                     operationId,
                   });
+                  await context.revalidatePrincipalAccess();
                 }
               }}
             />
