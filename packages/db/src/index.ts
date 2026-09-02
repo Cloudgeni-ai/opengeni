@@ -3167,7 +3167,12 @@ async function lockBackgroundCommandWorkspaceLifecycle(
  */
 export async function deleteWorkspaceIfQuiescent(
   db: Database,
-  input: { accountId: string; workspaceId: string; observer?: WorkspaceDeleteObserver },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    observer?: WorkspaceDeleteObserver;
+    organizationAdministratorSubjectId?: string;
+  },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
   try {
@@ -3177,6 +3182,16 @@ export async function deleteWorkspaceIfQuiescent(
       async (scopedDb) =>
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
+          if (input.organizationAdministratorSubjectId) {
+            await setSubjectRlsContext(tx, input.organizationAdministratorSubjectId);
+            await tx.execute(sql`
+              select authorize_organization_shared_workspace_administration(
+                ${input.accountId}::uuid,
+                ${input.workspaceId}::uuid,
+                ${input.organizationAdministratorSubjectId}
+              )
+            `);
+          }
           // Adoption takes the matching shared prefix before its canonical
           // session/attempt or retained-process locks. Taking the exclusive
           // prefix first prevents parent-FK deletion from deadlocking with an

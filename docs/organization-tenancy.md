@@ -494,7 +494,8 @@ The managed-human API surface is:
   organization membership and canonical Personal workspace/control row—no
   shared workspace and no Personal `workspace_memberships` row;
 - `POST /v1/organizations/:organizationId/workspaces` idempotently creates a
-  shared workspace without implicitly granting the organization administrator
+  shared workspace and atomically gives that exact creator an explicit named
+  workspace-admin grant; unrelated organization administrators receive no
   operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
@@ -502,7 +503,11 @@ The managed-human API surface is:
   `/settings` route, `PUT
 /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
   for an idempotent named or custom grant, and the explicit `/revoke` command
-  below that member route for the shared-workspace control plane; and
+  below that member route for the shared-workspace control plane;
+- `DELETE /v1/organizations/:organizationId/workspaces/:workspaceId` for the
+  same quiescence-fenced deletion used by a direct workspace administrator,
+  after a transaction-scoped organization owner/admin check that excludes
+  Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 The organization overview, organization/shared-workspace metadata, member
@@ -801,7 +806,15 @@ mutation runs under an exact active owner/administrator organization membership
 and an organization-scoped transaction advisory fence. Missing,
 cross-organization, and Personal workspace ids are rejected through one
 non-enumerating result before mutation. The capability never creates an
-operational workspace grant for the organization administrator. The exception
+operational workspace grant merely because a person is an organization
+administrator. Migration 0396 adds the narrow exception for the exact person
+who creates a shared workspace: the create transaction materializes a named
+workspace-admin membership through a stable idempotent child operation. It
+also adds a content-blind, transaction-scoped authorization routine for shared
+workspace deletion. The browser uses the same
+`/workspaces/:workspaceId/settings` URL for ordinary and organization-only
+management; the latter exposes only General, Members, and Danger zone and does
+not mount operational workspace context. The exception
 to the durable last-workspace-admin removal guard requires a transaction-local
 capability opened by the direct organization route; merely holding an
 organization role through an ordinary or delegated workspace route does not

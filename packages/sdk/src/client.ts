@@ -4431,7 +4431,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create a shared workspace without implicitly granting the actor access. */
+  /** Create a shared workspace and grant its creator explicit workspace-admin access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
@@ -4465,6 +4465,14 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
       request,
+    );
+  }
+
+  /** Delete a shared workspace through organization-administrator authority. */
+  async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
     );
   }
 

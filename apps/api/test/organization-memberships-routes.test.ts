@@ -1135,7 +1135,7 @@ describe("organization membership routes", () => {
     });
   }, 180_000);
 
-  test("administers shared-workspace settings and access without granting the organization owner operational access", async () => {
+  test("administers existing shared workspaces without access while granting new creators workspace admin", async () => {
     if (!shared || !app) return;
     const membershipResponse = await app.request("http://x/v1/organization-memberships", {
       headers: { cookie: "session=present" },
@@ -1193,10 +1193,10 @@ describe("organization membership routes", () => {
     });
     expect(replayCreate.status).toBe(201);
     expect(await replayCreate.json()).toEqual(createdWorkspace);
-    const [createdMembership] = await shared.admin<Array<{ count: number }>>`
-      select count(*)::int as count from workspace_memberships
+    const [createdMembership] = await shared.admin<Array<{ count: number; role: string | null }>>`
+      select count(*)::int as count, max(role::text) as role from workspace_memberships
       where workspace_id = ${createdWorkspace.id} and subject_id = ${subjectId}`;
-    expect(createdMembership?.count).toBe(0);
+    expect(createdMembership).toEqual({ count: 1, role: "admin" });
 
     const missingUpdate = await app.request(
       `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}/members/${crypto.randomUUID()}`,
