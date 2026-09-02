@@ -110,10 +110,10 @@ describe("migration 0401 MCP OAuth authorization server", () => {
         select client_id
         from opengeni_private.register_mcp_oauth_client(
           ${`ogmcp_client_smoke_${index.toString().padStart(4, "0")}`},
-          ${JSON.stringify(["http://127.0.0.1:4567/callback"])}::jsonb,
+          ${app.json(["http://127.0.0.1:4567/callback"])},
           'Migration smoke client',
-          ${JSON.stringify(["authorization_code", "refresh_token"])}::jsonb,
-          ${JSON.stringify(["code"])}::jsonb,
+          ${app.json(["authorization_code", "refresh_token"])},
+          ${app.json(["code"])},
           ${registrationScopeHash}
         )`;
       expect(registered?.client_id).toBe(`ogmcp_client_smoke_${index.toString().padStart(4, "0")}`);
@@ -123,10 +123,10 @@ describe("migration 0401 MCP OAuth authorization server", () => {
         select client_id
         from opengeni_private.register_mcp_oauth_client(
           'ogmcp_client_smoke_0021',
-          ${JSON.stringify(["http://127.0.0.1:4567/callback"])}::jsonb,
+          ${app.json(["http://127.0.0.1:4567/callback"])},
           'Migration smoke client',
-          ${JSON.stringify(["authorization_code", "refresh_token"])}::jsonb,
-          ${JSON.stringify(["code"])}::jsonb,
+          ${app.json(["authorization_code", "refresh_token"])},
+          ${app.json(["code"])},
           ${registrationScopeHash}
         )`,
     ).rejects.toMatchObject({ code: "P0004" });
@@ -137,10 +137,10 @@ describe("migration 0401 MCP OAuth authorization server", () => {
         registration_scope_hash, created_at, expires_at
       ) values (
         'ogmcp_client_expired_0001',
-        ${JSON.stringify(["http://127.0.0.1:4567/callback"])}::jsonb,
+        ${admin.json(["http://127.0.0.1:4567/callback"])},
         'Expired migration client',
-        ${JSON.stringify(["authorization_code"])}::jsonb,
-        ${JSON.stringify(["code"])}::jsonb,
+        ${admin.json(["authorization_code"])},
+        ${admin.json(["code"])},
         ${"b".repeat(64)},
         clock_timestamp() - interval '2 days',
         clock_timestamp() - interval '1 day'
@@ -185,9 +185,9 @@ describe("migration 0401 MCP OAuth authorization server", () => {
     await admin`insert into mcp_oauth_clients (
       client_id, redirect_uris, client_name, grant_types, response_types, registration_scope_hash
     ) values (
-      ${clientId}, ${JSON.stringify(["http://127.0.0.1/callback"])}::jsonb, 'Replay test',
-      ${JSON.stringify(["authorization_code", "refresh_token"])}::jsonb,
-      ${JSON.stringify(["code"])}::jsonb, ${"4".repeat(64)}
+      ${clientId}, ${admin.json(["http://127.0.0.1/callback"])}, 'Replay test',
+      ${admin.json(["authorization_code", "refresh_token"])},
+      ${admin.json(["code"])}, ${"4".repeat(64)}
     )`;
     await admin`insert into mcp_oauth_refresh_tokens (
       token_hash, family_id, generation, client_id, account_id, workspace_id,
