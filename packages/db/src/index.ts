@@ -3182,6 +3182,21 @@ export async function deleteWorkspaceIfQuiescent(
       async (scopedDb) =>
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
+          // Adoption takes the matching shared prefix before its canonical
+          // session/attempt or retained-process locks. Taking the exclusive
+          // prefix first prevents parent-FK deletion from deadlocking with an
+          // already-started cross-workspace adoption. It must also precede the
+          // organization-administration seam: that seam takes the account row
+          // FOR KEY SHARE, while ordinary deletion takes this lifecycle lock
+          // before upgrading the account row to FOR UPDATE.
+          const lifecycleLockStartedAt = performance.now();
+          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
+          observeWorkspaceDeletePhase(input.observer, {
+            phase: "lifecycle_lock",
+            outcome: "ok",
+            durationSeconds: workspaceDeletePhaseDuration(lifecycleLockStartedAt),
+          });
+
           if (input.organizationAdministratorSubjectId) {
             await setSubjectRlsContext(tx, input.organizationAdministratorSubjectId);
             await tx.execute(sql`
@@ -3192,17 +3207,6 @@ export async function deleteWorkspaceIfQuiescent(
               )
             `);
           }
-          // Adoption takes the matching shared prefix before its canonical
-          // session/attempt or retained-process locks. Taking the exclusive
-          // prefix first prevents parent-FK deletion from deadlocking with an
-          // already-started cross-workspace adoption.
-          const lifecycleLockStartedAt = performance.now();
-          await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
-          observeWorkspaceDeletePhase(input.observer, {
-            phase: "lifecycle_lock",
-            outcome: "ok",
-            durationSeconds: workspaceDeletePhaseDuration(lifecycleLockStartedAt),
-          });
 
           const accountWorkspaceLockStartedAt = performance.now();
           const [account] = await tx

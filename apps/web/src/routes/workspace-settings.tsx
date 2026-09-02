@@ -65,6 +65,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { deleteOrganizationWorkspaceWithReconciliation } from "@/lib/workspace-deletion";
 import {
   apiKeyPermissionGroups,
   defaultApiKeyPermissions,
@@ -977,9 +978,14 @@ function OrganizationManagedWorkspaceSettings({
   async function deleteWorkspace(): Promise<boolean> {
     setBusy(true);
     try {
-      await context.client.deleteOrganizationWorkspace(organizationId, workspace.id);
+      const currentOverview = await deleteOrganizationWorkspaceWithReconciliation({
+        client: context.client,
+        organizationId,
+        workspaceId: workspace.id,
+      });
       await context.revalidatePrincipalAccess();
-      const next = context.workspaces.find((candidate) => candidate.accountId === organizationId);
+      const next =
+        currentOverview?.workspaces.find((candidate) => candidate.id !== workspace.id) ?? null;
       if (next) {
         await navigate({
           to: "/workspaces/$workspaceId/organization",

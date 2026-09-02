@@ -13,6 +13,9 @@ afterAll(() => {
 });
 
 const { DangerZone } = await import("./workspace-settings");
+const workspaceSettingsSource = await Bun.file(
+  new URL("./workspace-settings.tsx", import.meta.url),
+).text();
 
 function deferred<Value>() {
   let resolve!: (value: Value | PromiseLike<Value>) => void;
@@ -41,6 +44,16 @@ async function setInputValue(input: HTMLInputElement, value: string): Promise<vo
 }
 
 describe("workspace deletion confirmation", () => {
+  test("reconciles organization-admin deletion and stays in its manageable workspace roster", () => {
+    expect(workspaceSettingsSource).toContain("deleteOrganizationWorkspaceWithReconciliation({");
+    expect(workspaceSettingsSource).toContain(
+      "currentOverview?.workspaces.find((candidate) => candidate.id !== workspace.id) ?? null;",
+    );
+    expect(workspaceSettingsSource).not.toContain(
+      "context.workspaces.find((candidate) => candidate.accountId === organizationId)",
+    );
+  });
+
   test("submits only once while a deletion request is pending", async () => {
     const pending = deferred<boolean>();
     const onDelete = mock(() => pending.promise);
