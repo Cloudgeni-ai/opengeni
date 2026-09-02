@@ -274,6 +274,12 @@ describe("release schema contract", () => {
         latestMigration: "0393_workspace_memory_and_learning_defaults.sql",
       };
     }
+    if (sessionSelectedSkillActivation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0394_session_selected_skill_activation.sql",
+      };
+    }
     const automaticSessionTitleMigrationPaths = new Set([
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
@@ -452,6 +458,9 @@ describe("release schema contract", () => {
                                                                                         )?.path,
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
+        : {}),
+      ...(sessionSelectedSkillActivation
+        ? { latestMigration: "0394_session_selected_skill_activation.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -794,6 +803,12 @@ describe("release schema contract", () => {
         latestMigration: "0393_workspace_memory_and_learning_defaults.sql",
       };
     }
+    if (sessionSelectedSkillActivation) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0394_session_selected_skill_activation.sql",
+      };
+    }
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (sessionSelectedSkillActivation ? 1 : 0) +
@@ -939,6 +954,9 @@ describe("release schema contract", () => {
                                                                                                   : "0336_atomic_session_fork_visibility.sql",
       ...(workspaceMemoryAndLearningDefaults
         ? { latestMigration: "0393_workspace_memory_and_learning_defaults.sql" }
+        : {}),
+      ...(sessionSelectedSkillActivation
+        ? { latestMigration: "0394_session_selected_skill_activation.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(

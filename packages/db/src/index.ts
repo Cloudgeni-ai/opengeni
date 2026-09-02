@@ -30194,6 +30194,33 @@ type SessionCreateReplayIdentity = {
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
 };
 
+// Session metadata is immutable after creation and already participates in
+// every historical schema fixture. Keep this reserved request-identity fact
+// there instead of making current code require a post-fixture sessions column.
+// Create admission always replaces a caller-supplied value for this key.
+const SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY =
+  "_opengeni_session_create_selected_installed_skill_ids_v1";
+
+function metadataWithSelectedInstalledSkillCreateIdentity(
+  metadata: Record<string, unknown>,
+  selectedInstalledSkillIds: string[],
+): Record<string, unknown> {
+  const next = { ...metadata };
+  delete next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY];
+  if (selectedInstalledSkillIds.length > 0) {
+    next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY] = [...selectedInstalledSkillIds];
+  }
+  return next;
+}
+
+function selectedInstalledSkillCreateIdentity(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const value = (metadata as Record<string, unknown>)[
+    SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY
+  ];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : [];
+}
+
 function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
@@ -30211,7 +30238,7 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (
-    stableJson(existing.createSelectedInstalledSkillIds ?? []) !==
+    stableJson(selectedInstalledSkillCreateIdentity(existing.metadata)) !==
     stableJson(input.selectedInstalledSkillIds)
   ) {
     throw new SessionCreateIdempotencyConflictError();
@@ -30310,6 +30337,11 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
   const variableSetId = variableSetIds.at(-1) ?? null;
+  const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
+  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
+    input.metadata,
+    selectedInstalledSkillIds,
+  );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private") {
@@ -30488,7 +30520,7 @@ async function createSessionInTransaction(
               mode: "explicit",
               inheritedFromSessionId: input.parentSessionId ?? null,
             },
-            metadata: input.metadata,
+            metadata: sessionMetadata,
             ...creatorColumns(frozenCreator),
             ...(privateCreateOwnerMembershipId
               ? {
@@ -30520,7 +30552,6 @@ async function createSessionInTransaction(
             parentSessionId: input.parentSessionId ?? null,
             parentTurnId,
             createIdempotencyKey,
-            createSelectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
             rootSessionId: decision.rootSessionId,
             nestedAgentDepth: decision.nestedAgentDepth,
             maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
