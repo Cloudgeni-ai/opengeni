@@ -557,15 +557,15 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 313],
-            [NON_RLS_RUNTIME_TABLES, 14],
-            [RUNTIME_FULL_DML_TABLES, 157],
+            [FORCE_RLS_TABLES, 314],
+            [NON_RLS_RUNTIME_TABLES, 19],
+            [RUNTIME_FULL_DML_TABLES, 163],
             [RUNTIME_READ_ONLY_TABLES, 22],
             [readUpdateTables, 1],
             [RUNTIME_READ_INSERT_TABLES, 46],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 32],
             [PROTECTED_NO_DIRECT_DML_TABLES, 69],
-            [RUNTIME_DML_TABLES, 258],
+            [RUNTIME_DML_TABLES, 264],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 206],
@@ -592,7 +592,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 327 : 218;
+      const tableCount = hasCurrentMainActivityLedger ? 333 : 218;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -1198,6 +1198,22 @@ describe("runtime database posture evaluator", () => {
     expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("session_variable_set_attachments");
     expect(RUNTIME_FULL_DML_TABLES).not.toContain("session_variable_set_attachments");
     expect(RUNTIME_TABLE_PRIVILEGES.session_variable_set_attachments).toBeUndefined();
+  });
+
+  test("classifies MCP OAuth exact-key state and tool approvals explicitly", () => {
+    for (const table of [
+      "mcp_oauth_access_tokens",
+      "mcp_oauth_authorization_codes",
+      "mcp_oauth_authorization_requests",
+      "mcp_oauth_clients",
+      "mcp_oauth_refresh_tokens",
+    ] as const) {
+      expect(NON_RLS_RUNTIME_TABLES).toContain(table);
+      expect(RUNTIME_FULL_DML_TABLES).toContain(table);
+      expect(FORCE_RLS_TABLES).not.toContain(table);
+    }
+    expect(FORCE_RLS_TABLES).toContain("tool_gateway_approval_capabilities");
+    expect(RUNTIME_FULL_DML_TABLES).toContain("tool_gateway_approval_capabilities");
   });
 
   test("classifies advisory work claims as readable heads with capability-only history", () => {

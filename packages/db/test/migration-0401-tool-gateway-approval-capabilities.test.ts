@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { FORCE_RLS_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
   "../drizzle/0401_tool_gateway_approval_capabilities.sql",
@@ -69,6 +70,8 @@ describe("migration 0401 tool gateway approval capabilities", () => {
       'ALTER TABLE "tool_gateway_approval_capabilities" FORCE ROW LEVEL SECURITY',
     );
     expect(source).toContain('"subject_id" = opengeni_private.current_subject_id()');
+    expect(FORCE_RLS_TABLES).toContain("tool_gateway_approval_capabilities");
+    expect(RUNTIME_FULL_DML_TABLES).toContain("tool_gateway_approval_capabilities");
   });
 
   test("allows the matching application principal to consume one capability once", async () => {

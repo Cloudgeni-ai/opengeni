@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
   "../drizzle/0400_mcp_oauth_authorization_server.sql",
@@ -73,6 +74,16 @@ describe("migration 0400 MCP OAuth authorization server", () => {
     expect(source).toContain(
       "GRANT EXECUTE ON FUNCTION opengeni_private.register_mcp_oauth_client",
     );
+    for (const table of [
+      "mcp_oauth_access_tokens",
+      "mcp_oauth_authorization_codes",
+      "mcp_oauth_authorization_requests",
+      "mcp_oauth_clients",
+      "mcp_oauth_refresh_tokens",
+    ] as const) {
+      expect(NON_RLS_RUNTIME_TABLES).toContain(table);
+      expect(RUNTIME_FULL_DML_TABLES).toContain(table);
+    }
   });
 
   test("durably bounds registration and reaps expired OAuth state", () => {
