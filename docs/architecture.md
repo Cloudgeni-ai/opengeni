@@ -731,7 +731,9 @@ admitted only when that session's locked status is exactly `idle`. The status
 check, optional reusable-goal reset, run settlement, and pending-update append
 share the ordinary session event transaction, so concurrent occurrences cannot
 both cross the same idle boundary and a skipped occurrence cannot mutate the
-goal. A newly generated session still admits the occurrence that creates it.
+goal. An admitted occurrence persists `queued` to consume that boundary even
+when a pause or active realtime lease withholds its workflow wake. A newly
+generated session still admits the occurrence that creates it.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage

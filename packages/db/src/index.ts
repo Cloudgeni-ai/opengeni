@@ -70032,11 +70032,16 @@ export async function addSessionSystemUpdateWithSourceMutation<
               temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
             })
           : null;
+        // An idle-gated admission consumes that boundary even when control or
+        // realtime ownership withholds the workflow wake. Persisting `queued`
+        // reserves the accepted work so a later distinct skip occurrence
+        // cannot cross the same idle boundary while this update is pending.
+        const shouldQueue = shouldWake || options.requireIdleSession === true;
         await tx
           .update(schema.sessions)
           .set({
             lastSequence: session.lastSequence + appendedSequences,
-            ...(shouldWake ? { status: "queued" as const } : {}),
+            ...(shouldQueue ? { status: "queued" as const } : {}),
             updatedAt: now,
           })
           .where(eq(schema.sessions.id, session.id));

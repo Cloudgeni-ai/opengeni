@@ -3676,13 +3676,34 @@ describe("worker activities integration", () => {
     });
     expect(turn.status).toBe("idle");
 
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "verify scheduled idle reservation",
+          operationKey: `pause:${crypto.randomUUID()}`,
+          expectedRevision: 0,
+        }),
+      ),
+    );
     const third = await activities.dispatchScheduledTaskRun({
       workspaceId: grant.workspaceId,
       taskId: task.id,
       triggerType: "scheduled",
       producerKey: `worker-activity-${crypto.randomUUID()}`,
     });
-    expect(third).toMatchObject({ action: "signal", sessionId: first.sessionId });
+    expect(third).toMatchObject({
+      action: "signal",
+      sessionId: first.sessionId,
+      workflowWakeRevision: null,
+    });
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "queued",
+      effectiveControl: { state: "paused" },
+    });
     expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
       id: goalAfterFirst.id,
       status: "active",
@@ -3690,9 +3711,29 @@ describe("worker activities integration", () => {
     });
     const goalAfterThird = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
     expect(goalAfterThird!.version).toBeGreaterThan(goalAfterFirst.version);
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterThird!.id,
+      status: goalAfterThird!.status,
+      version: goalAfterThird!.version,
+      objectiveRevision: goalAfterThird!.objectiveRevision,
+      updatedAt: goalAfterThird!.updatedAt,
+    });
     expect(
       await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
     ).toHaveLength(1);
+    expect(
+      (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
+        (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
+      ),
+    ).toHaveLength(2);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {
