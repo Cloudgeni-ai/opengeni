@@ -7,7 +7,11 @@ import {
 } from "@opengeni/react/artifacts";
 import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
-import { ArtifactSandbox } from "./artifact-sandbox";
+import {
+  ArtifactSandbox,
+  formatSiteToolArguments,
+  siteToolIsDestructive,
+} from "./artifact-sandbox";
 
 describe("published HTML artifacts", () => {
   it("runs exact source without parent-origin or top-navigation authority", () => {
@@ -52,5 +56,23 @@ describe("published HTML artifacts", () => {
     expect(
       openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [port, port]),
     ).toBeNull();
+  });
+
+  it("shows bounded canonical arguments and honors destructive tool annotations", () => {
+    expect(formatSiteToolArguments({ z: 1, a: { y: 2, x: 3 } })).toBe(
+      '{\n  "a": {\n    "x": 3,\n    "y": 2\n  },\n  "z": 1\n}',
+    );
+    expect(formatSiteToolArguments({ text: "abcdefgh" }, 8)).toHaveLength(8);
+    expect(
+      siteToolIsDestructive({
+        identity: { serverId: "files", toolName: "delete" },
+        modelName: "files__delete",
+        codemodePath: ["files", "delete"],
+        inputSchema: { type: "object" },
+        source: "files",
+        approval: "human",
+        annotations: { destructiveHint: true },
+      }),
+    ).toBe(true);
   });
 });

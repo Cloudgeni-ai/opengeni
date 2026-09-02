@@ -323,13 +323,17 @@ export const ToolGatewayCallRequest = z
     catalogDigest: sha256,
     identity: ToolGatewayIdentity,
     arguments: jsonObject,
+    /** Host-owned Site context. Publisher-controlled iframe code cannot set it. */
+    siteArtifactId: z.string().uuid().optional(),
+    siteVersionId: z.string().uuid().optional(),
     /** Opaque, server-issued, single-use capability for an approval-required call. */
     approvalToken: z
       .string()
       .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
 export type ToolGatewayCallRequest = z.infer<typeof ToolGatewayCallRequest>;
 
 export const ToolGatewayApprovalRequest = z
@@ -338,8 +342,12 @@ export const ToolGatewayApprovalRequest = z
     catalogDigest: sha256,
     identity: ToolGatewayIdentity,
     arguments: jsonObject,
+    /** Host-owned Site context. Site calls require approval regardless of generic tool policy. */
+    siteArtifactId: z.string().uuid().optional(),
+    siteVersionId: z.string().uuid().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
 export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalRequest>;
 
 export const ToolGatewayApprovalResponse = z
@@ -368,6 +376,18 @@ export const ToolGatewayDeclarationsResponse = z
   })
   .strict();
 export type ToolGatewayDeclarationsResponse = z.infer<typeof ToolGatewayDeclarationsResponse>;
+
+function requireCompleteSiteToolContext(
+  value: { siteArtifactId?: string | undefined; siteVersionId?: string | undefined },
+  context: z.RefinementCtx,
+): void {
+  if ((value.siteArtifactId === undefined) === (value.siteVersionId === undefined)) return;
+  context.addIssue({
+    code: "custom",
+    message: "siteArtifactId and siteVersionId must be provided together",
+    path: [value.siteArtifactId === undefined ? "siteArtifactId" : "siteVersionId"],
+  });
+}
 
 export const CodemodeOperationState = z.enum([
   "queued",

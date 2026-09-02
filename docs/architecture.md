@@ -1069,8 +1069,11 @@ journal, sandbox delivery, and recovery semantics. The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
-credentials nor workspace routing context. Approval-required Site calls are
-confirmed in the parent and enforced again at the gateway boundary.
+credentials nor workspace routing context. Every Site invocation is confirmed
+in the parent and enforced again with a one-shot capability bound to the current
+viewer, operation, arguments, catalog, identity, and immutable Site version;
+archived Sites receive no bridge. Provider construction is permission-filtered
+and resource-filtered before any connection or `tools/list` traffic.
 
 External MCP clients may use the opt-in OAuth authorization server. Its public
 metadata and dynamic registration lead to an authorization-code flow with
@@ -1078,7 +1081,9 @@ mandatory PKCE S256, one exact RFC 8707 workspace MCP resource, issuer-bound
 redirects, opaque short-lived access tokens, and rotating refresh tokens.
 Consent freezes the current human's permissions and tool identities; every MCP
 request intersects that snapshot with live workspace authority and the current
-gateway catalog. OAuth bearer tokens are never accepted as REST credentials.
+gateway catalog. Reuse of a rotated refresh-token generation revokes every
+refresh and access token in that family. OAuth bearer tokens are never accepted
+as REST credentials.
 
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit

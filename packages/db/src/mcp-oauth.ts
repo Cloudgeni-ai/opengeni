@@ -127,7 +127,7 @@ export async function createMcpOAuthAuthorizationRequest(
     ${input.requestHash}, ${input.clientId}, ${input.accountId}, ${input.workspaceId},
     ${input.subjectId}, ${input.resource}, ${input.redirectUri}, ${input.codeChallenge},
     ${input.state}, ${JSON.stringify(input.permissions)}::jsonb,
-    ${JSON.stringify(input.toolIdentities)}::jsonb, ${input.expiresAt}
+    ${JSON.stringify(input.toolIdentities)}::jsonb, ${input.expiresAt.toISOString()}::timestamptz
   )`);
 }
 
@@ -209,7 +209,7 @@ export async function consumeMcpOAuthAuthorizationRequest(
       ${input.codeHash}, ${row.client_id}, ${row.account_id}, ${row.workspace_id},
       ${row.subject_id}, ${row.resource}, ${row.redirect_uri}, ${row.code_challenge},
       ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-      ${input.codeExpiresAt}
+      ${input.codeExpiresAt.toISOString()}::timestamptz
     )`);
     return {
       requestHash: row.request_hash,
@@ -260,7 +260,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
         ${input.refreshTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
         ${row.workspace_id}, ${row.subject_id}, ${row.resource},
         ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-        ${input.refreshExpiresAt}
+        ${input.refreshExpiresAt.toISOString()}::timestamptz
       )`);
     }
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
@@ -270,7 +270,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
       ${input.accessTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
       ${row.workspace_id}, ${row.subject_id}, ${row.resource},
       ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-      ${input.accessExpiresAt}
+      ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
       tokenHash: input.accessTokenHash,
@@ -296,25 +296,48 @@ export async function rotateMcpOAuthRefreshToken(
   },
 ): Promise<McpOAuthAccess | null> {
   return await db.transaction(async (tx) => {
+    const [family] = await rawRows<{ family_id: string }>(
+      tx,
+      sql`select family_id
+        from mcp_oauth_refresh_tokens
+        where token_hash = ${input.refreshTokenHash}
+          and client_id = ${input.clientId}
+          and resource = ${input.resource}`,
+    );
+    if (!family) return null;
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(
+        hashtextextended(${`mcp-oauth-refresh-family:${family.family_id}`}, 0)
+      )`,
+    );
     const [row] = await rawRows<
       GrantRow & {
         client_id: string;
         family_id: string;
         generation: number;
+        revoked_at: Date | string | null;
+        active: boolean;
       }
     >(
       tx,
-      sql`update mcp_oauth_refresh_tokens
-        set revoked_at = clock_timestamp()
+      sql`select client_id, family_id, generation, account_id, workspace_id,
+          subject_id, resource, permissions, tool_identities, revoked_at,
+          expires_at > clock_timestamp() as active
+        from mcp_oauth_refresh_tokens
         where token_hash = ${input.refreshTokenHash}
           and client_id = ${input.clientId}
           and resource = ${input.resource}
-          and revoked_at is null
-          and expires_at > clock_timestamp()
-        returning client_id, family_id, generation, account_id, workspace_id,
-          subject_id, resource, permissions, tool_identities`,
+        for update`,
     );
     if (!row) return null;
+    if (row.revoked_at !== null) {
+      await revokeMcpOAuthRefreshFamily(tx, row.family_id);
+      return null;
+    }
+    if (!row.active) return null;
+    await tx.execute(sql`update mcp_oauth_refresh_tokens
+      set revoked_at = clock_timestamp()
+      where token_hash = ${input.refreshTokenHash}`);
     const generation = Number(row.generation) + 1;
     await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
       token_hash, family_id, generation, client_id, account_id, workspace_id,
@@ -323,7 +346,7 @@ export async function rotateMcpOAuthRefreshToken(
       ${input.nextRefreshTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
       ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-      ${input.refreshExpiresAt}
+      ${input.refreshExpiresAt.toISOString()}::timestamptz
     )`);
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
       token_hash, refresh_family_id, refresh_generation, client_id, account_id,
@@ -332,7 +355,7 @@ export async function rotateMcpOAuthRefreshToken(
       ${input.accessTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
       ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb,
-      ${input.accessExpiresAt}
+      ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
       tokenHash: input.accessTokenHash,
@@ -343,6 +366,15 @@ export async function rotateMcpOAuthRefreshToken(
       expiresAt: input.accessExpiresAt,
     };
   });
+}
+
+async function revokeMcpOAuthRefreshFamily(db: Database, familyId: string): Promise<void> {
+  await db.execute(sql`update mcp_oauth_refresh_tokens
+    set revoked_at = coalesce(revoked_at, clock_timestamp())
+    where family_id = ${familyId}`);
+  await db.execute(sql`update mcp_oauth_access_tokens
+    set revoked_at = coalesce(revoked_at, clock_timestamp())
+    where refresh_family_id = ${familyId}`);
 }
 
 export async function resolveMcpOAuthAccessToken(

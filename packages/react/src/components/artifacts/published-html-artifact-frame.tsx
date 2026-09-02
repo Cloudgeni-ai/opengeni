@@ -64,8 +64,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   }, [props.toolBridge]);
   useEffect(() => {
     if (!toolBridgeEnabled || typeof window === "undefined") return;
-    const ports = new Set<MessagePort>();
-    const controllers = new Map<string, AbortController>();
+    const requests = new SiteBridgeRequestRegistry();
     const onWindowMessage = (event: MessageEvent<unknown>) => {
       const port = openGeniSiteBridgePortForFrame(
         event.source,
@@ -74,19 +73,29 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
         event.ports,
       );
       if (!port) return;
-      for (const existing of ports) existing.close();
-      ports.clear();
-      ports.add(port);
+      requests.replacePort(port);
       port.addEventListener("message", (portEvent: MessageEvent<unknown>) => {
         const message = portEvent.data;
         if (isOpenGeniSiteBridgeCancelMessage(message)) {
-          controllers.get(message.requestId)?.abort();
-          controllers.delete(message.requestId);
+          requests.cancel(port, message.requestId);
           return;
         }
         if (!isOpenGeniSiteBridgeRequestMessage(message)) return;
-        const controller = new AbortController();
-        controllers.set(message.requestId, controller);
+        const controller = requests.start(port, message.requestId);
+        if (!controller) {
+          port.postMessage({
+            type: OPENGENI_SITE_BRIDGE_RESPONSE,
+            version: OPENGENI_SITE_BRIDGE_VERSION,
+            requestId: message.requestId,
+            ok: false,
+            error: {
+              code: "duplicate_request_id",
+              message: "A Site tool request with this id is already running",
+              retryable: false,
+            },
+          } satisfies OpenGeniSiteBridgeResponseMessage);
+          return;
+        }
         void handleSiteBridgeRequest(bridgeRef.current, message, controller.signal)
           .then((value) => {
             if (!controller.signal.aborted) {
@@ -110,8 +119,9 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
               } satisfies OpenGeniSiteBridgeResponseMessage);
             }
           })
-          .finally(() => controllers.delete(message.requestId));
+          .finally(() => requests.complete(port, message.requestId, controller));
       });
+      port.addEventListener("messageerror", () => requests.closePort(port));
       port.start();
       port.postMessage({
         type: OPENGENI_SITE_BRIDGE_READY,
@@ -121,10 +131,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
     window.addEventListener("message", onWindowMessage);
     return () => {
       window.removeEventListener("message", onWindowMessage);
-      for (const controller of controllers.values()) controller.abort();
-      controllers.clear();
-      for (const port of ports) port.close();
-      ports.clear();
+      requests.closeAll();
     };
   }, [toolBridgeEnabled]);
   return (
@@ -138,6 +145,51 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       style={props.style}
     />
   );
+}
+
+export class SiteBridgeRequestRegistry {
+  private readonly controllersByPort = new Map<MessagePort, Map<string, AbortController>>();
+
+  replacePort(port: MessagePort): void {
+    this.closeAll();
+    this.controllersByPort.set(port, new Map());
+  }
+
+  start(port: MessagePort, requestId: string): AbortController | null {
+    const controllers = this.controllersByPort.get(port);
+    if (!controllers || controllers.has(requestId)) return null;
+    const controller = new AbortController();
+    controllers.set(requestId, controller);
+    return controller;
+  }
+
+  cancel(port: MessagePort, requestId: string): void {
+    const controllers = this.controllersByPort.get(port);
+    const controller = controllers?.get(requestId);
+    if (!controller) return;
+    controller.abort(new Error("Site tool request cancelled"));
+    controllers!.delete(requestId);
+  }
+
+  complete(port: MessagePort, requestId: string, controller: AbortController): void {
+    const controllers = this.controllersByPort.get(port);
+    if (controllers?.get(requestId) === controller) controllers.delete(requestId);
+  }
+
+  closePort(port: MessagePort): void {
+    const controllers = this.controllersByPort.get(port);
+    if (!controllers) return;
+    for (const controller of controllers.values()) {
+      controller.abort(new Error("Site tool bridge port closed"));
+    }
+    controllers.clear();
+    this.controllersByPort.delete(port);
+    port.close();
+  }
+
+  closeAll(): void {
+    for (const port of [...this.controllersByPort.keys()]) this.closePort(port);
+  }
 }
 
 export function openGeniSiteBridgePortForFrame(

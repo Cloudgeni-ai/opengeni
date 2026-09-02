@@ -207,10 +207,11 @@ The parent resolves every call through the current human's live workspace tool
 gateway. That gateway rebuilds the enabled first-party and integration catalog,
 resolves personal/workspace connection authority through the existing broker,
 validates the catalog digest and input, and invokes the same executor as model
-and Codemode calls. An approval-required entry opens the stock parent-owned
-confirmation dialog; only the resulting authenticated current-human HTTP call
-carries the server-issued one-shot approval capability. Site code cannot approve
-itself.
+and Codemode calls. Every Site invocation opens the stock parent-owned
+confirmation dialog, including tools whose ordinary catalog policy is `none` or
+`policy`; only the resulting authenticated current-human HTTP call carries the
+server-issued one-shot approval capability bound to that immutable Site version.
+Site code cannot approve itself.
 
 This avoids version-scoped bearer issuance entirely. Membership, permission,
 connection, logout, and catalog changes are observed by the parent's ordinary
@@ -360,9 +361,11 @@ catalog changed after the Site was built.
    digest, canonical identity, and arguments over the transferred port.
 4. The parent rejects identities outside the immutable requested set and sends
    the call through the authenticated workspace HTTP adapter.
-5. Approval-required entries stop at a stock parent-owned confirmation dialog.
-   The parent obtains a server-issued one-shot capability bound to the exact
-   operation; MCP and Site code cannot silently provide it.
+5. Every invocation stops at a stock parent-owned confirmation dialog. The
+   parent shows bounded canonical arguments and destructive intent, then obtains
+   a server-issued one-shot capability bound to the exact operation, arguments,
+   identity, viewer, and immutable Site version; MCP and Site code cannot
+   silently provide it.
 6. The API rebuilds the current-human gateway from live enabled first-party and
    integration servers, validates digest/input/authorization, resolves current
    connections, and calls the same executor closures as model and Codemode.
@@ -384,9 +387,10 @@ catalog changed after the Site was built.
   `/v1/workspaces/:id/mcp` route and standard MCP OAuth.
 - Site authority is parent-mediated and limited twice: the immutable version's
   retained requested identities and the viewer's live workspace gateway.
-- Existing `requireApproval` metadata remains the only human-approval policy.
-  The parent confirmation dialog and server check are adapters over that policy,
-  not a new consent framework.
+- Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
+  approval policy. The Site adapter applies mandatory per-invocation viewer
+  confirmation through the same one-shot capability mechanism, not a parallel
+  approval store or consent framework.
 - Codemode keeps its exact-attempt durable operation journal and recovery
   semantics. Direct current-human calls carry caller-generated operation ids;
   provider-specific idempotency/outcome handling remains in the canonical

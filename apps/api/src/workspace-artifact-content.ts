@@ -22,6 +22,7 @@ export type PreparedWorkspaceArtifactContent = {
   sourceSizeBytes: number;
   requestedTools?: ToolGatewayIdentity[];
   persistContent: () => Promise<void>;
+  discardContent: () => Promise<void>;
 };
 
 export function prepareWorkspaceArtifactContent(
@@ -46,6 +47,12 @@ export function prepareWorkspaceArtifactContent(
   const storageGroupId = crypto.randomUUID();
   const contentKey = `workspaces/${workspaceId}/workspace-artifacts/blobs/${storageGroupId}-${contentSha256}.html`;
   const sourceKey = `workspaces/${workspaceId}/workspace-artifacts/sources/${storageGroupId}-${sourceSha256}.json`;
+  const discardContent = async (): Promise<void> => {
+    await Promise.allSettled([
+      objectStorage.deleteObject(contentKey),
+      objectStorage.deleteObject(sourceKey),
+    ]);
+  };
   return {
     contentKey,
     contentSha256,
@@ -54,6 +61,7 @@ export function prepareWorkspaceArtifactContent(
     sourceSha256,
     sourceSizeBytes: sourceBytes.byteLength,
     ...(requestedTools === undefined ? {} : { requestedTools }),
+    discardContent,
     persistContent: async () => {
       const writes = await Promise.allSettled([
         objectStorage.putObject({

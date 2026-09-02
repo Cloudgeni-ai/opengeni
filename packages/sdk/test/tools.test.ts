@@ -3,6 +3,10 @@ import { OpenGeniClient } from "../src/client";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
+const site = {
+  artifactId: "44444444-4444-4444-8444-444444444444",
+  versionId: "55555555-5555-4555-8555-555555555555",
+};
 const catalog = {
   version: 1 as const,
   accountId: "22222222-2222-4222-8222-222222222222",
@@ -48,6 +52,8 @@ describe("OpenGeniClient tools", () => {
             catalogDigest: catalog.digest,
             identity: catalog.entries[0]!.identity,
             arguments: { query: "gateway" },
+            siteArtifactId: site.artifactId,
+            siteVersionId: site.versionId,
           });
           return response({
             operationId: "33333333-3333-4333-8333-333333333333",
@@ -60,6 +66,8 @@ describe("OpenGeniClient tools", () => {
           catalogDigest: catalog.digest,
           identity: catalog.entries[0]!.identity,
           arguments: { query: "gateway" },
+          siteArtifactId: site.artifactId,
+          siteVersionId: site.versionId,
           approvalToken: `ogta_${"a".repeat(43)}`,
         });
         return response({
@@ -77,7 +85,7 @@ describe("OpenGeniClient tools", () => {
     const approval = await tools.$approve(
       catalog.entries[0]!.identity,
       { query: "gateway" },
-      { operationId: "33333333-3333-4333-8333-333333333333" },
+      { operationId: "33333333-3333-4333-8333-333333333333", site },
     );
     expect(
       await (tools.docs!.search as (args: unknown, options: unknown) => Promise<unknown>)(
@@ -85,6 +93,7 @@ describe("OpenGeniClient tools", () => {
         {
           operationId: approval.operationId,
           approvalToken: approval.approvalToken,
+          site,
         },
       ),
     ).toEqual({ matches: 1 });

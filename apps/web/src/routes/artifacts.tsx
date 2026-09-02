@@ -226,8 +226,9 @@ export function ArtifactDetailRoute({
   }, [artifactId, workspaceId]);
   useEffect(() => void load(), [load]);
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
+  const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
-    if (requestedTools.length === 0) return undefined;
+    if (requestedTools.length === 0 || !siteVersionId) return undefined;
     const allowed = new Set(requestedTools.map(toolIdentityKey));
     const workspaceTools = context.client.tools.forWorkspace(workspaceId);
     let projectedCatalog: ToolGatewayCatalog | null = null;
@@ -248,6 +249,7 @@ export function ArtifactDetailRoute({
         }
         return await workspaceTools.$approve(toolRequest.identity, toolRequest.arguments, {
           operationId: toolRequest.operationId,
+          site: { artifactId, versionId: siteVersionId },
           signal,
         });
       },
@@ -266,11 +268,15 @@ export function ArtifactDetailRoute({
         return await request<ToolGatewayCallResponse>(`/v1/workspaces/${workspaceId}/tools/calls`, {
           method: "POST",
           signal,
-          body: JSON.stringify(toolRequest),
+          body: JSON.stringify({
+            ...toolRequest,
+            siteArtifactId: artifactId,
+            siteVersionId,
+          }),
         });
       },
     };
-  }, [context.client, requestedTools, workspaceId]);
+  }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
   const editWithGeni = async () => {
     const currentVersion = detail?.artifact.currentVersion;
     if (!detail || !currentVersion || detail.artifact.status === "archived") return;
@@ -442,7 +448,7 @@ export function ArtifactDetailRoute({
             }
             editDisabled={context.busy || archived}
             onEdit={() => void editWithGeni()}
-            toolBridge={siteToolBridge}
+            toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
             sourceFileCount={content.source.files.length}
           />

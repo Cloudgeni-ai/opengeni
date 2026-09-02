@@ -96,6 +96,12 @@ describe("OpenGeni Site client", () => {
     expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
       "approvalToken",
     );
+    expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
+      "siteVersionId",
+    );
+    expect(calls[1]?.method === "call" ? calls[1].payload : null).not.toHaveProperty(
+      "siteArtifactId",
+    );
     await expect(
       client.tools.$approve(catalog.entries[0]!.identity, { query: "roadmap" }),
     ).rejects.toThrow("Unsupported Site bridge request");

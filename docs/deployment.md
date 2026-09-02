@@ -33,12 +33,18 @@ through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
 removes expired clients, consent requests, authorization codes, access tokens,
 and refresh tokens without requiring a separate scheduler.
 
-Current-human HTTP/SDK and Site calls that need approval use the ordinary API
-database and require migration `0401_tool_gateway_approval_capabilities.sql`.
-No additional secret or service is required. The API stores only a token hash,
-binds each capability to the current human and exact call, expires it after five
-minutes, and consumes it once. Issuance opportunistically removes bounded
-expired/consumed rows. Existing database readiness therefore covers this path.
+Current-human HTTP/SDK calls classified for human approval and every Site call
+use the ordinary API database and require migration
+`0401_tool_gateway_approval_capabilities.sql`. No additional secret or service
+is required. The API stores only a token hash, binds each capability to the
+current human and exact call, additionally binds Site consent to the immutable
+Site version, expires it after five minutes, and consumes it once. Issuance
+opportunistically removes bounded expired/consumed rows. Existing database
+readiness therefore covers this path.
+
+Refresh-token rotation is family-fenced. Reuse of any known revoked generation
+atomically revokes every descendant refresh and access token before returning
+`invalid_grant`.
 
 Gateway calls emit `opengeni_tool_gateway_operations_total` and
 `opengeni_tool_gateway_operation_duration_seconds` with bounded adapter,

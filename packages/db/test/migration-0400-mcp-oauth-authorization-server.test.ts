@@ -2,6 +2,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
+import { createDb, rotateMcpOAuthRefreshToken, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
@@ -17,6 +18,7 @@ setDefaultTimeout(900_000);
 let blank: BlankTestDatabase | null = null;
 let admin: ReturnType<typeof postgres> | null = null;
 let app: ReturnType<typeof postgres> | null = null;
+let client: DbClient | null = null;
 
 beforeAll(async () => {
   blank = await acquireBlankTestDatabase("migration-0400-mcp-oauth");
@@ -43,9 +45,11 @@ beforeAll(async () => {
   appUrl.username = "opengeni_app";
   appUrl.password = blank.appPassword;
   app = postgres(appUrl.toString(), { max: 1, prepare: false });
+  client = createDb(appUrl.toString());
 }, 900_000);
 
 afterAll(async () => {
+  await client?.close().catch(() => undefined);
   await app?.end().catch(() => undefined);
   await admin?.end().catch(() => undefined);
   await blank?.release();
@@ -151,16 +155,79 @@ describe("migration 0400 MCP OAuth authorization server", () => {
     expect(Number(remaining?.count)).toBe(0);
   });
 
-  test("consumes codes and refresh tokens once with exact client and resource binding", () => {
+  test("consumes codes and rotates refresh tokens with exact client and resource binding", () => {
     expect(repositorySource).toMatch(
       /delete from mcp_oauth_authorization_codes[\s\S]*code_hash = \$\{input\.codeHash\}[\s\S]*client_id = \$\{input\.clientId\}[\s\S]*redirect_uri = \$\{input\.redirectUri\}[\s\S]*resource = \$\{input\.resource\}[\s\S]*code_challenge = \$\{input\.codeChallenge\}[\s\S]*expires_at > clock_timestamp\(\)/u,
     );
-    expect(repositorySource).toMatch(
-      /update mcp_oauth_refresh_tokens[\s\S]*set revoked_at = clock_timestamp\(\)[\s\S]*token_hash = \$\{input\.refreshTokenHash\}[\s\S]*client_id = \$\{input\.clientId\}[\s\S]*resource = \$\{input\.resource\}[\s\S]*revoked_at is null[\s\S]*expires_at > clock_timestamp\(\)/u,
-    );
+    expect(repositorySource).toContain("mcp-oauth-refresh-family:");
+    expect(repositorySource).toContain("for update");
+    expect(repositorySource).toContain("revokeMcpOAuthRefreshFamily(tx, row.family_id)");
+    expect(repositorySource).toContain("where refresh_family_id = ${familyId}");
+    expect(repositorySource).toContain("toISOString()}::timestamptz");
     expect(repositorySource).toContain("const generation = Number(row.generation) + 1");
     expect(repositorySource).toMatch(
       /if \(input\.refreshTokenHash\) \{[\s\S]*insert into mcp_oauth_refresh_tokens/u,
     );
+  });
+
+  test("revokes the whole rotated family when an older refresh token is replayed", async () => {
+    if (!admin || !client) return;
+    const accountId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const familyId = crypto.randomUUID();
+    const clientId = `ogmcp_replay_${crypto.randomUUID()}`;
+    const oldTokenHash = "1".repeat(64);
+    const nextTokenHash = "2".repeat(64);
+    const accessTokenHash = "3".repeat(64);
+    const resource = `https://api.example.test/mcp/workspaces/${workspaceId}`;
+    await admin`insert into managed_accounts (id) values (${accountId})`;
+    await admin`insert into workspaces (id, account_id) values (${workspaceId}, ${accountId})`;
+    await admin`insert into mcp_oauth_clients (
+      client_id, redirect_uris, client_name, grant_types, response_types, registration_scope_hash
+    ) values (
+      ${clientId}, ${JSON.stringify(["http://127.0.0.1/callback"])}::jsonb, 'Replay test',
+      ${JSON.stringify(["authorization_code", "refresh_token"])}::jsonb,
+      ${JSON.stringify(["code"])}::jsonb, ${"4".repeat(64)}
+    )`;
+    await admin`insert into mcp_oauth_refresh_tokens (
+      token_hash, family_id, generation, client_id, account_id, workspace_id,
+      subject_id, resource, permissions, tool_identities, expires_at
+    ) values (
+      ${oldTokenHash}, ${familyId}, 1, ${clientId}, ${accountId}, ${workspaceId},
+      'subject:refresh-replay', ${resource}, '[]'::jsonb, '[]'::jsonb,
+      clock_timestamp() + interval '1 day'
+    )`;
+
+    const rotated = await rotateMcpOAuthRefreshToken(client.db, {
+      refreshTokenHash: oldTokenHash,
+      clientId,
+      resource,
+      accessTokenHash,
+      nextRefreshTokenHash: nextTokenHash,
+      accessExpiresAt: new Date(Date.now() + 15 * 60_000),
+      refreshExpiresAt: new Date(Date.now() + 24 * 60 * 60_000),
+    });
+    expect(rotated?.refreshGeneration).toBe(2);
+
+    expect(
+      await rotateMcpOAuthRefreshToken(client.db, {
+        refreshTokenHash: oldTokenHash,
+        clientId,
+        resource,
+        accessTokenHash: "5".repeat(64),
+        nextRefreshTokenHash: "6".repeat(64),
+        accessExpiresAt: new Date(Date.now() + 15 * 60_000),
+        refreshExpiresAt: new Date(Date.now() + 24 * 60 * 60_000),
+      }),
+    ).toBeNull();
+
+    const [liveRefresh] = await admin<{ count: number }[]>`
+      select count(*)::integer as count from mcp_oauth_refresh_tokens
+      where family_id = ${familyId} and revoked_at is null`;
+    const [liveAccess] = await admin<{ count: number }[]>`
+      select count(*)::integer as count from mcp_oauth_access_tokens
+      where refresh_family_id = ${familyId} and revoked_at is null`;
+    expect(liveRefresh?.count).toBe(0);
+    expect(liveAccess?.count).toBe(0);
   });
 });

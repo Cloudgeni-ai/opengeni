@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
+import type { Settings } from "@opengeni/config";
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import {
@@ -9,6 +10,7 @@ import {
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
+  workspaceToolGatewaySettingsForGrant,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
 } from "../src/workspace-tool-gateway";
@@ -30,6 +32,7 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
 
 function preparedGateway(
   calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }>,
+  approval: "human" | "none" = "human",
 ): PreparedWorkspaceToolGateway {
   const { catalog, gateway } = createWorkspaceToolGateway({
     accountId,
@@ -55,7 +58,7 @@ function preparedGateway(
           additionalProperties: false,
         },
         source: "mcp",
-        approval: "human",
+        approval,
         execute: async (argumentsValue, context) => {
           calls.push({ kind: context.caller.kind, argumentsValue });
           return {
@@ -203,6 +206,69 @@ describe("workspace tool gateway adapters", () => {
     });
   });
 
+  test("requires viewer approval for every Site call and binds it to the exact Site version", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const prepared = preparedGateway(calls, "none");
+    const access = grant();
+    const site = {
+      siteArtifactId: "44444444-4444-4444-8444-444444444444",
+      siteVersionId: "55555555-5555-4555-8555-555555555555",
+    };
+    const authorizationChecks: unknown[] = [];
+    const authorizeSiteTool = async (_db: never, _grant: AccessGrant, context: unknown) => {
+      authorizationChecks.push(context);
+    };
+    const request = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "SITE-1" },
+      ...site,
+    };
+
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        access,
+        request,
+        {} as never,
+        async () => false,
+        undefined,
+        authorizeSiteTool as never,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const issued: unknown[] = [];
+    const approval = await approveWorkspaceToolGatewayCall(
+      prepared,
+      access,
+      {} as never,
+      request,
+      async (_db, input) => {
+        issued.push(input);
+      },
+      undefined,
+      authorizeSiteTool as never,
+    );
+    expect(issued[0]).toMatchObject({ siteVersionId: site.siteVersionId });
+
+    const response = await callWorkspaceToolGateway(
+      prepared,
+      access,
+      { ...request, approvalToken: approval.approvalToken },
+      {} as never,
+      async (_db, input) => {
+        expect(input).toMatchObject({ siteVersionId: site.siteVersionId });
+        return true;
+      },
+      undefined,
+      authorizeSiteTool as never,
+    );
+    expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+    expect(authorizationChecks).toHaveLength(3);
+    expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SITE-1" } }]);
+  });
+
   test("generates SDK declarations from the catalog exposed by the route adapter", () => {
     const prepared = preparedGateway([]);
     const declarations = workspaceToolGatewayDeclarations(prepared);
@@ -232,5 +298,26 @@ describe("workspace tool gateway adapters", () => {
       requireWorkspaceToolGatewayGrant(grant({ principalKind: "configured_key" })),
     ).toThrow(HTTPException);
     expect(() => requireWorkspaceToolGatewayGrant(grant())).not.toThrow();
+  });
+
+  test("filters unauthorized and out-of-resource servers before provider construction", () => {
+    const settings = {
+      mcpServers: [
+        { id: "opengeni" },
+        { id: "files" },
+        { id: "docs" },
+        { id: "unrelated-integration" },
+      ],
+    } as Settings;
+    expect(
+      workspaceToolGatewaySettingsForGrant(settings, grant()).mcpServers.map((server) => server.id),
+    ).toEqual(["opengeni", "unrelated-integration"]);
+    expect(
+      workspaceToolGatewaySettingsForGrant(
+        settings,
+        grant({ permissions: ["workspace:read", "documents:search", "files:read"] }),
+        [{ serverId: "docs", toolName: "search_documents" }],
+      ).mcpServers.map((server) => server.id),
+    ).toEqual(["docs"]);
   });
 });

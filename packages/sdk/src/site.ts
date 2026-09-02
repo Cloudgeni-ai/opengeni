@@ -27,8 +27,11 @@ export type OpenGeniSiteBridgeReadyMessage = {
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
 };
 
-/** Site-originated calls cannot carry host-only approval authority. */
-export type OpenGeniSiteToolCallRequest = Omit<ToolGatewayCallRequest, "approvalToken">;
+/** Site-originated calls cannot carry host-only approval or Site-version authority. */
+export type OpenGeniSiteToolCallRequest = Omit<
+  ToolGatewayCallRequest,
+  "approvalToken" | "siteArtifactId" | "siteVersionId"
+>;
 
 export type OpenGeniSiteBridgeRequestMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_REQUEST;

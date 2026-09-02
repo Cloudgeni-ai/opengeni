@@ -22,6 +22,7 @@ import {
 } from "@opengeni/contracts";
 import {
   buildApiIntegrationMcpServers,
+  hasPermission,
   requireResolvedAccessGrantAuthorization,
   resolveCodexAppsCredentialIdForRun,
   resolveWorkspaceCatalogSettings,
@@ -34,8 +35,10 @@ import {
   buildConnectionTokenResolver,
   withCodexAppsRequestAuthorization,
   consumeToolGatewayApproval,
+  getWorkspaceArtifact,
   issueToolGatewayApproval,
   ToolGatewayApprovalRateLimitError,
+  WorkspaceArtifactNotFoundError,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -68,6 +71,18 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
 };
+
+type WorkspaceSiteToolContext = {
+  siteArtifactId: string;
+  siteVersionId: string;
+  identity: { serverId: string; toolName: string };
+};
+
+type AuthorizeWorkspaceSiteTool = (
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  context: WorkspaceSiteToolContext,
+) => Promise<void>;
 
 export function grantUsesAttemptScopedMcp(grant: AccessGrant): boolean {
   return (
@@ -145,8 +160,10 @@ async function prepareWorkspaceToolGatewayForGrant(
       },
     },
   );
-  const deps = { ...routeDeps, catalogSourceSettings, settings };
-  const resolveConnection = buildConnectionTokenResolver(routeDeps.db, settings);
+  const gatewaySettings = workspaceToolGatewaySettingsForGrant(settings, grant, allowedIdentities);
+  const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
+  const deps = { ...routeDeps, catalogSourceSettings, settings: gatewaySettings };
+  const resolveConnection = buildConnectionTokenResolver(routeDeps.db, gatewaySettings);
   const resolveCredential = async (
     input: ResolveConnectionCredentialInput,
   ): Promise<ResolveConnectionCredentialResult> =>
@@ -155,22 +172,30 @@ async function prepareWorkspaceToolGatewayForGrant(
       ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
     });
   const firstPartyServers = await Promise.all([
-    inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant)),
-    inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant)),
-    inMemoryMcpRegistration(
-      "docs",
-      buildDocumentsMcpServer(
-        routeDeps.db,
-        grant.accountId,
-        grant.workspaceId,
-        routeDeps.getDocumentServices(),
-        { initiatingSubjectId: grant.subjectId },
-      ),
-    ),
+    ...(gatewayServerIds.has("opengeni")
+      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
+      : []),
+    ...(gatewayServerIds.has("files")
+      ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]
+      : []),
+    ...(gatewayServerIds.has("docs")
+      ? [
+          inMemoryMcpRegistration(
+            "docs",
+            buildDocumentsMcpServer(
+              routeDeps.db,
+              grant.accountId,
+              grant.workspaceId,
+              routeDeps.getDocumentServices(),
+              { initiatingSubjectId: grant.subjectId },
+            ),
+          ),
+        ]
+      : []),
   ]);
   const apiIntegrationServers = buildApiIntegrationMcpServers({
-    settings,
-    integrations,
+    settings: gatewaySettings,
+    integrations: integrations.filter((integration) => gatewayServerIds.has(integration.serverId)),
     authority: {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -182,10 +207,9 @@ async function prepareWorkspaceToolGatewayForGrant(
         ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
       }),
   });
-  const codexAppsCredentialId = await resolveCodexAppsCredentialIdForRun(
-    routeDeps.db,
-    grant.workspaceId,
-  );
+  const codexAppsCredentialId = gatewayServerIds.has("codex_apps")
+    ? await resolveCodexAppsCredentialIdForRun(routeDeps.db, grant.workspaceId)
+    : null;
   const codexAppsAuth = codexAppsCredentialId
     ? (() => {
         const resolver = buildCodexTokenResolver(
@@ -214,29 +238,33 @@ async function prepareWorkspaceToolGatewayForGrant(
       })()
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
-  const prepared = await prepareWorkspaceToolGatewayTools(settings, allGatewayToolRefs(settings), {
-    accountId: grant.accountId,
-    workspaceId: grant.workspaceId,
-    subjectId: grant.subjectId,
-    credentialSubjectId: grant.subjectId,
-    resolveCredential,
-    localMcpServers,
-    ...(codexAppsAuth ? { codexAppsAuth } : {}),
-    workspaceToolGateway: {
-      requireApproval: (entry, _caller, context) =>
-        entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
-      ...(allowedIdentities
-        ? {
-            filterDefinition: (definition) =>
-              allowedIdentities.some(
-                (identity) =>
-                  identity.serverId === definition.identity.serverId &&
-                  identity.toolName === definition.identity.toolName,
-              ),
-          }
-        : {}),
+  const prepared = await prepareWorkspaceToolGatewayTools(
+    gatewaySettings,
+    allGatewayToolRefs(gatewaySettings),
+    {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+      credentialSubjectId: grant.subjectId,
+      resolveCredential,
+      localMcpServers,
+      ...(codexAppsAuth ? { codexAppsAuth } : {}),
+      workspaceToolGateway: {
+        requireApproval: (entry, _caller, context) =>
+          entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+        ...(allowedIdentities
+          ? {
+              filterDefinition: (definition) =>
+                allowedIdentities.some(
+                  (identity) =>
+                    identity.serverId === definition.identity.serverId &&
+                    identity.toolName === definition.identity.toolName,
+                ),
+            }
+          : {}),
+      },
     },
-  });
+  );
   if (!prepared.toolGateway || !prepared.toolGatewayCatalog) {
     await prepared.close().catch(() => undefined);
     throw new Error("workspace tool gateway preparation did not produce a gateway");
@@ -245,6 +273,27 @@ async function prepareWorkspaceToolGatewayForGrant(
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+  };
+}
+
+export function workspaceToolGatewaySettingsForGrant(
+  settings: Settings,
+  grant: AccessGrant,
+  allowedIdentities?: readonly { serverId: string; toolName: string }[],
+): Settings {
+  const allowedServerIds = allowedIdentities
+    ? new Set(allowedIdentities.map((identity) => identity.serverId))
+    : null;
+  return {
+    ...settings,
+    mcpServers: settings.mcpServers.filter((server) => {
+      if (allowedServerIds && !allowedServerIds.has(server.id)) return false;
+      if (server.id === "docs" && !hasPermission(grant.permissions, "documents:search")) {
+        return false;
+      }
+      if (server.id === "files" && !hasPermission(grant.permissions, "files:read")) return false;
+      return true;
+    }),
   };
 }
 
@@ -313,6 +362,7 @@ export async function callWorkspaceToolGateway(
   db?: ApiRouteDeps["db"],
   consumeApproval: typeof consumeToolGatewayApproval = consumeToolGatewayApproval,
   observability?: Observability,
+  authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
 ) {
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
@@ -327,8 +377,21 @@ export async function callWorkspaceToolGateway(
     source: entry?.source ?? "aggregate",
   });
   try {
+    const siteContext =
+      request.siteArtifactId && request.siteVersionId
+        ? {
+            siteArtifactId: request.siteArtifactId,
+            siteVersionId: request.siteVersionId,
+            identity: request.identity,
+          }
+        : null;
+    if (entry && siteContext) {
+      if (!db) throw new HTTPException(409, { message: "tool_gateway_approval_required" });
+      await authorizeSiteTool(db, grant, siteContext);
+    }
     let approvalConfirmed = false;
-    if (entry?.approval === "human" && request.approvalToken && db) {
+    const approvalRequired = entry?.approval === "human" || siteContext !== null;
+    if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
         accountId: grant.accountId,
@@ -338,7 +401,11 @@ export async function callWorkspaceToolGateway(
         catalogDigest: request.catalogDigest,
         identity: request.identity,
         argumentsDigest: digestCanonicalJson(request.arguments),
+        ...(siteContext ? { siteVersionId: siteContext.siteVersionId } : {}),
       });
+    }
+    if (approvalRequired && !approvalConfirmed) {
+      throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
     const result = await prepared.toolGateway.call(
       {
@@ -383,6 +450,7 @@ export async function approveWorkspaceToolGatewayCall(
   input: unknown,
   issueApproval: typeof issueToolGatewayApproval = issueToolGatewayApproval,
   observability?: Observability,
+  authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
 ) {
   const request = ToolGatewayApprovalRequest.parse(input);
   if (request.catalogDigest !== prepared.toolGatewayCatalog.digest) {
@@ -394,7 +462,17 @@ export async function approveWorkspaceToolGatewayCall(
       candidate.identity.toolName === request.identity.toolName,
   );
   if (!entry) throw new HTTPException(404, { message: "tool_not_found" });
-  if (entry.approval !== "human") {
+  const siteContext =
+    request.siteArtifactId && request.siteVersionId
+      ? {
+          siteArtifactId: request.siteArtifactId,
+          siteVersionId: request.siteVersionId,
+          identity: request.identity,
+        }
+      : null;
+  if (siteContext) {
+    await authorizeSiteTool(db, grant, siteContext);
+  } else if (entry.approval !== "human") {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
   const observation = startWorkspaceToolGatewayObservation(observability, {
@@ -414,6 +492,7 @@ export async function approveWorkspaceToolGatewayCall(
       catalogDigest: request.catalogDigest,
       identity: request.identity,
       argumentsDigest: digestCanonicalJson(request.arguments),
+      ...(siteContext ? { siteVersionId: siteContext.siteVersionId } : {}),
       expiresAt,
     });
   } catch (error) {
@@ -430,6 +509,34 @@ export async function approveWorkspaceToolGatewayCall(
     approvalToken,
     expiresAt: expiresAt.toISOString(),
   });
+}
+
+async function requireWorkspaceSiteToolAuthorization(
+  db: ApiRouteDeps["db"],
+  grant: AccessGrant,
+  context: WorkspaceSiteToolContext,
+): Promise<void> {
+  try {
+    const detail = await getWorkspaceArtifact(db, grant.workspaceId, context.siteArtifactId);
+    const currentVersion = detail.artifact.currentVersion;
+    const requested = currentVersion?.requestedTools.some(
+      (identity) =>
+        identity.serverId === context.identity.serverId &&
+        identity.toolName === context.identity.toolName,
+    );
+    if (
+      detail.artifact.status !== "active" ||
+      currentVersion?.id !== context.siteVersionId ||
+      !requested
+    ) {
+      throw new HTTPException(403, { message: "site_tool_not_authorized" });
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceArtifactNotFoundError) {
+      throw new HTTPException(403, { message: "site_tool_not_authorized" });
+    }
+    throw error;
+  }
 }
 
 function hashOpaqueValue(value: string): string {

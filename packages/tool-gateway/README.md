@@ -39,7 +39,9 @@ const result = await gateway.call({
 });
 ```
 
-Approval evidence is transport-owned. Current-human HTTP and Site calls use a
-server-issued, hash-only, single-use capability; agent attempts keep their
-existing durable approval and operation lifecycle. The gateway receives only
-the resulting trusted transport metadata.
+Approval evidence is transport-owned. Current-human HTTP calls classified for
+human approval and every publisher-controlled Site call use a server-issued,
+hash-only, single-use capability; Site capabilities are additionally bound to
+the exact immutable Site version. Agent attempts keep their existing durable
+approval and operation lifecycle. The gateway receives only the resulting
+trusted transport metadata.

@@ -81,6 +81,9 @@ beforeAll(async () => {
       objects.set(key, { bytes: body.slice(), contentType });
     },
     getObjectBytes: async (key: string) => objects.get(key) ?? null,
+    deleteObject: async (key: string) => {
+      objects.delete(key);
+    },
   } as unknown as ObjectStorageDependency;
   app = new Hono();
   registerWorkspaceArtifactRoutes(app, {
@@ -157,6 +160,28 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(replay.replayed).toBe(true);
     expect(replay.artifact.id).toBe(created.artifact.id);
     expect(objectPutCount).toBe(putsAfterCreate);
+
+    const conflictSeed = await request(grant, ["artifacts:publish"], base, {
+      method: "POST",
+      body: JSON.stringify({
+        ...createBody,
+        slug: "publication-cleanup",
+        idempotencyKey: "publication-cleanup-seed",
+      }),
+    });
+    expect(conflictSeed.status).toBe(201);
+    const keysBeforeConflict = [...objects.keys()].sort();
+    const conflict = await request(grant, ["artifacts:publish"], base, {
+      method: "POST",
+      body: JSON.stringify({
+        ...createBody,
+        slug: "publication-cleanup",
+        html: "<!doctype html><h1>Should be discarded</h1>",
+        idempotencyKey: "publication-cleanup-conflict",
+      }),
+    });
+    expect(conflict.status).toBe(409);
+    expect([...objects.keys()].sort()).toEqual(keysBeforeConflict);
 
     const concurrentCreate = await Promise.all([
       request(grant, ["artifacts:publish"], base, {

@@ -84,6 +84,8 @@ export function ArtifactSandbox(props: {
       });
     }
   };
+  const pendingApprovalRequest = pendingApprovalEntry ? pendingApprovalRef.current?.request : null;
+  const destructiveApproval = siteToolIsDestructive(pendingApprovalEntry);
   return (
     <>
       <section
@@ -208,24 +210,60 @@ export function ArtifactSandbox(props: {
           if (!open) closeApproval();
         }}
         title={`Allow ${pendingApprovalEntry?.title ?? pendingApprovalEntry?.identity.toolName ?? "this tool"}?`}
-        description={`“${props.title}” wants to run a workspace tool once. OpenGeni will use your current account and keep credentials outside the Site.`}
-        confirmLabel="Allow once"
+        description={`“${props.title}” wants to run a workspace tool once with your current account. Review the exact target and arguments below; credentials stay outside the Site.${destructiveApproval ? " This tool reports that it may change or delete data." : ""}`}
+        confirmLabel={destructiveApproval ? "Allow destructive action once" : "Allow once"}
         cancelAutoFocus
-        destructive={false}
+        destructive={destructiveApproval}
         onConfirm={approveOnce}
       >
-        {pendingApprovalEntry ? (
-          <div className="rounded-lg bg-surface-2 px-3 py-2.5 text-xs">
-            <p className="font-medium text-fg">
-              {pendingApprovalEntry.identity.serverId}.{pendingApprovalEntry.identity.toolName}
-            </p>
+        {pendingApprovalEntry && pendingApprovalRequest ? (
+          <div className="grid gap-3 rounded-lg bg-surface-2 px-3 py-2.5 text-xs">
+            <div>
+              <p className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
+                Tool target
+              </p>
+              <p className="mt-1 font-medium text-fg">
+                {pendingApprovalEntry.identity.serverId}.{pendingApprovalEntry.identity.toolName}
+              </p>
+            </div>
             {pendingApprovalEntry.description ? (
-              <p className="mt-1 text-fg-muted">{pendingApprovalEntry.description}</p>
+              <p className="text-fg-muted">{pendingApprovalEntry.description}</p>
             ) : null}
+            <div>
+              <p className="text-2xs font-medium uppercase tracking-wide text-fg-subtle">
+                Arguments
+              </p>
+              <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-surface px-2.5 py-2 font-mono text-2xs text-fg">
+                {formatSiteToolArguments(pendingApprovalRequest.arguments)}
+              </pre>
+            </div>
           </div>
         ) : null}
       </ConfirmDialog>
     </>
+  );
+}
+
+export function formatSiteToolArguments(
+  argumentsValue: Record<string, unknown>,
+  maximumCharacters = 4_096,
+): string {
+  const canonical = JSON.stringify(sortSiteToolJson(argumentsValue), null, 2) ?? "{}";
+  if (canonical.length <= maximumCharacters) return canonical;
+  return `${canonical.slice(0, Math.max(0, maximumCharacters - 1))}…`;
+}
+
+export function siteToolIsDestructive(entry: ToolGatewayCatalogEntry | null): boolean {
+  return entry?.annotations?.destructiveHint === true;
+}
+
+function sortSiteToolJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortSiteToolJson);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => [key, sortSiteToolJson(nested)]),
   );
 }
 
@@ -258,9 +296,6 @@ function useApprovedToolBridge(
             candidate.identity.toolName === siteRequest.identity.toolName,
         );
         if (!entry) throw new Error("This tool is not available to the Site");
-        if (entry.approval !== "human") {
-          return await bridge.call(siteRequest, options);
-        }
         if (pendingApprovalRef.current) {
           throw new Error("Another Site tool is waiting for approval");
         }

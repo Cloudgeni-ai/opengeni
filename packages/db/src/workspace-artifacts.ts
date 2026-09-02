@@ -297,7 +297,16 @@ type PublishMetadata = {
   sourceExecutionGeneration: number | null;
   sourceToolName: ArtifactMutationToolName | null;
   persistContent: () => Promise<void>;
+  discardContent: () => Promise<void>;
 };
+
+async function discardPersistedArtifactContent(
+  input: Pick<PublishMetadata, "discardContent">,
+  error: unknown,
+): Promise<never> {
+  await input.discardContent().catch(() => undefined);
+  throw error;
+}
 
 async function assertAttemptAuthority(
   scopedDb: any,
@@ -518,95 +527,102 @@ export async function createWorkspaceArtifact(
     description: string | null;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      return await scopedDb.transaction(async (tx) => {
-        await lockOperation(tx, input.workspaceId, input.operationKey);
-        await assertAttemptAuthority(tx, input);
-        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
-        if (replay) {
-          assertCreateReplay(replay);
-          if (replay.version.contentSha256 !== input.contentSha256) {
-            throw new WorkspaceArtifactConflictError(
-              "Idempotency key was already used with different content",
+  let contentPersisted = false;
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        return await scopedDb.transaction(async (tx) => {
+          await lockOperation(tx, input.workspaceId, input.operationKey);
+          await assertAttemptAuthority(tx, input);
+          const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+          if (replay) {
+            assertCreateReplay(replay);
+            if (replay.version.contentSha256 !== input.contentSha256) {
+              throw new WorkspaceArtifactConflictError(
+                "Idempotency key was already used with different content",
+              );
+            }
+            assertReplayVersionMetadata(replay.version, input);
+            return mutationResult(
+              replay.artifact,
+              replay.version,
+              replay.event,
+              true,
+              replay.current ?? replay.version,
             );
           }
-          assertReplayVersionMetadata(replay.version, input);
-          return mutationResult(
-            replay.artifact,
-            replay.version,
-            replay.event,
-            true,
-            replay.current ?? replay.version,
-          );
-        }
-        await input.persistContent();
-        const [artifact] = await tx
-          .insert(schema.workspaceArtifacts)
-          .values({
-            id: input.artifactId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            slug: input.slug,
-            title: input.title,
-            description: input.description,
-            createdBySubjectId: input.actorSubjectId,
-          })
-          .returning();
-        const [version] = await tx
-          .insert(schema.workspaceArtifactVersions)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            artifactId: input.artifactId,
-            revision: 1,
-            contentKey: input.contentKey,
-            contentSha256: input.contentSha256,
-            sizeBytes: input.sizeBytes,
-            sourceKey: input.sourceKey,
-            sourceSha256: input.sourceSha256,
-            sourceSizeBytes: input.sourceSizeBytes,
-            requestedTools: input.requestedTools ?? [],
-            operationKey: input.operationKey,
-            sourceSessionId: input.sourceSessionId,
-            sourceTurnId: input.sourceTurnId,
-            sourceAttemptId: input.sourceAttemptId,
-            sourceExecutionGeneration: input.sourceExecutionGeneration,
-            createdBySubjectId: input.actorSubjectId,
-          })
-          .returning();
-        const [updated] = await tx
-          .update(schema.workspaceArtifacts)
-          .set({
-            currentVersionId: version!.id,
-            updatedAt: new Date(),
-          })
-          .where(eq(schema.workspaceArtifacts.id, artifact!.id))
-          .returning();
-        const [event] = await tx
-          .insert(schema.workspaceArtifactEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            artifactId: input.artifactId,
-            type: "published",
-            fromVersionId: null,
-            toVersionId: version!.id,
-            operationKey: input.operationKey,
-            sourceSessionId: input.sourceSessionId,
-            sourceTurnId: input.sourceTurnId,
-            sourceAttemptId: input.sourceAttemptId,
-            sourceExecutionGeneration: input.sourceExecutionGeneration,
-            actorSubjectId: input.actorSubjectId,
-            reason: "Initial publication",
-          })
-          .returning();
-        return mutationResult(updated!, version!, event!, false);
-      });
-    },
-  );
+          await input.persistContent();
+          contentPersisted = true;
+          const [artifact] = await tx
+            .insert(schema.workspaceArtifacts)
+            .values({
+              id: input.artifactId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              slug: input.slug,
+              title: input.title,
+              description: input.description,
+              createdBySubjectId: input.actorSubjectId,
+            })
+            .returning();
+          const [version] = await tx
+            .insert(schema.workspaceArtifactVersions)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              artifactId: input.artifactId,
+              revision: 1,
+              contentKey: input.contentKey,
+              contentSha256: input.contentSha256,
+              sizeBytes: input.sizeBytes,
+              sourceKey: input.sourceKey,
+              sourceSha256: input.sourceSha256,
+              sourceSizeBytes: input.sourceSizeBytes,
+              requestedTools: input.requestedTools ?? [],
+              operationKey: input.operationKey,
+              sourceSessionId: input.sourceSessionId,
+              sourceTurnId: input.sourceTurnId,
+              sourceAttemptId: input.sourceAttemptId,
+              sourceExecutionGeneration: input.sourceExecutionGeneration,
+              createdBySubjectId: input.actorSubjectId,
+            })
+            .returning();
+          const [updated] = await tx
+            .update(schema.workspaceArtifacts)
+            .set({
+              currentVersionId: version!.id,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.workspaceArtifacts.id, artifact!.id))
+            .returning();
+          const [event] = await tx
+            .insert(schema.workspaceArtifactEvents)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              artifactId: input.artifactId,
+              type: "published",
+              fromVersionId: null,
+              toVersionId: version!.id,
+              operationKey: input.operationKey,
+              sourceSessionId: input.sourceSessionId,
+              sourceTurnId: input.sourceTurnId,
+              sourceAttemptId: input.sourceAttemptId,
+              sourceExecutionGeneration: input.sourceExecutionGeneration,
+              actorSubjectId: input.actorSubjectId,
+              reason: "Initial publication",
+            })
+            .returning();
+          return mutationResult(updated!, version!, event!, false);
+        });
+      },
+    );
+  } catch (error) {
+    if (contentPersisted) return await discardPersistedArtifactContent(input, error);
+    throw error;
+  }
 }
 
 export async function publishWorkspaceArtifactVersion(
@@ -618,110 +634,117 @@ export async function publishWorkspaceArtifactVersion(
     description?: string | null;
   },
 ): Promise<WorkspaceArtifactMutationResponse> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      return await scopedDb.transaction(async (tx) => {
-        await lockOperation(tx, input.workspaceId, input.operationKey);
-        await assertAttemptAuthority(tx, input);
-        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
-        if (replay) {
-          assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
-          if (replay.version.contentSha256 !== input.contentSha256) {
-            throw new WorkspaceArtifactConflictError(
-              "Idempotency key was already used with different content",
+  let contentPersisted = false;
+  try {
+    return await withRlsContext(
+      db,
+      { accountId: input.accountId, workspaceId: input.workspaceId },
+      async (scopedDb) => {
+        return await scopedDb.transaction(async (tx) => {
+          await lockOperation(tx, input.workspaceId, input.operationKey);
+          await assertAttemptAuthority(tx, input);
+          const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+          if (replay) {
+            assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
+            if (replay.version.contentSha256 !== input.contentSha256) {
+              throw new WorkspaceArtifactConflictError(
+                "Idempotency key was already used with different content",
+              );
+            }
+            assertReplayVersionMetadata(replay.version, input);
+            return mutationResult(
+              replay.artifact,
+              replay.version,
+              replay.event,
+              true,
+              replay.current ?? replay.version,
             );
           }
-          assertReplayVersionMetadata(replay.version, input);
-          return mutationResult(
-            replay.artifact,
-            replay.version,
-            replay.event,
-            true,
-            replay.current ?? replay.version,
-          );
-        }
-        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
-        if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
-        if (artifact.status !== "active") {
-          throw new WorkspaceArtifactOperationError("Archived artifacts cannot be published");
-        }
-        if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
-          throw new WorkspaceArtifactConflictError(
-            "Artifact changed in another request",
-            artifact.currentVersionId,
-          );
-        }
-        const current = await currentVersion(tx, artifact);
-        if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
-        const [latest] = await tx
-          .select()
-          .from(schema.workspaceArtifactVersions)
-          .where(
-            and(
-              eq(schema.workspaceArtifactVersions.workspaceId, input.workspaceId),
-              eq(schema.workspaceArtifactVersions.artifactId, input.artifactId),
-            ),
-          )
-          .orderBy(desc(schema.workspaceArtifactVersions.revision))
-          .limit(1);
-        await input.persistContent();
-        const [version] = await tx
-          .insert(schema.workspaceArtifactVersions)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            artifactId: input.artifactId,
-            revision: (latest?.revision ?? 0) + 1,
-            contentKey: input.contentKey,
-            contentSha256: input.contentSha256,
-            sizeBytes: input.sizeBytes,
-            sourceKey: input.sourceKey,
-            sourceSha256: input.sourceSha256,
-            sourceSizeBytes: input.sourceSizeBytes,
-            requestedTools: input.requestedTools ?? current.requestedTools,
-            operationKey: input.operationKey,
-            sourceSessionId: input.sourceSessionId,
-            sourceTurnId: input.sourceTurnId,
-            sourceAttemptId: input.sourceAttemptId,
-            sourceExecutionGeneration: input.sourceExecutionGeneration,
-            createdBySubjectId: input.actorSubjectId,
-          })
-          .returning();
-        const update: Partial<typeof schema.workspaceArtifacts.$inferInsert> = {
-          currentVersionId: version!.id,
-          updatedAt: new Date(),
-        };
-        if (input.title !== undefined) update.title = input.title;
-        if (input.description !== undefined) update.description = input.description;
-        const [updated] = await tx
-          .update(schema.workspaceArtifacts)
-          .set(update)
-          .where(eq(schema.workspaceArtifacts.id, artifact.id))
-          .returning();
-        const [event] = await tx
-          .insert(schema.workspaceArtifactEvents)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            artifactId: input.artifactId,
-            type: "published",
-            fromVersionId: artifact.currentVersionId,
-            toVersionId: version!.id,
-            operationKey: input.operationKey,
-            sourceSessionId: input.sourceSessionId,
-            sourceTurnId: input.sourceTurnId,
-            sourceAttemptId: input.sourceAttemptId,
-            sourceExecutionGeneration: input.sourceExecutionGeneration,
-            actorSubjectId: input.actorSubjectId,
-            reason: `Published revision ${version!.revision}`,
-          })
-          .returning();
-        return mutationResult(updated!, version!, event!, false);
-      });
-    },
-  );
+          const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+          if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+          if (artifact.status !== "active") {
+            throw new WorkspaceArtifactOperationError("Archived artifacts cannot be published");
+          }
+          if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
+            throw new WorkspaceArtifactConflictError(
+              "Artifact changed in another request",
+              artifact.currentVersionId,
+            );
+          }
+          const current = await currentVersion(tx, artifact);
+          if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
+          const [latest] = await tx
+            .select()
+            .from(schema.workspaceArtifactVersions)
+            .where(
+              and(
+                eq(schema.workspaceArtifactVersions.workspaceId, input.workspaceId),
+                eq(schema.workspaceArtifactVersions.artifactId, input.artifactId),
+              ),
+            )
+            .orderBy(desc(schema.workspaceArtifactVersions.revision))
+            .limit(1);
+          await input.persistContent();
+          contentPersisted = true;
+          const [version] = await tx
+            .insert(schema.workspaceArtifactVersions)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              artifactId: input.artifactId,
+              revision: (latest?.revision ?? 0) + 1,
+              contentKey: input.contentKey,
+              contentSha256: input.contentSha256,
+              sizeBytes: input.sizeBytes,
+              sourceKey: input.sourceKey,
+              sourceSha256: input.sourceSha256,
+              sourceSizeBytes: input.sourceSizeBytes,
+              requestedTools: input.requestedTools ?? current.requestedTools,
+              operationKey: input.operationKey,
+              sourceSessionId: input.sourceSessionId,
+              sourceTurnId: input.sourceTurnId,
+              sourceAttemptId: input.sourceAttemptId,
+              sourceExecutionGeneration: input.sourceExecutionGeneration,
+              createdBySubjectId: input.actorSubjectId,
+            })
+            .returning();
+          const update: Partial<typeof schema.workspaceArtifacts.$inferInsert> = {
+            currentVersionId: version!.id,
+            updatedAt: new Date(),
+          };
+          if (input.title !== undefined) update.title = input.title;
+          if (input.description !== undefined) update.description = input.description;
+          const [updated] = await tx
+            .update(schema.workspaceArtifacts)
+            .set(update)
+            .where(eq(schema.workspaceArtifacts.id, artifact.id))
+            .returning();
+          const [event] = await tx
+            .insert(schema.workspaceArtifactEvents)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              artifactId: input.artifactId,
+              type: "published",
+              fromVersionId: artifact.currentVersionId,
+              toVersionId: version!.id,
+              operationKey: input.operationKey,
+              sourceSessionId: input.sourceSessionId,
+              sourceTurnId: input.sourceTurnId,
+              sourceAttemptId: input.sourceAttemptId,
+              sourceExecutionGeneration: input.sourceExecutionGeneration,
+              actorSubjectId: input.actorSubjectId,
+              reason: `Published revision ${version!.revision}`,
+            })
+            .returning();
+          return mutationResult(updated!, version!, event!, false);
+        });
+      },
+    );
+  } catch (error) {
+    if (contentPersisted) return await discardPersistedArtifactContent(input, error);
+    throw error;
+  }
 }
 
 export async function rollbackWorkspaceArtifact(
@@ -736,6 +759,7 @@ export async function rollbackWorkspaceArtifact(
     | "sourceSizeBytes"
     | "requestedTools"
     | "persistContent"
+    | "discardContent"
   > & {
     artifactId: string;
     versionId: string;
@@ -830,6 +854,7 @@ export async function setWorkspaceArtifactStatus(
     | "sourceSizeBytes"
     | "requestedTools"
     | "persistContent"
+    | "discardContent"
   > & {
     artifactId: string;
     status: "active" | "archived";

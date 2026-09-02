@@ -4,6 +4,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import {
   bootstrapWorkspace,
   consumeToolGatewayApproval,
+  createWorkspaceArtifact,
   createDb,
   deleteWorkspace,
   issueToolGatewayApproval,
@@ -44,6 +45,30 @@ describe("tool gateway approval capabilities", () => {
     const tokenHash = "a".repeat(64);
     const operationId = crypto.randomUUID();
     const identity = { serverId: "docs", toolName: "search" };
+    const site = await createWorkspaceArtifact(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      artifactId: crypto.randomUUID(),
+      slug: `approval-site-${suffix.slice(0, 8)}`,
+      title: "Approval Site",
+      description: null,
+      contentKey: `approval-site/${suffix}.html`,
+      contentSha256: "f".repeat(64),
+      sizeBytes: 1,
+      sourceKey: `approval-site/${suffix}.json`,
+      sourceSha256: "9".repeat(64),
+      sourceSizeBytes: 1,
+      requestedTools: [identity],
+      operationKey: `approval-site:${suffix}`,
+      actorSubjectId: grant.subjectId,
+      sourceSessionId: null,
+      sourceTurnId: null,
+      sourceAttemptId: null,
+      sourceExecutionGeneration: null,
+      sourceToolName: null,
+      persistContent: async () => undefined,
+      discardContent: async () => undefined,
+    });
     const common = {
       tokenHash,
       accountId: grant.accountId,
@@ -53,6 +78,7 @@ describe("tool gateway approval capabilities", () => {
       catalogDigest: "b".repeat(64),
       identity,
       argumentsDigest: "c".repeat(64),
+      siteVersionId: site.version.id,
     };
     try {
       await issueToolGatewayApproval(client.db, {
@@ -64,19 +90,25 @@ describe("tool gateway approval capabilities", () => {
         tokenHash: "e".repeat(64),
         expiresAt: new Date(Date.now() + 5 * 60_000),
       });
-      const [stored] = await shared.admin<Array<{ token_hash: string; consumed_at: Date | null }>>`
-        select token_hash, consumed_at
+      const [stored] = await shared.admin<
+        Array<{ token_hash: string; consumed_at: Date | null; site_version_id: string | null }>
+      >`
+        select token_hash, consumed_at, site_version_id
         from tool_gateway_approval_capabilities
         where workspace_id = ${grant.workspaceId}
           and subject_id = ${grant.subjectId}
           and operation_id = ${operationId}`;
-      expect(stored).toEqual({ token_hash: "e".repeat(64), consumed_at: null });
+      expect(stored).toEqual({
+        token_hash: "e".repeat(64),
+        consumed_at: null,
+        site_version_id: site.version.id,
+      });
 
       expect(
         await consumeToolGatewayApproval(client.db, {
           ...common,
           tokenHash: "e".repeat(64),
-          argumentsDigest: "d".repeat(64),
+          siteVersionId: crypto.randomUUID(),
         }),
       ).toBe(false);
       expect(

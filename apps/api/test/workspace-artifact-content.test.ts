@@ -43,4 +43,21 @@ describe("workspace artifact content persistence", () => {
     expect(first.contentKey).not.toBe(second.contentKey);
     expect(first.sourceKey).not.toBe(second.sourceKey);
   });
+
+  test("discards both unique objects after a later publication failure", async () => {
+    const deleted: string[] = [];
+    const storage = {
+      putObject: async () => undefined,
+      deleteObject: async (key: string) => {
+        deleted.push(key);
+      },
+    } as unknown as NonNullable<ObjectStorageDependency>;
+    const prepared = prepareWorkspaceArtifactContent(storage, "workspace-one", {
+      html: "<!doctype html><h1>Discard me</h1>",
+    });
+
+    await prepared.persistContent();
+    await prepared.discardContent();
+    expect(deleted.sort()).toEqual([prepared.contentKey, prepared.sourceKey].sort());
+  });
 });
