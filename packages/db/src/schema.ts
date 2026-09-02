@@ -10,6 +10,7 @@ import type {
   PersonalResourceAttachmentSummary,
   McpServerConnectionRef,
   ModelContextContributionSummary,
+  ModelContextSnapshot,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -6766,6 +6767,59 @@ export const sessionAttemptToolCatalogs = pgTable(
         and ${table.catalog}->>'digest' = ${table.digest}
         and jsonb_typeof(${table.catalog}->'entries') = 'array'
         and jsonb_array_length(${table.catalog}->'entries') <= 4096`,
+    ),
+  }),
+);
+
+export const sessionAttemptModelContextSnapshots = pgTable(
+  "session_attempt_model_context_snapshots",
+  {
+    attemptId: uuid("attempt_id").primaryKey(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    requestIndex: integer("request_index").notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    snapshot: jsonb("snapshot").$type<ModelContextSnapshot>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    attemptOwner: foreignKey({
+      name: "session_attempt_model_context_snapshots_attempt_owner_fk",
+      columns: [table.accountId, table.workspaceId, table.sessionId, table.turnId, table.attemptId],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    sessionLatest: index("session_attempt_model_context_snapshots_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.capturedAt.desc(),
+    ),
+    requestIndexValid: check(
+      "session_attempt_model_context_snapshots_request_index_check",
+      sql`${table.requestIndex} > 0 and ${table.executionGeneration} > 0`,
+    ),
+    snapshotSize: check(
+      "session_attempt_model_context_snapshots_size_check",
+      sql`octet_length(${table.snapshot}::text) between 2 and 16777216`,
+    ),
+    snapshotIdentity: check(
+      "session_attempt_model_context_snapshots_identity_check",
+      sql`jsonb_typeof(${table.snapshot}) = 'object'
+        and ${table.snapshot} ?& array['version', 'capturedAt', 'source', 'requestIndex', 'instructions', 'layers', 'tools', 'skills', 'tokens']::text[]
+        and (${table.snapshot}->>'version')::integer = 1
+        and ${table.snapshot}->>'source' = 'model_request'
+        and jsonb_typeof(${table.snapshot}->'layers') = 'array'
+        and jsonb_typeof(${table.snapshot}->'tools') = 'array'
+        and jsonb_typeof(${table.snapshot}->'skills') = 'array'`,
     ),
   }),
 );

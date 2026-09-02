@@ -326,6 +326,31 @@ export class LazyToolRuntime {
     return this.functionTools.get(name);
   }
 
+  inspectSearchableTools(): ReadonlyArray<{
+    name: string;
+    description: string;
+    parameters: unknown;
+    strict?: boolean;
+  }> {
+    const tools: Array<{
+      name: string;
+      description: string;
+      parameters: unknown;
+      strict?: boolean;
+    }> = [];
+    for (const name of [...this.searchableToolNames].sort()) {
+      const tool = this.functionTools.get(name);
+      if (!tool || !isFunctionTool(tool)) continue;
+      tools.push({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        ...(typeof tool.strict === "boolean" ? { strict: tool.strict } : {}),
+      });
+    }
+    return tools;
+  }
+
   requiresPreparationForFunctionCall(name: string): boolean {
     // Deferred preparation is one attempt-wide authority boundary, not only a
     // schema-discovery dependency. Keep the stable always-visible base tool

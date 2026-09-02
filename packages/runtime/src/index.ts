@@ -275,7 +275,12 @@ export {
   type RuntimeSkillDescriptor,
   type SessionSkillActivation,
 } from "./runtime-skills";
-import { appendWorkspaceGovernance } from "./workspace-governance";
+import {
+  createModelVisibleContextCaptureFilter,
+  joinPersistentAgentInstructionLayers,
+  type PersistentAgentInstructionInspection,
+  type PersistentAgentInstructionLayerDraft,
+} from "./model-context-inspector";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
@@ -384,6 +389,13 @@ export {
   WorkspaceGovernancePromptLimitError,
   type WorkspaceGovernanceContext,
 } from "./workspace-governance";
+export {
+  buildModelContextSnapshot,
+  createModelVisibleContextCaptureFilter,
+  joinPersistentAgentInstructionLayers,
+  type PersistentAgentInstructionInspection,
+  type PersistentAgentInstructionLayerDraft,
+} from "./model-context-inspector";
 export {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -1503,6 +1515,11 @@ export type CodemodeTokenWriterSession = SandboxSessionLike;
 
 const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
 const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+const agentInstructionInspection = new WeakMap<object, PersistentAgentInstructionInspection>();
+const emptyInstructionInspection: PersistentAgentInstructionInspection = Object.freeze({
+  layers: Object.freeze([]),
+  composed: "",
+});
 
 /**
  * Read-only, secret-free skill provenance for an already-built agent. This is
@@ -1514,6 +1531,12 @@ export function effectiveSkillSelectionsForAgent(
   agent: object,
 ): readonly EffectiveSkillSelection[] {
   return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
+export function persistentAgentInstructionInspectionFor(
+  agent: object,
+): PersistentAgentInstructionInspection {
+  return agentInstructionInspection.get(agent) ?? emptyInstructionInspection;
 }
 
 export type ConnectorActionToolCall = {
@@ -1944,49 +1967,86 @@ export function appendWorkspaceMemory(composed: string, workspaceMemory?: string
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
-function composedPersistentAgentInstructions(
+function gitBindingDiscoveryApplies(
+  bindings: GitCredentialBindingSeed[] | undefined,
+  activeSandboxBackend?: Settings["sandboxBackend"],
+): boolean {
+  if (activeSandboxBackend === "selfhosted" || !bindings?.length) return false;
+  const bindingsByProvider = new Map<GitCredentialProvider, Set<string>>();
+  for (const binding of bindings) {
+    const ids = bindingsByProvider.get(binding.provider) ?? new Set<string>();
+    ids.add(binding.credentialBindingId);
+    bindingsByProvider.set(binding.provider, ids);
+  }
+  return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
+}
+
+export function inspectPersistentAgentInstructions(
   settings: Settings,
   options: BuildAgentOptions,
-): string {
+): PersistentAgentInstructionInspection {
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
     options.rig,
   );
-  const operationalPersonaAndCore = `${OPENGENI_OPERATIONAL_INSTRUCTIONS}\n\n${personaAndCore}`;
+  const layers: PersistentAgentInstructionLayerDraft[] = [
+    {
+      id: "operational_contract",
+      title: "Operational contract",
+      content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
+    },
+    { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
+  ];
+  const push = (
+    id: PersistentAgentInstructionLayerDraft["id"],
+    title: string,
+    content?: string,
+  ) => {
+    const trimmed = content?.trim();
+    if (!trimmed) return;
+    layers.push({ id, title, content: trimmed });
+  };
   if (!options.workspaceGovernance?.trim()) {
-    // Preserve the existing relative ordering when no structured governance
-    // authority is active for this exact attempt.
-    return appendSessionInstructions(
-      appendWorkspaceMemory(
-        appendGitCredentialBindingInstructions(
-          appendCodemodeInstructions(operationalPersonaAndCore, codemodeIsAvailable(options)),
-          options.gitCredentialBindings,
-          options.activeSandboxBackend,
-        ),
-        options.workspaceMemory,
-      ),
-      options.sessionInstructions,
-    );
+    if (codemodeIsAvailable(options)) {
+      layers.push({
+        id: "codemode",
+        title: "Codemode",
+        content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
+      });
+    }
+    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+      layers.push({
+        id: "git_bindings",
+        title: "Git credential bindings",
+        content: GIT_BINDING_DISCOVERY_DIRECTIVE,
+      });
+    }
+    push("workspace_memory", "Workspace memory", options.workspaceMemory);
+    push("session_instructions", "Session instructions", options.sessionInstructions);
+  } else {
+    push("workspace_governance", "Workspace governance", options.workspaceGovernance);
+    push("session_instructions", "Session instructions", options.sessionInstructions);
+    if (codemodeIsAvailable(options)) {
+      layers.push({
+        id: "codemode",
+        title: "Codemode",
+        content: CODEMODE_PROGRAMMATIC_DIRECTIVE,
+      });
+    }
+    if (gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)) {
+      layers.push({
+        id: "git_bindings",
+        title: "Git credential bindings",
+        content: GIT_BINDING_DISCOVERY_DIRECTIVE,
+      });
+    }
+    push("workspace_memory", "Workspace memory", options.workspaceMemory);
   }
-
-  // Structured governance precedence after CORE:
-  // governance (org -> workspace -> initiating user -> matching role), then
-  // session/task state, then tool/repository substrate, then bounded memory.
-  return appendWorkspaceMemory(
-    appendGitCredentialBindingInstructions(
-      appendCodemodeInstructions(
-        appendSessionInstructions(
-          appendWorkspaceGovernance(operationalPersonaAndCore, options.workspaceGovernance),
-          options.sessionInstructions,
-        ),
-        codemodeIsAvailable(options),
-      ),
-      options.gitCredentialBindings,
-      options.activeSandboxBackend,
-    ),
-    options.workspaceMemory,
-  );
+  return {
+    layers,
+    composed: joinPersistentAgentInstructionLayers(layers),
+  };
 }
 
 /**
@@ -2316,6 +2376,7 @@ export function buildOpenGeniAgent(
     ...(videoGenerationTool ? [videoGenerationTool] : []),
     ...(humanInputTool ? [humanInputTool] : []),
   ];
+  const instructionInspection = inspectPersistentAgentInstructions(settings, options);
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -2342,7 +2403,7 @@ export function buildOpenGeniAgent(
     //   7. + host context for this exact turn, when supplied,
     // The missing-title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
-    instructions: composedPersistentAgentInstructions(settings, options),
+    instructions: instructionInspection.composed,
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
@@ -2375,6 +2436,7 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
+    agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
     }
@@ -2451,6 +2513,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
+  agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
   }
@@ -6404,6 +6467,13 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+  /**
+   * Observes the exact model-visible prefix after every input filter. Must not
+   * throw; capture failures are swallowed so they cannot change inference.
+   */
+  onModelVisibleContext?: (
+    snapshot: import("@opengeni/contracts").ModelContextSnapshot,
+  ) => void | Promise<void>;
 };
 
 // One-shot directive injected into the FIRST model call while the durable
@@ -6491,6 +6561,20 @@ function measuredModelInputFilter(
       });
     }
   };
+}
+
+function modelVisibleContextCaptureFilter(
+  agent: Agent<any, any>,
+  onCapture: RunAgentStreamOptions["onModelVisibleContext"],
+): CallModelInputFilter | undefined {
+  if (!onCapture) return undefined;
+  return createModelVisibleContextCaptureFilter({
+    persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+    genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
+    serializeVisibleTools: serializedToolsForRemoteCompaction,
+    skillSelectionsFor: effectiveSkillSelectionsForAgent,
+    onCapture,
+  });
 }
 
 export async function runAgentStream(
@@ -6670,6 +6754,7 @@ export async function runAgentStream(
               : {}),
           }),
         ),
+        modelVisibleContextCaptureFilter(agent, overrides.onModelVisibleContext),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -6811,6 +6896,7 @@ export async function runAgentStream(
             : {}),
         }),
       ),
+      modelVisibleContextCaptureFilter(agent, overrides.onModelVisibleContext),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {

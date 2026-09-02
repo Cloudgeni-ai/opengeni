@@ -10,6 +10,7 @@ import {
   clearDurablePendingSessionToolCalls,
   isSessionCompactionRequested,
   nextSessionHistoryPosition,
+  persistModelContextSnapshot,
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -772,6 +773,17 @@ export async function runTurnStreamAttempt(
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,
           sandboxEnvironment,
+          onModelVisibleContext: async (snapshot) => {
+            await persistModelContextSnapshot(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              snapshot,
+            });
+          },
           onRuntimeEvent: async (event) => {
             await leases.renewServing("runtime_event");
             if (leases.servingLost()) {

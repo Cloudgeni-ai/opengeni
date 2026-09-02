@@ -16309,6 +16309,7 @@ export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
+export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";
