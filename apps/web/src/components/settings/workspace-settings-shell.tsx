@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BarChart3Icon,
@@ -20,7 +20,9 @@ import {
 import type { ComponentType, ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
+import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { ContentPage } from "@/components/ui/content-layout";
+import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 
 export type WorkspaceSettingsSection =
@@ -188,13 +190,15 @@ export function WorkspaceManagementShell({
   children,
 }: {
   workspaceId: string;
-  workspaceName: string;
+  workspaceName?: string;
   organizationName: string;
   location: WorkspaceManagementLocation;
   organizationManagementOnly?: boolean;
   organizationSettingsWorkspaceId?: string;
   children: ReactNode;
 }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
   const settingsItems = organizationManagementOnly
     ? SETTINGS_ITEMS.filter(
         (item) => item.id === "general" || item.id === "members" || item.id === "danger",
@@ -202,6 +206,25 @@ export function WorkspaceManagementShell({
     : SETTINGS_ITEMS;
   const organizationLinkWorkspaceId =
     organizationSettingsWorkspaceId ?? (organizationManagementOnly ? undefined : workspaceId);
+  const switcherWorkspaceId = organizationManagementOnly
+    ? (organizationSettingsWorkspaceId ?? context.workspaces[0]?.id)
+    : workspaceId;
+
+  function openManagementWorkspace(nextWorkspaceId: string) {
+    context.resetSessionView();
+    if (location.kind === "settings") {
+      void navigate({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: nextWorkspaceId },
+        search: { section: location.section },
+      });
+      return;
+    }
+    void navigate({
+      to: location.target,
+      params: { workspaceId: nextWorkspaceId },
+    });
+  }
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
       <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-full lg:max-h-none lg:border-r lg:border-b-0">
@@ -230,19 +253,44 @@ export function WorkspaceManagementShell({
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               Workspace settings
             </p>
-            <div className="mt-2 flex min-w-0 items-center gap-2.5">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
-                {workspaceName.trim().charAt(0).toUpperCase() || "W"}
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
-                  {workspaceName}
-                </p>
-                <p className="mt-0.5 text-2xs text-fg-subtle">
-                  {organizationManagementOnly ? "Organization management" : "Settings and controls"}
-                </p>
+            {organizationManagementOnly ? (
+              <>
+                <div className="mt-2 flex min-w-0 items-center gap-2.5">
+                  <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
+                    {workspaceName?.trim().charAt(0).toUpperCase() || "W"}
+                  </span>
+                  <div className="min-w-0">
+                    <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
+                      {workspaceName ?? "Workspace"}
+                    </p>
+                    <p className="mt-0.5 text-2xs text-fg-subtle">Organization management</p>
+                  </div>
+                </div>
+                {switcherWorkspaceId ? (
+                  <div className="mt-3 min-w-0">
+                    <p className="mb-1 px-1 text-2xs text-fg-subtle">Open another workspace</p>
+                    <WorkspaceSwitcherMenu
+                      workspaceId={switcherWorkspaceId}
+                      collapsed={false}
+                      align="start"
+                      onSelect={openManagementWorkspace}
+                      className="w-full"
+                    />
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-2 min-w-0">
+                <WorkspaceSwitcherMenu
+                  workspaceId={workspaceId}
+                  collapsed={false}
+                  align="start"
+                  onSelect={openManagementWorkspace}
+                  className="w-full border-brand/25 bg-brand-strong/10 py-2 hover:border-brand/40 hover:bg-brand-strong/15"
+                />
+                <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
               </div>
-            </div>
+            )}
           </div>
 
           <p className="mt-3 px-2.5 text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
