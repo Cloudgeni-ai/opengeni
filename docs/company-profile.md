@@ -65,7 +65,7 @@ organization-scoped policy, editable only by an active organization owner,
 controls the result:
 
 - `off` rejects the operation before a proposal revision is created;
-- `suggest` (the default for existing and new organizations) creates an
+- `suggest` (shown as **Require approval**, and the default for existing and new organizations) creates an
   inactive immutable proposal and requires the bound
   `company_profile_confirm` human-confirmation path;
 - `automatic` creates the same immutable proposal and immediately activates it

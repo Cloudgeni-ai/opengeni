@@ -8,6 +8,14 @@ import {
 } from "../src";
 
 describe("workspace Memory V1 prompt mode", () => {
+  test("enables Workspace Memory by default while preserving explicit and malformed opt-outs", () => {
+    expect(resolveWorkspaceMemoryEnabled()).toBe(true);
+    expect(resolveWorkspaceMemoryEnabled({})).toBe(true);
+    expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: true })).toBe(true);
+    expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: false })).toBe(false);
+    expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: "yes" })).toBe(false);
+  });
+
   test("defaults to retrieval-only composition when the setting is absent or invalid", () => {
     expect(resolveWorkspaceMemoryPromptMode()).toBe("retrieval_only");
   });

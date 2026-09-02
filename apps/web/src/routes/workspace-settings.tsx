@@ -2,6 +2,7 @@
 // name/rename, members, API keys, memory/transcription/Codex policy, Codex
 // subscriptions, and a danger zone with workspace deletion. The org/billing
 // console lives at Organization settings.
+import { resolveWorkspaceMemoryEnabled } from "@opengeni/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -837,7 +838,7 @@ function MemoryPreferenceRow({
 }) {
   const context = useAppContext();
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
-  const enabled = workspace?.settings?.memoryEnabled === true;
+  const enabled = workspace ? resolveWorkspaceMemoryEnabled(workspace.settings) : false;
   const [saving, setSaving] = useState(false);
 
   async function toggle(next: boolean) {

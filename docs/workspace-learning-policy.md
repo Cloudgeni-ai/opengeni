@@ -25,7 +25,7 @@ Migration `0199_workspace_learning_policy.sql` adds four FORCE-RLS tables:
 
 Revision creation does not activate a policy. Activation and rollback require an exact authenticated human actor, expected current revision, expected activation version, and operation fingerprint. A rollback target must have been active previously. Direct head/event writes are not a supported or authorized activation path.
 
-Workspaces without an active revision snapshot deterministically as `off`, with no revision and no source overrides. This default applies only to the future governed derived-learning path; it does not disable `memory_search`.
+Workspaces without an active revision snapshot deterministically as `suggest`, with no revision and no source overrides. The UI names this mode **Require approval**. This default applies only to governed Workspace instruction and Skill changes; it does not disable `memory_search` or gate autonomous Workspace Memory writes.
 
 Migration `0364_workspace_learning_policy_snapshot_lock_order.sql` repairs the accepted-attempt snapshot lock order without changing policy semantics. Snapshot creation locks the workspace, session, turn, and attempt explicitly in the same order as ordinary session lifecycle writers, then revalidates the complete authority and interruption tuple in a fresh statement. The attempt `SHARE` lock remains held through commit and every supported interruption writer takes that attempt `FOR UPDATE` before insertion, so an interruption cannot cross the revalidation-to-insert interval. PostgreSQL query planning therefore cannot invert session and turn locks, while a Pause, Steer, replacement, or settlement that completed during a lock wait still causes the snapshot to fail closed.
 
@@ -37,7 +37,9 @@ Migration `0364_workspace_learning_policy_snapshot_lock_order.sql` repairs the a
 2. It matches one exact `{kind,id}` override.
 3. It returns the override mode when present; otherwise it returns the workspace mode with `inherited: true`.
 4. Its receipt retains the snapshot id/hash, policy revision identity, activation version, and source reference.
-5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-off:v1` revision sentinel, preserving the deterministic `off` policy instead of misrepresenting it as a missing snapshot.
+5. `workspaceLearningPolicyRouterContext(effectiveMode)` projects the exact immutable `{mode,snapshotId,revisionId}` object consumed by the canonical router. A snapshot with no active revision uses the explicit stable `workspace-learning-policy:default-suggest:v1` revision sentinel, preserving the deterministic approval-required policy instead of misrepresenting it as a missing snapshot.
+
+Migration `0392_workspace_memory_and_learning_defaults.sql` changes only the no-active-revision default to `suggest`; existing activated revisions and immutable accepted-attempt snapshots remain authoritative and unchanged.
 
 Migration `0268_governed_learning_decision_receipts.sql` adds the deterministic evaluator over this frozen policy state. The Company Brain learning-policy router (`createCompanyBrainLearningPolicyRouter` in `packages/core/src/domain/company-brain-governed-writes.ts`) invokes it after every committed Ways-of-working proposal (instruction policy or preference) with the accepted snapshot and the turn's immutable initiating human; see [`company-brain-write-routing.md`](company-brain-write-routing.md). It accepts only an exact live attempt, its accepted policy snapshot, and one workspace-scoped proposal/claim/supporting-evidence lineage. Before recording a verdict it rechecks current Task-note or scoped-Document authority, the latest review, expiry/staleness, conflicts, and a platform-owned confidence floor. The result is one immutable, content-free receipt with exact IDs, hashes, versions, bounded facts, and canonical reason order.
 
@@ -102,25 +104,27 @@ content, credentials, or another human's receipts.
 
 Policy revision creation, activation, and rollback plus exact governed-change
 undo require `workspace:admin` and an authenticated human session. The
-The Workspace settings **Learning & autonomy** section exposes only the workspace learning
-mode, mapped directly to the canonical backend modes (`Off`, `Review first` =
-`suggest`, and `Autonomous` = `automatic`); a mode change creates and activates
-a new revision under activation-version CAS and carries the active revision's
-existing source overrides forward unchanged. Exact-source overrides, rollback,
-and governed-change undo remain API/SDK operations on the `/learning` routes
-with no web UI. Rollback and undo remain destination-native compensating
-lifecycle operations rather than history mutation.
+Workspace settings **Workspace instruction & Skill autonomy** section exposes
+only the workspace learning mode, mapped directly to the canonical backend
+modes (`Off`, `Require approval` = `suggest`, and `Autonomous` = `automatic`); a
+mode change creates and activates a new revision under activation-version CAS
+and carries the active revision's existing source overrides forward unchanged.
+Exact-source overrides, rollback, and governed-change undo remain API/SDK
+operations on the `/learning` routes with no web UI. Rollback and undo remain
+destination-native compensating lifecycle operations rather than history
+mutation.
 
 Workspace Memory is deliberately outside this policy. When the separate
-`memoryEnabled` workspace setting is true, exact live agent attempts may use
-`memory_save` and `memory_correct` autonomously in every Learning mode. Learning
-mode continues to govern derived Skills and instruction proposals, not the
-shared agent Memory mechanism. Autonomous may activate an eligible Skill or
-instruction through the destination-owned lifecycle; Review first leaves the
-proposal inactive for human review; Off creates no durable derived change.
-Organization identity is separate again: its own organization-owner policy
-uses Off, Review first, and Autonomous modes for `company_profile_propose`, and
-cannot be changed or widened by a workspace administrator.
+`memoryEnabled` workspace setting is not explicitly false, exact live agent
+attempts may use `memory_save` and `memory_correct` autonomously in every
+Learning mode. Learning mode continues to govern derived Skills and instruction
+proposals, not the shared agent Memory mechanism. Autonomous may activate an
+eligible Skill or instruction through the destination-owned lifecycle; Require
+approval leaves the proposal inactive until a person approves it; Off creates
+no durable derived change. Organization identity is separate again: its own
+organization-owner policy uses Off, Require approval, and Autonomous modes for
+`company_profile_propose`, and cannot be changed or widened by a workspace
+administrator.
 
 Destination ownership remains:
 
@@ -141,4 +145,4 @@ The controller deliberately does not implement:
 - runtime prompt composition or automatic snapshot installation;
 - Slack notification delivery.
 
-Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migrations `0199_workspace_learning_policy.sql` and `0364_workspace_learning_policy_snapshot_lock_order.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`. Canonical administration code: `packages/contracts/src/workspace-learning-administration.ts`, `apps/api/src/routes/workspace-learning.ts`, `packages/sdk/src/workspace-learning.ts`, `apps/web/src/routes/workspace-learning-admin.tsx`, and migration `0270_governed_learning_history_inspection.sql`.
+Canonical policy code: `packages/contracts/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy.ts`, `packages/db/src/workspace-learning-policy-schema.ts`, and migrations `0199_workspace_learning_policy.sql`, `0364_workspace_learning_policy_snapshot_lock_order.sql`, and `0392_workspace_memory_and_learning_defaults.sql`. Canonical evaluator code: `packages/contracts/src/governed-learning-evaluator.ts`, `packages/core/src/domain/governed-learning-evaluator.ts`, `packages/db/src/governed-learning-evaluator.ts`, and migration `0268_governed_learning_decision_receipts.sql`. Canonical activation code: `packages/contracts/src/governed-learning-activation.ts`, `packages/core/src/domain/governed-learning-activation.ts`, `packages/db/src/governed-learning-activation.ts`, and migration `0269_governed_learning_activation_controller.sql`. Canonical administration code: `packages/contracts/src/workspace-learning-administration.ts`, `apps/api/src/routes/workspace-learning.ts`, `packages/sdk/src/workspace-learning.ts`, `apps/web/src/routes/workspace-learning-admin.tsx`, and migration `0270_governed_learning_history_inspection.sql`.

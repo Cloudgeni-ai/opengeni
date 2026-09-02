@@ -213,15 +213,16 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
-Workspace Memory is the autonomous agent-retention lane: when the workspace
-Memory toggle is enabled, exact live agent attempts save and correct active
+Workspace Memory is the autonomous agent-retention lane. It is enabled by
+default; an explicit workspace opt-out disables agent writes. When enabled,
+exact live agent attempts save and correct active
 facts, decisions, incidents, fixes, and outcomes without consulting Learning
 mode. It remains retrieval-only model context through `memory_search`; it is
 not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
 claim.
 
 Organization identity has a separate organization-owner autonomy policy. Off
-rejects agent-authored identity changes before proposal creation, Review first
+rejects agent-authored identity changes before proposal creation, Require approval
 keeps the bound human-confirmation path, and Autonomous activates eligible
 proposals without another prompt. All three modes still require an exact live
 turn initiated by the active organization owner and use the existing
