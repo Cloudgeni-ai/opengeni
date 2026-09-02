@@ -197,6 +197,38 @@ describe("Pack routes", () => {
       installedSkillIds: [capabilityId],
     });
     expect(session.skills).toEqual([expect.objectContaining({ name: skillName })]);
+
+    const selectedCreateKey = crypto.randomUUID();
+    const selectedWithKey = await createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+      startMode: "realtime",
+      idempotencyKey: selectedCreateKey,
+      installedSkillIds: [capabilityId],
+    });
+    const selectedReplay = await createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+      startMode: "realtime",
+      idempotencyKey: selectedCreateKey,
+      installedSkillIds: [capabilityId],
+    });
+    expect(selectedReplay.id).toBe(selectedWithKey.id);
+    await expect(
+      createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+        startMode: "realtime",
+        idempotencyKey: selectedCreateKey,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    const ordinaryCreateKey = crypto.randomUUID();
+    await createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+      startMode: "realtime",
+      idempotencyKey: ordinaryCreateKey,
+    });
+    await expect(
+      createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+        startMode: "realtime",
+        idempotencyKey: ordinaryCreateKey,
+        installedSkillIds: [capabilityId],
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   }, 60_000);
 
   test("reviews, installs, shares, and safely uninstalls inline-Skill Packs", async () => {

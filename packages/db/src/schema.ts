@@ -3977,6 +3977,13 @@ export const sessions = pgTable(
     // workspace to a single session row — the dedup that closes the
     // double-submit/double-dispatch stuck-queued bug.
     createIdempotencyKey: text("create_idempotency_key"),
+    // Exact explicit installed-Skill selection accepted by the create. This is
+    // private idempotency identity, not a runtime lookup: the resolved Skill
+    // content remains frozen in `skills` for the lifetime of the session.
+    createSelectedInstalledSkillIds: jsonb("create_selected_installed_skill_ids")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     // Immutable creation-time hierarchy and policy snapshot. These values are
     // populated by the database admission boundary and never re-derived from
     // a live workspace setting for an existing session.

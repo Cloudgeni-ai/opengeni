@@ -18,3 +18,10 @@ ALTER TABLE capability_facets
 
 ALTER TABLE capability_facets
   VALIDATE CONSTRAINT capability_facets_activation_chk;
+
+-- Keep the explicit installed-Skill selection in the keyed-create identity.
+-- Existing sessions (and creates that select no installed Skills) retain the
+-- legacy empty identity, while a retry that changes the selection conflicts
+-- before it can replay a differently configured session.
+ALTER TABLE sessions
+  ADD COLUMN create_selected_installed_skill_ids jsonb NOT NULL DEFAULT '[]'::jsonb;

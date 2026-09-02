@@ -29897,6 +29897,8 @@ export type SessionCreateInput = {
   policyRole?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
+  /** Exact explicit installed-Skill selection used for keyed-create replay. */
+  selectedInstalledSkillIds?: string[];
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -30188,6 +30190,7 @@ type SessionCreateReplayIdentity = {
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
+  selectedInstalledSkillIds: string[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
 };
 
@@ -30205,6 +30208,12 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (
+    stableJson(existing.createSelectedInstalledSkillIds ?? []) !==
+    stableJson(input.selectedInstalledSkillIds)
+  ) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
@@ -30351,6 +30360,7 @@ async function createSessionInTransaction(
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
+        selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
       });
@@ -30510,6 +30520,7 @@ async function createSessionInTransaction(
             parentSessionId: input.parentSessionId ?? null,
             parentTurnId,
             createIdempotencyKey,
+            createSelectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
             rootSessionId: decision.rootSessionId,
             nestedAgentDepth: decision.nestedAgentDepth,
             maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
@@ -30556,6 +30567,7 @@ async function createSessionInTransaction(
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
+          selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
         });
@@ -30746,6 +30758,7 @@ export async function getInitializedSessionCreateReplay(
     requestedSessionId?: string;
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
+    selectedInstalledSkillIds: string[];
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },

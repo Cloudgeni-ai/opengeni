@@ -772,6 +772,9 @@ export async function createAndStartSessionWithOutcome(input: {
   // session. Every caller repairs or re-delivers the winner's one atomic start;
   // the durable initializer prevents duplicate events or turns.
   createIdempotencyKey?: string | null;
+  // Exact explicit installed-Skill selection. The database stores this only as
+  // keyed-create identity; runtime behavior comes from the frozen Skill content.
+  selectedInstalledSkillIds?: string[];
   // The shared-sandbox group this session's box joins (addendum 05 §D). Null/
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
   // shared/{groupId} spawn passes the resolved group so both run in ONE box.
@@ -974,6 +977,7 @@ export async function createAndStartSessionWithOutcome(input: {
       policyRole: input.policyRole ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
+      selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
@@ -1946,6 +1950,7 @@ export async function createSessionForRequestWithOutcome(
           ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
+        selectedInstalledSkillIds: payload.installedSkillIds ?? [],
         ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
         visibility: effectiveVisibility,
         variableSetIds: payload.variableSetIds ?? [],
@@ -2834,6 +2839,7 @@ export async function createSessionForRequestWithOutcome(
       ...(xaiProviderAccountAuthoritySnapshot ? { xaiProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
+      selectedInstalledSkillIds,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
       allowNestedAgentDepthIncrease: hasPermission(grant.permissions, "workspace:admin"),
       subjectId: grant.subjectId,
