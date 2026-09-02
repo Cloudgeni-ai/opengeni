@@ -277,6 +277,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           sourcePath: inline.sourcePath,
           name: inline.name,
           description: inline.description,
+          activationMode: inline.activationMode,
           contentSha256: inline.contentSha256,
           totalBytes: inline.totalBytes,
           files: inline.files,

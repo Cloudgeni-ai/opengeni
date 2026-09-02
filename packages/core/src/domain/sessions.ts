@@ -20,6 +20,7 @@ import {
   DraftTimelineAnnotations,
   FIRST_PARTY_MCP_TOOL_NAMES,
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+  SessionSkills,
   SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
@@ -77,6 +78,7 @@ import {
   getWorkspaceDefaultRigId,
   listDistinctVariableSetSelectionsInGroup,
   listDistinctRigVersionIdsInGroup,
+  listInstalledPortableSkills,
   getSandbox,
   getSession,
   getInitializedSessionCreateReplay,
@@ -2106,9 +2108,43 @@ export async function createSessionForRequestWithOutcome(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
-  const skills = hasOwnProperty(rawPayload, "skills")
+  const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills
     : (parentSession?.skills ?? payload.skills);
+  const selectedInstalledSkillIds = payload.installedSkillIds ?? [];
+  const selectedInstalledSkills: SessionSkill[] = [];
+  if (selectedInstalledSkillIds.length > 0) {
+    const installedSkills = await listInstalledPortableSkills(db, workspaceId, {
+      includeSessionSelected: true,
+    });
+    const installedById = new Map(installedSkills.map((skill) => [skill.capabilityId, skill]));
+    for (const capabilityId of selectedInstalledSkillIds) {
+      const installed = installedById.get(capabilityId);
+      if (!installed) {
+        throw new HTTPException(422, {
+          message: `Session-selected Skill is not installed in this workspace: ${capabilityId}`,
+        });
+      }
+      if (installed.activationMode !== "session_selected") {
+        throw new HTTPException(422, {
+          message: `Installed Skill does not require explicit session selection: ${capabilityId}`,
+        });
+      }
+      selectedInstalledSkills.push({
+        name: installed.name,
+        description: installed.description,
+        files: installed.files.map((file) => ({ path: file.path, content: file.content })),
+      });
+    }
+  }
+  let skills: SessionSkill[];
+  try {
+    skills = SessionSkills.parse([...inheritedOrSubmittedSkills, ...selectedInstalledSkills]);
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "invalid session Skill selection",
+    });
+  }
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
   // Visibility became durable draft state after older clients had already
   // written rows without it. Compare it only when the create request supplied

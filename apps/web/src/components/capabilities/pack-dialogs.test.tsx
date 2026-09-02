@@ -56,6 +56,7 @@ describe("PackDetailDialog", () => {
         onPreviewUninstall={async () => uninstallPreview()}
         onUninstall={async () => true}
         onUnregister={async () => true}
+        onStartSession={() => {}}
       />,
     );
     try {
@@ -82,6 +83,7 @@ describe("PackDetailDialog", () => {
         onPreviewUninstall={async () => uninstallPreview()}
         onUninstall={async () => true}
         onUnregister={async () => true}
+        onStartSession={() => {}}
       />,
     );
     try {
@@ -184,6 +186,34 @@ describe("PackDetailDialog", () => {
       expect(onUninstall).toHaveBeenCalledTimes(1);
     } finally {
       await notInstalled.unmount();
+    }
+  });
+
+  test("starts a session only when a session-selected Pack Skill is available", async () => {
+    const onStartSession = mock(() => {});
+    const rendered = await render(
+      <PackDetailActions
+        busy={false}
+        installed
+        reviewing={false}
+        reviewed
+        hasPreview
+        installReady
+        installLabel="Repair Pack"
+        canStartSession
+        onCancel={() => {}}
+        onReview={() => {}}
+        onInstall={() => {}}
+        onUninstall={() => {}}
+        onUnregister={() => {}}
+        onStartSession={onStartSession}
+      />,
+    );
+    try {
+      await act(async () => button(rendered.container, "Start with Pack").click());
+      expect(onStartSession).toHaveBeenCalledTimes(1);
+    } finally {
+      await rendered.unmount();
     }
   });
 

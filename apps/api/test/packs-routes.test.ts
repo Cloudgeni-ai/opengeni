@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { createSessionForRequest, type ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   createDb,
@@ -12,6 +12,7 @@ import {
 import { migrate } from "@opengeni/db/migrate";
 import {
   acquireSharedTestDatabase,
+  MemoryEventBus,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
@@ -29,6 +30,7 @@ let available = true;
 let accountId = "";
 let workspaceId = "";
 let subjectId = "";
+let routeDeps: ApiRouteDeps;
 
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_API_PACKS_TEST_POSTGRES_ADMIN_URL;
@@ -73,12 +75,18 @@ beforeAll(async () => {
   workspaceId = grant.workspaceId;
 
   app = new Hono();
-  registerPackRoutes(app, {
+  routeDeps = {
     db: client.db,
-    settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret,
+      sandboxBackend: "none",
+    }),
+    bus: new MemoryEventBus(),
     objectStorage: null,
-    workflowClient: {},
-  } as unknown as ApiRouteDeps);
+    workflowClient: { wakeSessionWorkflow: async () => {} },
+  } as unknown as ApiRouteDeps;
+  registerPackRoutes(app, routeDeps);
 }, 180_000);
 
 afterAll(async () => {
@@ -110,6 +118,87 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("Pack routes", () => {
+  test("installs session-selected Pack Skills without adding them to workspace runtime", async () => {
+    if (!available || !client) return;
+    const suffix = crypto.randomUUID().slice(0, 8);
+    const packId = `session-selected-${suffix}`;
+    const skillName = `implementation-guide-${suffix}`;
+    const registered = await request("/packs", {
+      method: "POST",
+      body: JSON.stringify({
+        id: packId,
+        name: "Implementation guide",
+        description: "Guidance selected only for implementation sessions.",
+        role: "software-engineering",
+        category: "implementation",
+        version: "1.0.0",
+        skills: [
+          {
+            name: skillName,
+            activationMode: "session_selected",
+            files: [
+              {
+                path: "SKILL.md",
+                content: `---\nname: ${skillName}\ndescription: Guide one implementation session.\n---\n# Guide\n`,
+              },
+            ],
+          },
+        ],
+      }),
+    });
+    expect(registered.status, await registered.text()).toBe(201);
+
+    const previewResponse = await request(`/packs/${packId}/installation-preview`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const previewBody = await previewResponse.text();
+    expect(previewResponse.status, previewBody).toBe(200);
+    const preview = JSON.parse(previewBody) as {
+      manifestDigest: string;
+      components: Array<{ capabilityId: string }>;
+    };
+    const installed = await request(`/packs/${packId}/install`, {
+      method: "POST",
+      body: JSON.stringify({
+        expectedManifestDigest: preview.manifestDigest,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(installed.status, await installed.text()).toBe(201);
+
+    const capabilityId = preview.components[0]!.capabilityId;
+    expect(capabilityId).toContain("skill:pack-inline/session-selected/");
+    expect(
+      (await listInstalledPortableSkills(client.db, workspaceId)).some(
+        (skill) => skill.capabilityId === capabilityId,
+      ),
+    ).toBe(false);
+    expect(
+      await listInstalledPortableSkills(client.db, workspaceId, {
+        includeSessionSelected: true,
+      }),
+    ).toContainEqual(expect.objectContaining({ capabilityId, activationMode: "session_selected" }));
+
+    const sessionGrant = {
+      accountId,
+      workspaceId,
+      subjectId,
+      principalKind: "human_session" as const,
+      permissions: ["sessions:create" as const, "sessions:read" as const],
+    };
+    const ordinarySession = await createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+      startMode: "realtime",
+    });
+    expect(ordinarySession.skills).toEqual([]);
+
+    const session = await createSessionForRequest(routeDeps, sessionGrant, workspaceId, {
+      startMode: "realtime",
+      installedSkillIds: [capabilityId],
+    });
+    expect(session.skills).toEqual([expect.objectContaining({ name: skillName })]);
+  }, 60_000);
+
   test("reviews, installs, shares, and safely uninstalls inline-Skill Packs", async () => {
     if (!available || !client) return;
     const suffix = crypto.randomUUID().slice(0, 8);

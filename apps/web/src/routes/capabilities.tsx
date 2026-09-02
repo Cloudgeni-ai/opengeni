@@ -19,6 +19,7 @@
 // projections.
 import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import {
   Fragment,
   Suspense,
@@ -180,6 +181,7 @@ export function CapabilitiesRoute({
   slackLinkToken?: string;
 }) {
   const context = useAppContext();
+  const navigate = useNavigate();
   const client = context.client;
   const onRuntimeChanged = useCallback(
     () => void context.refreshWorkspaceMcpServers(workspaceId),
@@ -1874,6 +1876,13 @@ export function CapabilitiesRoute({
             onPreviewPackUninstall={previewPackUninstall}
             onUninstallPack={uninstallPack}
             onUnregisterPack={unregisterPack}
+            onStartPackSession={(skillCapabilityId) => {
+              void navigate({
+                to: "/workspaces/$workspaceId/sessions",
+                params: { workspaceId },
+                search: { skillCapabilityId },
+              });
+            }}
             onChanged={async () => {
               await refresh();
               onRuntimeChanged();

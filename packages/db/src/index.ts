@@ -5819,6 +5819,7 @@ export type InstallPortableSkillInput = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode?: "workspace_managed" | "session_selected";
   category?: string;
   tags?: string[];
   provenance?: "platform" | "deployment" | "registry" | "workspace";
@@ -5859,6 +5860,7 @@ export type PortableSkillRuntime = {
   version: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   sourceUrl: string;
   sourceCommit: string;
   sourcePath: string;
@@ -8295,6 +8297,7 @@ export async function installPortableSkill(
         }
         if (!pluginVersion) throw new Error("Failed to create portable Skill plugin version");
 
+        const activationMode = input.activationMode ?? "workspace_managed";
         let [facet] = await tx
           .select()
           .from(schema.capabilityFacets)
@@ -8312,12 +8315,17 @@ export async function installPortableSkill(
               pluginVersionId: pluginVersion.id,
               facetKey: "skill",
               kind: "skill",
-              activationMode: "workspace_managed",
+              activationMode,
               required: true,
             })
             .returning();
         }
         if (!facet) throw new Error("Failed to create portable Skill facet");
+        if (facet.activationMode !== activationMode) {
+          throw new Error(
+            `Portable Skill ${input.capabilityId} activation mode conflicts with immutable stored content`,
+          );
+        }
 
         const [existingSkill] = await tx
           .select()
@@ -8521,16 +8529,22 @@ export async function installPortableSkill(
   );
 }
 
-/** Return exact text artifacts for active authoritative Skill installations. */
+/**
+ * Return exact text artifacts for active authoritative Skill installations.
+ * Session-selected Skills are excluded from ambient runtime resolution unless
+ * the caller is explicitly materializing one during session admission.
+ */
 export async function listInstalledPortableSkills(
   db: Database,
   workspaceId: string,
+  options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
         facetId: schema.capabilitySkillFacets.facetId,
+        activationMode: schema.capabilityFacets.activationMode,
         manifest: schema.capabilityPluginVersions.manifest,
         version: schema.capabilityPluginVersions.version,
         name: schema.capabilitySkillFacets.name,
@@ -8558,6 +8572,10 @@ export async function listInstalledPortableSkills(
         ),
       )
       .innerJoin(
+        schema.capabilityFacets,
+        eq(schema.capabilityFacets.id, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
         schema.capabilitySkillFacets,
         eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
       )
@@ -8581,6 +8599,14 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
+        throw new Error(
+          `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
+        );
+      }
+      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+        continue;
+      }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
       const existing = skills.get(row.facetId);
       if (existing) {
@@ -8593,6 +8619,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
+        activationMode: row.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,

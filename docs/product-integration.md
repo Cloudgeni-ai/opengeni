@@ -18,8 +18,15 @@ The canonical server-side integration uses:
 - inline session Skills loaded from the external backend's own Skill store.
 
 An organization workspace has wire `kind: "shared"`. Use “organization
-workspace” in customer-facing integration guidance; `shared` is the exact wire
+workspace" in customer-facing integration guidance; `shared` is the exact wire
 value. Personal workspaces are excluded from this integration model.
+
+The built-in `opengeni-product-integration` Pack is guidance for the coding
+session that builds this integration, not for the resulting product chatbot.
+Its Skill is session-selected: installation alone does not add it to any agent.
+Use **Start with Pack** in the web console, or create the implementation session
+with the reviewed Skill component ID in `installedSkillIds`. Never include that
+ID in customer-facing session creation.
 
 ## Boundary and ownership
 

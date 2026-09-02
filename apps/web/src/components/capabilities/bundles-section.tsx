@@ -76,6 +76,7 @@ export function BundlesSection({
   onPreviewPackUninstall,
   onUninstallPack,
   onUnregisterPack,
+  onStartPackSession,
   onChanged,
 }: {
   client: OpenGeniBrowserClient;
@@ -110,6 +111,7 @@ export function BundlesSection({
     idempotencyKey: string,
   ) => Promise<boolean>;
   onUnregisterPack: (pack: CapabilityPack) => Promise<boolean>;
+  onStartPackSession: (skillCapabilityId: string) => void;
   onChanged: () => void | Promise<void>;
 }) {
   const source = useSourcePackages({
@@ -379,6 +381,7 @@ export function BundlesSection({
             onUninstallPack(openPack, preview, idempotencyKey)
           }
           onUnregister={() => onUnregisterPack(openPack)}
+          onStartSession={onStartPackSession}
         />
       ) : null}
 
