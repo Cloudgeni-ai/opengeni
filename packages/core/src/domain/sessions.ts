@@ -838,44 +838,50 @@ export async function createAndStartSessionWithOutcome(input: {
     input.retainWorkspaceCustomModel !== true &&
     input.retainWorkspaceGatewayModel !== true;
   const seedTargetForNewSession = input.seedTargetSandbox ?? null;
-  if (seedTargetForNewSession && input.sandboxBackend === "none") {
-    throw new HTTPException(422, {
-      message: "cannot target a machine for a session with no sandbox (backend: none)",
-    });
-  }
-  const preflightTarget = seedTargetForNewSession
-    ? await preflightCreateTimeSandboxTarget(
-        {
-          db: input.db,
-          settings: seedTargetForNewSession.settings,
-          bus: input.bus,
-        },
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          ...(seedTargetForNewSession.resourceSubjectId
-            ? { subjectId: seedTargetForNewSession.resourceSubjectId }
-            : {}),
-        },
-        seedTargetForNewSession.sandboxId,
-        seedTargetForNewSession.workingDir ?? null,
-      )
-    : null;
-  if (preflightTarget && !preflightTarget.ok) {
-    throw new HTTPException(422, {
-      message: `cannot target sandbox ${seedTargetForNewSession!.sandboxId}: ${preflightTarget.reason}`,
-    });
-  }
+  const unsupportedTargetBackendMessage =
+    seedTargetForNewSession && input.sandboxBackend === "none"
+      ? "cannot target a machine for a session with no sandbox (backend: none)"
+      : null;
+  const preflightTarget =
+    seedTargetForNewSession && !unsupportedTargetBackendMessage
+      ? await preflightCreateTimeSandboxTarget(
+          {
+            db: input.db,
+            settings: seedTargetForNewSession.settings,
+            bus: input.bus,
+          },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            ...(seedTargetForNewSession.resourceSubjectId
+              ? { subjectId: seedTargetForNewSession.resourceSubjectId }
+              : {}),
+          },
+          seedTargetForNewSession.sandboxId,
+          seedTargetForNewSession.workingDir ?? null,
+        )
+      : null;
+  const targetPreflightFailureMessage = unsupportedTargetBackendMessage
+    ? unsupportedTargetBackendMessage
+    : preflightTarget && !preflightTarget.ok
+      ? `cannot target sandbox ${seedTargetForNewSession!.sandboxId}: ${preflightTarget.reason}`
+      : null;
   let targetSeededBeforeCreateCommit = false;
   const beforeCreateCommit =
     requiresActiveWorkspaceCustomModel ||
     input.consumeNewSessionDraft ||
     input.beforeCreateCommit ||
-    preflightTarget
+    preflightTarget ||
+    targetPreflightFailureMessage
       ? async (tx: Database, sessionId: string, context?: { created: boolean }): Promise<void> => {
           // A committed keyed replay already crossed this fence when its shell
           // was first accepted. Revalidate only the transaction inserting a new
           // session, while still running caller linkage on every replay.
+          if (targetPreflightFailureMessage && context?.created !== false) {
+            throw new HTTPException(422, {
+              message: targetPreflightFailureMessage,
+            });
+          }
           if (requiresActiveWorkspaceCustomModel && context?.created !== false) {
             const reference = {
               scope: input.turnExecutionPolicy.providerId.startsWith("organization-")

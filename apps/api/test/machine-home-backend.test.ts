@@ -20,6 +20,7 @@
 //     machine route + working directory before the child's first turn.
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import postgres from "postgres";
 import {
   testSettings,
@@ -38,7 +39,7 @@ import {
 } from "@opengeni/db";
 import { subjectFor } from "@opengeni/runtime";
 import type { AccessGrant } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
+import { createAndStartSessionWithOutcome, createSessionForRequest } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 import { withChannelA } from "../src/sandbox/channel-a";
 
@@ -329,6 +330,65 @@ describe("Stage-D honest label: machine-targeted home sandbox_backend", () => {
     const [after] = await admin<{ count: string }[]>`
       select count(*)::text as count from sessions where workspace_id = ${workspaceId}`;
     expect(after?.count).toBe(before?.count);
+  }, 60_000);
+
+  test("a committed keyed create replays after its machine target is revoked", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollmentId, sandboxId, bus } = await seedMachine();
+    const idempotencyKey = crypto.randomUUID();
+    const createInput = {
+      db,
+      bus,
+      workflowClient: stubWorkflowClient(),
+      accountId,
+      workspaceId,
+      initialMessage: "replay this machine-targeted session",
+      resources: [],
+      tools: [],
+      toolPolicy: { mode: "explicit" as const, inheritedFromSessionId: null },
+      model: settings.openaiModel,
+      reasoningEffort: settings.openaiReasoningEffort,
+      turnExecutionPolicy: resolveTurnExecutionPolicyV1(settings, {
+        modelId: settings.openaiModel,
+        requestedModelId: null,
+        modelSource: "deployment",
+        reasoningEffort: settings.openaiReasoningEffort,
+        reasoningSource: "deployment",
+      }),
+      sandboxBackend: "selfhosted" as const,
+      metadata: {},
+      firstPartyMcpTools: [],
+      createIdempotencyKey: idempotencyKey,
+      seedTargetSandbox: {
+        sandboxId,
+        settings,
+      },
+    };
+    const created = await createAndStartSessionWithOutcome(createInput);
+    expect(created).toMatchObject({
+      outcome: "created",
+      replay: false,
+      session: { activeSandboxId: sandboxId },
+    });
+
+    await admin`update enrollments set status = 'revoked' where id = ${enrollmentId}`;
+
+    const replayed = await createAndStartSessionWithOutcome(createInput);
+    expect(replayed).toMatchObject({
+      outcome: "repaired",
+      replay: false,
+      changed: true,
+      session: {
+        id: created.session.id,
+        activeSandboxId: sandboxId,
+      },
+    });
+    const [stored] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from sessions
+      where workspace_id = ${workspaceId}
+        and create_idempotency_key = ${idempotencyKey}`;
+    expect(stored?.count).toBe(1);
   }, 60_000);
 
   test("a direct terminal command without op-stream fails closed without a phantom lease", async () => {
