@@ -62,7 +62,7 @@ describe("release schema contract", () => {
     const contract = await buildSchemaContract();
     expect(
       contract.migrations.find(
-        (migration) => migration.path === "0391_fail_closed_rig_version_activation.sql",
+        (migration) => migration.path === "0393_fail_closed_rig_version_activation.sql",
       ),
     ).toMatchObject({ deploymentMode: "maintenance" });
   });
@@ -222,10 +222,10 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0382_organization_api_key_provenance.sql",
     );
     const failClosedRigVersionActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0391_fail_closed_rig_version_activation.sql",
+      (migration) => migration.path === "0393_fail_closed_rig_version_activation.sql",
     );
     const durableRigProviderImageCleanup = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0392_durable_rig_provider_image_cleanup.sql",
+      (migration) => migration.path === "0394_durable_rig_provider_image_cleanup.sql",
     );
     const codexCooldownReconciliation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0383_codex_cooldown_reconciliation.sql",
@@ -294,9 +294,9 @@ describe("release schema contract", () => {
       "0388_sandbox_provider_deadline_interactions.sql",
       "0389_model_catalog_and_gateway_custom_models.sql",
       "0390_organization_model_provider_connections.sql",
-      "0391_fail_closed_rig_version_activation.sql",
+      "0393_fail_closed_rig_version_activation.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
-      "0392_durable_rig_provider_image_cleanup.sql",
+      "0394_durable_rig_provider_image_cleanup.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -348,13 +348,13 @@ describe("release schema contract", () => {
         (organizationModelProviderConnections ? 1 : 0) +
         (sandboxProviderDeadlineInteractionFollowup ? 1 : 0),
       latestMigration: durableRigProviderImageCleanup
-        ? "0392_durable_rig_provider_image_cleanup.sql"
+        ? "0394_durable_rig_provider_image_cleanup.sql"
         : contextCompactionPendingObservability
           ? "0392_context_compaction_pending_observability.sql"
           : sandboxProviderDeadlineInteractionFollowup
             ? "0391_sandbox_provider_deadline_interaction_followup.sql"
             : failClosedRigVersionActivation
-              ? "0391_fail_closed_rig_version_activation.sql"
+              ? "0393_fail_closed_rig_version_activation.sql"
               : organizationModelProviderConnections
                 ? "0390_organization_model_provider_connections.sql"
                 : modelCatalogAndGatewayCustomModels
@@ -569,9 +569,9 @@ describe("release schema contract", () => {
       "0388_sandbox_provider_deadline_interactions.sql",
       "0389_model_catalog_and_gateway_custom_models.sql",
       "0390_organization_model_provider_connections.sql",
-      "0391_fail_closed_rig_version_activation.sql",
+      "0393_fail_closed_rig_version_activation.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
-      "0392_durable_rig_provider_image_cleanup.sql",
+      "0394_durable_rig_provider_image_cleanup.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -705,7 +705,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0382_organization_api_key_provenance.sql",
     );
     const failClosedRigVersionActivation = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0391_fail_closed_rig_version_activation.sql",
+      (migration) => migration.path === "0393_fail_closed_rig_version_activation.sql",
     );
     const codexCooldownReconciliation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0383_codex_cooldown_reconciliation.sql",
@@ -723,7 +723,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0387_bound_host_export_session_payloads.sql",
     );
     const durableRigProviderImageCleanup = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0392_durable_rig_provider_image_cleanup.sql",
+      (migration) => migration.path === "0394_durable_rig_provider_image_cleanup.sql",
     );
     const sandboxProviderDeadlineInteractions = completeSourceContract.migrations.some(
       (migration) => migration.path === "0388_sandbox_provider_deadline_interactions.sql",
@@ -788,13 +788,13 @@ describe("release schema contract", () => {
         (organizationModelProviderConnections ? 1 : 0) +
         (sandboxProviderDeadlineInteractionFollowup ? 1 : 0),
       latestMigration: durableRigProviderImageCleanup
-        ? "0392_durable_rig_provider_image_cleanup.sql"
+        ? "0394_durable_rig_provider_image_cleanup.sql"
         : contextCompactionPendingObservability
           ? "0392_context_compaction_pending_observability.sql"
           : sandboxProviderDeadlineInteractionFollowup
             ? "0391_sandbox_provider_deadline_interaction_followup.sql"
             : failClosedRigVersionActivation
-              ? "0391_fail_closed_rig_version_activation.sql"
+              ? "0393_fail_closed_rig_version_activation.sql"
               : organizationModelProviderConnections
                 ? "0390_organization_model_provider_connections.sql"
                 : modelCatalogAndGatewayCustomModels
