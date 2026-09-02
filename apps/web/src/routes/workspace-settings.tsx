@@ -920,7 +920,7 @@ function CodexCompactionPreferenceRow({
 }
 
 /** Danger zone: delete the workspace behind a typed-name confirmation. */
-function DangerZone(props: {
+export function DangerZone(props: {
   workspaceName: string;
   canDelete: boolean;
   isOnlyWorkspaceInAccount: boolean;
