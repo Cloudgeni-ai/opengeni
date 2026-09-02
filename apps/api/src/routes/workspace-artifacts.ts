@@ -3,6 +3,7 @@ import {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListQuery,
@@ -11,7 +12,6 @@ import {
   normalizeWorkspaceArtifactSlug,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
-import { retryWhileMissing } from "@opengeni/storage";
 import {
   createWorkspaceArtifact,
   getWorkspaceArtifact,
@@ -19,6 +19,7 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   WorkspaceArtifactConflictError,
   WorkspaceArtifactNotFoundError,
   WorkspaceArtifactOperationError,
@@ -26,10 +27,12 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import {
+  prepareWorkspaceArtifactContent,
+  readWorkspaceArtifactContent,
+} from "../workspace-artifact-content";
 
 const ArtifactId = z.string().uuid();
-const encoder = new TextEncoder();
-const decoder = new TextDecoder("utf-8", { fatal: true });
 
 async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
   const parsed = schema.safeParse(await context.req.json().catch(() => null));
@@ -72,32 +75,14 @@ function errorResponse(context: Context, error: unknown): Response {
   throw error;
 }
 
-function contentMetadata(workspaceId: string, html: string) {
-  const bytes = encoder.encode(html);
-  const sha256 = createHash("sha256").update(bytes).digest("hex");
-  return {
-    bytes,
-    contentSha256: sha256,
-    sizeBytes: bytes.byteLength,
-    contentKey: `workspaces/${workspaceId}/workspace-artifacts/blobs/${sha256}.html`,
-  };
-}
-
-function prepareHtml(deps: ApiRouteDeps, workspaceId: string, html: string) {
+function prepareContent(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  input: Parameters<typeof prepareWorkspaceArtifactContent>[2],
+) {
   if (!deps.objectStorage)
     throw new HTTPException(503, { message: "Object storage is not configured" });
-  const content = contentMetadata(workspaceId, html);
-  return {
-    ...content,
-    persistContent: async () => {
-      await deps.objectStorage!.putObject({
-        key: content.contentKey,
-        contentType: "text/html; charset=utf-8",
-        body: content.bytes,
-        sha256: content.contentSha256,
-      });
-    },
-  };
+  return prepareWorkspaceArtifactContent(deps.objectStorage, workspaceId, input);
 }
 
 function provenance(subjectId: string, idempotencyKey: string) {
@@ -146,7 +131,11 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const id = crypto.randomUUID();
     const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
-    const content = prepareHtml(deps, workspaceId, request.html);
+    const content = prepareContent(deps, workspaceId, {
+      html: request.html,
+      ...(request.source ? { source: request.source } : {}),
+      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
+    });
     try {
       return context.json(
         WorkspaceArtifactMutationResponse.parse(
@@ -198,19 +187,14 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
         artifactId(context),
         parsedVersion,
       );
-      const object = await retryWhileMissing(async () =>
-        deps.objectStorage!.getObjectBytes(ref.contentKey),
-      );
-      if (!object) throw new HTTPException(503, { message: "Artifact content is unavailable" });
-      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
-      if (actualHash !== ref.version.contentSha256) {
-        throw new HTTPException(503, { message: "Artifact content failed integrity verification" });
-      }
-      let html: string;
+      let content: Awaited<ReturnType<typeof readWorkspaceArtifactContent>>;
       try {
-        html = decoder.decode(object.bytes);
-      } catch {
-        throw new HTTPException(503, { message: "Artifact content is not valid UTF-8" });
+        content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+      } catch (error) {
+        throw new HTTPException(503, {
+          message: error instanceof Error ? error.message : "Artifact content is unavailable",
+          cause: error,
+        });
       }
       return context.json(
         WorkspaceArtifactContentResponse.parse({
@@ -218,7 +202,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
           versionId: ref.version.id,
           contentType: "text/html",
           contentSha256: ref.version.contentSha256,
-          html,
+          ...content,
         }),
       );
     } catch (error) {
@@ -231,7 +215,11 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
-    const content = prepareHtml(deps, workspaceId, request.html);
+    const content = prepareContent(deps, workspaceId, {
+      html: request.html,
+      ...(request.source ? { source: request.source } : {}),
+      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
+    });
     try {
       return context.json(
         WorkspaceArtifactMutationResponse.parse(
@@ -264,6 +252,29 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             workspaceId,
             artifactId: artifactId(context),
             versionId: request.versionId,
+            expectedCurrentVersionId: request.expectedCurrentVersionId,
+            reason: request.reason,
+            ...provenance(grant.subjectId, request.idempotencyKey),
+          }),
+        ),
+      );
+    } catch (error) {
+      return errorResponse(context, error);
+    }
+  });
+
+  app.patch(`${base}/:artifactId/status`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const request = await body(context, SetWorkspaceArtifactStatusRequest);
+    try {
+      return context.json(
+        WorkspaceArtifactMutationResponse.parse(
+          await setWorkspaceArtifactStatus(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            artifactId: artifactId(context),
+            status: request.status,
             expectedCurrentVersionId: request.expectedCurrentVersionId,
             reason: request.reason,
             ...provenance(grant.subjectId, request.idempotencyKey),

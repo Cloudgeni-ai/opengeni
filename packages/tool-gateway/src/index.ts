@@ -84,7 +84,11 @@ export class PreparedToolGatewayDefinitions {
   create(input: {
     catalogDigest: string;
     authorize?: ToolGatewayAuthorization;
-    requireApproval?: (entry: ToolGatewayCatalogEntryValue, caller: ToolGatewayCaller) => boolean;
+    requireApproval?: (
+      entry: ToolGatewayCatalogEntryValue,
+      caller: ToolGatewayCaller,
+      context: { transportMeta?: Record<string, unknown> | null },
+    ) => boolean;
   }): ToolGateway {
     return new ToolGateway(
       input.catalogDigest,
@@ -104,7 +108,11 @@ export class ToolGateway {
     definitions: readonly CompiledDefinition[],
     private readonly authorize: ToolGatewayAuthorization | undefined,
     private readonly requireApproval:
-      | ((entry: ToolGatewayCatalogEntryValue, caller: ToolGatewayCaller) => boolean)
+      | ((
+          entry: ToolGatewayCatalogEntryValue,
+          caller: ToolGatewayCaller,
+          context: { transportMeta?: Record<string, unknown> | null },
+        ) => boolean)
       | undefined,
   ) {
     for (const definition of definitions) {
@@ -135,7 +143,7 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
-    if (this.requireApproval?.(definition.entry, caller)) {
+    if (this.requireApproval?.(definition.entry, caller, context)) {
       throw new ToolGatewayApprovalRequiredError();
     }
     if (!definition.validateInput(request.arguments)) {
@@ -219,7 +227,11 @@ export function createWorkspaceToolGateway(input: {
   definitions: readonly ToolGatewayDefinition[];
   createdAt?: Date;
   authorize?: ToolGatewayAuthorization;
-  requireApproval?: (entry: ToolGatewayCatalogEntryValue, caller: ToolGatewayCaller) => boolean;
+  requireApproval?: (
+    entry: ToolGatewayCatalogEntryValue,
+    caller: ToolGatewayCaller,
+    context: { transportMeta?: Record<string, unknown> | null },
+  ) => boolean;
 }): { catalog: ToolGatewayCatalogValue; gateway: ToolGateway } {
   const prepared = prepareToolGatewayDefinitions(input.definitions);
   const unsigned = {

@@ -12,6 +12,8 @@ export type OpenGeniToolCallOptions = {
   operationId?: string;
   signal?: AbortSignal;
   refreshCatalog?: boolean;
+  /** Set by a current-human host only after its approval UI resolves. */
+  approvalConfirmed?: true;
 };
 
 export type OpenGeniToolFunction<
@@ -107,6 +109,7 @@ export class OpenGeniToolsClient {
         catalogDigest: current.digest,
         identity,
         arguments: argumentsValue,
+        ...(options.approvalConfirmed ? { approvalConfirmed: true as const } : {}),
       };
       const response = await this.transport.requestJson<ToolGatewayCallResponse>(
         "POST",

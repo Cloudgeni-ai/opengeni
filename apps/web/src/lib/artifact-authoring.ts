@@ -1,15 +1,6 @@
-import type { FirstPartyMcpToolName, Permission, ToolRef } from "@opengeni/contracts";
+import type { FirstPartyMcpToolName, Permission } from "@opengeni/contracts";
 
 import type { ReasoningEffort, TurnSubmission } from "@/types";
-
-/**
- * Artifact authoring needs only OpenGeni's mandatory first-party MCP server.
- * Keep this explicit so workspace-default Files/docs servers are not attached
- * to the artifact-only delegated grant and rejected during MCP startup.
- */
-export const ARTIFACT_SESSION_TOOLS = [
-  { kind: "mcp", id: "opengeni" },
-] as const satisfies readonly ToolRef[];
 
 export const ARTIFACT_CREATE_PERMISSIONS = [
   "artifacts:publish",
@@ -29,14 +20,14 @@ export const ARTIFACT_EDIT_TOOLS = [
   "artifacts_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
-const ARTIFACT_RUNTIME_CONTRACT = `Artifacts run as exact HTML in an opaque-origin sandboxed iframe. JavaScript, event handlers, forms, external resources, network requests, popups, and downloads work. The artifact cannot access OpenGeni credentials, parent-page DOM/storage, same-origin authority, or top-level navigation. Prefer a complete, responsive, accessible document; external resources are supported.`;
+const ARTIFACT_RUNTIME_CONTRACT = `Sites publish as one self-contained compiled HTML document in an opaque-origin sandboxed iframe. JavaScript, event handlers, forms, network requests, popups, and downloads work. The Site cannot access OpenGeni credentials, parent-page DOM/storage, same-origin authority, or top-level navigation. When workspace tools are needed, request only their exact gateway identities and use createOpenGeniSiteClient from @opengeni/sdk/site; the parent host keeps workspace identity and credentials outside the iframe and handles approval-required calls. Prefer @opengeni/react components and the workspace design system for the source app.`;
 
 export function artifactCreateOpeningMessage(): string {
-  return "Help me create a workspace artifact.";
+  return "Help me build a workspace Site.";
 }
 
 export function artifactCreateInstructions(): string {
-  return `You are the artifact author for this session. Ask me what the artifact should do. After I answer, build a polished, responsive, accessible, complete self-contained HTML document and call artifacts_create yourself in this same session before replying that the work is complete. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating a file. ${ARTIFACT_RUNTIME_CONTRACT} Keep the artifact primitive generic: it may be an app, page, visualization, gallery, dashboard, document-like experience, or anything else.`;
+  return `You are the Site author for this session. Ask me what the Site should do. After I answer, create a normal Bun + React source project in the workspace, use ordinary packages and build tooling, compile it to one self-contained HTML document, and call artifacts_create yourself with both the retained source bundle and compiled HTML before replying that the work is complete. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT} A Site may be a page, visualization, gallery, dashboard, workflow, or focused app.`;
 }
 
 export function artifactEditOpeningMessage(title: string): string {
@@ -48,7 +39,7 @@ export function artifactEditInstructions(input: {
   title: string;
   currentVersionId: string;
 }): string {
-  return `You are editing the workspace artifact "${input.title}" (artifact id ${input.artifactId}). Ask me what I want changed. After I answer, call artifacts_get_source yourself, make the requested changes, and call artifacts_publish yourself in this same session with current version ${input.currentVersionId} for optimistic concurrency. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating a file. Publish the complete updated HTML before replying that the work is complete. ${ARTIFACT_RUNTIME_CONTRACT}`;
+  return `You are editing the workspace Site "${input.title}" (artifact id ${input.artifactId}). Ask me what I want changed. After I answer, call artifacts_get_source yourself, restore its retained Bun + React source, make and validate the requested changes, compile it to one self-contained HTML document, and call artifacts_publish yourself with both source and HTML in this same session using current version ${input.currentVersionId} for optimistic concurrency. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT}`;
 }
 
 /** Apply the actor's durable new-session model preference without replacing an explicit choice. */

@@ -46,6 +46,7 @@ describe("OpenGeniClient tools", () => {
           catalogDigest: catalog.digest,
           identity: catalog.entries[0]!.identity,
           arguments: { query: "gateway" },
+          approvalConfirmed: true,
         });
         return response({
           operationId: "33333333-3333-4333-8333-333333333333",
@@ -60,7 +61,10 @@ describe("OpenGeniClient tools", () => {
 
     const tools = client.tools.forWorkspace(workspaceId);
     expect(
-      await (tools.docs!.search as (args: unknown) => Promise<unknown>)({ query: "gateway" }),
+      await (tools.docs!.search as (args: unknown, options: unknown) => Promise<unknown>)(
+        { query: "gateway" },
+        { approvalConfirmed: true },
+      ),
     ).toEqual({ matches: 1 });
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [

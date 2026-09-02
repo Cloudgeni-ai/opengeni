@@ -17,6 +17,7 @@ import type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
@@ -209,6 +210,18 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+    );
+  }
+
+  async setWorkspaceArtifactStatus(
+    workspaceId: string,
+    artifactId: string,
+    request: SetWorkspaceArtifactStatusRequest,
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
       request,
     );
   }

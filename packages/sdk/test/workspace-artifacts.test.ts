@@ -32,7 +32,7 @@ describe("workspace artifacts SDK", () => {
     ]);
   });
 
-  test("keeps all detail, content, create, publish, and rollback routes on the root client", async () => {
+  test("keeps detail, content, publish, rollback, and status routes on the root client", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({
       baseUrl: "https://api.example.test",
@@ -62,6 +62,12 @@ describe("workspace artifacts SDK", () => {
       reason: "Restore known-good version",
       idempotencyKey: "rollback-key",
     });
+    await client.setWorkspaceArtifactStatus(WORKSPACE_ID, artifactId, {
+      status: "archived",
+      expectedCurrentVersionId: "version-1",
+      reason: "Temporarily unpublish the Site",
+      idempotencyKey: "archive-site",
+    });
 
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       [
@@ -81,6 +87,10 @@ describe("workspace artifacts SDK", () => {
         "POST",
         `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${encodedArtifactId}/rollback`,
       ],
+      [
+        "PATCH",
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts/${encodedArtifactId}/status`,
+      ],
     ]);
     expect(await requests[2]!.json()).toEqual({
       title: "Status board",
@@ -97,6 +107,12 @@ describe("workspace artifacts SDK", () => {
       expectedCurrentVersionId: "version-2",
       reason: "Restore known-good version",
       idempotencyKey: "rollback-key",
+    });
+    expect(await requests[5]!.json()).toEqual({
+      status: "archived",
+      expectedCurrentVersionId: "version-1",
+      reason: "Temporarily unpublish the Site",
+      idempotencyKey: "archive-site",
     });
   });
 });

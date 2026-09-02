@@ -181,7 +181,10 @@ export async function prepareWorkspaceToolGateway(
     resolveCredential,
     localMcpServers,
     ...(codexAppsAuth ? { codexAppsAuth } : {}),
-    workspaceToolGateway: {},
+    workspaceToolGateway: {
+      requireApproval: (entry, _caller, context) =>
+        entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+    },
   });
   if (!prepared.toolGateway || !prepared.toolGatewayCatalog) {
     await prepared.close().catch(() => undefined);
@@ -247,13 +250,18 @@ export async function callWorkspaceToolGateway(
   const request = ToolGatewayCallRequest.parse(input);
   const operationId = request.operationId ?? crypto.randomUUID();
   try {
-    const result = await prepared.toolGateway.call({
-      operationId,
-      catalogDigest: request.catalogDigest,
-      identity: request.identity,
-      arguments: request.arguments,
-      caller: { kind: "http", subjectId: grant.subjectId },
-    });
+    const result = await prepared.toolGateway.call(
+      {
+        operationId,
+        catalogDigest: request.catalogDigest,
+        identity: request.identity,
+        arguments: request.arguments,
+        caller: { kind: "http", subjectId: grant.subjectId },
+      },
+      {
+        transportMeta: { approvalConfirmed: request.approvalConfirmed === true },
+      },
+    );
     return ToolGatewayCallResponse.parse({
       operationId,
       catalogDigest: prepared.toolGatewayCatalog.digest,

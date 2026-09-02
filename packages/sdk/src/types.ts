@@ -114,6 +114,7 @@ export type ToolGatewayCallRequest = {
   catalogDigest: string;
   identity: ToolGatewayIdentity;
   arguments: Record<string, unknown>;
+  approvalConfirmed?: true | undefined;
 };
 
 export type ToolGatewayCallResponse = {
@@ -3042,6 +3043,8 @@ export type FirstPartyMcpToolName =
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"

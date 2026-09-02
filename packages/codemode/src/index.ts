@@ -4,7 +4,6 @@ import {
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
   AttemptToolCall,
   AttemptToolCatalog,
-  AttemptToolCatalogEntry,
   AttemptToolResult,
   CodemodeCallSubmission,
   CodemodeOperation,

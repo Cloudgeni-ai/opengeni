@@ -1,9 +1,11 @@
-import type {
-  WorkspaceArtifact,
-  WorkspaceArtifactDetailResponse,
-  WorkspaceArtifactEvent,
-  WorkspaceArtifactMutationResponse,
-  WorkspaceArtifactVersion,
+import {
+  WorkspaceArtifactRequestedTools,
+  type ToolGatewayIdentity,
+  type WorkspaceArtifact,
+  type WorkspaceArtifactDetailResponse,
+  type WorkspaceArtifactEvent,
+  type WorkspaceArtifactMutationResponse,
+  type WorkspaceArtifactVersion,
 } from "@opengeni/contracts";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
@@ -13,7 +15,12 @@ import * as schema from "./schema";
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
 type VersionRow = typeof schema.workspaceArtifactVersions.$inferSelect;
 type EventRow = typeof schema.workspaceArtifactEvents.$inferSelect;
-type ArtifactMutationToolName = "artifacts_create" | "artifacts_publish" | "artifacts_rollback";
+type ArtifactMutationToolName =
+  | "artifacts_create"
+  | "artifacts_publish"
+  | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore";
 
 export class WorkspaceArtifactNotFoundError extends Error {
   readonly name = "WorkspaceArtifactNotFoundError";
@@ -47,6 +54,9 @@ function versionFromRow(row: VersionRow): WorkspaceArtifactVersion {
     contentType: "text/html",
     contentSha256: row.contentSha256,
     sizeBytes: row.sizeBytes,
+    sourceSha256: row.sourceSha256,
+    sourceSizeBytes: row.sourceSizeBytes,
+    requestedTools: WorkspaceArtifactRequestedTools.parse(row.requestedTools),
     sourceSessionId: row.sourceSessionId,
     sourceTurnId: row.sourceTurnId,
     sourceAttemptId: row.sourceAttemptId,
@@ -237,7 +247,12 @@ export async function getWorkspaceArtifactContentRef(
   workspaceId: string,
   artifactId: string,
   versionId?: string,
-): Promise<{ artifactId: string; version: WorkspaceArtifactVersion; contentKey: string }> {
+): Promise<{
+  artifactId: string;
+  version: WorkspaceArtifactVersion;
+  contentKey: string;
+  sourceKey: string | null;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
     if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
@@ -255,7 +270,12 @@ export async function getWorkspaceArtifactContentRef(
       )
       .limit(1);
     if (!version) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
-    return { artifactId, version: versionFromRow(version), contentKey: version.contentKey };
+    return {
+      artifactId,
+      version: versionFromRow(version),
+      contentKey: version.contentKey,
+      sourceKey: version.sourceKey,
+    };
   });
 }
 
@@ -265,6 +285,10 @@ type PublishMetadata = {
   contentKey: string;
   contentSha256: string;
   sizeBytes: number;
+  sourceKey: string;
+  sourceSha256: string;
+  sourceSizeBytes: number;
+  requestedTools?: ToolGatewayIdentity[];
   operationKey: string;
   actorSubjectId: string;
   sourceSessionId: string | null;
@@ -448,6 +472,28 @@ function assertRollbackReplay(
   }
 }
 
+function assertStatusReplay(
+  replay: Awaited<ReturnType<typeof replayForOperation>>,
+  artifactId: string,
+  status: "active" | "archived",
+  expectedCurrentVersionId: string,
+  reason: string,
+) {
+  const expectedType = status === "archived" ? "archived" : "restored";
+  if (
+    !replay ||
+    replay.event.type !== expectedType ||
+    replay.event.artifactId !== artifactId ||
+    replay.event.fromVersionId !== expectedCurrentVersionId ||
+    replay.event.toVersionId !== expectedCurrentVersionId ||
+    replay.event.reason !== reason
+  ) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used for a different operation",
+    );
+  }
+}
+
 function mutationResult(
   artifact: ArtifactRow,
   version: VersionRow,
@@ -487,6 +533,7 @@ export async function createWorkspaceArtifact(
               "Idempotency key was already used with different content",
             );
           }
+          assertReplayVersionMetadata(replay.version, input);
           return mutationResult(
             replay.artifact,
             replay.version,
@@ -518,6 +565,10 @@ export async function createWorkspaceArtifact(
             contentKey: input.contentKey,
             contentSha256: input.contentSha256,
             sizeBytes: input.sizeBytes,
+            sourceKey: input.sourceKey,
+            sourceSha256: input.sourceSha256,
+            sourceSizeBytes: input.sourceSizeBytes,
+            requestedTools: input.requestedTools ?? [],
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
@@ -582,6 +633,7 @@ export async function publishWorkspaceArtifactVersion(
               "Idempotency key was already used with different content",
             );
           }
+          assertReplayVersionMetadata(replay.version, input);
           return mutationResult(
             replay.artifact,
             replay.version,
@@ -601,6 +653,8 @@ export async function publishWorkspaceArtifactVersion(
             artifact.currentVersionId,
           );
         }
+        const current = await currentVersion(tx, artifact);
+        if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
         const [latest] = await tx
           .select()
           .from(schema.workspaceArtifactVersions)
@@ -623,6 +677,10 @@ export async function publishWorkspaceArtifactVersion(
             contentKey: input.contentKey,
             contentSha256: input.contentSha256,
             sizeBytes: input.sizeBytes,
+            sourceKey: input.sourceKey,
+            sourceSha256: input.sourceSha256,
+            sourceSizeBytes: input.sourceSizeBytes,
+            requestedTools: input.requestedTools ?? current.requestedTools,
             operationKey: input.operationKey,
             sourceSessionId: input.sourceSessionId,
             sourceTurnId: input.sourceTurnId,
@@ -668,7 +726,17 @@ export async function publishWorkspaceArtifactVersion(
 
 export async function rollbackWorkspaceArtifact(
   db: Database,
-  input: Omit<PublishMetadata, "contentKey" | "contentSha256" | "sizeBytes" | "persistContent"> & {
+  input: Omit<
+    PublishMetadata,
+    | "contentKey"
+    | "contentSha256"
+    | "sizeBytes"
+    | "sourceKey"
+    | "sourceSha256"
+    | "sourceSizeBytes"
+    | "requestedTools"
+    | "persistContent"
+  > & {
     artifactId: string;
     versionId: string;
     expectedCurrentVersionId: string;
@@ -748,4 +816,104 @@ export async function rollbackWorkspaceArtifact(
       });
     },
   );
+}
+
+export async function setWorkspaceArtifactStatus(
+  db: Database,
+  input: Omit<
+    PublishMetadata,
+    | "contentKey"
+    | "contentSha256"
+    | "sizeBytes"
+    | "sourceKey"
+    | "sourceSha256"
+    | "sourceSizeBytes"
+    | "requestedTools"
+    | "persistContent"
+  > & {
+    artifactId: string;
+    status: "active" | "archived";
+    expectedCurrentVersionId: string;
+    reason: string;
+  },
+): Promise<WorkspaceArtifactMutationResponse> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await lockOperation(tx, input.workspaceId, input.operationKey);
+        await assertAttemptAuthority(tx, input);
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
+        if (replay) {
+          assertStatusReplay(
+            replay,
+            input.artifactId,
+            input.status,
+            input.expectedCurrentVersionId,
+            input.reason,
+          );
+          return mutationResult(
+            replay.artifact,
+            replay.version,
+            replay.event,
+            true,
+            replay.current ?? replay.version,
+          );
+        }
+        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+        if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
+          throw new WorkspaceArtifactConflictError(
+            "Artifact changed in another request",
+            artifact.currentVersionId,
+          );
+        }
+        const current = await currentVersion(tx, artifact);
+        if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
+        if (artifact.status === input.status) {
+          throw new WorkspaceArtifactOperationError(
+            input.status === "archived"
+              ? "Artifact is already archived"
+              : "Artifact is already active",
+          );
+        }
+        const [updated] = await tx
+          .update(schema.workspaceArtifacts)
+          .set({ status: input.status, updatedAt: new Date() })
+          .where(eq(schema.workspaceArtifacts.id, artifact.id))
+          .returning();
+        const [event] = await tx
+          .insert(schema.workspaceArtifactEvents)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            artifactId: input.artifactId,
+            type: input.status === "archived" ? "archived" : "restored",
+            fromVersionId: current.id,
+            toVersionId: current.id,
+            operationKey: input.operationKey,
+            sourceSessionId: input.sourceSessionId,
+            sourceTurnId: input.sourceTurnId,
+            sourceAttemptId: input.sourceAttemptId,
+            sourceExecutionGeneration: input.sourceExecutionGeneration,
+            actorSubjectId: input.actorSubjectId,
+            reason: input.reason,
+          })
+          .returning();
+        return mutationResult(updated!, current, event!, false);
+      }),
+  );
+}
+
+function assertReplayVersionMetadata(version: VersionRow, input: PublishMetadata): void {
+  if (
+    version.sourceSha256 !== input.sourceSha256 ||
+    (input.requestedTools !== undefined &&
+      JSON.stringify(version.requestedTools) !== JSON.stringify(input.requestedTools))
+  ) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used with different source or requested tools",
+    );
+  }
 }

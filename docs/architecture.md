@@ -937,6 +937,7 @@ handlers because its host owns process lifecycle.
 | `packages/storage` | `@opengeni/storage` | Object-storage abstraction for files, recordings, and retained bytes |
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
+| `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -1048,6 +1049,22 @@ Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
 
+`@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
+authorization, approval-classification, and execution boundary. Runtime prepares
+one canonical provider set from enabled first-party and integration MCP servers;
+the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
+workspace HTTP/SDK adapter project that same catalog and invoke the same executor
+closures. Friendly model names and JavaScript paths are projections of the
+opaque `{serverId, toolName}` identity and never authority.
+
+Codemode adds only attempt scope, active-attempt fencing, its durable operation
+journal, sandbox delivery, and recovery semantics. The current-human gateway
+rebuilds live authority for each request. Browser callers use
+`client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
+parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
+credentials nor workspace routing context. Approval-required Site calls are
+confirmed in the parent and enforced again at the gateway boundary.
+
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
@@ -1081,7 +1098,12 @@ remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
-are different products and must not share mutable truth accidentally.
+are different products and must not share mutable truth accidentally. Workspace
+Sites are immutable versions of the existing HTML artifact primitive: one
+self-contained HTML runtime, one retained source bundle, an exact requested-tool
+allowlist, rollback, and recoverable archive/restore. They run in the existing
+opaque-origin iframe; there is no second host, wildcard domain, or compute
+runtime.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and

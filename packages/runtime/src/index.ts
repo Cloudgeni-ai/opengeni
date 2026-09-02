@@ -3361,7 +3361,11 @@ export type PrepareToolsOptions = {
     generation?: number;
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
-    requireApproval?: (entry: ToolGatewayCatalogEntry, caller: ToolGatewayCaller) => boolean;
+    requireApproval?: (
+      entry: ToolGatewayCatalogEntry,
+      caller: ToolGatewayCaller,
+      context: { transportMeta?: Record<string, unknown> | null },
+    ) => boolean;
   };
   /**
    * Persist an oversized *model-visible* tool result as a workspace File and

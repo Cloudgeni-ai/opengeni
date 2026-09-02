@@ -323,6 +323,8 @@ export const ToolGatewayCallRequest = z
     catalogDigest: sha256,
     identity: ToolGatewayIdentity,
     arguments: jsonObject,
+    /** Current-human HTTP adapters set this only after an explicit approval UI. */
+    approvalConfirmed: z.literal(true).optional(),
   })
   .strict();
 export type ToolGatewayCallRequest = z.infer<typeof ToolGatewayCallRequest>;

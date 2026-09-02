@@ -1,3 +1,15 @@
+import type { ToolGatewayIdentity } from "./types";
+
+export type WorkspaceArtifactSourceFile = {
+  path: string;
+  content: string;
+};
+
+export type WorkspaceArtifactSourceBundle = {
+  entrypoint: string;
+  files: WorkspaceArtifactSourceFile[];
+};
+
 export type WorkspaceArtifactVersion = {
   id: string;
   accountId: string;
@@ -7,6 +19,9 @@ export type WorkspaceArtifactVersion = {
   contentType: "text/html";
   contentSha256: string;
   sizeBytes: number;
+  sourceSha256: string | null;
+  sourceSizeBytes: number | null;
+  requestedTools: ToolGatewayIdentity[];
   sourceSessionId: string | null;
   sourceTurnId: string | null;
   sourceAttemptId: string | null;
@@ -34,7 +49,7 @@ export type WorkspaceArtifactEvent = {
   accountId: string;
   workspaceId: string;
   artifactId: string;
-  type: "published" | "rolled_back";
+  type: "published" | "rolled_back" | "archived" | "restored";
   fromVersionId: string | null;
   toVersionId: string;
   sourceSessionId: string | null;
@@ -65,6 +80,8 @@ export type WorkspaceArtifactContentResponse = {
   contentType: "text/html";
   contentSha256: string;
   html: string;
+  source: WorkspaceArtifactSourceBundle;
+  requestedTools: ToolGatewayIdentity[];
 };
 export type WorkspaceArtifactMutationResponse = {
   artifact: WorkspaceArtifact;
@@ -77,17 +94,27 @@ export type CreateWorkspaceArtifactRequest = {
   title: string;
   description?: string | null;
   html: string;
+  source?: WorkspaceArtifactSourceBundle;
+  requestedTools?: ToolGatewayIdentity[];
   idempotencyKey: string;
 };
 export type PublishWorkspaceArtifactVersionRequest = {
   title?: string;
   description?: string | null;
   html: string;
+  source?: WorkspaceArtifactSourceBundle;
+  requestedTools?: ToolGatewayIdentity[];
   expectedCurrentVersionId: string;
   idempotencyKey: string;
 };
 export type RollbackWorkspaceArtifactRequest = {
   versionId: string;
+  expectedCurrentVersionId: string;
+  reason: string;
+  idempotencyKey: string;
+};
+export type SetWorkspaceArtifactStatusRequest = {
+  status: "active" | "archived";
   expectedCurrentVersionId: string;
   reason: string;
   idempotencyKey: string;

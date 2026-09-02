@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   CreateWorkspaceArtifactRequest,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WorkspaceArtifactRequestedTools,
+  WorkspaceArtifactSourceBundle,
   WorkspaceArtifactHtml,
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
@@ -41,5 +43,29 @@ describe("workspace artifact contracts", () => {
       }).success,
     ).toBe(true);
     expect(WorkspaceArtifactListResponse.safeParse({ artifacts: [] }).success).toBe(false);
+  });
+
+  test("retains traversal-free source bundles and unique requested tool identities", () => {
+    expect(
+      WorkspaceArtifactSourceBundle.parse({
+        entrypoint: "src/index.tsx",
+        files: [
+          { path: "src/index.tsx", content: "export {};" },
+          { path: "src/styles.css", content: ":root{}" },
+        ],
+      }),
+    ).toMatchObject({ entrypoint: "src/index.tsx" });
+    expect(
+      WorkspaceArtifactSourceBundle.safeParse({
+        entrypoint: "../index.tsx",
+        files: [{ path: "../index.tsx", content: "" }],
+      }).success,
+    ).toBe(false);
+    expect(
+      WorkspaceArtifactRequestedTools.safeParse([
+        { serverId: "docs", toolName: "search" },
+        { serverId: "docs", toolName: "search" },
+      ]).success,
+    ).toBe(false);
   });
 });

@@ -59,7 +59,10 @@ describe("ToolGateway", () => {
       workspaceId: "22222222-2222-4222-8222-222222222222",
       generation: 1,
       definitions: [{ ...definition, approval: "human" }],
-      requireApproval: (entry, caller) => entry.approval === "human" && caller.kind !== "model",
+      requireApproval: (entry, caller, context) =>
+        entry.approval === "human" &&
+        caller.kind !== "model" &&
+        context.transportMeta?.approvalConfirmed !== true,
     });
     await expect(
       gateway.call({
@@ -79,6 +82,18 @@ describe("ToolGateway", () => {
         caller: { kind: "browser", subjectId: "human:test" },
       }),
     ).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    await expect(
+      gateway.call(
+        {
+          operationId: crypto.randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: definition.identity,
+          arguments: { query: "approved" },
+          caller: { kind: "browser", subjectId: "human:test" },
+        },
+        { transportMeta: { approvalConfirmed: true } },
+      ),
+    ).resolves.toMatchObject({ structuredContent: { ok: true } });
   });
 
   test("verifies catalog integrity independently of creation time", () => {

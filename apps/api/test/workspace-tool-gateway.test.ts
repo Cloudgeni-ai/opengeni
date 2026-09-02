@@ -64,6 +64,8 @@ function preparedGateway(
         },
       },
     ],
+    requireApproval: (entry, _caller, context) =>
+      entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
   });
   return {
     toolGateway: gateway,
@@ -95,21 +97,28 @@ describe("workspace tool gateway adapters", () => {
           "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
         },
       });
-      expect(
-        await client.callTool({ name: "inventory__lookup", arguments: { sku: "SKU-1" } }),
-      ).toMatchObject({ structuredContent: { count: 7 } });
+      await expect(
+        client.callTool({ name: "inventory__lookup", arguments: { sku: "SKU-1" } }),
+      ).rejects.toThrow("Tool requires human approval");
+
+      await expect(
+        callWorkspaceToolGateway(prepared, access, {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "SKU-2" },
+        }),
+      ).rejects.toMatchObject({ status: 409 });
 
       const response = await callWorkspaceToolGateway(prepared, access, {
         operationId: "33333333-3333-4333-8333-333333333333",
         catalogDigest: prepared.toolGatewayCatalog.digest,
         identity: { serverId: "inventory", toolName: "lookup" },
         arguments: { sku: "SKU-2" },
+        approvalConfirmed: true,
       });
       expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
-      expect(calls).toEqual([
-        { kind: "mcp", argumentsValue: { sku: "SKU-1" } },
-        { kind: "http", argumentsValue: { sku: "SKU-2" } },
-      ]);
+      expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SKU-2" } }]);
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }
@@ -136,7 +145,11 @@ describe("workspace tool gateway adapters", () => {
       }),
     ).rejects.toMatchObject({ status: 404 });
     await expect(
-      callWorkspaceToolGateway(prepared, access, { ...base, arguments: {} }),
+      callWorkspaceToolGateway(prepared, access, {
+        ...base,
+        arguments: {},
+        approvalConfirmed: true,
+      }),
     ).rejects.toMatchObject({ status: 422 });
   });
 

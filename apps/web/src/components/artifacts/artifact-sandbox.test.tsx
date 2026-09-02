@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
+  openGeniSiteBridgePortForFrame,
 } from "@opengeni/react/artifacts";
+import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
 import { ArtifactSandbox } from "./artifact-sandbox";
 
@@ -25,13 +27,30 @@ describe("published HTML artifacts", () => {
     expect(markup).toContain('referrerPolicy="no-referrer"');
   });
 
-  it("renders platform-owned stop, reload, focus, and version controls", () => {
+  it("renders platform-owned stop, reload, full-screen, and version controls", () => {
     const markup = renderToStaticMarkup(
       <ArtifactSandbox html="<h1>App</h1>" title="Status" versionLabel="v4" />,
     );
-    expect(markup).toContain('aria-label="Stop artifact"');
-    expect(markup).toContain('aria-label="Reload artifact"');
-    expect(markup).toContain('aria-label="Open focus mode"');
+    expect(markup).toContain('aria-label="Stop Site"');
+    expect(markup).toContain('aria-label="Reload Site"');
+    expect(markup).toContain('aria-label="Open Site full screen"');
     expect(markup).toContain("v4");
+  });
+
+  it("accepts a bridge only from the exact iframe window with one transferred port", () => {
+    const frameWindow = {} as Window;
+    const otherWindow = {} as Window;
+    const port = {} as MessagePort;
+    const connect = {
+      type: OPENGENI_SITE_BRIDGE_CONNECT,
+      version: OPENGENI_SITE_BRIDGE_VERSION,
+    };
+
+    expect(openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [port])).toBe(port);
+    expect(openGeniSiteBridgePortForFrame(otherWindow, frameWindow, connect, [port])).toBeNull();
+    expect(openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [])).toBeNull();
+    expect(
+      openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [port, port]),
+    ).toBeNull();
   });
 });

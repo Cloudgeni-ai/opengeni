@@ -17,6 +17,7 @@ import type {
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  ToolGatewayIdentity,
   UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -212,6 +213,10 @@ export const workspaceArtifactVersions = pgTable(
     contentType: text("content_type").$type<"text/html">().notNull().default("text/html"),
     contentSha256: text("content_sha256").notNull(),
     sizeBytes: integer("size_bytes").notNull(),
+    sourceKey: text("source_key"),
+    sourceSha256: text("source_sha256"),
+    sourceSizeBytes: integer("source_size_bytes"),
+    requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
@@ -272,7 +277,7 @@ export const workspaceArtifactEvents = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     artifactId: uuid("artifact_id").notNull(),
-    type: text("type").$type<"published" | "rolled_back">().notNull(),
+    type: text("type").$type<"published" | "rolled_back" | "archived" | "restored">().notNull(),
     fromVersionId: uuid("from_version_id"),
     toVersionId: uuid("to_version_id").notNull(),
     operationKey: text("operation_key").notNull(),

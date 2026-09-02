@@ -20,6 +20,30 @@ export type {
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export {
+  OPENGENI_SITE_BRIDGE_CANCEL,
+  OPENGENI_SITE_BRIDGE_CONNECT,
+  OPENGENI_SITE_BRIDGE_READY,
+  OPENGENI_SITE_BRIDGE_REQUEST,
+  OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_VERSION,
+  OpenGeniSiteBridgeError,
+  createOpenGeniSiteClient,
+  isOpenGeniSiteBridgeCancelMessage,
+  isOpenGeniSiteBridgeConnectMessage,
+  isOpenGeniSiteBridgeRequestMessage,
+  sanitizeOpenGeniSiteToolCallRequest,
+} from "./site";
+export type {
+  OpenGeniSiteBridgeCancelMessage,
+  OpenGeniSiteBridgeConnectMessage,
+  OpenGeniSiteBridgeReadyMessage,
+  OpenGeniSiteBridgeRequestMessage,
+  OpenGeniSiteBridgeResponseMessage,
+  OpenGeniSiteClient,
+  OpenGeniSiteClientOptions,
+  OpenGeniSiteToolCallRequest,
+} from "./site";
 export type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
@@ -177,6 +201,7 @@ export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -184,6 +209,8 @@ export type {
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
   WorkspaceArtifactVersion,
 } from "./workspace-artifacts";
 export {

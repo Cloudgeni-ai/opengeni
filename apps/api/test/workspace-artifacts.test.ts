@@ -129,6 +129,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       title: "Status board",
       description: "A generic live board",
       html: "<!doctype html><h1>Version one</h1>",
+      source: {
+        entrypoint: "src/index.tsx",
+        files: [{ path: "src/index.tsx", content: "export const version = 1;" }],
+      },
+      requestedTools: [{ serverId: "docs", toolName: "search" }],
       idempotencyKey: "create-status-board",
     };
     const createdResponse = await request(grant, ["artifacts:publish"], base, {
@@ -140,6 +145,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(created.replayed).toBe(false);
     expect(created.artifact).not.toHaveProperty("kind");
     expect(created.artifact.currentVersion?.revision).toBe(1);
+    expect(created.version.requestedTools).toEqual(createBody.requestedTools);
+    expect(created.version.sourceSha256).toHaveLength(64);
     const putsAfterCreate = objectPutCount;
 
     const replayResponse = await request(grant, ["artifacts:publish"], base, {
@@ -207,6 +214,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       await (await request(grant, ["artifacts:read"], contentPath)).json(),
     );
     expect(firstContent.html).toBe(createBody.html);
+    expect(firstContent.source).toEqual(createBody.source);
+    expect(firstContent.requestedTools).toEqual(createBody.requestedTools);
 
     const versionPath = `${base}/${created.artifact.id}/versions`;
     const publish = (html: string, key: string) =>
@@ -226,6 +235,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const winnerResponse = concurrent.find((response) => response.status === 200)!;
     const winner = WorkspaceArtifactMutationResponse.parse(await winnerResponse.json());
     expect(winner.version.revision).toBe(2);
+    expect(winner.version.requestedTools).toEqual(createBody.requestedTools);
 
     const putsBeforeStalePublish = objectPutCount;
     const stalePublish = await publish(
@@ -263,11 +273,74 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const rolledBack = WorkspaceArtifactMutationResponse.parse(await rollbackResponse.json());
     expect(rolledBack.artifact.currentVersion?.id).toBe(created.version.id);
 
+    const archivedResponse = await request(
+      grant,
+      ["artifacts:publish"],
+      `${base}/${created.artifact.id}/status`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "archived",
+          expectedCurrentVersionId: created.version.id,
+          reason: "Temporarily unpublish the Site",
+          idempotencyKey: "archive-site",
+        }),
+      },
+    );
+    expect(archivedResponse.status).toBe(200);
+    const archived = WorkspaceArtifactMutationResponse.parse(await archivedResponse.json());
+    expect(archived.artifact.status).toBe("archived");
+    expect(archived.event.type).toBe("archived");
+    expect(archived.replayed).toBe(false);
+    const archiveReplay = WorkspaceArtifactMutationResponse.parse(
+      await (
+        await request(grant, ["artifacts:publish"], `${base}/${created.artifact.id}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "archived",
+            expectedCurrentVersionId: created.version.id,
+            reason: "Temporarily unpublish the Site",
+            idempotencyKey: "archive-site",
+          }),
+        })
+      ).json(),
+    );
+    expect(archiveReplay.replayed).toBe(true);
+    const putsBeforeArchivedPublish = objectPutCount;
+    const archivedPublish = await request(grant, ["artifacts:publish"], versionPath, {
+      method: "POST",
+      body: JSON.stringify({
+        html: "<!doctype html><h1>Archived write</h1>",
+        expectedCurrentVersionId: created.version.id,
+        idempotencyKey: "archived-publish",
+      }),
+    });
+    expect(archivedPublish.status).toBe(422);
+    expect(objectPutCount).toBe(putsBeforeArchivedPublish);
+    const restoredResponse = await request(
+      grant,
+      ["artifacts:publish"],
+      `${base}/${created.artifact.id}/status`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          status: "active",
+          expectedCurrentVersionId: created.version.id,
+          reason: "Restore the Site",
+          idempotencyKey: "restore-site",
+        }),
+      },
+    );
+    expect(restoredResponse.status).toBe(200);
+    const restored = WorkspaceArtifactMutationResponse.parse(await restoredResponse.json());
+    expect(restored.artifact.status).toBe("active");
+    expect(restored.event.type).toBe("restored");
+
     const detail = WorkspaceArtifactDetailResponse.parse(
       await (await request(grant, ["artifacts:read"], `${base}/${created.artifact.id}`)).json(),
     );
     expect(detail.versions).toHaveLength(2);
-    expect(detail.events).toHaveLength(3);
+    expect(detail.events).toHaveLength(5);
     expect(detail.versionsTruncated).toBe(false);
     expect(detail.eventsTruncated).toBe(false);
 
@@ -313,6 +386,8 @@ describe("workspace artifact API and PostgreSQL authority", () => {
             "artifacts_get_source",
             "artifacts_publish",
             "artifacts_rollback",
+            "artifacts_archive",
+            "artifacts_restore",
           ],
         },
       },
@@ -323,9 +398,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     await mcp.connect(clientTransport);
     try {
       expect((await mcp.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
+        "artifacts_archive",
         "artifacts_create",
         "artifacts_get_source",
         "artifacts_publish",
+        "artifacts_restore",
         "artifacts_rollback",
       ]);
       const createdResult = await mcp.callTool({
@@ -368,6 +445,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const sourceText = sourceResult.content.find((item) => item.type === "text");
       if (!sourceText || sourceText.type !== "text") throw new Error("missing MCP source result");
       expect(JSON.parse(sourceText.text).html).toContain("Created through MCP");
+      expect(JSON.parse(sourceText.text).source).toEqual({
+        entrypoint: "index.html",
+        files: [{ path: "index.html", content: "<!doctype html><main>Created through MCP</main>" }],
+      });
 
       const publishedResult = await mcp.callTool({
         name: "artifacts_publish",
@@ -401,6 +482,38 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const rolledBack = WorkspaceArtifactMutationResponse.parse(JSON.parse(rollbackText.text));
       expect(rolledBack.event.sourceAttemptId).toBe(attempt.attemptId);
       expect(rolledBack.event.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+
+      const archiveResult = await mcp.callTool({
+        name: "artifacts_archive",
+        arguments: {
+          artifactId: created.artifact.id,
+          expectedCurrentVersionId: created.version.id,
+          reason: "Exact attempt archive",
+          idempotencyKey: "agent-archive-map",
+        },
+      });
+      const archiveText = archiveResult.content.find((item) => item.type === "text");
+      if (!archiveText || archiveText.type !== "text")
+        throw new Error("missing MCP archive result");
+      const archived = WorkspaceArtifactMutationResponse.parse(JSON.parse(archiveText.text));
+      expect(archived.artifact.status).toBe("archived");
+      expect(archived.event.sourceAttemptId).toBe(attempt.attemptId);
+
+      const restoreResult = await mcp.callTool({
+        name: "artifacts_restore",
+        arguments: {
+          artifactId: created.artifact.id,
+          expectedCurrentVersionId: created.version.id,
+          reason: "Exact attempt restore",
+          idempotencyKey: "agent-restore-map",
+        },
+      });
+      const restoreText = restoreResult.content.find((item) => item.type === "text");
+      if (!restoreText || restoreText.type !== "text")
+        throw new Error("missing MCP restore result");
+      const restored = WorkspaceArtifactMutationResponse.parse(JSON.parse(restoreText.text));
+      expect(restored.artifact.status).toBe("active");
+      expect(restored.event.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 
       await supersedeAttempt(attempt);
       const putsBeforeStaleAttempt = objectPutCount;
