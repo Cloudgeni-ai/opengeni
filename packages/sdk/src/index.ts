@@ -1,4 +1,14 @@
 export { OpenGeniClient } from "./artifact-client";
+export { OpenGeniToolCallError, OpenGeniToolsClient } from "./tools";
+export type {
+  OpenGeniDynamicToolNamespace,
+  OpenGeniDynamicToolNode,
+  OpenGeniGeneratedTools,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniToolTransport,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
   FetchResponse,
@@ -10,6 +20,15 @@ export type {
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export type {
+  ToolGatewayCallRequest,
+  ToolGatewayCallResponse,
+  ToolGatewayCatalog,
+  ToolGatewayCatalogEntry,
+  ToolGatewayDeclarationsResponse,
+  ToolGatewayIdentity,
+  ToolGatewayResult,
+} from "./types";
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,

@@ -1,17 +1,16 @@
 {
-  "name": "@opengeni/codemode",
-  "version": "0.4.24",
-  "description": "Attempt-frozen programmatic tool catalog and execution authority for OpenGeni.",
+  "name": "@opengeni/tool-gateway",
+  "version": "0.1.0",
+  "description": "Protocol-neutral catalog validation, authorization, and execution core for OpenGeni tools.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
-    "directory": "packages/codemode"
+    "directory": "packages/tool-gateway"
   },
   "files": [
     "dist",
-    "src",
-    "README.md"
+    "src"
   ],
   "type": "module",
   "sideEffects": false,
@@ -35,7 +34,7 @@
   },
   "dependencies": {
     "@opengeni/contracts": "workspace:*",
-    "@opengeni/tool-gateway": "workspace:*"
+    "ajv": "^8.20.0"
   },
   "devDependencies": {
     "tsup": "^8.5.0",

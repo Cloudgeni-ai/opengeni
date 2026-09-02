@@ -18,6 +18,7 @@ import {
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  ToolGatewayCallRequest,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -63,6 +64,7 @@ import {
   ManagedAuthActorLeaseOutcomeUnknownError,
   hasPermission,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireLiveAgentAttemptAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
@@ -100,6 +102,13 @@ import { assertManagedEmailTransportMetadata } from "./auth/organization-user-se
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
+import {
+  buildWorkspaceToolGatewayMcpServer,
+  callWorkspaceToolGateway,
+  grantUsesAttemptScopedMcp,
+  prepareWorkspaceToolGateway,
+  workspaceToolGatewayDeclarations,
+} from "./workspace-tool-gateway";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -898,7 +907,8 @@ export function createAppComposition(deps: AppDependencies): {
       }
       throw error;
     }
-    const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
+    const authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
+    const grant = authorization.grant;
     return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
       const boundSessionId = grant.metadata?.sessionId;
       if (typeof boundSessionId === "string") {
@@ -926,6 +936,16 @@ export function createAppComposition(deps: AppDependencies): {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
+      if (!grantUsesAttemptScopedMcp(grant)) {
+        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant);
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
       const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
@@ -937,6 +957,61 @@ export function createAppComposition(deps: AppDependencies): {
       // worker that drops the call (Steer/Pause) aborts a blocking tool here.
       return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
     });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(prepared.toolGatewayCatalog);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/calls", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const grant = authorization.grant;
+    const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway call" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(await callWorkspaceToolGateway(prepared, grant, parsed.data));
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/declarations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(workspaceToolGatewayDeclarations(prepared));
+    } finally {
+      await prepared.close();
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1197,14 +1272,15 @@ async function withAccessGrantSessionRlsContext<T>(
   }
 }
 
-async function requireMcpAccessGrant(
+async function requireMcpAccessGrantAuthorization(
   c: Parameters<typeof requireAccessGrant>[0],
   deps: ApiRouteDeps,
   workspaceId: string,
-): Promise<AccessGrant> {
-  const grant = await requireAccessGrant(c, deps, workspaceId);
+): Promise<Awaited<ReturnType<typeof requireAccessGrantAuthorization>>> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = authorization.grant;
   if (hasPermission(grant.permissions, "workspace:read")) {
-    return grant;
+    return authorization;
   }
   if (isCodemodeGrant(grant)) {
     requirePermission(grant, "workspace:read");
@@ -1214,10 +1290,10 @@ async function requireMcpAccessGrant(
   // authorization seam runs immediately after this gate, and tool registration
   // still exposes only capabilities permitted by the delegated grant.
   if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
-    return grant;
+    return authorization;
   }
   requirePermission(grant, "workspace:read");
-  return grant;
+  return authorization;
 }
 
 function clientAuthConfig(settings: AppDependencies["settings"]) {
@@ -1588,6 +1664,18 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
     label: "/v1/workspaces/:workspaceId/mcp/files",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/catalog$/,
+    label: "/v1/workspaces/:workspaceId/tools/catalog",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/calls$/,
+    label: "/v1/workspaces/:workspaceId/tools/calls",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/declarations$/,
+    label: "/v1/workspaces/:workspaceId/tools/declarations",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,

@@ -28,7 +28,6 @@ import {
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
-import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
@@ -40,6 +39,7 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
@@ -439,7 +439,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
-  const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
+  const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
     integrations: installedApiIntegrations.filter((integration) =>
       selectedApiIntegrationServerIds.has(integration.serverId),

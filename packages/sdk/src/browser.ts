@@ -1,5 +1,13 @@
 /** Browser-console client. Optional SDK surfaces must not enter this eager graph. */
 export { OpenGeniClient as OpenGeniBrowserClient } from "./client";
+export { OpenGeniToolCallError, OpenGeniToolsClient } from "./tools";
+export type {
+  OpenGeniGeneratedTools,
+  OpenGeniDynamicToolNode,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
   FetchResponse,

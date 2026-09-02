@@ -12,8 +12,8 @@ import type {
   ResolveConnectionCredentialInput,
   ResolveConnectionCredentialResult,
 } from "@opengeni/db";
-import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { FetchLike } from "@opengeni/network";
+import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 
 export type BuildApiIntegrationServersInput = {
   settings: Settings;
@@ -27,12 +27,11 @@ export type BuildApiIntegrationServersInput = {
 };
 
 /**
- * Compile active persisted API facets into ordinary in-process MCP servers for
- * one exact attempt. Connection resolution remains request-time, destination-
- * bound, personal-delegation-fenced, and refreshable through the same worker
- * resolver used by remote MCP servers.
+ * Compile active persisted API facets into ordinary in-process MCP providers.
+ * The caller supplies its authority resolver, so agent attempts and current
+ * humans use the same provider assembly without sharing credentials or policy.
  */
-export function buildApiIntegrationServersForTurn(
+export function buildApiIntegrationMcpServers(
   input: BuildApiIntegrationServersInput,
 ): LocalMcpServerRegistration[] {
   const transport = createPinnedIntegrationTransport({
@@ -73,6 +72,9 @@ export function buildApiIntegrationServersForTurn(
     };
   });
 }
+
+/** @deprecated Use buildApiIntegrationMcpServers. */
+export const buildApiIntegrationServersForTurn = buildApiIntegrationMcpServers;
 
 function integrationCredentialResolver(
   input: BuildApiIntegrationServersInput,

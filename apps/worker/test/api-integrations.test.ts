@@ -3,7 +3,7 @@ import type { ApiIntegrationRuntime, ResolveConnectionCredentialResult } from "@
 import { prepareAgentTools } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
-import { buildApiIntegrationServersForTurn } from "../src/activities/api-integrations";
+import { buildApiIntegrationMcpServers as buildApiIntegrationServersForTurn } from "@opengeni/core";
 
 function integration(): ApiIntegrationRuntime {
   return {

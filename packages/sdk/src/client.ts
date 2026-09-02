@@ -4,6 +4,7 @@ import {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
+import { OpenGeniToolsClient } from "./tools";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -782,6 +783,8 @@ export class OpenGeniClient {
   private readonly queued = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
+  /** Dynamic typed tool facade backed by the canonical workspace gateway. */
+  readonly tools: OpenGeniToolsClient;
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -794,6 +797,7 @@ export class OpenGeniClient {
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.interaction = new OpenGeniInteractionClient(this);
+    this.tools = new OpenGeniToolsClient(this);
   }
 
   // --- Session lifecycle ---------------------------------------------------

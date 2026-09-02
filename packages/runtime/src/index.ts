@@ -21,6 +21,12 @@ import {
   type AttemptToolScope,
 } from "@opengeni/codemode";
 import {
+  createWorkspaceToolGateway,
+  type ToolGateway,
+  type ToolGatewayAuthorization,
+  type ToolGatewayDefinition,
+} from "@opengeni/tool-gateway";
+import {
   approvalIdentifier,
   INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
   CAPABILITY_DESCRIPTORS,
@@ -60,6 +66,9 @@ import {
   type ResourceRef,
   type SessionGoalSnapshot,
   type ToolAuthNeededPayload,
+  type ToolGatewayCaller,
+  type ToolGatewayCatalog,
+  type ToolGatewayCatalogEntry,
   type ToolRef,
   type VideoGenerationCapabilities,
   type VideoGenerationToolResult,
@@ -3237,6 +3246,10 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 
 export type PreparedAgentTools = {
   mcpServers: MCPServer[];
+  /** Protocol-neutral catalog for current-human HTTP, MCP, and browser adapters. */
+  toolGatewayCatalog: ToolGatewayCatalog | null;
+  /** In-process authority behind every current-human gateway projection. */
+  toolGateway: ToolGateway | null;
   /** One exact executable catalog shared by model MCP and Codemode projections. */
   attemptToolCatalog: AttemptToolCatalog | null;
   /** In-process authority behind the model MCP projection of the same catalog. */
@@ -3277,7 +3290,8 @@ export type ToolPreparationPhase =
   | "required_connect"
   | "optional_connect"
   | "attempt_catalog_build"
-  | "attempt_catalog_persist";
+  | "attempt_catalog_persist"
+  | "workspace_gateway_catalog_build";
 
 export type ToolPreparationPhaseMeasurement = {
   phase: ToolPreparationPhase;
@@ -3342,6 +3356,13 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /** Build a current-human workspace gateway from the same prepared provider set. */
+  workspaceToolGateway?: {
+    generation?: number;
+    createdAt?: Date;
+    authorize?: ToolGatewayAuthorization;
+    requireApproval?: (entry: ToolGatewayCatalogEntry, caller: ToolGatewayCaller) => boolean;
+  };
   /**
    * Persist an oversized *model-visible* tool result as a workspace File and
    * return the compact receipt. Codemode callers skip the 1 MiB cap entirely.
@@ -3918,6 +3939,8 @@ export async function prepareAgentTools(
   };
   const completePreparation = async (): Promise<PreparedAgentTools> => {
     let attemptToolEnvironment: AttemptToolEnvironment | null = null;
+    let toolGatewayCatalog: ToolGatewayCatalog | null = null;
+    let toolGateway: ToolGateway | null = null;
     try {
       const connectedDeferred = await connectEntryGroups(
         deferredRequiredEntries,
@@ -3942,8 +3965,20 @@ export async function prepareAgentTools(
           await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
         });
       }
+      if (options.workspaceToolGateway) {
+        const prepared = await measureToolPreparationPhase(
+          options,
+          "workspace_gateway_catalog_build",
+          async () =>
+            await prepareWorkspaceToolGatewayEnvironment(activeMcpServers, registry, options),
+        );
+        toolGatewayCatalog = prepared.catalog;
+        toolGateway = prepared.gateway;
+      }
       return {
         mcpServers: localToolServer ? [...activeMcpServers, localToolServer] : activeMcpServers,
+        toolGatewayCatalog,
+        toolGateway,
         attemptToolCatalog: attemptToolEnvironment?.catalog ?? null,
         attemptToolEnvironment,
         // Keep this by-reference so connector approval can observe an identity
@@ -4046,6 +4081,8 @@ export async function prepareAgentTools(
       ...deferredServers,
       ...(localToolServer ? [localToolServer] : []),
     ],
+    toolGatewayCatalog: null,
+    toolGateway: null,
     attemptToolCatalog: null,
     attemptToolEnvironment: null,
     resolvedMcpConnectionIds,
@@ -4119,20 +4156,80 @@ async function prepareAttemptToolEnvironment(
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
+  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  const definitions: AttemptToolDefinition[] = [
+    ...prepared.definitions.map((definition) => ({
+      ...definition,
+      execute: wrapAttemptToolExecute(
+        async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+        options.spillOversizedModelToolResult,
+      ),
+    })),
+    ...wrapAttemptToolDefinitions(
+      options.attemptToolDefinitions ?? [],
+      options.spillOversizedModelToolResult,
+    ),
+  ];
+  const environment = createAttemptToolEnvironment({
+    scope,
+    generation: options.attemptToolCatalogGeneration ?? 1,
+    definitions,
+    ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
+  });
+  const subjectId = options.subjectId ?? "worker:mcp-model";
+  for (const { server } of prepared.servers) {
+    server.bindAttemptToolEnvironment(environment, subjectId);
+  }
+  return environment;
+}
+
+async function prepareWorkspaceToolGatewayEnvironment(
+  servers: MCPServer[],
+  registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  options: PrepareToolsOptions,
+): Promise<{ catalog: ToolGatewayCatalog; gateway: ToolGateway }> {
+  if (!options.accountId || !options.workspaceId || !options.workspaceToolGateway) {
+    throw new Error("workspace tool gateway requires account and workspace scope");
+  }
+  const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  return createWorkspaceToolGateway({
+    accountId: options.accountId,
+    workspaceId: options.workspaceId,
+    generation: options.workspaceToolGateway.generation ?? 1,
+    definitions: prepared.definitions,
+    ...(options.workspaceToolGateway.createdAt
+      ? { createdAt: options.workspaceToolGateway.createdAt }
+      : {}),
+    ...(options.workspaceToolGateway.authorize
+      ? { authorize: options.workspaceToolGateway.authorize }
+      : {}),
+    ...(options.workspaceToolGateway.requireApproval
+      ? { requireApproval: options.workspaceToolGateway.requireApproval }
+      : {}),
+  });
+}
+
+async function prepareToolGatewayDefinitionsFromServers(
+  servers: MCPServer[],
+  registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+): Promise<{
+  servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
+  definitions: ToolGatewayDefinition[];
+}> {
   const preparedServers = servers.map((server) => {
     if (!(server instanceof PrefixedMcpServer)) {
-      throw new Error("attempt tool catalog received an unknown MCP server implementation");
+      throw new Error("tool gateway received an unknown MCP server implementation");
     }
     const config = registry.get(server.registryId);
     if (!config) {
-      throw new Error(`attempt tool catalog lost MCP registry entry: ${server.registryId}`);
+      throw new Error(`tool gateway lost MCP registry entry: ${server.registryId}`);
     }
     return { server, config };
   });
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
-    async ({ server, config }): Promise<AttemptToolDefinition[]> => {
+    async ({ server, config }): Promise<ToolGatewayDefinition[]> => {
       const listed = await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
@@ -4148,42 +4245,23 @@ async function prepareAttemptToolEnvironment(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
-          execute: wrapAttemptToolExecute(
-            async (args, context) =>
-              await server.executeCatalogTool(
-                toolName,
-                args,
-                {
-                  ...(context.transportMeta ?? {}),
-                  opengeniOperationId: context.operationId,
-                },
-                {
-                  ...(context.signal ? { signal: context.signal } : {}),
-                },
-              ),
-            options.spillOversizedModelToolResult,
-          ),
+          execute: async (args, context) =>
+            await server.executeCatalogTool(
+              toolName,
+              args,
+              {
+                ...(context.transportMeta ?? {}),
+                opengeniOperationId: context.operationId,
+              },
+              {
+                ...(context.signal ? { signal: context.signal } : {}),
+              },
+            ),
         };
       });
     },
   );
-  const environment = createAttemptToolEnvironment({
-    scope,
-    generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions: [
-      ...perServerDefinitions.flat(),
-      ...wrapAttemptToolDefinitions(
-        options.attemptToolDefinitions ?? [],
-        options.spillOversizedModelToolResult,
-      ),
-    ],
-    ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
-  });
-  const subjectId = options.subjectId ?? "worker:mcp-model";
-  for (const { server } of preparedServers) {
-    server.bindAttemptToolEnvironment(environment, subjectId);
-  }
-  return environment;
+  return { servers: preparedServers, definitions: perServerDefinitions.flat() };
 }
 
 function attemptToolCodemodePath(serverId: string, toolName: string): readonly string[] {
@@ -4197,7 +4275,7 @@ function attemptToolCodemodePath(serverId: string, toolName: string): readonly s
   return [serverId, toolName];
 }
 
-function attemptToolSource(serverId: string): AttemptToolDefinition["source"] {
+function attemptToolSource(serverId: string): ToolGatewayDefinition["source"] {
   if (serverId === "opengeni" || serverId === "files" || serverId === "docs") {
     return serverId;
   }
@@ -4208,7 +4286,7 @@ function attemptToolSource(serverId: string): AttemptToolDefinition["source"] {
 function attemptToolApproval(
   config: Settings["mcpServers"][number],
   toolName: string,
-): AttemptToolDefinition["approval"] {
+): ToolGatewayDefinition["approval"] {
   if (
     config.requireApproval === true ||
     (Array.isArray(config.requireApproval) && config.requireApproval.includes(toolName))

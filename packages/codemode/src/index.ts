@@ -1,7 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
-import Ajv2019 from "ajv/dist/2019.js";
-import Ajv2020 from "ajv/dist/2020.js";
+import { randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
@@ -15,9 +12,8 @@ import {
   CodemodeDispatchRequest,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
-  isToolResultSpilledReceipt,
   type AttemptToolCall as AttemptToolCallValue,
-  type AttemptToolCaller,
+  AttemptToolCaller,
   type AttemptToolCatalog as AttemptToolCatalogValue,
   type AttemptToolCatalogEntry as AttemptToolCatalogEntryValue,
   type AttemptToolIdentity,
@@ -26,6 +22,19 @@ import {
   type CodemodeDispatchRequest as CodemodeDispatchRequestValue,
   type CodemodeOperation as CodemodeOperationValue,
 } from "@opengeni/contracts";
+import {
+  ToolGateway,
+  ToolGatewayApprovalRequiredError as AttemptToolApprovalRequiredError,
+  ToolGatewayCatalogIntegrityError as AttemptToolCatalogIntegrityError,
+  ToolGatewayCatalogStaleError as AttemptToolCatalogStaleError,
+  ToolGatewayCatalogTooLargeError as AttemptToolCatalogTooLargeError,
+  ToolGatewayInputValidationError as AttemptToolInputValidationError,
+  ToolGatewayOutputValidationError as AttemptToolOutputValidationError,
+  ToolGatewayToolNotFoundError as AttemptToolNotFoundError,
+  digestCanonicalJson,
+  prepareToolGatewayDefinitions,
+  type ToolGatewayDefinition,
+} from "@opengeni/tool-gateway";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
@@ -73,68 +82,15 @@ export type ModelAttemptToolCall = {
   signal?: AbortSignal;
 };
 
-export class AttemptToolCatalogStaleError extends Error {
-  readonly code = "catalog_stale";
-
-  constructor() {
-    super("Codemode catalog is stale for the active execution attempt");
-    this.name = "AttemptToolCatalogStaleError";
-  }
-}
-
-export class AttemptToolNotFoundError extends Error {
-  readonly code = "tool_not_found";
-
-  constructor() {
-    super("Tool is not present in the active execution attempt catalog");
-    this.name = "AttemptToolNotFoundError";
-  }
-}
-
-export class AttemptToolApprovalRequiredError extends Error {
-  readonly code = "approval_required";
-
-  constructor() {
-    super("Tool requires human approval and must be invoked through the agent");
-    this.name = "AttemptToolApprovalRequiredError";
-  }
-}
-
-export class AttemptToolCatalogIntegrityError extends Error {
-  readonly code = "catalog_integrity_failed";
-
-  constructor() {
-    super("Attempt tool catalog digest does not match its authoritative content");
-    this.name = "AttemptToolCatalogIntegrityError";
-  }
-}
-
-export class AttemptToolCatalogTooLargeError extends Error {
-  readonly code = "catalog_too_large";
-
-  constructor() {
-    super("Attempt tool catalog exceeds the maximum serialized size");
-    this.name = "AttemptToolCatalogTooLargeError";
-  }
-}
-
-export class AttemptToolInputValidationError extends Error {
-  readonly code = "invalid_tool_arguments";
-
-  constructor() {
-    super("Tool arguments do not match the attempt catalog input schema");
-    this.name = "AttemptToolInputValidationError";
-  }
-}
-
-export class AttemptToolOutputValidationError extends Error {
-  readonly code = "invalid_tool_result";
-
-  constructor() {
-    super("Tool result does not match the attempt catalog output schema");
-    this.name = "AttemptToolOutputValidationError";
-  }
-}
+export {
+  AttemptToolCatalogStaleError,
+  AttemptToolNotFoundError,
+  AttemptToolApprovalRequiredError,
+  AttemptToolCatalogIntegrityError,
+  AttemptToolCatalogTooLargeError,
+  AttemptToolInputValidationError,
+  AttemptToolOutputValidationError,
+};
 
 export class CodemodeTransportError extends Error {
   readonly code = "codemode_transport_error";
@@ -438,29 +394,11 @@ export function compileCodemodeTools(
   return root;
 }
 
-type CompiledDefinition = {
-  entry: AttemptToolCatalogEntryValue;
-  execute: AttemptToolDefinition["execute"];
-  validateInput: ValidateFunction<unknown>;
-  validateOutput: ValidateFunction<unknown> | null;
-};
-
 export class AttemptToolEnvironment {
-  readonly catalog: AttemptToolCatalogValue;
-  private readonly byIdentity = new Map<string, CompiledDefinition>();
-  private readonly byModelName = new Map<string, CompiledDefinition>();
-
   constructor(
-    catalog: AttemptToolCatalogValue,
-    definitions: readonly CompiledDefinition[],
-    private readonly authorize: AttemptToolAuthorization | undefined,
-  ) {
-    this.catalog = catalog;
-    for (const definition of definitions) {
-      this.byIdentity.set(identityKey(definition.entry.identity), definition);
-      this.byModelName.set(definition.entry.modelName, definition);
-    }
-  }
+    readonly catalog: AttemptToolCatalogValue,
+    private readonly gateway: ToolGateway,
+  ) {}
 
   async call(
     input: AttemptToolCallValue,
@@ -470,57 +408,11 @@ export class AttemptToolEnvironment {
     } = {},
   ): Promise<AttemptToolResultValue> {
     const call = AttemptToolCall.parse(input);
-    if (call.catalogDigest !== this.catalog.digest) {
-      throw new AttemptToolCatalogStaleError();
-    }
-    const definition = this.byIdentity.get(identityKey(call.identity));
-    if (!definition) {
-      throw new AttemptToolNotFoundError();
-    }
-    if (call.caller.kind === "codemode" && definition.entry.approval === "human") {
-      throw new AttemptToolApprovalRequiredError();
-    }
-    if (!definition.validateInput(call.arguments)) {
-      throw new AttemptToolInputValidationError();
-    }
-    await this.authorize?.({ call, entry: definition.entry });
-    const result = AttemptToolResult.parse(
-      await definition.execute(call.arguments, {
-        operationId: call.operationId,
-        caller: call.caller,
-        ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      }),
-    );
-    if (!result.isError && definition.validateOutput) {
-      const outputMatchesSchema =
-        result.structuredContent !== undefined &&
-        definition.validateOutput(result.structuredContent);
-      // Model overflow replaces the exact tool payload with a compact File
-      // receipt after execute. That handle is not the catalog output schema.
-      if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-        throw new AttemptToolOutputValidationError();
-      }
-    }
-    return result;
+    return await this.gateway.call(call, context);
   }
 
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
-    const definition = this.byModelName.get(input.modelName);
-    if (!definition) {
-      throw new AttemptToolNotFoundError();
-    }
-    const call = AttemptToolCall.parse({
-      operationId: input.operationId ?? randomUUID(),
-      catalogDigest: this.catalog.digest,
-      identity: definition.entry.identity,
-      arguments: input.arguments,
-      caller: { kind: "model", subjectId: input.subjectId },
-    });
-    return await this.call(call, {
-      ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    return await this.gateway.callModel(input);
   }
 }
 
@@ -528,36 +420,46 @@ export function createAttemptToolEnvironment(
   input: CreateAttemptToolEnvironmentInput,
 ): AttemptToolEnvironment {
   const createdAt = (input.createdAt ?? new Date()).toISOString();
-  const paths = allocateCodemodePaths(input.definitions);
-  const schemaValidators = createSchemaValidators();
-  const compiled = input.definitions.map((definition, index): CompiledDefinition => {
-    const { execute, codemodePath: _path, ...entryInput } = definition;
-    const entry = AttemptToolCatalogEntry.parse({
-      ...entryInput,
-      codemodePath: paths[index],
-    });
-    return {
-      entry,
-      execute,
-      validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
-      validateOutput: entry.outputSchema
-        ? compileCatalogSchema(schemaValidators, entry.outputSchema)
-        : null,
-    };
-  });
+  const prepared = prepareToolGatewayDefinitions(
+    input.definitions.map(
+      (definition): ToolGatewayDefinition => ({
+        ...definition,
+        execute: async (argumentsValue, context) =>
+          await definition.execute(argumentsValue, {
+            ...context,
+            caller: AttemptToolCaller.parse(context.caller),
+          }),
+      }),
+    ),
+  );
   const unsigned = {
     version: ATTEMPT_TOOL_CATALOG_VERSION,
     ...input.scope,
     generation: input.generation,
     createdAt,
-    entries: compiled.map(({ entry }) => entry),
+    entries: [...prepared.entries],
   };
   const catalog = AttemptToolCatalog.parse({
     ...unsigned,
     digest: digestAttemptToolCatalog(unsigned),
   });
   assertCatalogSize(catalog);
-  return new AttemptToolEnvironment(catalog, compiled, input.authorize);
+  return new AttemptToolEnvironment(
+    catalog,
+    prepared.create({
+      catalogDigest: catalog.digest,
+      requireApproval: (entry, caller) => caller.kind === "codemode" && entry.approval === "human",
+      ...(input.authorize
+        ? {
+            authorize: async ({ call, entry }) =>
+              await input.authorize!({
+                call: AttemptToolCall.parse(call),
+                entry,
+              }),
+          }
+        : {}),
+    }),
+  );
 }
 
 export function digestAttemptToolCatalog(catalog: Omit<AttemptToolCatalogValue, "digest">): string {
@@ -610,124 +512,6 @@ function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
   ) {
     throw new AttemptToolCatalogTooLargeError();
   }
-}
-
-type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
-
-// Validator compilation is structural and independent of attempt identity,
-// executable closures, credentials, and authorization. Reuse only exact
-// content-addressed validators; the attempt environment and catalog remain
-// freshly bound and digested on every execution. The hard cap prevents an
-// untrusted MCP schema stream from turning this process cache into a memory
-// sink.
-const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
-const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
-
-function createSchemaValidators(): {
-  draft7: SchemaCompiler;
-  draft2019: SchemaCompiler;
-  draft2020: SchemaCompiler;
-} {
-  const options = {
-    allErrors: false,
-    coerceTypes: false,
-    strict: false,
-    useDefaults: false,
-    validateFormats: false,
-  } as const;
-  return {
-    draft7: new Ajv(options),
-    draft2019: new Ajv2019(options),
-    draft2020: new Ajv2020(options),
-  };
-}
-
-function compileCatalogSchema(
-  validators: ReturnType<typeof createSchemaValidators>,
-  schema: AttemptToolCatalogEntryValue["inputSchema"],
-): ValidateFunction<unknown> {
-  const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
-  const family = dialect.includes("2020-12")
-    ? "2020-12"
-    : dialect.includes("2019-09")
-      ? "2019-09"
-      : "draft7";
-  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
-  const cached = compiledCatalogSchemaCache.get(cacheKey);
-  if (cached) {
-    compiledCatalogSchemaCache.delete(cacheKey);
-    compiledCatalogSchemaCache.set(cacheKey, cached);
-    return cached;
-  }
-  const compiled =
-    family === "2020-12"
-      ? validators.draft2020.compile(schema)
-      : family === "2019-09"
-        ? validators.draft2019.compile(schema)
-        : validators.draft7.compile(schema);
-  while (compiledCatalogSchemaCache.size >= COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES) {
-    const oldest = compiledCatalogSchemaCache.keys().next().value;
-    if (oldest === undefined) break;
-    compiledCatalogSchemaCache.delete(oldest);
-  }
-  compiledCatalogSchemaCache.set(cacheKey, compiled);
-  return compiled;
-}
-
-function allocateCodemodePaths(definitions: readonly AttemptToolDefinition[]): string[][] {
-  const bases = definitions.map((definition) =>
-    (definition.codemodePath?.length
-      ? definition.codemodePath
-      : [definition.identity.serverId, definition.identity.toolName]
-    ).map(safeNamespaceSegment),
-  );
-  const counts = new Map<string, number>();
-  for (const path of bases) {
-    const key = path.join("\u0000");
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return bases.map((base, index) => {
-    const key = base.join("\u0000");
-    if (counts.get(key) === 1) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
-}
-
-function safeNamespaceSegment(value: string): string {
-  let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
-  if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
-  if (["__proto__", "prototype", "constructor"].includes(normalized)) {
-    normalized = `_${normalized}`;
-  }
-  return normalized.slice(0, 128) || "_";
-}
-
-function shortIdentityDigest(identity: AttemptToolIdentity): string {
-  return createHash("sha256").update(identityKey(identity), "utf8").digest("hex").slice(0, 10);
-}
-
-function identityKey(identity: AttemptToolIdentity): string {
-  return `${identity.serverId}\u0000${identity.toolName}`;
-}
-
-function digestCanonicalJson(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)), "utf8")
-    .digest("hex");
-}
-
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
-    );
-  }
-  return value;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;

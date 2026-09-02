@@ -244,6 +244,31 @@ export function requireAccountAdminAuthorizationStamp(
 }
 
 /**
+ * Verify that an access authorization was minted by the canonical request
+ * resolver for this exact subject and workspace.
+ *
+ * This is the protocol-neutral boundary for request-local services that need
+ * the authenticated grant rather than a caller-supplied grant-shaped object.
+ * Object identity is intentional: matching fields alone are not proof that the
+ * request authenticated the named subject.
+ */
+export function requireResolvedAccessGrantAuthorization(
+  authorization: AccessGrantAuthorization,
+  workspaceId: string,
+): AccessGrant {
+  const { grant } = authorization;
+  if (
+    !resolvedAccessGrantAuthorizations.has(authorization) ||
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== grant.subjectId ||
+    grant.workspaceId !== workspaceId
+  ) {
+    throw new HTTPException(403, { message: "workspace access authorization is invalid" });
+  }
+  return grant;
+}
+
+/**
  * Resolve the exact built-in single-user local administrator for an account.
  *
  * This is intentionally narrower than checking `context.mode === "local"` or
