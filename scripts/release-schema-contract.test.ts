@@ -124,10 +124,10 @@ describe("release schema contract", () => {
     );
   });
 
-  test("registers the sandbox deadline rotation preemption migration after published history", async () => {
+  test("registers sandbox deadline rotation preemption before workspace management", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0397_sandbox_deadline_rotation_preemption.sql",
+      "0398_organization_workspace_management_entry.sql",
     );
     expect(
       completeSourceContract.migrations.find(
