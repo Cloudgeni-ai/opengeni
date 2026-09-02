@@ -7688,6 +7688,7 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: false });
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
