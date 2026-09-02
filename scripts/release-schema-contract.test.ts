@@ -112,12 +112,12 @@ describe("release schema contract", () => {
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
     const mcpOauthAuthorizationServer = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0398_mcp_oauth_authorization_server.sql",
+      (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
     );
     const completeSourceContractWithMcpOauthAuthorizationServer = completeSourceContract;
     const mcpOauthAuthorizationServerMigrationIndex =
       completeSourceContractWithMcpOauthAuthorizationServer.migrations.findIndex(
-        (migration) => migration.path === "0398_mcp_oauth_authorization_server.sql",
+        (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
       );
     completeSourceContract = mcpOauthAuthorizationServer
       ? {
@@ -129,12 +129,12 @@ describe("release schema contract", () => {
         }
       : completeSourceContractWithMcpOauthAuthorizationServer;
     const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0397_workspace_html_site_sources.sql",
+      (migration) => migration.path === "0399_workspace_html_site_sources.sql",
     );
     const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
     const workspaceHtmlSiteSourcesMigrationIndex =
       completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
-        (migration) => migration.path === "0397_workspace_html_site_sources.sql",
+        (migration) => migration.path === "0399_workspace_html_site_sources.sql",
       );
     completeSourceContract = workspaceHtmlSiteSources
       ? {
@@ -354,13 +354,13 @@ describe("release schema contract", () => {
     if (workspaceHtmlSiteSources) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0397_workspace_html_site_sources.sql",
+        latestMigration: "0399_workspace_html_site_sources.sql",
       };
     }
     if (mcpOauthAuthorizationServer) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0398_mcp_oauth_authorization_server.sql",
+        latestMigration: "0400_mcp_oauth_authorization_server.sql",
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
@@ -408,8 +408,8 @@ describe("release schema contract", () => {
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
       "0396_model_call_equivalent_credit_cost.sql",
-      "0397_workspace_html_site_sources.sql",
-      "0398_mcp_oauth_authorization_server.sql",
+      "0399_workspace_html_site_sources.sql",
+      "0400_mcp_oauth_authorization_server.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -560,10 +560,10 @@ describe("release schema contract", () => {
         ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
         : {}),
       ...(workspaceHtmlSiteSources
-        ? { latestMigration: "0397_workspace_html_site_sources.sql" }
+        ? { latestMigration: "0399_workspace_html_site_sources.sql" }
         : {}),
       ...(mcpOauthAuthorizationServer
-        ? { latestMigration: "0398_mcp_oauth_authorization_server.sql" }
+        ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -587,12 +587,12 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
       workspaceHtmlSiteSources
-        ? "0397_workspace_html_site_sources.sql"
+        ? "0399_workspace_html_site_sources.sql"
         : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithMcpOauthAuthorizationServer.latestMigration).toBe(
       mcpOauthAuthorizationServer
-        ? "0398_mcp_oauth_authorization_server.sql"
+        ? "0400_mcp_oauth_authorization_server.sql"
         : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
     );
   });
@@ -610,12 +610,12 @@ describe("release schema contract", () => {
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const mcpOauthAuthorizationServer = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0398_mcp_oauth_authorization_server.sql",
+      (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
     );
     const completeSourceContractWithMcpOauthAuthorizationServer = completeSourceContract;
     const mcpOauthAuthorizationServerMigrationIndex =
       completeSourceContractWithMcpOauthAuthorizationServer.migrations.findIndex(
-        (migration) => migration.path === "0398_mcp_oauth_authorization_server.sql",
+        (migration) => migration.path === "0400_mcp_oauth_authorization_server.sql",
       );
     completeSourceContract = mcpOauthAuthorizationServer
       ? {
@@ -627,12 +627,12 @@ describe("release schema contract", () => {
         }
       : completeSourceContractWithMcpOauthAuthorizationServer;
     const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0397_workspace_html_site_sources.sql",
+      (migration) => migration.path === "0399_workspace_html_site_sources.sql",
     );
     const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
     const workspaceHtmlSiteSourcesMigrationIndex =
       completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
-        (migration) => migration.path === "0397_workspace_html_site_sources.sql",
+        (migration) => migration.path === "0399_workspace_html_site_sources.sql",
       );
     completeSourceContract = workspaceHtmlSiteSources
       ? {
@@ -813,8 +813,8 @@ describe("release schema contract", () => {
       "0393_workspace_memory_and_learning_defaults.sql",
       "0396_model_call_equivalent_credit_cost.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
-      "0397_workspace_html_site_sources.sql",
-      "0398_mcp_oauth_authorization_server.sql",
+      "0399_workspace_html_site_sources.sql",
+      "0400_mcp_oauth_authorization_server.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1007,13 +1007,13 @@ describe("release schema contract", () => {
     if (workspaceHtmlSiteSources) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0397_workspace_html_site_sources.sql",
+        latestMigration: "0399_workspace_html_site_sources.sql",
       };
     }
     if (mcpOauthAuthorizationServer) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0398_mcp_oauth_authorization_server.sql",
+        latestMigration: "0400_mcp_oauth_authorization_server.sql",
       };
     }
     expect(completeSourceContract).toMatchObject({
@@ -1176,10 +1176,10 @@ describe("release schema contract", () => {
         ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
         : {}),
       ...(workspaceHtmlSiteSources
-        ? { latestMigration: "0397_workspace_html_site_sources.sql" }
+        ? { latestMigration: "0399_workspace_html_site_sources.sql" }
         : {}),
       ...(mcpOauthAuthorizationServer
-        ? { latestMigration: "0398_mcp_oauth_authorization_server.sql" }
+        ? { latestMigration: "0400_mcp_oauth_authorization_server.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -1203,12 +1203,12 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
       workspaceHtmlSiteSources
-        ? "0397_workspace_html_site_sources.sql"
+        ? "0399_workspace_html_site_sources.sql"
         : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithMcpOauthAuthorizationServer.latestMigration).toBe(
       mcpOauthAuthorizationServer
-        ? "0398_mcp_oauth_authorization_server.sql"
+        ? "0400_mcp_oauth_authorization_server.sql"
         : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
     );
     expect(

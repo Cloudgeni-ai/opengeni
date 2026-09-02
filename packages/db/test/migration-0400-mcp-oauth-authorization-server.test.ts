@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 const migrationPath = new URL(
-  "../drizzle/0398_mcp_oauth_authorization_server.sql",
+  "../drizzle/0400_mcp_oauth_authorization_server.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationPath).text();
 const repositorySource = await Bun.file(new URL("../src/mcp-oauth.ts", import.meta.url)).text();
 
-describe("migration 0398 MCP OAuth authorization server", () => {
+describe("migration 0400 MCP OAuth authorization server", () => {
   test("stores only token hashes and binds every grant to workspace/account/resource", () => {
     expect(source).toContain("-- deployment-mode: rolling");
     expect(source).toContain("CREATE TABLE mcp_oauth_clients");
