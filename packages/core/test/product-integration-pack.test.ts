@@ -29,7 +29,9 @@ describe("OpenGeni Product Integration Pack", () => {
         customerRuntimeProfile: "generated-during-integration",
       },
     });
-    expect(pack?.skills.map((skill) => skill.name)).toEqual(["opengeni-product-integration"]);
+    expect(pack?.skills.map((skill) => [skill.name, skill.activationMode])).toEqual([
+      ["opengeni-product-integration", "session_selected"],
+    ]);
     expect(pack?.tools).toEqual([]);
     expect(pack?.connectors).toEqual([]);
     expect(pack?.knowledge).toEqual([]);
@@ -59,6 +61,7 @@ describe("OpenGeni Product Integration Pack", () => {
       "references/runtime-profile-and-verification.md",
     ]);
     expect(install.contentSha256).toBe(artifact.contentSha256);
+    expect(install.activationMode).toBe("session_selected");
     expect(install.files.map((file) => file.path)).toEqual(artifact.files.map((file) => file.path));
 
     const entrypoint = skill.files.find((file) => file.path === "SKILL.md")!.content;

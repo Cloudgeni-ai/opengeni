@@ -2738,6 +2738,8 @@ export type CreateSessionRequest = {
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
   skills?: SessionSkill[] | undefined;
+  /** Installed session-selected Skill identities to freeze onto this session at creation. */
+  installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -6041,10 +6043,12 @@ export type CapabilityPackSkillFile = {
 export type CapabilityPackSkill = {
   name: string;
   description?: string | undefined;
+  /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
+  activationMode?: "workspace_managed" | "session_selected" | undefined;
   files: CapabilityPackSkillFile[];
 };
 
-export type SessionSkill = CapabilityPackSkill;
+export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6138,6 +6142,7 @@ export type RegisterCapabilityPackRequest = {
     | {
         name: string;
         description?: string | undefined;
+        activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];
       }[]
     | undefined;

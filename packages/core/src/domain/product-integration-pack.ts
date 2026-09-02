@@ -13,6 +13,7 @@ export const OPENGENI_PRODUCT_INTEGRATION_SKILL = {
   name: "opengeni-product-integration",
   description:
     "Design, implement, verify, and hand off a tenant-safe OpenGeni product integration while adapting to the customer's architecture, UI, data APIs, and desired delivery autonomy. Use in the implementation workspace, not as behavior for the customer-facing runtime agent.",
+  activationMode: "session_selected",
   files: [
     {
       path: "SKILL.md",

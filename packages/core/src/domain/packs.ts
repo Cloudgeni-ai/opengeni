@@ -360,6 +360,7 @@ export type InlinePackSkillInstall = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   contentSha256: string;
   totalBytes: number;
   files: Array<{ path: string; content: string; byteSize: number; contentSha256: string }>;
@@ -377,19 +378,22 @@ export function inlinePackSkillInstall(
     });
   }
   const normalizedName = skill.name.toLowerCase();
+  const activationMode = skill.activationMode ?? "workspace_managed";
+  const activationIdentity = activationMode === "session_selected" ? "session-selected/" : "";
   const encodedSkill = encodeURIComponent(normalizedName);
-  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${encodedSkill}/${artifact.contentSha256}`;
-  const capabilityId = `skill:pack-inline/${normalizedName}@${artifact.contentSha256}`;
+  const sourceUrl = `https://opengeni.invalid/pack-inline-skills/${activationIdentity}${encodedSkill}/${artifact.contentSha256}`;
+  const capabilityId = `skill:pack-inline/${activationIdentity}${normalizedName}@${artifact.contentSha256}`;
   return {
     componentKey: `inline-skill/${normalizedName}`,
     capabilityId,
-    pluginKey: `pack-skill/${normalizedName}/${artifact.contentSha256}`,
+    pluginKey: `pack-skill/${activationIdentity}${normalizedName}/${artifact.contentSha256}`,
     sourceUrl,
     repositoryUrl: "https://opengeni.invalid/pack-inline-skills",
     sourceCommit: artifact.contentSha256,
     sourcePath: normalizedName,
     name: artifact.name,
     description: artifact.description,
+    activationMode,
     contentSha256: artifact.contentSha256,
     totalBytes: artifact.totalBytes,
     files: artifact.files.map((file) => ({
@@ -419,6 +423,7 @@ export async function previewCapabilityPackInstallation(
         key: inline.componentKey,
         capabilityId: inline.capabilityId,
         name: inline.name,
+        activationMode: inline.activationMode,
         contentSha256: inline.contentSha256,
       })),
       installation?.id,

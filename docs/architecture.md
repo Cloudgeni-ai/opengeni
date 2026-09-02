@@ -1091,6 +1091,12 @@ aid for those standalone integrations. Its immutable Skill adds no runtime
 tools, credentials, compute, or customer-facing agent behavior; it teaches the
 implementation agent to derive the workspace isolation unit, UI surface, data
 tool boundary, runtime profile, and delivery workflow from the host product.
+The Skill uses the existing `capability_facets.activation_mode` authority as
+`session_selected`: ordinary workspace Skill resolution excludes it, and an
+explicit create-time `installedSkillIds` selection freezes the verified
+artifact into exactly one session. The web Pack action carries that immutable
+capability ID into the new-session composer; Pack installation alone can never
+contaminate customer-facing chats.
 The Pack lives in `packages/core/src/domain/product-integration-pack.ts`, while
 the exact customer integration contract remains
 [`product-integration.md`](product-integration.md).

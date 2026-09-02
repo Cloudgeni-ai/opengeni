@@ -111,16 +111,33 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0393_session_selected_skill_activation.sql",
+    );
+    const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    completeSourceContract = sessionSelectedSkillActivation
+      ? {
+          ...completeSourceContractWithSessionSelectedSkillActivation,
+          latestMigration:
+            completeSourceContractWithSessionSelectedSkillActivation.migrations.at(-2)?.path ??
+            completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+        }
+      : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
     );
     const completeSourceContractWithContextCompaction = completeSourceContract;
+    const contextCompactionMigrationIndex =
+      completeSourceContractWithContextCompaction.migrations.findIndex(
+        (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+      );
     completeSourceContract = contextCompactionPendingObservability
       ? {
           ...completeSourceContractWithContextCompaction,
           latestMigration:
-            completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
-            completeSourceContractWithContextCompaction.latestMigration,
+            completeSourceContractWithContextCompaction.migrations[
+              contextCompactionMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithContextCompaction.latestMigration,
         }
       : completeSourceContractWithContextCompaction;
     const automaticSessionTitlePolicyFence = completeSourceContract.migrations.some(
@@ -249,6 +266,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0391_sandbox_provider_deadline_interaction_followup.sql",
     );
     const automaticSessionTitleMigrationPaths = new Set([
+      "0393_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -296,6 +314,7 @@ describe("release schema contract", () => {
 
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionSelectedSkillActivation ? 1 : 0) +
         (completeSourceContractWithContextCompaction.latestMigration ===
         "0392_context_compaction_pending_observability.sql"
           ? 1
@@ -429,6 +448,11 @@ describe("release schema contract", () => {
         ? "0392_context_compaction_pending_observability.sql"
         : completeSourceContract.latestMigration,
     );
+    expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
+      sessionSelectedSkillActivation
+        ? "0393_session_selected_skill_activation.sql"
+        : completeSourceContractWithContextCompaction.latestMigration,
+    );
   });
 
   test("preserves published host-export history and appends the forward repair", async () => {
@@ -443,16 +467,33 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0393_session_selected_skill_activation.sql",
+    );
+    const completeSourceContractWithSessionSelectedSkillActivation = completeSourceContract;
+    completeSourceContract = sessionSelectedSkillActivation
+      ? {
+          ...completeSourceContractWithSessionSelectedSkillActivation,
+          latestMigration:
+            completeSourceContractWithSessionSelectedSkillActivation.migrations.at(-2)?.path ??
+            completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
+        }
+      : completeSourceContractWithSessionSelectedSkillActivation;
     const contextCompactionPendingObservability = completeSourceContract.migrations.some(
       (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
     );
     const completeSourceContractWithContextCompaction = completeSourceContract;
+    const contextCompactionMigrationIndex =
+      completeSourceContractWithContextCompaction.migrations.findIndex(
+        (migration) => migration.path === "0392_context_compaction_pending_observability.sql",
+      );
     completeSourceContract = contextCompactionPendingObservability
       ? {
           ...completeSourceContractWithContextCompaction,
           latestMigration:
-            completeSourceContractWithContextCompaction.migrations.at(-2)?.path ??
-            completeSourceContractWithContextCompaction.latestMigration,
+            completeSourceContractWithContextCompaction.migrations[
+              contextCompactionMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithContextCompaction.latestMigration,
         }
       : completeSourceContractWithContextCompaction;
     const companyBrainMigrationPaths = [
@@ -473,6 +514,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0393_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
       "0354_automatic_session_title_quarantine_index.sql",
@@ -731,6 +773,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionSelectedSkillActivation ? 1 : 0) +
         (completeSourceContractWithContextCompaction.latestMigration ===
         "0392_context_compaction_pending_observability.sql"
           ? 1
@@ -878,6 +921,11 @@ describe("release schema contract", () => {
       contextCompactionPendingObservability
         ? "0392_context_compaction_pending_observability.sql"
         : completeSourceContract.latestMigration,
+    );
+    expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
+      sessionSelectedSkillActivation
+        ? "0393_session_selected_skill_activation.sql"
+        : completeSourceContractWithContextCompaction.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(
