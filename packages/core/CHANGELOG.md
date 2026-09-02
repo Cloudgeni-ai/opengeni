@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 2.7.1
+
+### Patch Changes
+
+- Updated dependencies [a5ca001]
+- Updated dependencies [8f81b57]
+  - @opengeni/db@3.8.1
+  - @opengeni/contracts@2.11.0
+  - @opengeni/runtime@2.1.1
+  - @opengeni/documents@0.8.16
+  - @opengeni/events@0.4.14
+  - @opengeni/config@0.23.1
+  - @opengeni/observability@0.8.16
+  - @opengeni/storage@0.2.117
+
 ## 2.7.0
 
 ### Minor Changes
