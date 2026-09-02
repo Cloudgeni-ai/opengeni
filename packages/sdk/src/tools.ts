@@ -56,6 +56,10 @@ export interface OpenGeniToolTransport {
   ): Promise<T>;
 }
 
+export interface OpenGeniToolsFacade {
+  forWorkspace(workspaceId: string): OpenGeniWorkspaceTools;
+}
+
 export class OpenGeniToolCallError extends Error {
   readonly code: string;
   readonly retryable: boolean;
@@ -75,7 +79,7 @@ export class OpenGeniToolCallError extends Error {
   }
 }
 
-export class OpenGeniToolsClient {
+export class OpenGeniToolsClient implements OpenGeniToolsFacade {
   constructor(private readonly transport: OpenGeniToolTransport) {}
 
   forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {

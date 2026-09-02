@@ -6,6 +6,7 @@ export type {
   OpenGeniDynamicToolNode,
   OpenGeniToolCallOptions,
   OpenGeniToolFunction,
+  OpenGeniToolsFacade,
   OpenGeniWorkspaceTools,
 } from "./tools";
 export type {

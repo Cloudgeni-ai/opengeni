@@ -7,6 +7,7 @@ export type {
   OpenGeniToolCallOptions,
   OpenGeniToolFunction,
   OpenGeniToolTransport,
+  OpenGeniToolsFacade,
   OpenGeniWorkspaceTools,
 } from "./tools";
 export type {

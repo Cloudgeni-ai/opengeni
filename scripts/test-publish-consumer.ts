@@ -184,6 +184,8 @@ try {
     "package/dist/github-repositories.d.ts",
     "package/dist/interaction.js",
     "package/dist/interaction.d.ts",
+    "package/dist/site.js",
+    "package/dist/site.d.ts",
   ]) {
     if (!sdkTarballContents.split("\n").includes(artifact)) {
       throw new Error(`SDK tarball is missing ${artifact}`);
@@ -206,6 +208,15 @@ try {
     sdkGitHubRepositoriesExport.import !== "./dist/github-repositories.js"
   ) {
     throw new Error("SDK tarball has an invalid ./github-repositories export");
+  }
+  const sdkSiteExport = sdk.manifest.exports?.["./site"];
+  if (
+    !sdkSiteExport ||
+    typeof sdkSiteExport === "string" ||
+    sdkSiteExport.types !== "./dist/site.d.ts" ||
+    sdkSiteExport.import !== "./dist/site.js"
+  ) {
+    throw new Error("SDK tarball has an invalid ./site export");
   }
   const core = await stageTarball("packages/core", stagingRoot, tarballRoot, versions);
   const coreTarballContents = await run(["tar", "-tzf", core.tarball], consumerRoot, true);
@@ -377,6 +388,7 @@ try {
       "packages/config",
       "packages/contracts",
       "packages/network",
+      "packages/tool-gateway",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );
