@@ -446,12 +446,14 @@ models. They are siblings of the built-in GPT-5.6 family in the OpenGeni picker
 rail; the client never receives the Gateway hostname, upstream model slug, or
 endpoint provider.
 
-| Product                | Approved provider order      | Supplier input / cache read / output                                                                   | Conservative retail fallback (+5%)                        |
-| ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.147 / $0.0294 / $0.294 per 1M (highest approved route) |
-| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $15 per 1M on both routes                                                                 | $3.15 / $0.315 / $15.75 per 1M                            |
+| Product                | Approved provider order      | Supplier input / cache read / cache write / output                                                                                  | Conservative retail fallback (+5%)                                 |
+| ---------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.13 / $0.26; Novita $0.14 / $0.028 / $0.14 / $0.28; DeepInfra $0.09 / $0.018 / $0.09 / $0.18 per 1M | $0.147 / $0.0294 / $0.147 / $0.294 per 1M (highest approved route) |
+| Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $3 / $15 per 1M on both routes                                                                                        | $3.15 / $0.315 / $3.15 / $15.75 per 1M                            |
 
 Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.
+Gateway does not publish a separate cache-write rate for these routes, so the
+static fallback prices cache writes at the route's uncached-input rate.
 Managed turns normally debit the exact Gateway-reported inference cost for the
 provider that actually served the response, plus 5%. The static token rates
 above are only a conservative fallback if that response metadata is absent.
