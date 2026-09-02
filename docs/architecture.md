@@ -357,8 +357,11 @@ parent-tree projections to mistake for live work.
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
 default copies the trusted parent's exact active machine and working directory
-before the child's first turn. A selfhosted-only child with no inherited or
-explicit machine fails at create rather than reaching an unbound runtime.
+before the child's first turn. This includes a `backend:none` parent that has
+attached a Connected Machine: the child keeps the shared backend-none home and
+group while inheriting the exact active route. A selfhosted-only child with no
+inherited or explicit machine fails at create rather than reaching an unbound
+runtime.
 
 A machine-home session does not pre-provision a hidden managed box. When the
 deployment has a managed sandbox backend, its fleet nevertheless exposes the
