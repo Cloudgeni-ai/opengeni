@@ -21869,6 +21869,8 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     workspaceId: string;
     subjectId: string | null;
     mode: WorkspaceCodexSubscriptionMode;
+    /** Effective source captured under the source lock before caller-owned credential writes. */
+    effectiveSourceBeforeMutation?: EffectiveCodexSubscriptionSource;
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
   await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
@@ -21879,25 +21881,29 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
   if (current.workspaceKind === "personal" && input.mode !== "automatic") {
     throw new Error("personal workspaces always use workspace Codex subscriptions");
   }
-  if (current.mode === input.mode) return current;
-  await scopedDb
-    .insert(schema.workspaceCodexSubscriptionPreferences)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      mode: input.mode,
-      updatedBySubjectId: input.subjectId,
-    })
-    .onConflictDoUpdate({
-      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-      set: {
+  const effectiveSourceBeforeMutation =
+    input.effectiveSourceBeforeMutation ?? current.effectiveSource;
+  let next = current;
+  if (current.mode !== input.mode) {
+    await scopedDb
+      .insert(schema.workspaceCodexSubscriptionPreferences)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
         mode: input.mode,
         updatedBySubjectId: input.subjectId,
-        updatedAt: new Date(),
-      },
-    });
-  const next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
-  if (next.effectiveSource !== current.effectiveSource) {
+      })
+      .onConflictDoUpdate({
+        target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+        set: {
+          mode: input.mode,
+          updatedBySubjectId: input.subjectId,
+          updatedAt: new Date(),
+        },
+      });
+    next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  }
+  if (next.effectiveSource !== effectiveSourceBeforeMutation) {
     const [activeCodexTurn] = await scopedDb
       .select({ id: schema.sessionTurns.id })
       .from(schema.sessionTurns)
