@@ -33,12 +33,12 @@ import {
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
-  prepareAgentTools,
   type LocalMcpServerRegistration,
-  type PreparedAgentTools,
+  type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
-} from "@opengeni/runtime";
+  prepareWorkspaceToolGatewayTools,
+} from "@opengeni/runtime/workspace-tool-gateway";
 import {
   ToolGatewayApprovalRequiredError,
   ToolGatewayCatalogStaleError,
@@ -53,11 +53,11 @@ import { buildFilesMcpServer } from "./mcp/files";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 
 export type PreparedWorkspaceToolGateway = Pick<
-  PreparedAgentTools,
+  PreparedWorkspaceToolGatewayTools,
   "toolGateway" | "toolGatewayCatalog" | "close"
 > & {
-  toolGateway: NonNullable<PreparedAgentTools["toolGateway"]>;
-  toolGatewayCatalog: NonNullable<PreparedAgentTools["toolGatewayCatalog"]>;
+  toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
+  toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
 };
 
 export function grantUsesAttemptScopedMcp(grant: AccessGrant): boolean {
@@ -69,20 +69,52 @@ export function grantUsesAttemptScopedMcp(grant: AccessGrant): boolean {
 }
 
 export function requireWorkspaceToolGatewayGrant(grant: AccessGrant): void {
-  if (grantUsesAttemptScopedMcp(grant) || grant.principalKind === "service") {
+  if (
+    grantUsesAttemptScopedMcp(grant) ||
+    (grant.principalKind !== undefined && grant.principalKind !== "human_session")
+  ) {
     throw new HTTPException(403, { message: "current-human tool access required" });
   }
+}
+
+export function requireWorkspaceToolGatewayAuthorization(
+  authorization: AccessGrantAuthorization,
+): AccessGrant {
+  const grant = requireResolvedAccessGrantAuthorization(
+    authorization,
+    authorization.grant.workspaceId,
+  );
+  requireWorkspaceToolGatewayGrant(grant);
+  if (!authorization.canonicalManagedHumanSession && !authorization.canonicalLocalHumanSession) {
+    throw new HTTPException(403, { message: "current-human tool access required" });
+  }
+  return grant;
 }
 
 export async function prepareWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   authorization: AccessGrantAuthorization,
 ): Promise<PreparedWorkspaceToolGateway> {
-  const grant = requireResolvedAccessGrantAuthorization(
-    authorization,
-    authorization.grant.workspaceId,
-  );
-  requireWorkspaceToolGatewayGrant(grant);
+  const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant);
+}
+
+export async function prepareMcpOAuthWorkspaceToolGateway(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+  allowedIdentities: readonly { serverId: string; toolName: string }[],
+): Promise<PreparedWorkspaceToolGateway> {
+  if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
+    throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
+  }
+  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+}
+
+async function prepareWorkspaceToolGatewayForGrant(
+  routeDeps: ApiRouteDeps,
+  grant: AccessGrant,
+  allowedIdentities?: readonly { serverId: string; toolName: string }[],
+): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
   const resolvedCatalog = await resolveWorkspaceCatalogSettings(
     routeDeps.db,
@@ -173,7 +205,7 @@ export async function prepareWorkspaceToolGateway(
       })()
     : undefined;
   const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
-  const prepared = await prepareAgentTools(settings, allGatewayToolRefs(settings), {
+  const prepared = await prepareWorkspaceToolGatewayTools(settings, allGatewayToolRefs(settings), {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
@@ -184,6 +216,16 @@ export async function prepareWorkspaceToolGateway(
     workspaceToolGateway: {
       requireApproval: (entry, _caller, context) =>
         entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+      ...(allowedIdentities
+        ? {
+            filterDefinition: (definition) =>
+              allowedIdentities.some(
+                (identity) =>
+                  identity.serverId === definition.identity.serverId &&
+                  identity.toolName === definition.identity.toolName,
+              ),
+          }
+        : {}),
     },
   });
   if (!prepared.toolGateway || !prepared.toolGatewayCatalog) {

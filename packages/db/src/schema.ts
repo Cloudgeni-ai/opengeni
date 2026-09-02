@@ -8,6 +8,7 @@ import type {
   McpPersonalConnectionDelegation,
   PersonalResourceAttachmentIntent,
   PersonalResourceAttachmentSummary,
+  Permission,
   McpServerConnectionRef,
   ModelContextContributionSummary,
   RigProviderImages,
@@ -3484,6 +3485,138 @@ export const integrationOauthStateNonces = pgTable(
   (table) => ({
     workspace: index("integration_oauth_state_nonces_workspace_idx").on(table.workspaceId),
     expires: index("integration_oauth_state_nonces_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthClients = pgTable(
+  "mcp_oauth_clients",
+  {
+    clientId: text("client_id").primaryKey(),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    clientName: text("client_name"),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+    grantTypes: jsonb("grant_types")
+      .$type<Array<"authorization_code" | "refresh_token">>()
+      .notNull(),
+    responseTypes: jsonb("response_types").$type<["code"]>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({ created: index("mcp_oauth_clients_created_idx").on(table.createdAt) }),
+);
+
+const mcpOauthGrantColumns = () => ({
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  resource: text("resource").notNull(),
+  permissions: jsonb("permissions").$type<Permission[]>().notNull(),
+  toolIdentities: jsonb("tool_identities").$type<ToolGatewayIdentity[]>().notNull(),
+});
+
+export const mcpOauthAuthorizationRequests = pgTable(
+  "mcp_oauth_authorization_requests",
+  {
+    requestHash: text("request_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    state: text("state"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_authorization_requests_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expires: index("mcp_oauth_authorization_requests_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthAuthorizationCodes = pgTable(
+  "mcp_oauth_authorization_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_authorization_codes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expires: index("mcp_oauth_authorization_codes_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthRefreshTokens = pgTable(
+  "mcp_oauth_refresh_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    familyId: uuid("family_id").notNull(),
+    generation: integer("generation").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_refresh_tokens_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    familyGeneration: uniqueIndex("mcp_oauth_refresh_tokens_family_generation_uq").on(
+      table.familyId,
+      table.generation,
+    ),
+    expires: index("mcp_oauth_refresh_tokens_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthAccessTokens = pgTable(
+  "mcp_oauth_access_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    refreshFamilyId: uuid("refresh_family_id").notNull(),
+    refreshGeneration: integer("refresh_generation").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_access_tokens_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    family: index("mcp_oauth_access_tokens_family_idx").on(
+      table.refreshFamilyId,
+      table.refreshGeneration,
+    ),
+    expires: index("mcp_oauth_access_tokens_expires_idx").on(table.expiresAt),
   }),
 );
 

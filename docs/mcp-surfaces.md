@@ -20,7 +20,7 @@ The public OAuth authorization server is deliberately narrow: public dynamic
 client registration, authorization-code grant with mandatory PKCE S256, exact
 RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope
 `mcp:access`, opaque 15-minute access tokens, and rotating 30-day refresh
-tokens. Consent requires the existing managed current-human session. OAuth
+tokens. Consent requires the existing managed or local current-human session. OAuth
 tokens are accepted only by MCP routes and never become REST credentials.
 
 First-party OpenGeni MCP memory tools:

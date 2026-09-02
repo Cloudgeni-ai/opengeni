@@ -86,6 +86,8 @@ describe("API helpers", () => {
     expect(workspaceActorContextExempt("PUT", "/v1/workspaces/external")).toBe(true);
     expect(workspaceActorContextExempt("GET", "/v1/workspaces/external")).toBe(false);
     expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/docs`)).toBe(true);
+    expect(workspaceActorContextExempt("POST", `/v1/workspaces/${workspace}/mcp/files`)).toBe(true);
     expect(workspaceActorContextExempt("GET", `/v1/workspaces/${workspace}/github/connect`)).toBe(
       true,
     );
@@ -561,6 +563,15 @@ describe("API helpers", () => {
 
   test("normalizes dynamic route labels for metrics", () => {
     const workspace = "00000000-0000-4000-8000-000000000001";
+    expect(routeLabel("/.well-known/oauth-authorization-server")).toBe(
+      "/.well-known/oauth-authorization-server",
+    );
+    expect(
+      routeLabel(`/.well-known/oauth-protected-resource/v1/workspaces/${workspace}/mcp/docs`),
+    ).toBe("/.well-known/oauth-protected-resource/v1/workspaces/:workspaceId/mcp/docs");
+    expect(routeLabel("/oauth/register")).toBe("/oauth/register");
+    expect(routeLabel("/oauth/authorize")).toBe("/oauth/authorize");
+    expect(routeLabel("/oauth/token")).toBe("/oauth/token");
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/events/stream",
     );
@@ -795,6 +806,41 @@ describe("API helpers", () => {
     expect(errorCodeForStatus(402)).toBe("payment_required");
     expect(errorCodeForStatus(409)).toBe("conflict");
     expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
+  });
+
+  test("rejects OAuth access tokens outside MCP and challenges invalid MCP tokens", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const oauthToken = `ogmcp_at_${"a".repeat(43)}`;
+    const app = createApp({
+      settings: testSettings({
+        mcpOauthEnabled: true,
+        publicBaseUrl: "https://api.example.test",
+      }),
+      db: { execute: async () => [] } as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    const rest = await app.request(`/v1/workspaces/${workspaceId}/tools/catalog`, {
+      headers: { authorization: `Bearer ${oauthToken}` },
+    });
+    expect(rest.status).toBe(401);
+    expect(await rest.json()).toEqual({ error: "invalid_token" });
+
+    for (const path of [
+      `/v1/workspaces/${workspaceId}/mcp`,
+      `/v1/workspaces/${workspaceId}/mcp/docs`,
+      `/v1/workspaces/${workspaceId}/mcp/files`,
+    ]) {
+      const response = await app.request(path, {
+        headers: { authorization: `Bearer ${oauthToken}` },
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toContain(
+        `resource_metadata="https://api.example.test/.well-known/oauth-protected-resource${path}"`,
+      );
+    }
   });
 
   test("returns secret-safe typed bounded /v1 errors with a correlation id", async () => {

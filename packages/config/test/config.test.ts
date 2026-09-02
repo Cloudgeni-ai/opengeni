@@ -63,6 +63,50 @@ describe(".env.example", () => {
   });
 });
 
+describe("MCP OAuth settings", () => {
+  test("defaults off and requires a credential-free public origin when enabled", () => {
+    expect(withEnv({}, () => getSettings()).mcpOauthEnabled).toBe(false);
+    expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
+      "OPENGENI_PUBLIC_BASE_URL",
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ).mcpOauthEnabled,
+    ).toBe(true);
+  });
+
+  test("requires HTTPS outside local and test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "http://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must use https");
+  });
+
+  test("requires a product mode with a canonical current-human session", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("requires managed or local product access mode");
+  });
+});
+
 describe("goal continuation pacing settings", () => {
   test("defaults to the input-aware idle backoff schedule and cap", () => {
     const settings = withEnv({}, () => getSettings());

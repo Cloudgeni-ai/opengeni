@@ -3366,6 +3366,7 @@ export type PrepareToolsOptions = {
       caller: ToolGatewayCaller,
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
+    filterDefinition?: (definition: ToolGatewayDefinition) => boolean;
   };
   /**
    * Persist an oversized *model-visible* tool result as a workspace File and
@@ -4196,11 +4197,14 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
+  const definitions = options.workspaceToolGateway.filterDefinition
+    ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
+    : prepared.definitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,
     generation: options.workspaceToolGateway.generation ?? 1,
-    definitions: prepared.definitions,
+    definitions,
     ...(options.workspaceToolGateway.createdAt
       ? { createdAt: options.workspaceToolGateway.createdAt }
       : {}),

@@ -175,6 +175,12 @@ describe("workspace tool gateway adapters", () => {
     expect(() => requireWorkspaceToolGatewayGrant(grant({ principalKind: "service" }))).toThrow(
       HTTPException,
     );
+    expect(() => requireWorkspaceToolGatewayGrant(grant({ principalKind: "api_key" }))).toThrow(
+      HTTPException,
+    );
+    expect(() =>
+      requireWorkspaceToolGatewayGrant(grant({ principalKind: "configured_key" })),
+    ).toThrow(HTTPException);
     expect(() => requireWorkspaceToolGatewayGrant(grant())).not.toThrow();
   });
 });

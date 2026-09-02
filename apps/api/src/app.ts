@@ -42,7 +42,6 @@ import {
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   rlsContextForWorkspace,
-  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -65,7 +64,6 @@ import {
   hasPermission,
   requireAccessGrant,
   requireAccessGrantAuthorization,
-  requireLiveAgentAttemptAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
   resolveCatalogSettings,
@@ -106,9 +104,17 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   callWorkspaceToolGateway,
   grantUsesAttemptScopedMcp,
+  prepareMcpOAuthWorkspaceToolGateway,
   prepareWorkspaceToolGateway,
   workspaceToolGatewayDeclarations,
 } from "./workspace-tool-gateway";
+import {
+  isMcpOAuthResourcePath,
+  mcpOAuthAuthenticateHeader,
+  mcpOAuthBearerToken,
+  registerMcpOAuthRoutes,
+  resolveMcpOAuthRouteAccess,
+} from "./mcp-oauth";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
@@ -124,6 +130,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
 import { allowedCorsOrigin } from "./http/cors";
+import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -409,6 +416,18 @@ export function createAppComposition(deps: AppDependencies): {
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
     correlationIds.set(c.req.raw, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
+
+  app.use("*", async (c, next) => {
+    const oauthToken = mcpOAuthBearerToken(c.req.raw);
+    if (
+      oauthToken &&
+      (!deps.settings.mcpOauthEnabled || !isMcpOAuthResourcePath(new URL(c.req.url).pathname))
+    ) {
+      c.header("www-authenticate", 'Bearer error="invalid_token"');
+      return c.json({ error: "invalid_token" }, 401);
+    }
     await next();
   });
 
@@ -808,6 +827,8 @@ export function createAppComposition(deps: AppDependencies): {
     }),
   );
 
+  registerMcpOAuthRoutes(app, routeDeps);
+
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
@@ -907,7 +928,49 @@ export function createAppComposition(deps: AppDependencies): {
       }
       throw error;
     }
-    const authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
+    let oauthAccess: Awaited<ReturnType<typeof resolveMcpOAuthRouteAccess>>;
+    try {
+      oauthAccess = await resolveMcpOAuthRouteAccess(routeDeps, c.req.raw, workspaceId);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
+    if (oauthAccess) {
+      return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
+        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
+          routeDeps,
+          oauthAccess.grant,
+          oauthAccess.allowedToolIdentities,
+        );
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, oauthAccess.grant);
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      });
+    }
+    let authorization: Awaited<ReturnType<typeof requireMcpAccessGrantAuthorization>>;
+    try {
+      authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
+    } catch (error) {
+      if (deps.settings.mcpOauthEnabled && error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
     const grant = authorization.grant;
     return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
       const boundSessionId = grant.metadata?.sessionId;
@@ -1211,7 +1274,7 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
-  if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
+  if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -1237,38 +1300,6 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
     throw new HTTPException(400, {
       message: 'target is required ("auto" or an account id)',
     });
-  }
-}
-
-async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (grant.principalKind !== "agent_attempt") {
-    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
-  }
-  const callerSessionId = grant.metadata?.sessionId;
-  if (typeof callerSessionId !== "string") {
-    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
-  }
-  try {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
-    return await withSessionRlsActorContext(
-      {
-        subjectId: actor.subjectId,
-        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-      },
-      fn,
-    );
-  } catch (error) {
-    if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(403, {
-        message: "agent attempt authority is invalid",
-        cause: error,
-      });
-    }
-    throw error;
   }
 }
 
@@ -1580,6 +1611,20 @@ const routeLabelPatterns: Array<{
   pattern: RegExp;
   label: string | ((match: RegExpMatchArray) => string);
 }> = [
+  {
+    pattern: /^\/\.well-known\/oauth-authorization-server$/,
+    label: "/.well-known/oauth-authorization-server",
+  },
+  {
+    pattern:
+      /^\/\.well-known\/oauth-protected-resource\/v1\/workspaces\/[^/]+\/mcp(?:\/(docs|files))?$/,
+    label: (match) =>
+      `/.well-known/oauth-protected-resource/v1/workspaces/:workspaceId/mcp${match[1] ? `/${match[1]}` : ""}`,
+  },
+  {
+    pattern: /^\/oauth\/(register|authorize|token)$/,
+    label: (match) => `/oauth/${match[1]}`,
+  },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },

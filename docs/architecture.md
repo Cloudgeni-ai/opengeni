@@ -1065,6 +1065,14 @@ parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
 credentials nor workspace routing context. Approval-required Site calls are
 confirmed in the parent and enforced again at the gateway boundary.
 
+External MCP clients may use the opt-in OAuth authorization server. Its public
+metadata and dynamic registration lead to an authorization-code flow with
+mandatory PKCE S256, one exact RFC 8707 workspace MCP resource, issuer-bound
+redirects, opaque short-lived access tokens, and rotating refresh tokens.
+Consent freezes the current human's permissions and tool identities; every MCP
+request intersects that snapshot with live workspace authority and the current
+gateway catalog. OAuth bearer tokens are never accepted as REST credentials.
+
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.

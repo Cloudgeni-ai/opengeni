@@ -70,6 +70,12 @@ import {
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildDocumentsMcpServer } from "../mcp/documents";
+import { mcpOAuthAuthenticateHeader, resolveMcpOAuthRouteAccess } from "../mcp-oauth";
+import { withAccessGrantSessionRlsContext } from "../access-grant-rls";
+import {
+  buildWorkspaceToolGatewayMcpServer,
+  prepareMcpOAuthWorkspaceToolGateway,
+} from "../workspace-tool-gateway";
 import { sanitizeFilename } from "./files";
 
 export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -949,25 +955,63 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.all("/v1/workspaces/:workspaceId/mcp/docs", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
-    const sessionId =
-      typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
-    const attemptId =
-      typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
-    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
-    const server = buildDocumentsMcpServer(
-      db,
-      grant.accountId,
-      workspaceId,
-      getDocumentServices(),
-      {
-        createdBySessionId: sessionId,
-        attemptId,
-        initiatingSubjectId: grant.subjectId,
-      },
-    );
-    await server.connect(transport);
-    return await transport.handleRequest(c.req.raw);
+    let oauthAccess: Awaited<ReturnType<typeof resolveMcpOAuthRouteAccess>>;
+    try {
+      oauthAccess = await resolveMcpOAuthRouteAccess(deps, c.req.raw, workspaceId);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) {
+        c.header("www-authenticate", mcpOAuthAuthenticateHeader(deps, new URL(c.req.url).pathname));
+      }
+      throw error;
+    }
+    if (oauthAccess) {
+      return await withAccessGrantSessionRlsContext(deps, oauthAccess.grant, async () => {
+        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
+          deps,
+          oauthAccess.grant,
+          oauthAccess.allowedToolIdentities,
+        );
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        const server = buildWorkspaceToolGatewayMcpServer(prepared, oauthAccess.grant);
+        try {
+          await server.connect(transport);
+          return await transport.handleRequest(c.req.raw);
+        } finally {
+          await Promise.allSettled([server.close(), prepared.close()]);
+        }
+      });
+    }
+    let grant: Awaited<ReturnType<typeof requireAccessGrant>>;
+    try {
+      grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");
+    } catch (error) {
+      if (deps.settings.mcpOauthEnabled && error instanceof HTTPException && error.status === 401) {
+        c.header("www-authenticate", mcpOAuthAuthenticateHeader(deps, new URL(c.req.url).pathname));
+      }
+      throw error;
+    }
+    return await withAccessGrantSessionRlsContext(deps, grant, async () => {
+      const sessionId =
+        typeof grant.metadata?.sessionId === "string" ? grant.metadata.sessionId : undefined;
+      const attemptId =
+        typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
+      const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+      const server = buildDocumentsMcpServer(
+        db,
+        grant.accountId,
+        workspaceId,
+        getDocumentServices(),
+        {
+          createdBySessionId: sessionId,
+          attemptId,
+          initiatingSubjectId: grant.subjectId,
+        },
+      );
+      await server.connect(transport);
+      return await transport.handleRequest(c.req.raw);
+    });
   });
 }
 

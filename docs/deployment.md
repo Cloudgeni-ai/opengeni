@@ -9,6 +9,23 @@ fake-provider conformance, rollback, and unsupported-operation contract in
 not enable an external recovery notification provider or perform a production
 mutation.
 
+## Workspace MCP OAuth
+
+The public MCP authorization server is disabled by default. Enable it only in
+managed or local product-access mode with
+`OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
+`OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
+
+The deployment then publishes authorization-server and protected-resource
+metadata, public Dynamic Client Registration, and authorization-code/token
+endpoints for the exact workspace MCP resources. Consent uses the existing
+current-human browser session; no separate OAuth signing secret is required.
+Access and refresh values are opaque, only their hashes are retained, and the
+runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
+`/mcp/docs`, or `/mcp/files`. Keep the public base URL stable across upgrades
+because it is the issuer and part of every exact resource identifier. See
+[`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use

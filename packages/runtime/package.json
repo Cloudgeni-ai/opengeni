@@ -40,6 +40,10 @@
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./workspace-tool-gateway": {
+      "types": "./src/workspace-tool-gateway.ts",
+      "default": "./src/workspace-tool-gateway.ts"
     }
   },
   "publishConfig": {
