@@ -19,7 +19,13 @@ import {
   type FirstPartyMcpToolName,
 } from "@opengeni/contracts";
 
-export type RepoDraft = { id: number; url: string; ref: string };
+export type RepoDraft = {
+  id: number;
+  url: string;
+  ref: string;
+  expectedCommitSha?: string;
+  attached?: boolean;
+};
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
 // the old `Extract<…,"low"|…>` silently dropped `none`/`minimal`, so a deployment
 // whose default is one of those was overridden to "low" on every web turn
@@ -225,6 +231,7 @@ export function buildResources(
       .map((repo) => ({
         url: repo.cloneUrl,
         ref: (selectedRefs[repo.id] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.id,
         installationId: repo.installationId,
         private: repo.private,
@@ -241,6 +248,7 @@ export function buildResources(
       .map((repo) => ({
         url: repo.canonicalUrl,
         ref: (selectedPersonalRepositoryRefs[repo.repositoryId] ?? repo.defaultBranch).trim(),
+        expectedCommitSha: null,
         repositoryId: repo.repositoryId,
         installationId: null,
         private: repo.private,
@@ -249,17 +257,20 @@ export function buildResources(
         credentialBindingId: personalCredentialBindingId,
         access: repo.selectedAccess!,
       })),
-    ...manualRepos.map((repo) => ({
-      url: repo.url.trim(),
-      ref: repo.ref.trim(),
-      repositoryId: null,
-      installationId: null,
-      private: false,
-      provider: null,
-      connectionType: null,
-      credentialBindingId: null,
-      access: null,
-    })),
+    ...manualRepos
+      .filter((repo) => repo.attached !== false)
+      .map((repo) => ({
+        url: repo.url.trim(),
+        ref: repo.ref.trim(),
+        expectedCommitSha: repo.expectedCommitSha ?? null,
+        repositoryId: null,
+        installationId: null,
+        private: false,
+        provider: null,
+        connectionType: null,
+        credentialBindingId: null,
+        access: null,
+      })),
   ].filter((repo) => repo.url.length > 0);
   const mountPaths = new Set<string>();
   return raw.map((repo) => {
@@ -297,6 +308,7 @@ export function buildResources(
       ref: repo.ref,
       mountPath,
       ...(repo.provider ? { provider: repo.provider } : {}),
+      ...(repo.expectedCommitSha ? { expectedCommitSha: repo.expectedCommitSha } : {}),
       // Every catalog repository is in the workspace's GitHub App allowlist,
       // public or private, so every selection carries the stable ids that
       // mint the scoped installation token. Manual URLs stay bare.
@@ -465,7 +477,13 @@ export function repositorySelectionFromResources(
       selectedRepoIds.add(matched.id);
       selectedRepoRefs[matched.id] = resource.ref;
     } else {
-      manualRepos.push({ id: nextManualId++, url: resource.uri, ref: resource.ref });
+      manualRepos.push({
+        id: nextManualId++,
+        url: resource.uri,
+        ref: resource.ref,
+        ...(resource.expectedCommitSha ? { expectedCommitSha: resource.expectedCommitSha } : {}),
+        attached: true,
+      });
     }
   }
   return {

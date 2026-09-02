@@ -34,6 +34,10 @@
       "types": "./src/browser.ts",
       "default": "./src/browser.ts"
     },
+    "./github-repositories": {
+      "types": "./src/github-repositories.ts",
+      "default": "./src/github-repositories.ts"
+    },
     "./document-authority": {
       "types": "./src/document-authority.ts",
       "default": "./src/document-authority.ts"

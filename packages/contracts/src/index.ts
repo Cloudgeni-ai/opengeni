@@ -4367,6 +4367,14 @@ export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
   repositories: GitHubUserRepositoryAccess[];
 };
 
+export type GitHubAppRepositoryBranchPage = {
+  installationId: number;
+  repositoryId: number;
+  defaultBranch: string;
+  branches: string[];
+  nextPage: number | null;
+};
+
 export type GitHubAppApiPort = {
   /**
    * Exchange one fresh GitHub user-authorization code and prove current
@@ -4398,6 +4406,18 @@ export type GitHubAppApiPort = {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
+  /**
+   * List one bounded page of branch suggestions for one exact repository.
+   * Implementations must keep the provider credential server-side and scope
+   * it to exactly `repositoryId`; the caller separately rechecks the durable
+   * workspace binding immediately before and after this provider request.
+   */
+  listRepositoryBranches?: (input: {
+    installationId: number;
+    repositoryId: number;
+    page: number;
+    limit: number;
+  }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
 export const BillingBalance = z.object({

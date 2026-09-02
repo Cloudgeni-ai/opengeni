@@ -8,11 +8,17 @@ import {
   type PersonalGitHubRepository as PersonalGitHubRepositoryContract,
   type PersonalGitHubRepositorySelectionInput,
 } from "@opengeni/contracts/personal-github";
+import {
+  GitHubRepositoryBranchesResponse,
+  type GitHubRepositoryBranchesResponse as GitHubRepositoryBranchesResponseContract,
+  type ListGitHubRepositoryBranchesQuery,
+} from "@opengeni/contracts/github-repository-contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
+  type PersonalGitHubRepositorySelectionState as DbPersonalGitHubRepositorySelectionState,
 } from "@opengeni/db";
 import { readResponseTextBounded } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
@@ -21,6 +27,7 @@ import JSONBig from "json-bigint";
 const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_REQUEST_TIMEOUT_MS = 10_000;
 const GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES = 1024 * 1024;
+const GITHUB_BRANCHES_RESPONSE_MAX_BYTES = 256 * 1024;
 const personalGitHubProviderJsonParser = JSONBig({
   storeAsString: true,
   protoAction: "error",
@@ -31,6 +38,60 @@ export type PersonalGitHubRepositoryConnection = NonNullable<
   Awaited<ReturnType<typeof getConnectionMetadata>>
 >;
 
+type PersonalGitHubRepositoryProviderOperation =
+  | "repositories_list"
+  | "repository_branches_list"
+  | "repository_verify";
+
+type ExpectedPersonalGitHubRepositoryAuthority = {
+  selectionGeneration: number;
+  repositoryId: string;
+  fullName: string;
+};
+
+type PersonalGitHubProviderJsonOptions = {
+  operation: PersonalGitHubRepositoryProviderOperation;
+  expectedRepositoryAuthority?: ExpectedPersonalGitHubRepositoryAuthority;
+  responseLabel?: string;
+  responseMaxBytes?: number;
+};
+
+export type PersonalGitHubRepositoryBranchServices = {
+  requireConnection: typeof requirePersonalGitHubRepositoryConnection;
+  getSelectionState: (
+    deps: ApiRouteDeps,
+    input: {
+      accountId: string;
+      originWorkspaceId: string;
+      subjectId: string;
+      connectionId: string;
+    },
+  ) => Promise<DbPersonalGitHubRepositorySelectionState | null>;
+  providerJson: (input: {
+    deps: ApiRouteDeps;
+    connection: PersonalGitHubRepositoryConnection;
+    subjectId: string;
+    url: URL;
+    expectedConnectionAuthorityGeneration: number;
+    options: PersonalGitHubProviderJsonOptions;
+  }) => Promise<unknown>;
+};
+
+const personalGitHubRepositoryBranchServices: PersonalGitHubRepositoryBranchServices = {
+  requireConnection: requirePersonalGitHubRepositoryConnection,
+  getSelectionState: async (deps, input) =>
+    await getPersonalGitHubRepositorySelectionState(deps.db, input),
+  providerJson: async (input) =>
+    await personalGitHubProviderJson(
+      input.deps,
+      input.connection,
+      input.subjectId,
+      input.url,
+      input.expectedConnectionAuthorityGeneration,
+      input.options,
+    ),
+};
+
 export type PersonalGitHubRepositoryProviderErrorCode =
   | "connection_changed"
   | "connection_inactive"
@@ -40,7 +101,9 @@ export type PersonalGitHubRepositoryProviderErrorCode =
   | "provider_unavailable"
   | "repository_archived"
   | "repository_not_found"
+  | "repository_not_selected"
   | "repository_read_denied"
+  | "repository_selection_changed"
   | "repository_write_denied";
 
 export class PersonalGitHubRepositoryProviderError extends Error {
@@ -104,6 +167,7 @@ export async function listLivePersonalGitHubRepositories(
     input.subjectId,
     url,
     input.expectedConnectionAuthorityGeneration,
+    { operation: "repositories_list" },
   );
   if (!Array.isArray(payload) || payload.length > PERSONAL_GITHUB_REPOSITORY_CATALOG_MAX) {
     throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
@@ -122,6 +186,93 @@ export async function listLivePersonalGitHubRepositories(
     repositories,
     nextPage: payload.length === input.limit && input.page < 10_000 ? input.page + 1 : null,
   };
+}
+
+export async function listLivePersonalGitHubRepositoryBranches(
+  deps: ApiRouteDeps,
+  input: {
+    workspaceId: string;
+    accountId: string;
+    subjectId: string;
+    connectionId: string;
+    repositoryId: string;
+    query: ListGitHubRepositoryBranchesQuery;
+  },
+  services: PersonalGitHubRepositoryBranchServices = personalGitHubRepositoryBranchServices,
+): Promise<GitHubRepositoryBranchesResponseContract> {
+  const connection = await services.requireConnection(deps, input);
+  const current = await requireSelectedPersonalGitHubRepository(
+    deps,
+    connection,
+    input,
+    null,
+    services.getSelectionState,
+  );
+  const [owner, repositoryName] = current.repository.fullName.split("/");
+  if (!owner || !repositoryName) {
+    throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
+  }
+  const url = new URL(
+    `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repositoryName)}/branches`,
+    PERSONAL_GITHUB_API_ORIGIN,
+  );
+  url.searchParams.set("page", String(input.query.cursor));
+  url.searchParams.set("per_page", String(input.query.limit));
+  const expectedRepositoryAuthority = {
+    selectionGeneration: current.selectionGeneration,
+    repositoryId: current.repository.repositoryId,
+    fullName: current.repository.fullName,
+  };
+  const payload = await services.providerJson({
+    deps,
+    connection,
+    subjectId: input.subjectId,
+    url,
+    expectedConnectionAuthorityGeneration: current.connectionAuthorityGeneration,
+    options: {
+      operation: "repository_branches_list",
+      expectedRepositoryAuthority,
+      responseLabel: "GitHub repository branches response",
+      responseMaxBytes: GITHUB_BRANCHES_RESPONSE_MAX_BYTES,
+    },
+  });
+  if (!Array.isArray(payload) || payload.length > input.query.limit) {
+    throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
+  }
+  const branches: string[] = [];
+  const seen = new Set<string>();
+  for (const value of payload) {
+    const name =
+      value && typeof value === "object" && !Array.isArray(value)
+        ? (value as Record<string, unknown>).name
+        : null;
+    if (typeof name !== "string" || name.length === 0 || name.length > 1024 || seen.has(name)) {
+      throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
+    }
+    seen.add(name);
+    branches.push(name);
+  }
+  await requireSelectedPersonalGitHubRepository(
+    deps,
+    connection,
+    input,
+    expectedRepositoryAuthority,
+    services.getSelectionState,
+  );
+  const response = GitHubRepositoryBranchesResponse.safeParse({
+    branches: branches.map((name) => ({
+      name,
+      isDefault: name === current.repository.defaultBranch,
+    })),
+    nextCursor:
+      branches.length === input.query.limit && input.query.cursor < 10_000
+        ? input.query.cursor + 1
+        : null,
+  });
+  if (!response.success) {
+    throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
+  }
+  return response.data;
 }
 
 /** Serial by design: one bounded provider request and one authority check at a time. */
@@ -154,7 +305,7 @@ export async function verifyLivePersonalGitHubRepositories(
       input.subjectId,
       url,
       input.expectedConnectionAuthorityGeneration,
-      true,
+      { operation: "repository_verify" },
     );
     const repository = parsePersonalGitHubRepository(payload);
     if (
@@ -179,6 +330,58 @@ export async function verifyLivePersonalGitHubRepositories(
   return verified;
 }
 
+async function requireSelectedPersonalGitHubRepository(
+  deps: ApiRouteDeps,
+  connection: PersonalGitHubRepositoryConnection,
+  input: {
+    accountId: string;
+    subjectId: string;
+    connectionId: string;
+    repositoryId: string;
+  },
+  expected: ExpectedPersonalGitHubRepositoryAuthority | null,
+  getSelectionState: PersonalGitHubRepositoryBranchServices["getSelectionState"],
+): Promise<{
+  connectionAuthorityGeneration: number;
+  selectionGeneration: number;
+  repository: NonNullable<
+    Awaited<ReturnType<typeof getPersonalGitHubRepositorySelectionState>>
+  >["repositories"][number];
+}> {
+  const selection = await getSelectionState(deps, {
+    accountId: input.accountId,
+    originWorkspaceId: connection.workspaceId,
+    subjectId: input.subjectId,
+    connectionId: input.connectionId,
+  });
+  if (!selection) {
+    throw new PersonalGitHubRepositoryProviderError(
+      expected ? "repository_selection_changed" : "repository_not_selected",
+    );
+  }
+  const repository = selection.repositories.find(
+    (candidate) => candidate.repositoryId === input.repositoryId,
+  );
+  if (!repository) {
+    throw new PersonalGitHubRepositoryProviderError(
+      expected ? "repository_selection_changed" : "repository_not_selected",
+    );
+  }
+  if (
+    expected &&
+    (selection.selectionGeneration !== expected.selectionGeneration ||
+      repository.repositoryId !== expected.repositoryId ||
+      repository.fullName !== expected.fullName)
+  ) {
+    throw new PersonalGitHubRepositoryProviderError("repository_selection_changed");
+  }
+  return {
+    connectionAuthorityGeneration: selection.connectionAuthorityGeneration,
+    selectionGeneration: selection.selectionGeneration,
+    repository,
+  };
+}
+
 export function personalGitHubRepositoryProviderHttpError(
   error: PersonalGitHubRepositoryProviderError,
 ): HTTPException {
@@ -194,6 +397,14 @@ export function personalGitHubRepositoryProviderHttpError(
       return new HTTPException(503, { message: "GitHub is temporarily rate limited" });
     case "repository_not_found":
       return new HTTPException(422, { message: "a selected GitHub repository is unavailable" });
+    case "repository_not_selected":
+      return new HTTPException(404, {
+        message: "personal GitHub repository is not selected for this connection",
+      });
+    case "repository_selection_changed":
+      return new HTTPException(409, {
+        message: "personal GitHub repository selection changed; refresh and try again",
+      });
     case "repository_archived":
       return new HTTPException(422, {
         message: "an archived or disabled GitHub repository cannot be selected for write access",
@@ -218,7 +429,7 @@ async function personalGitHubProviderJson(
   subjectId: string,
   url: URL,
   expectedConnectionAuthorityGeneration: number,
-  repositoryLookup = false,
+  options: PersonalGitHubProviderJsonOptions,
 ): Promise<unknown> {
   if (url.origin !== PERSONAL_GITHUB_API_ORIGIN) {
     throw new PersonalGitHubRepositoryProviderError("invalid_provider_response");
@@ -229,7 +440,8 @@ async function personalGitHubProviderJson(
     subjectId,
     url,
     expectedConnectionAuthorityGeneration,
-    repositoryLookup,
+    options.operation,
+    options.expectedRepositoryAuthority,
     false,
   );
   if (response.status === 401) {
@@ -240,7 +452,8 @@ async function personalGitHubProviderJson(
       subjectId,
       url,
       expectedConnectionAuthorityGeneration,
-      repositoryLookup,
+      options.operation,
+      options.expectedRepositoryAuthority,
       true,
     );
   }
@@ -264,7 +477,7 @@ async function personalGitHubProviderJson(
     if (status === 429) {
       throw new PersonalGitHubRepositoryProviderError("provider_rate_limited");
     }
-    if (status === 404 && repositoryLookup) {
+    if (status === 404 && options.operation !== "repositories_list") {
       throw new PersonalGitHubRepositoryProviderError("repository_not_found");
     }
     throw new PersonalGitHubRepositoryProviderError("provider_unavailable");
@@ -273,8 +486,11 @@ async function personalGitHubProviderJson(
     return parsePersonalGitHubProviderJson(
       await readResponseTextBounded(
         response,
-        GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES,
-        repositoryLookup ? "GitHub repository response" : "GitHub repositories response",
+        options.responseMaxBytes ?? GITHUB_REPOSITORIES_RESPONSE_MAX_BYTES,
+        options.responseLabel ??
+          (options.operation === "repositories_list"
+            ? "GitHub repositories response"
+            : "GitHub repository response"),
       ),
     );
   } catch {
@@ -293,7 +509,8 @@ async function personalGitHubProviderFetch(
   subjectId: string,
   url: URL,
   expectedConnectionAuthorityGeneration: number,
-  repositoryLookup: boolean,
+  operation: PersonalGitHubRepositoryProviderOperation,
+  expectedRepositoryAuthority: ExpectedPersonalGitHubRepositoryAuthority | undefined,
   forceRefresh: boolean,
 ): Promise<Response> {
   const resolver = buildConnectionTokenResolver(deps.db, deps.settings, undefined, {
@@ -305,7 +522,7 @@ async function personalGitHubProviderFetch(
     workspaceId: connection.workspaceId,
     subjectId,
     serverId: "github-personal-repository-picker",
-    toolName: repositoryLookup ? "repository_verify" : "repositories_list",
+    toolName: operation,
     connectionRef: {
       connectionId: connection.id,
       providerDomain: PERSONAL_GITHUB_PROVIDER_DOMAIN,
@@ -349,6 +566,18 @@ async function personalGitHubProviderFetch(
     authority.connectionAuthorityGeneration !== expectedConnectionAuthorityGeneration
   ) {
     throw new PersonalGitHubRepositoryProviderError("connection_changed");
+  }
+  if (expectedRepositoryAuthority) {
+    const repository = authority.repositories.find(
+      (candidate) => candidate.repositoryId === expectedRepositoryAuthority.repositoryId,
+    );
+    if (
+      authority.selectionGeneration !== expectedRepositoryAuthority.selectionGeneration ||
+      !repository ||
+      repository.fullName !== expectedRepositoryAuthority.fullName
+    ) {
+      throw new PersonalGitHubRepositoryProviderError("repository_selection_changed");
+    }
   }
   const authorization = Object.entries(credential.headers).find(
     ([name]) => name.toLowerCase() === "authorization",
