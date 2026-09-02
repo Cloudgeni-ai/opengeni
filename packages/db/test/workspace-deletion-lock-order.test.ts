@@ -5,15 +5,17 @@ const functionStart = source.indexOf("export async function deleteWorkspaceIfQui
 const functionEnd = source.indexOf("\nexport async function ", functionStart + 1);
 const deletionSource = source.slice(functionStart, functionEnd);
 
-test("takes the deletion lifecycle lock before organization authorization", () => {
+test("preauthorizes before the lifecycle lock and reauthorizes after it", () => {
   expect(functionStart).toBeGreaterThanOrEqual(0);
-  expect(deletionSource.indexOf("await lockBackgroundCommandWorkspaceLifecycle(")).toBeGreaterThan(
-    -1,
+  const preflightAuthorization = deletionSource.indexOf(
+    "await authorizeOrganizationWorkspaceDeletion(",
   );
-  expect(
-    deletionSource.indexOf("authorize_organization_shared_workspace_administration("),
-  ).toBeGreaterThan(-1);
-  expect(deletionSource.indexOf("await lockBackgroundCommandWorkspaceLifecycle(")).toBeLessThan(
-    deletionSource.indexOf("authorize_organization_shared_workspace_administration("),
+  const lifecycleLock = deletionSource.indexOf("await lockBackgroundCommandWorkspaceLifecycle(");
+  const authoritativeAuthorization = deletionSource.indexOf(
+    "await authorizeOrganizationWorkspaceDeletion(",
+    preflightAuthorization + 1,
   );
+  expect(preflightAuthorization).toBeGreaterThan(-1);
+  expect(lifecycleLock).toBeGreaterThan(preflightAuthorization);
+  expect(authoritativeAuthorization).toBeGreaterThan(lifecycleLock);
 });
