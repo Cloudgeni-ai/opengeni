@@ -89,6 +89,16 @@ export default defineConfig({
               priority: 17,
             },
             {
+              // Keep settings-only implementations in one explicit lazy unit.
+              // Recursive consumer-aware grouping can otherwise pair one
+              // shared primitive with these routes and make the complete
+              // management surface reachable from an active session.
+              name: "workspace-management-surfaces",
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|personal-workspace-badge|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults)\.(?:ts|tsx)|components[\\/]settings[\\/]workspace-settings-shell\.tsx|routes[\\/](?:workspace-learning-admin\.tsx|workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.

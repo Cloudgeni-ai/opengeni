@@ -129,6 +129,7 @@ async function bearer(
 function githubFixture() {
   const tokenRequests: URLSearchParams[] = [];
   const repositoryRequests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
+  const branchRequests: Array<{ url: string; redirect: RequestRedirect | undefined }> = [];
   let githubUserId = 123456;
   let scopes = "repo";
   let repositoryUnauthorizedOnce = false;
@@ -181,12 +182,20 @@ function githubFixture() {
       repositoryRequests.push({ url: url.toString(), redirect: init?.redirect });
       return Response.json(repository);
     }
+    if (
+      url.origin === PERSONAL_GITHUB_API_ORIGIN &&
+      url.pathname === "/repos/Cloudgeni-ai/opengeni/branches"
+    ) {
+      branchRequests.push({ url: url.toString(), redirect: init?.redirect });
+      return Response.json([{ name: "feature/picker" }, { name: "main" }]);
+    }
     return new Response("not found", { status: 404 });
   };
   return {
     fetch,
     tokenRequests,
     repositoryRequests,
+    branchRequests,
     setGitHubUserId(value: number) {
       githubUserId = value;
     },
@@ -311,6 +320,10 @@ describe("personal GitHub OAuth", () => {
     expect(catalog.selection).toMatchObject({ selectionGeneration: 0, repositories: [] });
     expect(fixture.repositoryRequests[0]).toMatchObject({ redirect: "manual" });
     expect(new URL(fixture.repositoryRequests[0]!.url).searchParams.get("per_page")).toBe("50");
+    const branchPath = `${basePath}/987654321/branches`;
+    const unselectedBranches = await app.request(branchPath, { headers });
+    expect(unselectedBranches.status).toBe(404);
+    expect(fixture.branchRequests).toHaveLength(0);
 
     const replacementBody = JSON.stringify({
       expectedConnectionAuthorityGeneration: catalog.selection.connectionAuthorityGeneration,
@@ -348,6 +361,20 @@ describe("personal GitHub OAuth", () => {
     expect((await replay.json()) as { selectionGeneration: number }).toMatchObject({
       selectionGeneration: 1,
     });
+
+    const branches = await app.request(`${branchPath}?cursor=2&limit=2`, { headers });
+    expect(branches.status).toBe(200);
+    expect(await branches.json()).toEqual({
+      branches: [
+        { name: "feature/picker", isDefault: false },
+        { name: "main", isDefault: true },
+      ],
+      nextCursor: 3,
+    });
+    expect(fixture.branchRequests).toEqual([expect.objectContaining({ redirect: "manual" })]);
+    const branchUrl = new URL(fixture.branchRequests[0]!.url);
+    expect(branchUrl.searchParams.get("page")).toBe("2");
+    expect(branchUrl.searchParams.get("per_page")).toBe("2");
 
     const verified = await app.request(`${basePath}/verify`, {
       method: "POST",

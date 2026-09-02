@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 
-import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-menu-body";
 import {
   RepositoryContextPicker,
   repositoryBindingPresentation,
@@ -21,7 +21,7 @@ describe("repository picker GitHub binding status", () => {
     const presentation = repositoryBindingPresentation("unbound", url);
     expect(presentation).toMatchObject({
       connectUrl: url,
-      connectLabel: "Connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     });
@@ -35,7 +35,7 @@ describe("repository picker GitHub binding status", () => {
     const presentation = repositoryBindingPresentation("unbound", url, "platform");
     expect(presentation).toMatchObject({
       connectUrl: url,
-      connectLabel: "Install or connect GitHub",
+      connectLabel: "Connect workspace App",
       healthy: false,
       canRefresh: false,
     });
@@ -57,7 +57,7 @@ describe("repository picker GitHub binding status", () => {
       "https://api.opengeni.test/github/connect",
     );
     expect(presentation).toMatchObject({
-      connectLabel: "Configure another installation",
+      connectLabel: "Connect another account",
       healthy: true,
       canRefresh: true,
     });

@@ -26,9 +26,10 @@ const migrationName = "0264_connection_authority_runtime_activation.sql";
 // that membership wrapper, and 0315 extends the 0275 ledgers. Migration 0345
 // patches the frozen 0275 routine, while 0374 consumes the tenancy helpers
 // installed by 0345, 0379 activates the cursor as public sequence authority,
-// and 0388 drift-guards the reaper definition produced by 0345. The synthetic
-// upgrade must therefore withhold all seven dependents alongside 0264 and
-// replay all eight in real filename order.
+// and 0388 drift-guards the reaper definition produced by 0345. Migration 0391
+// extends that exact 0388 definition. The synthetic upgrade must therefore
+// withhold all eight dependents alongside 0264 and replay all nine in real
+// filename order.
 const scheduledConnectionAuthorityMigrationName = "0275_scheduled_connection_authority.sql";
 const organizationMembershipLockOrderMigrationName = "0299_organization_membership_lock_order.sql";
 const personalGitHubRepositorySelectionMigrationName =
@@ -38,6 +39,8 @@ const sessionEventCursorMigrationName = "0374_session_event_cursors.sql";
 const sessionEventRawLaneActivationMigrationName = "0379_session_event_raw_lane_activation.sql";
 const sandboxProviderDeadlineInteractionMigrationName =
   "0388_sandbox_provider_deadline_interactions.sql";
+const sandboxProviderDeadlineInteractionFollowupMigrationName =
+  "0391_sandbox_provider_deadline_interaction_followup.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -90,7 +93,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${sessionTenancyFenceMigrationName}),
           (${sessionEventCursorMigrationName}),
           (${sessionEventRawLaneActivationMigrationName}),
-          (${sandboxProviderDeadlineInteractionMigrationName})
+          (${sandboxProviderDeadlineInteractionMigrationName}),
+          (${sandboxProviderDeadlineInteractionFollowupMigrationName})
       `;
       await migrate(blank.databaseUrl);
 
@@ -194,7 +198,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${sessionTenancyFenceMigrationName},
           ${sessionEventCursorMigrationName},
           ${sessionEventRawLaneActivationMigrationName},
-          ${sandboxProviderDeadlineInteractionMigrationName}
+          ${sandboxProviderDeadlineInteractionMigrationName},
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName}
         )
       `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
@@ -244,7 +249,8 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${sessionTenancyFenceMigrationName},
           ${sessionEventCursorMigrationName},
           ${sessionEventRawLaneActivationMigrationName},
-          ${sandboxProviderDeadlineInteractionMigrationName}
+          ${sandboxProviderDeadlineInteractionMigrationName},
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName}
         )
         order by name
       `;
@@ -257,6 +263,7 @@ describe("migration 0264 connection authority runtime activation", () => {
         sessionEventCursorMigrationName,
         sessionEventRawLaneActivationMigrationName,
         sandboxProviderDeadlineInteractionMigrationName,
+        sandboxProviderDeadlineInteractionFollowupMigrationName,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

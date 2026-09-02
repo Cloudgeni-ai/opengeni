@@ -1,5 +1,11 @@
 # @opengeni/react
 
+## 3.4.2
+
+### Patch Changes
+
+- b88a194: Stabilize timeline annotation interactions when lazy UI effects settle under load.
+
 ## 3.4.1
 
 ### Patch Changes

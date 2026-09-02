@@ -16,6 +16,7 @@ export default defineConfig({
     "src/accounts.ts",
     "src/core.ts",
     "src/browser.ts",
+    "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/artifacts.ts",
     "src/memory-slack.ts",
