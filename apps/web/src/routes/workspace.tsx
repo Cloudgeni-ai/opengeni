@@ -476,7 +476,6 @@ function AuthorizedWorkspaceShell({
   );
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
-  const workspaceName = activeWorkspace?.name ?? "Workspace";
   const organizationName = activeWorkspace
     ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
@@ -498,7 +497,6 @@ function AuthorizedWorkspaceShell({
       ) : managementLocation ? (
         <WorkspaceManagementShell
           workspaceId={workspaceId}
-          workspaceName={workspaceName}
           organizationName={organizationName}
           location={managementLocation}
         >

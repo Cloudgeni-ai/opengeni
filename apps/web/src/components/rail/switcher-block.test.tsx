@@ -3,7 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, createRef, type RefObject } from "react";
 import { createRoot } from "react-dom/client";
 
-import { WorkspaceSwitcherTrigger } from "@/components/rail/switcher-block";
+import { WorkspaceSwitcherTrigger } from "@/components/rail/workspace-switcher";
 import type { Workspace } from "@/types";
 
 beforeAll(() => {

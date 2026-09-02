@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
   BarChart3Icon,
@@ -20,7 +20,9 @@ import {
 import type { ComponentType, ReactNode } from "react";
 
 import { BrandMark } from "@/components/brand-mark";
+import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { ContentPage } from "@/components/ui/content-layout";
+import { useAppContext } from "@/context";
 import { cn } from "@/lib/utils";
 
 export type WorkspaceSettingsSection =
@@ -180,17 +182,34 @@ export function workspaceManagementLocation(
 
 export function WorkspaceManagementShell({
   workspaceId,
-  workspaceName,
   organizationName,
   location,
   children,
 }: {
   workspaceId: string;
-  workspaceName: string;
   organizationName: string;
   location: WorkspaceManagementLocation;
   children: ReactNode;
 }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+
+  function openManagementWorkspace(nextWorkspaceId: string) {
+    context.resetSessionView();
+    if (location.kind === "settings") {
+      void navigate({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: nextWorkspaceId },
+        search: { section: location.section },
+      });
+      return;
+    }
+    void navigate({
+      to: location.target,
+      params: { workspaceId: nextWorkspaceId },
+    });
+  }
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] overflow-hidden bg-bg text-fg lg:grid-cols-[15rem_minmax(0,1fr)] lg:grid-rows-1">
       <aside className="max-h-[50dvh] min-h-0 overflow-y-auto overscroll-y-contain border-b border-border bg-surface/35 lg:h-full lg:max-h-none lg:border-r lg:border-b-0">
@@ -219,16 +238,15 @@ export function WorkspaceManagementShell({
             <p className="text-2xs font-semibold uppercase tracking-wider text-fg-subtle">
               Workspace settings
             </p>
-            <div className="mt-2 flex min-w-0 items-center gap-2.5">
-              <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-brand/25 bg-brand-strong/15 text-sm font-semibold text-brand">
-                {workspaceName.trim().charAt(0).toUpperCase() || "W"}
-              </span>
-              <div className="min-w-0">
-                <p className="truncate text-lg font-semibold leading-tight tracking-tight text-fg">
-                  {workspaceName}
-                </p>
-                <p className="mt-0.5 text-2xs text-fg-subtle">Settings and controls</p>
-              </div>
+            <div className="mt-2 min-w-0">
+              <WorkspaceSwitcherMenu
+                workspaceId={workspaceId}
+                collapsed={false}
+                align="start"
+                onSelect={openManagementWorkspace}
+                className="w-full border-brand/25 bg-brand-strong/10 py-2 hover:border-brand/40 hover:bg-brand-strong/15"
+              />
+              <p className="mt-1.5 px-1 text-2xs text-fg-subtle">Settings and controls</p>
             </div>
           </div>
 

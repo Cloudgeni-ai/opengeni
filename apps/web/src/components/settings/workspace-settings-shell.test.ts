@@ -53,4 +53,12 @@ describe("workspace management navigation", () => {
     expect(shellSource).toContain("{organizationName}");
     expect(shellSource).not.toContain("Organization settings</span>");
   });
+
+  test("keeps the shared workspace selector in the management sidebar", () => {
+    expect(shellSource).toContain("<WorkspaceSwitcherMenu");
+    expect(shellSource).toContain("onSelect={openManagementWorkspace}");
+    expect(shellSource).toContain('to: "/workspaces/$workspaceId/settings"');
+    expect(shellSource).toContain("search: { section: location.section }");
+    expect(shellSource).toContain("to: location.target");
+  });
 });
