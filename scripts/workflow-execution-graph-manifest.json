@@ -78,7 +78,7 @@
     },
     {
       "path": ".github/workflows/source-admission.yml",
-      "sha256": "5d5a40305d78c80fb883d64e42b70343de090d89a9a8cd21cc289e6f214d4744"
+      "sha256": "dff0ac659656f7158bad6936bcc1fdee321beccfdf134944f087612efef37a3f"
     },
     {
       "path": ".github/workflows/staging-canary-dispatch.yml",

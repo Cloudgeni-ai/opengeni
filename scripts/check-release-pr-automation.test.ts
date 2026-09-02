@@ -27,6 +27,7 @@ const releasePublicationAdmissionPath = join(
   ".github/workflows/release-publication-admission.yml",
 );
 const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
+const sourceAdmissionHelperPath = join(root, "scripts/check-source-admission.mjs");
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
@@ -3653,6 +3654,7 @@ describe("workflow contracts", () => {
   const releaseSourceAdmissionText = readFileSync(releaseSourceAdmissionPath, "utf8");
   const releasePublicationAdmissionText = readFileSync(releasePublicationAdmissionPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
+  const sourceAdmissionHelperText = readFileSync(sourceAdmissionHelperPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
   const seal = Bun.YAML.parse(sealText) as any;
@@ -4372,6 +4374,11 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseAutomationText).toContain("releaseHeadTagPrefix");
     expect(releaseSourceAdmissionText).toContain("verify-approved-merge");
+  });
+
+  test("keeps moving-main tree normalization out of the base-owned hotfix helper", () => {
+    expect(releaseAutomationText).toContain("function canonicalReleaseLeafMap");
+    expect(sourceAdmissionHelperText).not.toContain("export function canonicalLeafMap");
   });
 
   test("runs final publication behind the historical retained-controller gate", () => {

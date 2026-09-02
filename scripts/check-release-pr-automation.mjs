@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import {
-  canonicalLeafMap,
   directTreeManifest,
   verifyHistoricalSourceAdmission,
   verifySourceAdmission,
@@ -63,6 +62,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const positiveIntegerPattern = /^[1-9][0-9]*$/;
+const allowedReleaseTreeBlobModes = new Set(["100644", "100755", "120000"]);
 const retryableVersionProjectionErrors = new Set([
   "Version PR base SHA changed",
   "Version PR head SHA changed",
@@ -93,6 +93,40 @@ function assertSha(value, label) {
     `${label} is not a lowercase Git SHA`,
   );
   return value;
+}
+
+// Keep this release-only parser local. The hotfix admission workflow fetches
+// check-source-admission.mjs from the immutable production base, so changing
+// that helper's bytes on main would disable hotfix admission until production
+// caught up with the new digest.
+function canonicalReleaseLeafMap(value, expectedSha, label) {
+  invariant(value?.sha === expectedSha, `${label} identity changed`);
+  invariant(value?.truncated === false, `${label} is truncated`);
+  invariant(Array.isArray(value?.tree), `${label} entries are missing`);
+  const out = new Map();
+  for (const entry of value.tree) {
+    invariant(entry !== null && typeof entry === "object", `${label} has an invalid entry`);
+    if (entry.type === "tree") continue;
+    invariant(
+      typeof entry.path === "string" && entry.path.length > 0,
+      `${label} has an invalid path`,
+    );
+    invariant(!out.has(entry.path), `${label} has a duplicate path`);
+    const sha = assertSha(entry.sha, `${label} object ${entry.path}`);
+    if (entry.type === "blob") {
+      invariant(
+        allowedReleaseTreeBlobModes.has(entry.mode),
+        `${label} has an invalid blob mode: ${entry.path}`,
+      );
+    } else {
+      invariant(
+        entry.type === "commit" && entry.mode === "160000",
+        `${label} has an invalid leaf: ${entry.path}`,
+      );
+    }
+    out.set(entry.path, { mode: entry.mode, type: entry.type, sha });
+  }
+  return out;
 }
 
 function assertPositiveInteger(value, label) {
@@ -2035,16 +2069,16 @@ async function classifyReleaseSourceComposition(api, source, base, head, pullIde
     api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
   ]);
   const reviewedManifest = directTreeManifest(
-    canonicalLeafMap(baseTree, base.treeSha, "reviewed base tree"),
-    canonicalLeafMap(headTree, head.treeSha, "reviewed head tree"),
+    canonicalReleaseLeafMap(baseTree, base.treeSha, "reviewed base tree"),
+    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
   );
   const landedManifest = directTreeManifest(
-    canonicalLeafMap(
+    canonicalReleaseLeafMap(
       integrationBaseTree,
       integrationBase.treeSha,
       "moving-main integration-base tree",
     ),
-    canonicalLeafMap(sourceTree, source.treeSha, "moving-main release source tree"),
+    canonicalReleaseLeafMap(sourceTree, source.treeSha, "moving-main release source tree"),
   );
   invariant(reviewedManifest.length > 0, "reviewed release tree delta is empty");
   invariant(

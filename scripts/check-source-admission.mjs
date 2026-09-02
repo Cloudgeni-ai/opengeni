@@ -248,7 +248,7 @@ function assertPullRequest(value, expected) {
   );
 }
 
-export function canonicalLeafMap(value, expectedSha, label) {
+function canonicalLeafMap(value, expectedSha, label) {
   invariant(value?.sha === expectedSha, `${label} identity changed`);
   invariant(value?.truncated === false, `${label} is truncated`);
   invariant(Array.isArray(value?.tree), `${label} entries are missing`);
