@@ -111,24 +111,6 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
-    const organizationWorkspaceManagementEntry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
-    );
-    const completeSourceContractWithOrganizationWorkspaceManagementEntry = completeSourceContract;
-    const organizationWorkspaceManagementEntryIndex =
-      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
-        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
-      );
-    completeSourceContract = organizationWorkspaceManagementEntry
-      ? {
-          ...completeSourceContractWithOrganizationWorkspaceManagementEntry,
-          latestMigration:
-            completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
-              organizationWorkspaceManagementEntryIndex - 1
-            ]?.path ??
-            completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration,
-        }
-      : completeSourceContractWithOrganizationWorkspaceManagementEntry;
     const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
       (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
     );
@@ -146,6 +128,26 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
         }
       : completeSourceContractWithModelCallEquivalentCreditCost;
+    const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
+      ...completeSourceContractWithModelCallEquivalentCreditCost,
+    };
+    const organizationWorkspaceManagementEntry =
+      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
+        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+      );
+    if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
+      const organizationWorkspaceManagementEntryIndex =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
+          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+        );
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
+          organizationWorkspaceManagementEntryIndex - 1
+        ]?.path ?? completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration;
+    } else if (organizationWorkspaceManagementEntry) {
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        "0396_model_call_equivalent_credit_cost.sql";
+    }
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
@@ -573,24 +575,6 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
-    const organizationWorkspaceManagementEntry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
-    );
-    const completeSourceContractWithOrganizationWorkspaceManagementEntry = completeSourceContract;
-    const organizationWorkspaceManagementEntryIndex =
-      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
-        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
-      );
-    completeSourceContract = organizationWorkspaceManagementEntry
-      ? {
-          ...completeSourceContractWithOrganizationWorkspaceManagementEntry,
-          latestMigration:
-            completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
-              organizationWorkspaceManagementEntryIndex - 1
-            ]?.path ??
-            completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration,
-        }
-      : completeSourceContractWithOrganizationWorkspaceManagementEntry;
     const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
       (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
     );
@@ -608,6 +592,26 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
         }
       : completeSourceContractWithModelCallEquivalentCreditCost;
+    const completeSourceContractWithOrganizationWorkspaceManagementEntry = {
+      ...completeSourceContractWithModelCallEquivalentCreditCost,
+    };
+    const organizationWorkspaceManagementEntry =
+      completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.some(
+        (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+      );
+    if (organizationWorkspaceManagementEntry && !modelCallEquivalentCreditCost) {
+      const organizationWorkspaceManagementEntryIndex =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations.findIndex(
+          (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
+        );
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        completeSourceContractWithOrganizationWorkspaceManagementEntry.migrations[
+          organizationWorkspaceManagementEntryIndex - 1
+        ]?.path ?? completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration;
+    } else if (organizationWorkspaceManagementEntry) {
+      completeSourceContractWithModelCallEquivalentCreditCost.latestMigration =
+        "0396_model_call_equivalent_credit_cost.sql";
+    }
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
