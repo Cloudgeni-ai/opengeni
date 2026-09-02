@@ -807,7 +807,7 @@ and an organization-scoped transaction advisory fence. Missing,
 cross-organization, and Personal workspace ids are rejected through one
 non-enumerating result before mutation. The capability never creates an
 operational workspace grant merely because a person is an organization
-administrator. Migration 0396 adds the narrow exception for the exact person
+administrator. Migration 0397 adds the narrow exception for the exact person
 who creates a shared workspace: the create transaction materializes a named
 workspace-admin membership through a stable idempotent child operation. It
 also adds a content-blind, transaction-scoped authorization routine for shared

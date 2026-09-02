@@ -1317,6 +1317,27 @@ describe("organization membership routes", () => {
       from workspace_memberships
       where workspace_id = ${sharedWorkspaceId}`;
     expect(after[0]).toEqual({ actorCount: 0, targetCount: 0 });
+
+    const personalDeleteDenied = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${personalWorkspaceId}`,
+      { method: "DELETE", headers: { cookie: "session=present" } },
+    );
+    expect(personalDeleteDenied.status).toBe(403);
+
+    const deleted = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}`,
+      { method: "DELETE", headers: { cookie: "session=present" } },
+    );
+    expect(deleted.status).toBe(204);
+    const [remaining] = await shared.admin<Array<{ count: number }>>`
+      select count(*)::int as count from workspaces where id = ${sharedWorkspaceId}`;
+    expect(remaining?.count).toBe(0);
+
+    const missingDelete = await app.request(
+      `http://x/v1/organizations/${accountId}/workspaces/${sharedWorkspaceId}`,
+      { method: "DELETE", headers: { cookie: "session=present" } },
+    );
+    expect(missingDelete.status).toBe(404);
   }, 180_000);
 
   test("refuses invitation creation before committing when setup delivery is unconfigured", async () => {

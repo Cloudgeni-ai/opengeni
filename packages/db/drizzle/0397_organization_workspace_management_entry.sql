@@ -11,34 +11,6 @@ ALTER FUNCTION organization_workspace_command(jsonb)
 
 REVOKE ALL ON FUNCTION organization_workspace_command_without_creator_access(jsonb) FROM PUBLIC;
 
-DO $revoke_legacy_runtime_callers$
-DECLARE
-  legacy_owner oid;
-  grantee_name text;
-BEGIN
-  SELECT function.proowner INTO legacy_owner
-  FROM pg_catalog.pg_proc function
-  WHERE function.oid = 'organization_workspace_command_without_creator_access(jsonb)'::regprocedure;
-  FOR grantee_name IN
-    SELECT role.rolname
-    FROM pg_catalog.pg_proc function
-    CROSS JOIN LATERAL pg_catalog.aclexplode(
-      coalesce(function.proacl, pg_catalog.acldefault('f', function.proowner))
-    ) grant_value
-    JOIN pg_catalog.pg_roles role ON role.oid = grant_value.grantee
-    WHERE function.oid =
-        'organization_workspace_command_without_creator_access(jsonb)'::regprocedure
-      AND grant_value.privilege_type = 'EXECUTE'
-      AND grant_value.grantee <> legacy_owner
-  LOOP
-    EXECUTE format(
-      'REVOKE EXECUTE ON FUNCTION %I.organization_workspace_command_without_creator_access(jsonb) FROM %I',
-      current_schema(), grantee_name
-    );
-  END LOOP;
-END
-$revoke_legacy_runtime_callers$;
-
 CREATE FUNCTION organization_workspace_command(p_command jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER
@@ -52,6 +24,12 @@ DECLARE
 BEGIN
   result := organization_workspace_command_without_creator_access(p_command);
   IF p_command ->> 'action' IS DISTINCT FROM 'create' THEN
+    RETURN result;
+  END IF;
+  -- A create receipt written before this migration has no child grant receipt.
+  -- Preserve that historical outcome instead of turning a retry into a new
+  -- privilege grant after rollout.
+  IF coalesce((result ->> 'replay')::boolean, false) THEN
     RETURN result;
   END IF;
 
@@ -156,7 +134,10 @@ REVOKE ALL ON FUNCTION authorize_organization_shared_workspace_administration(uu
   FROM PUBLIC;
 
 DO $pin_and_grant$
-DECLARE data_schema text := current_schema();
+DECLARE
+  data_schema text := current_schema();
+  legacy_owner oid;
+  grantee_name text;
 BEGIN
   EXECUTE format(
     'ALTER FUNCTION %I.organization_workspace_command_without_creator_access(jsonb) SET search_path = pg_catalog, %I, pg_temp',
@@ -170,6 +151,38 @@ BEGIN
     'ALTER FUNCTION %I.authorize_organization_shared_workspace_administration(uuid,uuid,text) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
+  -- Renaming preserved the legacy function's ACL. Atomically move every
+  -- supported runtime role to the replacement wrapper before removing its
+  -- bypass access, so a migrate-then-provision rollout has no outage window.
+  SELECT function.proowner INTO legacy_owner
+  FROM pg_catalog.pg_proc function
+  WHERE function.oid =
+    'organization_workspace_command_without_creator_access(jsonb)'::regprocedure;
+  FOR grantee_name IN
+    SELECT role.rolname
+    FROM pg_catalog.pg_proc function
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      coalesce(function.proacl, pg_catalog.acldefault('f', function.proowner))
+    ) grant_value
+    JOIN pg_catalog.pg_roles role ON role.oid = grant_value.grantee
+    WHERE function.oid =
+        'organization_workspace_command_without_creator_access(jsonb)'::regprocedure
+      AND grant_value.privilege_type = 'EXECUTE'
+      AND grant_value.grantee <> legacy_owner
+  LOOP
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.organization_workspace_command(jsonb) TO %I',
+      data_schema, grantee_name
+    );
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.authorize_organization_shared_workspace_administration(uuid,uuid,text) TO %I',
+      data_schema, grantee_name
+    );
+    EXECUTE format(
+      'REVOKE EXECUTE ON FUNCTION %I.organization_workspace_command_without_creator_access(jsonb) FROM %I',
+      data_schema, grantee_name
+    );
+  END LOOP;
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
     EXECUTE format(
       'REVOKE ALL ON FUNCTION %I.organization_workspace_command_without_creator_access(jsonb) FROM opengeni_app',

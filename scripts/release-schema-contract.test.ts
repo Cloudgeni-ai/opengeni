@@ -111,6 +111,23 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
+    );
+    const completeSourceContractWithModelCallEquivalentCreditCost = completeSourceContract;
+    const modelCallEquivalentCreditCostMigrationIndex =
+      completeSourceContractWithModelCallEquivalentCreditCost.migrations.findIndex(
+        (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
+      );
+    completeSourceContract = modelCallEquivalentCreditCost
+      ? {
+          ...completeSourceContractWithModelCallEquivalentCreditCost,
+          latestMigration:
+            completeSourceContractWithModelCallEquivalentCreditCost.migrations[
+              modelCallEquivalentCreditCostMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+        }
+      : completeSourceContractWithModelCallEquivalentCreditCost;
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
@@ -277,7 +294,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
     );
     const organizationWorkspaceManagementEntry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0396_organization_workspace_management_entry.sql",
+      (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
     );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
@@ -297,14 +314,20 @@ describe("release schema contract", () => {
         latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       };
     }
+    if (modelCallEquivalentCreditCost) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0396_model_call_equivalent_credit_cost.sql",
+      };
+    }
     if (organizationWorkspaceManagementEntry) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0396_organization_workspace_management_entry.sql",
+        latestMigration: "0397_organization_workspace_management_entry.sql",
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
-      "0396_organization_workspace_management_entry.sql",
+      "0397_organization_workspace_management_entry.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
@@ -348,6 +371,7 @@ describe("release schema contract", () => {
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
+      "0396_model_call_equivalent_credit_cost.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -399,7 +423,8 @@ describe("release schema contract", () => {
         (modelCatalogAndGatewayCustomModels ? 1 : 0) +
         (organizationModelProviderConnections ? 1 : 0) +
         (sandboxProviderDeadlineInteractionFollowup ? 1 : 0) +
-        (workspaceMemoryAndLearningDefaults ? 1 : 0),
+        (workspaceMemoryAndLearningDefaults ? 1 : 0) +
+        (modelCallEquivalentCreditCost ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -492,8 +517,11 @@ describe("release schema contract", () => {
       ...(scheduledTaskUnclaimedOccurrenceInvalidation
         ? { latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql" }
         : {}),
+      ...(modelCallEquivalentCreditCost
+        ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
+        : {}),
       ...(organizationWorkspaceManagementEntry
-        ? { latestMigration: "0396_organization_workspace_management_entry.sql" }
+        ? { latestMigration: "0397_organization_workspace_management_entry.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -505,12 +533,19 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
       organizationWorkspaceManagementEntry
-        ? "0396_organization_workspace_management_entry.sql"
+        ? "0397_organization_workspace_management_entry.sql"
         : scheduledTaskUnclaimedOccurrenceInvalidation
           ? "0395_scheduled_task_unclaimed_occurrence_invalidation.sql"
           : sessionSelectedSkillActivation
             ? "0394_session_selected_skill_activation.sql"
             : completeSourceContractWithContextCompaction.latestMigration,
+    );
+    expect(completeSourceContractWithModelCallEquivalentCreditCost.latestMigration).toBe(
+      organizationWorkspaceManagementEntry
+        ? "0397_organization_workspace_management_entry.sql"
+        : modelCallEquivalentCreditCost
+          ? "0396_model_call_equivalent_credit_cost.sql"
+          : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
   });
 
@@ -526,6 +561,23 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
+    );
+    const completeSourceContractWithModelCallEquivalentCreditCost = completeSourceContract;
+    const modelCallEquivalentCreditCostMigrationIndex =
+      completeSourceContractWithModelCallEquivalentCreditCost.migrations.findIndex(
+        (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
+      );
+    completeSourceContract = modelCallEquivalentCreditCost
+      ? {
+          ...completeSourceContractWithModelCallEquivalentCreditCost,
+          latestMigration:
+            completeSourceContractWithModelCallEquivalentCreditCost.migrations[
+              modelCallEquivalentCreditCostMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+        }
+      : completeSourceContractWithModelCallEquivalentCreditCost;
     const sessionSelectedSkillActivation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0394_session_selected_skill_activation.sql",
     );
@@ -578,7 +630,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0396_organization_workspace_management_entry.sql",
+      "0397_organization_workspace_management_entry.sql",
       "0394_session_selected_skill_activation.sql",
       "0392_context_compaction_pending_observability.sql",
       "0353_automatic_session_title_policy_fence.sql",
@@ -678,6 +730,7 @@ describe("release schema contract", () => {
       "0390_organization_model_provider_connections.sql",
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
+      "0396_model_call_equivalent_credit_cost.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
@@ -845,7 +898,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
     );
     const organizationWorkspaceManagementEntry = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0396_organization_workspace_management_entry.sql",
+      (migration) => migration.path === "0397_organization_workspace_management_entry.sql",
     );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
@@ -865,10 +918,16 @@ describe("release schema contract", () => {
         latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       };
     }
+    if (modelCallEquivalentCreditCost) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0396_model_call_equivalent_credit_cost.sql",
+      };
+    }
     if (organizationWorkspaceManagementEntry) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0396_organization_workspace_management_entry.sql",
+        latestMigration: "0397_organization_workspace_management_entry.sql",
       };
     }
     expect(completeSourceContract).toMatchObject({
@@ -922,7 +981,8 @@ describe("release schema contract", () => {
         (modelCatalogAndGatewayCustomModels ? 1 : 0) +
         (organizationModelProviderConnections ? 1 : 0) +
         (sandboxProviderDeadlineInteractionFollowup ? 1 : 0) +
-        (workspaceMemoryAndLearningDefaults ? 1 : 0),
+        (workspaceMemoryAndLearningDefaults ? 1 : 0) +
+        (modelCallEquivalentCreditCost ? 1 : 0),
       latestMigration: sandboxProviderDeadlineInteractionFollowup
         ? "0391_sandbox_provider_deadline_interaction_followup.sql"
         : organizationModelProviderConnections
@@ -1025,8 +1085,11 @@ describe("release schema contract", () => {
       ...(scheduledTaskUnclaimedOccurrenceInvalidation
         ? { latestMigration: "0395_scheduled_task_unclaimed_occurrence_invalidation.sql" }
         : {}),
+      ...(modelCallEquivalentCreditCost
+        ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
+        : {}),
       ...(organizationWorkspaceManagementEntry
-        ? { latestMigration: "0396_organization_workspace_management_entry.sql" }
+        ? { latestMigration: "0397_organization_workspace_management_entry.sql" }
         : {}),
     });
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
@@ -1038,12 +1101,19 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
       organizationWorkspaceManagementEntry
-        ? "0396_organization_workspace_management_entry.sql"
+        ? "0397_organization_workspace_management_entry.sql"
         : scheduledTaskUnclaimedOccurrenceInvalidation
           ? "0395_scheduled_task_unclaimed_occurrence_invalidation.sql"
           : sessionSelectedSkillActivation
             ? "0394_session_selected_skill_activation.sql"
             : completeSourceContractWithContextCompaction.latestMigration,
+    );
+    expect(completeSourceContractWithModelCallEquivalentCreditCost.latestMigration).toBe(
+      organizationWorkspaceManagementEntry
+        ? "0397_organization_workspace_management_entry.sql"
+        : modelCallEquivalentCreditCost
+          ? "0396_model_call_equivalent_credit_cost.sql"
+          : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(
