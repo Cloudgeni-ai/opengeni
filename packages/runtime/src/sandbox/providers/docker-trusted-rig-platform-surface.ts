@@ -13,6 +13,7 @@ import type {
 import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
+  type TrustedRigPlatformSidecarPurpose,
 } from "./trusted-rig-platform-surface";
 import {
   assertTrustedRigPlatformRuntimeMatches,
@@ -59,7 +60,10 @@ function inspectionRemainingMs(deadlineAtMs: number): number {
   return Math.max(1, Math.min(10 * 60_000, remaining));
 }
 
-function dockerSidecarIdentity(input: ProviderTrustedRigPlatformSurfaceInput): {
+function dockerSidecarIdentity(
+  input: ProviderTrustedRigPlatformSurfaceInput,
+  purpose: TrustedRigPlatformSidecarPurpose,
+): {
   name: string;
   networkName: string;
   label: string;
@@ -72,13 +76,14 @@ function dockerSidecarIdentity(input: ProviderTrustedRigPlatformSurfaceInput): {
         String(input.leaseEpoch),
         String(input.workspaceGeneration),
         input.rigVersionId,
+        purpose,
       ].join("\0"),
       "utf8",
     )
     .digest("hex");
   return {
-    name: `opengeni-rig-surface-${label.slice(0, 24)}`,
-    networkName: `opengeni-rig-surface-net-${label.slice(0, 20)}`,
+    name: `opengeni-rig-${purpose}-${label.slice(0, 20)}`,
+    networkName: `opengeni-rig-${purpose}-net-${label.slice(0, 16)}`,
     label,
   };
 }
@@ -426,6 +431,7 @@ async function resolveDockerSidecarPort(
 async function createDockerSidecar(
   input: ProviderTrustedRigPlatformSurfaceInput,
   operation: TrustedRigPlatformSurfaceOperation,
+  purpose: TrustedRigPlatformSidecarPurpose,
 ): Promise<TrustedRigPlatformSidecar> {
   const session = input.session as DockerRigSession;
   if (session.state?.containerId !== input.instanceId) {
@@ -444,7 +450,45 @@ async function createDockerSidecar(
   ) {
     throw new Error("Docker trusted Rig validation resolved no immutable image id");
   }
-  const identity = dockerSidecarIdentity(input);
+  const runtimeAuthorityImageId = input.runtimeAuthorityImageId ?? providerImageId;
+  if (!DOCKER_IMAGE_ID.test(runtimeAuthorityImageId)) {
+    throw new Error("Docker trusted Rig validation resolved no immutable runtime authority image");
+  }
+  const initialDeadlineAtMs = Math.min(
+    Date.now() + operation.timeoutMs,
+    operation.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+  );
+  const assertCandidateRuntimeIntegrity = async (options: {
+    timeoutMs: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void> => {
+    const deadlineAtMs = Math.min(
+      Date.now() + options.timeoutMs,
+      options.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+    );
+    const liveImage = await dockerCommand({
+      args: ["inspect", "--type", "container", "--format", "{{.Image}}", input.instanceId],
+      timeoutMs: Math.min(inspectionRemainingMs(deadlineAtMs), 10_000),
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    if (liveImage.stdout.trim() !== providerImageId) {
+      throw new Error("Docker trusted Rig candidate changed its immutable image binding");
+    }
+    const actual = await captureDockerTrustedRigPlatformRuntime({
+      settings: input.settings,
+      containerId: input.instanceId,
+      deadlineAtMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, actual);
+  };
+  await assertCandidateRuntimeIntegrity({
+    timeoutMs: inspectionRemainingMs(initialDeadlineAtMs),
+    deadlineAtMs: initialDeadlineAtMs,
+    ...(operation.signal ? { signal: operation.signal } : {}),
+  });
+  const identity = dockerSidecarIdentity(input, purpose);
   const existing = await dockerCommand({
     args: [
       "inspect",
@@ -515,14 +559,20 @@ async function createDockerSidecar(
         identity.networkName,
         "--publish",
         "127.0.0.1::7682",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,nosuid,nodev,exec,size=1073741824",
+        "--tmpfs",
+        "/run:rw,nosuid,nodev,exec,size=67108864",
         "--user",
         "0:0",
         "--workdir",
         "/workspace",
-        providerImageId,
+        "--entrypoint",
         "/bin/sh",
+        runtimeAuthorityImageId,
         "-c",
-        "exec sleep infinity",
+        "exec /usr/bin/sleep infinity",
       ],
       timeoutMs: operation.timeoutMs,
       ...(operation.signal ? { signal: operation.signal } : {}),
@@ -552,6 +602,24 @@ async function createDockerSidecar(
     await terminate().catch(() => undefined);
     throw error;
   }
+
+  const assertRuntimeIntegrity: TrustedRigPlatformSidecar["assertRuntimeIntegrity"] = async (
+    options,
+  ) => {
+    if (terminated) throw new Error("Docker trusted Rig sidecar is terminated");
+    await assertCandidateRuntimeIntegrity(options);
+    const deadlineAtMs = Math.min(
+      Date.now() + options.timeoutMs,
+      options.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+    );
+    const authority = await captureDockerTrustedRigPlatformRuntime({
+      settings: input.settings,
+      containerId: sidecarId,
+      deadlineAtMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, authority);
+  };
 
   const execute = async (
     args: Parameters<NonNullable<BrowserControlPlacementSession["exec"]>>[0],
@@ -613,6 +681,7 @@ async function createDockerSidecar(
 
   return {
     sidecarId,
+    assertRuntimeIntegrity,
     exec: execute,
     writePlacementPrivate,
     writeFile: writePlacementPrivate,
@@ -687,6 +756,10 @@ export async function createDockerTrustedRigPlatformSurface(
   ) {
     throw new Error("Docker trusted Rig validation resolved another immutable image id");
   }
+  const runtimeAuthorityImageId = input.runtimeAuthorityImageId ?? providerImageId;
+  if (!DOCKER_IMAGE_ID.test(runtimeAuthorityImageId)) {
+    throw new Error("Docker trusted Rig validation requires an immutable runtime authority image");
+  }
   return createTrustedRigPlatformSurface({
     binding: {
       authority: "deployment_control_plane",
@@ -694,6 +767,7 @@ export async function createDockerTrustedRigPlatformSurface(
       instanceId: input.instanceId,
       providerImage: input.providerImage,
       providerImageId,
+      runtimeAuthorityImageId,
       leaseId: input.leaseId,
       leaseEpoch: input.leaseEpoch,
       workspaceGeneration: input.workspaceGeneration,
@@ -702,6 +776,7 @@ export async function createDockerTrustedRigPlatformSurface(
       runtimeManifestDigest: input.runtimeManifest.digest,
     },
     desktopEnabled: input.settings.sandboxDesktopEnabled,
-    createSidecar: async (operation) => await createDockerSidecar(input, operation),
+    createSidecar: async (operation, purpose) =>
+      await createDockerSidecar(input, operation, purpose),
   });
 }

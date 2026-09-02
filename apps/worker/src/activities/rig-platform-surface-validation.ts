@@ -70,6 +70,9 @@ export type RigPlatformSurfaceValidationInput = {
   rigVersionId: string;
   providerImage: string;
   providerImageId: string;
+  /** Logical image carried by the verifier lease. Defaults to providerImage
+   * for ordinary verification; provider-image cold boots keep them separate. */
+  leaseImage?: string;
   established: EstablishedSandboxSession;
   ownership: {
     leaseId: string;
@@ -122,7 +125,7 @@ function assertLeaseBinding(
     lease.instanceId !== expected.instanceId ||
     lease.instanceId !== input.established.instanceId ||
     lease.backend !== input.established.backendId ||
-    lease.image !== input.providerImage ||
+    lease.image !== (input.leaseImage ?? input.providerImage) ||
     lease.rigVersionId !== input.rigVersionId ||
     lease.liveness !== "warm"
   ) {

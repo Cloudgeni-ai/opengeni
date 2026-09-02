@@ -247,6 +247,7 @@ function harness(options: HarnessOptions = {}) {
             instanceId: "sb-verifier",
             providerImage: settings.modalImageRef!,
             providerImageId: "im-platform-base",
+            runtimeAuthorityImageId: "im-platform-base",
             leaseId: "lease-1",
             leaseEpoch: 8,
             workspaceGeneration: 0,

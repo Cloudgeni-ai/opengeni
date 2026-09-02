@@ -10,11 +10,19 @@ import {
 
 export type TrustedRigPlatformSidecar = BrowserControlPlacementSession & {
   readonly sidecarId: string;
+  assertRuntimeIntegrity(options: {
+    timeoutMs: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void>;
   terminate(options: { timeoutMs: number; deadlineAtMs?: number }): Promise<void>;
 };
 
+export type TrustedRigPlatformSidecarPurpose = "terminal" | "controller";
+
 export type TrustedRigPlatformSidecarFactory = (
   input: TrustedRigPlatformSurfaceOperation,
+  purpose: TrustedRigPlatformSidecarPurpose,
 ) => Promise<TrustedRigPlatformSidecar>;
 
 function sameOperation(
@@ -166,35 +174,44 @@ export function createTrustedRigPlatformSurface(input: {
   createSidecar: TrustedRigPlatformSidecarFactory;
 }): TrustedRigPlatformSurface {
   const binding = Object.freeze({ ...input.binding });
-  let sidecar: TrustedRigPlatformSidecar | null = null;
-  let creating: Promise<TrustedRigPlatformSidecar> | null = null;
+  let phase: "idle" | "terminal" | "controller" | "closed" = "idle";
+  let controllerSidecar: TrustedRigPlatformSidecar | null = null;
 
-  const ensureSidecar = async (
-    operation: TrustedRigPlatformSurfaceOperation,
-  ): Promise<TrustedRigPlatformSidecar> => {
-    assertOperation(binding, operation);
-    if (sidecar) return sidecar;
-    if (!creating) creating = input.createSidecar(operation);
-    try {
-      sidecar = await settleCreation(creating, operation);
-      return sidecar;
-    } finally {
-      creating = null;
+  const assertIdle = (): void => {
+    if (phase !== "idle") {
+      throw new Error(`trusted Rig platform surface cannot start another phase from ${phase}`);
     }
   };
 
-  const discardSidecar = async (operation: TrustedRigPlatformSurfaceOperation): Promise<void> => {
-    const current = sidecar;
-    sidecar = null;
-    if (current) await terminateSidecar(current, operation);
+  const assertIntegrity = async (
+    current: TrustedRigPlatformSidecar,
+    operation: TrustedRigPlatformSurfaceOperation,
+  ): Promise<void> => {
+    await current.assertRuntimeIntegrity({
+      timeoutMs: operation.timeoutMs,
+      ...(operation.deadlineAtMs === undefined ? {} : { deadlineAtMs: operation.deadlineAtMs }),
+      ...(operation.signal ? { signal: operation.signal } : {}),
+    });
   };
 
   return Object.freeze({
     binding,
     async runTerminalProbe(operation) {
       assertOperation(binding, operation);
-      const current = await ensureSidecar(operation);
+      assertIdle();
+      phase = "terminal";
+      let current: TrustedRigPlatformSidecar | null = null;
+      let failed = false;
+      let failure: unknown;
+      let probe: {
+        cwd: "/workspace";
+        uid: 0;
+        bunVersion: "1.4.0";
+        interactive: true;
+      } | null = null;
       try {
+        current = await settleCreation(input.createSidecar(operation, "terminal"), operation);
+        await assertIntegrity(current, operation);
         const result = await current.exec!({
           cmd: terminalProbeCommand(),
           workdir: "/workspace",
@@ -205,22 +222,44 @@ export function createTrustedRigPlatformSurface(input: {
           ...(operation.signal ? { signal: operation.signal } : {}),
           maxOutputTokens: 2_000,
         });
+        await assertIntegrity(current, operation);
         if (
           commandExitCode(result) !== 0 ||
           !commandOutput(result).includes("OPENGENI_TRUSTED_TERMINAL_OK")
         ) {
           throw new Error("trusted Rig platform terminal probe failed");
         }
-        return { cwd: "/workspace", uid: 0, bunVersion: "1.4.0", interactive: true };
+        probe = { cwd: "/workspace", uid: 0, bunVersion: "1.4.0", interactive: true };
       } catch (error) {
-        await discardSidecar(operation).catch(() => undefined);
-        throw error;
+        failed = true;
+        failure = error;
       }
+      if (current) {
+        try {
+          await terminateSidecar(current, operation);
+        } catch (error) {
+          if (!failed) {
+            failed = true;
+            failure = error;
+          }
+        }
+      }
+      if (failed) {
+        phase = "closed";
+        throw failure;
+      }
+      phase = "idle";
+      return probe!;
     },
     async provisionController(operation) {
       assertOperation(binding, operation);
-      const current = await ensureSidecar(operation);
+      assertIdle();
+      phase = "controller";
+      let current: TrustedRigPlatformSidecar | null = null;
       try {
+        current = await settleCreation(input.createSidecar(operation, "controller"), operation);
+        controllerSidecar = current;
+        await assertIntegrity(current, operation);
         if (input.desktopEnabled) {
           const result = await current.exec!({
             cmd: desktopStartupCommand(binding),
@@ -236,6 +275,7 @@ export function createTrustedRigPlatformSurface(input: {
           if (commandExitCode(result) !== 0) {
             throw new Error(`trusted Rig desktop startup failed: ${commandOutput(result)}`);
           }
+          await assertIntegrity(current, operation);
         }
         const provisioned = await provisionBrowserControlClient(current, {
           adminToken: operation.adminToken,
@@ -244,15 +284,24 @@ export function createTrustedRigPlatformSurface(input: {
           ...(operation.deadlineAtMs === undefined ? {} : { deadlineAtMs: operation.deadlineAtMs }),
           ...(operation.signal ? { signal: operation.signal } : {}),
         });
+        await assertIntegrity(current, operation);
         return { client: provisioned.client };
       } catch (error) {
-        await discardSidecar(operation).catch(() => undefined);
+        phase = "closed";
+        controllerSidecar = null;
+        if (current) await terminateSidecar(current, operation).catch(() => undefined);
         throw error;
       }
     },
     async tearDownController(operation) {
       assertOperation(binding, operation);
-      await discardSidecar(operation);
+      if (phase === "closed") return;
+      const current = controllerSidecar;
+      controllerSidecar = null;
+      phase = "closed";
+      if (!current) return;
+      await assertIntegrity(current, operation);
+      await terminateSidecar(current, operation);
     },
   });
 }

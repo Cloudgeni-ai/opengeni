@@ -55,6 +55,11 @@ export type ProviderTrustedRigPlatformSurfaceInput = {
   /** Optional assertion only. Providers must discover the image identity from
    * the exact live instance and must never use this value to select an image. */
   expectedProviderImageId?: string;
+  /** Exact pristine deployment image used only to host the trusted validation
+   * runtime. When omitted, the live instance image is also the authority image.
+   * Cold-boot verification passes the original platform image so candidate
+   * derived bytes are inspected but never execute protected validation code. */
+  runtimeAuthorityImageId?: string;
   leaseId: string;
   leaseEpoch: number;
   workspaceGeneration: number;

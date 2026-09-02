@@ -8,6 +8,7 @@ import type {
 import {
   createTrustedRigPlatformSurface,
   type TrustedRigPlatformSidecar,
+  type TrustedRigPlatformSidecarPurpose,
 } from "./trusted-rig-platform-surface";
 import {
   assertTrustedRigPlatformRuntimeMatches,
@@ -220,7 +221,10 @@ async function captureModalTrustedRigPlatformRuntime(input: {
   });
 }
 
-function modalSidecarName(input: ProviderTrustedRigPlatformSurfaceInput): string {
+function modalSidecarName(
+  input: ProviderTrustedRigPlatformSurfaceInput,
+  purpose: TrustedRigPlatformSidecarPurpose,
+): string {
   const digest = createHash("sha256")
     .update(
       [
@@ -229,12 +233,13 @@ function modalSidecarName(input: ProviderTrustedRigPlatformSurfaceInput): string
         String(input.leaseEpoch),
         String(input.workspaceGeneration),
         input.rigVersionId,
+        purpose,
       ].join("\0"),
       "utf8",
     )
     .digest("hex")
     .slice(0, 28);
-  return `opengeni-rig-surface-${digest}`;
+  return `opengeni-rig-${purpose}-${digest}`;
 }
 
 function isAlreadyExists(error: unknown): boolean {
@@ -280,17 +285,21 @@ async function cleanupModalSidecarByName(
 async function createModalSidecar(
   input: ProviderTrustedRigPlatformSurfaceInput,
   operation: TrustedRigPlatformSurfaceOperation,
+  purpose: TrustedRigPlatformSidecarPurpose,
 ): Promise<TrustedRigPlatformSidecar> {
   const session = input.session as ModalRigSession;
   const sandboxId = session.state?.sandboxId;
   const imageId = session.state?.imageId;
   const images = session.modal?.images;
+  const candidateFilesystem = session.sandbox?.filesystem;
   const sidecars = session.sandbox?.experimentalSidecars;
   if (
     sandboxId !== input.instanceId ||
     !imageId ||
     (input.expectedProviderImageId !== undefined && input.expectedProviderImageId !== imageId) ||
     typeof images?.fromId !== "function" ||
+    typeof candidateFilesystem?.readBytes !== "function" ||
+    typeof candidateFilesystem?.stat !== "function" ||
     !sidecars ||
     typeof sidecars.create !== "function" ||
     typeof sidecars.get !== "function" ||
@@ -298,26 +307,58 @@ async function createModalSidecar(
   ) {
     throw new Error("Modal trusted Rig validation requires an exact sidecar-capable session");
   }
-  const name = modalSidecarName(input);
+  const runtimeAuthorityImageId = input.runtimeAuthorityImageId ?? imageId;
+  if (!runtimeAuthorityImageId) {
+    throw new Error("Modal trusted Rig validation requires a runtime authority image");
+  }
+  const assertCandidateRuntimeIntegrity = async (options: {
+    timeoutMs: number;
+    deadlineAtMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void> => {
+    if (session.state?.sandboxId !== input.instanceId || session.state?.imageId !== imageId) {
+      throw new Error("Modal trusted Rig candidate changed its immutable image binding");
+    }
+    const deadlineAtMs = Math.min(
+      Date.now() + options.timeoutMs,
+      options.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+    );
+    const actual = await captureModalTrustedRigPlatformRuntime({
+      settings: input.settings,
+      filesystem: candidateFilesystem,
+      deadlineAtMs,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, actual);
+  };
+  const name = modalSidecarName(input, purpose);
   const deadlineAtMs = operationDeadlineAt(operation);
   try {
-    const image = await images.fromId(imageId, deadlineOptions(deadlineAtMs, operation.signal));
-    if (image.imageId && image.imageId !== imageId) {
+    await assertCandidateRuntimeIntegrity({
+      timeoutMs: remainingMs(deadlineAtMs),
+      deadlineAtMs,
+      ...(operation.signal ? { signal: operation.signal } : {}),
+    });
+    const image = await images.fromId(
+      runtimeAuthorityImageId,
+      deadlineOptions(deadlineAtMs, operation.signal),
+    );
+    if (image.imageId && image.imageId !== runtimeAuthorityImageId) {
       throw new Error("Modal trusted Rig validation resolved another immutable image");
     }
-    let container: ModalSidecar;
-    try {
-      container = await sidecars.create(name, image, {
-        command: ["/bin/sh", "-c", "exec sleep infinity"],
+    const create = async (): Promise<ModalSidecar> =>
+      await sidecars.create(name, image, {
+        command: ["/bin/sh", "-c", "exec /usr/bin/sleep infinity"],
         workdir: "/workspace",
         ...deadlineOptions(deadlineAtMs, operation.signal),
       });
+    let container: ModalSidecar;
+    try {
+      container = await create();
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
-      container = await sidecars.get(name, {
-        includeTerminated: false,
-        ...deadlineOptions(deadlineAtMs, operation.signal),
-      });
+      await cleanupModalSidecarByName(sidecars, name, operation);
+      container = await create();
     }
     if (container.containerName !== name || !container.containerId) {
       await container
@@ -360,6 +401,23 @@ async function createModalSidecar(
       await terminate({ deadlineAtMs }).catch(() => undefined);
       throw error;
     }
+    const assertRuntimeIntegrity: TrustedRigPlatformSidecar["assertRuntimeIntegrity"] = async (
+      options,
+    ) => {
+      if (terminated) throw new Error("Modal trusted Rig sidecar is terminated");
+      await assertCandidateRuntimeIntegrity(options);
+      const integrityDeadlineAtMs = Math.min(
+        Date.now() + options.timeoutMs,
+        options.deadlineAtMs ?? Number.POSITIVE_INFINITY,
+      );
+      const authority = await captureModalTrustedRigPlatformRuntime({
+        settings: input.settings,
+        filesystem: container.filesystem,
+        deadlineAtMs: integrityDeadlineAtMs,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      assertTrustedRigPlatformRuntimeMatches(input.runtimeManifest, authority);
+    };
     const execute = async (
       args: Parameters<NonNullable<BrowserControlPlacementSession["exec"]>>[0],
     ) => {
@@ -410,6 +468,7 @@ async function createModalSidecar(
 
     return {
       sidecarId: container.containerId,
+      assertRuntimeIntegrity,
       exec: execute,
       writePlacementPrivate,
       writeFile: writePlacementPrivate,
@@ -466,6 +525,10 @@ export async function createModalTrustedRigPlatformSurface(
   ) {
     throw new Error("Modal trusted Rig validation requires an immutable provider image id");
   }
+  const runtimeAuthorityImageId = input.runtimeAuthorityImageId ?? providerImageId;
+  if (!runtimeAuthorityImageId) {
+    throw new Error("Modal trusted Rig validation requires a runtime authority image id");
+  }
   return createTrustedRigPlatformSurface({
     binding: {
       authority: "deployment_control_plane",
@@ -473,6 +536,7 @@ export async function createModalTrustedRigPlatformSurface(
       instanceId: input.instanceId,
       providerImage: input.providerImage,
       providerImageId,
+      runtimeAuthorityImageId,
       leaseId: input.leaseId,
       leaseEpoch: input.leaseEpoch,
       workspaceGeneration: input.workspaceGeneration,
@@ -481,6 +545,7 @@ export async function createModalTrustedRigPlatformSurface(
       runtimeManifestDigest: input.runtimeManifest.digest,
     },
     desktopEnabled: input.settings.sandboxDesktopEnabled,
-    createSidecar: async (operation) => await createModalSidecar(input, operation),
+    createSidecar: async (operation, purpose) =>
+      await createModalSidecar(input, operation, purpose),
   });
 }

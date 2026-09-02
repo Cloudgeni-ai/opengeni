@@ -116,6 +116,44 @@ function readyImage(settings: Settings, definition: RigVersion): RigProviderImag
   };
 }
 
+function readyDockerImage(settings: Settings, definition: RigVersion): RigProviderImage {
+  const sourceImage = rigProviderImageSourceImage(settings, "docker");
+  const contentHash = rigProviderImageContentHash({
+    backend: "docker",
+    sourceImage,
+    definition,
+  });
+  return {
+    backend: "docker",
+    provider: "docker",
+    status: "ready",
+    contentHash,
+    setupHash: rigProviderImageSetupHash(definition),
+    sourceImage,
+    buildRequestId: rigProviderImageBuildRequestId({
+      targetId: definition.id,
+      backend: "docker",
+      contentHash,
+    }),
+    imageId: `sha256:${"d".repeat(64)}`,
+    imageDigest: null,
+    artifactId: null,
+    providerBindingKeyHash: null,
+    coldBootValidation: {
+      version: 3,
+      checkedAt: "2026-09-02T09:00:00.000Z",
+    },
+    provenance: {
+      kind: "rig_verification",
+      targetKind: "version",
+      targetId: definition.id,
+    },
+    startedAt: "2026-09-02T08:59:00.000Z",
+    finishedAt: "2026-09-02T09:00:00.000Z",
+    error: null,
+  };
+}
+
 async function execute(command: string): Promise<{ exitCode: number; output: string }> {
   const process = Bun.spawn(["bash", "-lc", command], { stdout: "pipe", stderr: "pipe" });
   const [exitCode, output, error] = await Promise.all([
@@ -171,6 +209,7 @@ describe("build-once rig provider image runtime", () => {
             instanceId: "sandbox-build",
           },
           runtimeManifest: RUNTIME_MANIFEST,
+          runtimeAuthorityImageId: "im-platform-base",
           lifecycle: {
             signal: new AbortController().signal,
             workDeadlineAtMs: Date.now() + 40,
@@ -303,6 +342,7 @@ describe("build-once rig provider image runtime", () => {
             instanceId: "sandbox-build",
           },
           runtimeManifest: RUNTIME_MANIFEST,
+          runtimeAuthorityImageId: "im-platform-base",
           lifecycle: {
             signal: new AbortController().signal,
             workDeadlineAtMs: Date.now() + 5_000,
@@ -393,6 +433,7 @@ describe("build-once rig provider image runtime", () => {
             return { exitCode: 0, output: "ok" };
           },
           trustedRuntimeManifest: RUNTIME_MANIFEST,
+          runtimeAuthorityImageId: "im-platform-base",
           ownership: {
             leaseId: "lease-cold-boot",
             leaseEpoch: 2,
@@ -442,6 +483,8 @@ describe("build-once rig provider image runtime", () => {
         verificationExecutionGeneration: 2,
         sessionIdPrefix: "rig-provider-image-test",
         imageId: "im-built-rig-image",
+        sourceImage: PLATFORM_IMAGE,
+        runtimeAuthorityImageId: "im-platform-base",
         expectedRuntimeManifest: RUNTIME_MANIFEST,
         contentHash: `sha256:${"a".repeat(64)}`,
         checks: [
@@ -495,6 +538,115 @@ describe("build-once rig provider image runtime", () => {
     expect(commands.at(-1)).toBe("git --version");
   });
 
+  test("Docker cold boot keeps the logical lease source separate from the physical image", async () => {
+    const logicalImage = "registry.example.com/opengeni@sha256:platform";
+    const physicalImage = `sha256:${"e".repeat(64)}`;
+    const authorityImage = `sha256:${"f".repeat(64)}`;
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: logicalImage,
+    });
+    let runInput: Parameters<RigProviderImageColdBootDependencies["runOwnedSandbox"]>[0] | null =
+      null;
+    const receipt = {
+      version: 3 as const,
+      checkedAt: "2026-09-02T09:15:00.000Z",
+      binding: {
+        leaseId: "11111111-1111-4111-8111-111111111111",
+        sandboxGroupId: "33333333-3333-4333-8333-333333333333",
+        leaseEpoch: 2,
+        workspaceGeneration: 0,
+        instanceId: "docker-cold-boot",
+        backendId: "docker",
+        rigVersionId: VERSION_ID,
+      },
+      provenance: {
+        authority: "deployment_control_plane" as const,
+        providerImage: physicalImage,
+        providerImageId: physicalImage,
+      },
+      terminal: { status: "disabled" as const },
+      browser: {
+        status: "passed" as const,
+        browserSessionId: "22222222-2222-4222-8222-222222222222",
+        controllerGeneration: "docker-cold-boot",
+        targetId: "page-1",
+        observedTargetGeneration: "page-generation-1",
+      },
+      computer: { status: "disabled" as const },
+    };
+
+    await expect(
+      verifyRigProviderImageColdBoot(
+        {
+          settings,
+          db: {} as never,
+          observability: {} as never,
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          buildRequestId: "33333333-3333-4333-8333-333333333333",
+          rigVersionId: VERSION_ID,
+          verificationAttemptId: "55555555-5555-4555-8555-555555555555",
+          verificationExecutionGeneration: 2,
+          sessionIdPrefix: "docker-provider-image-test",
+          imageId: physicalImage,
+          sourceImage: logicalImage,
+          runtimeAuthorityImageId: authorityImage,
+          expectedRuntimeManifest: RUNTIME_MANIFEST,
+          contentHash: `sha256:${"a".repeat(64)}`,
+          checks: [],
+          lifecycle: {
+            signal: new AbortController().signal,
+            workDeadlineAtMs: null,
+            cleanupDeadlineAtMs: null,
+            dispose: () => undefined,
+          },
+        },
+        {
+          runOwnedSandbox: async (input, run) => {
+            runInput = input;
+            return await run(
+              {
+                backendId: "docker",
+                client: {},
+                instanceId: "docker-cold-boot",
+                session: {},
+                sessionState: {},
+              },
+              {
+                signal: new AbortController().signal,
+                commandRunner: async () => ({ exitCode: 0, output: "ok" }),
+                trustedRuntimeManifest: RUNTIME_MANIFEST,
+                runtimeAuthorityImageId: authorityImage,
+                ownership: {
+                  leaseId: receipt.binding.leaseId,
+                  leaseEpoch: receipt.binding.leaseEpoch,
+                  workspaceGeneration: receipt.binding.workspaceGeneration,
+                  instanceId: receipt.binding.instanceId,
+                },
+              },
+            );
+          },
+          runSurfaceValidation: async (input) => {
+            expect(input.leaseImage).toBe(logicalImage);
+            expect(input.providerImage).toBe(physicalImage);
+            expect(input.providerImageId).toBe(physicalImage);
+            return receipt;
+          },
+          now: () => new Date("2026-09-02T09:15:01.000Z"),
+        },
+      ),
+    ).resolves.toEqual({
+      checkedAt: "2026-09-02T09:15:01.000Z",
+      platformSurfaceValidation: receipt,
+    });
+    expect(runInput?.settings.dockerImage).toBe(logicalImage);
+    expect(runInput?.settings.dockerImageId).toBe(physicalImage);
+    expect(runInput?.leaseImage).toBe(logicalImage);
+    expect(runInput?.providerImage).toBe(physicalImage);
+    expect(runInput?.runtimeAuthorityImageId).toBe(authorityImage);
+  });
+
   for (const [surface, replacedCommand, expectedCheck] of [
     ["Browser", "opengeni-browserd-up", "opengeni-platform-browser"],
     ["Terminal", "opengeni-terminal-up", "opengeni-platform-terminal"],
@@ -526,6 +678,7 @@ describe("build-once rig provider image runtime", () => {
                 : { exitCode: 0, output: "ok" };
             },
             trustedRuntimeManifest: RUNTIME_MANIFEST,
+            runtimeAuthorityImageId: "im-platform-base",
             ownership: {
               leaseId: "lease-replaced-platform-binary",
               leaseEpoch: 2,
@@ -549,6 +702,8 @@ describe("build-once rig provider image runtime", () => {
             verificationExecutionGeneration: 2,
             sessionIdPrefix: "rig-provider-image-replaced-platform-binary",
             imageId: "im-derived-with-replaced-platform-binary",
+            sourceImage: PLATFORM_IMAGE,
+            runtimeAuthorityImageId: "im-platform-base",
             expectedRuntimeManifest: RUNTIME_MANIFEST,
             contentHash: `sha256:${"a".repeat(64)}`,
             checks: [],
@@ -720,9 +875,29 @@ describe("build-once rig provider image runtime", () => {
     expect(selected.imageId).toBeNull();
   });
 
+  test("Docker selects the physical immutable image without replacing the logical platform source", async () => {
+    const settings = testSettings({
+      sandboxBackend: "docker",
+      dockerImage: "registry.example.com/opengeni@sha256:platform",
+    });
+    const base = version({ image: null });
+    const image = readyDockerImage(settings, base);
+    const verified = { ...base, providerImages: { docker: image } };
+
+    const selected = resolveRigProviderImageSelection(settings, verified, "docker", null);
+    expect(selected.reason).toBe("selected");
+    expect(selected.settings.dockerImage).toBe(settings.dockerImage);
+    expect(selected.settings.dockerImageId).toBe(image.imageId);
+    expect(rigProviderImageSourceImage(selected.settings, "docker")).toBe(settings.dockerImage);
+
+    const resolved = await settingsWithRigProviderImage(settings, verified, "docker");
+    expect(resolved.dockerImage).toBe(settings.dockerImage);
+    expect(resolved.dockerImageId).toBe(image.imageId);
+  });
+
   test("unsupported backends preserve runtime setup fallback without changing settings", () => {
-    const settings = testSettings({ sandboxBackend: "docker", dockerImage: "ubuntu:24.04" });
-    const selected = resolveRigProviderImageSelection(settings, version(), "docker", null);
+    const settings = testSettings({ sandboxBackend: "local" });
+    const selected = resolveRigProviderImageSelection(settings, version(), "local", null);
     expect(selected).toEqual({
       settings,
       reason: "provider_unsupported",

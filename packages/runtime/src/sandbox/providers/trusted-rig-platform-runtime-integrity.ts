@@ -52,6 +52,7 @@ const COMMON_RUNTIME_PATHS = Object.freeze([
   "/usr/bin/install",
   "/usr/bin/mkdir",
   "/usr/bin/setsid",
+  "/usr/bin/sleep",
   "/usr/local/bin/opengeni-browserd",
   "/usr/local/bin/opengeni-browserd-down",
   "/usr/local/bin/opengeni-browserd-up",

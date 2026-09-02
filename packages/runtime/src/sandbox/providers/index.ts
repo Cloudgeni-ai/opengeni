@@ -289,6 +289,8 @@ export async function attachProviderTrustedRigPlatformSurface(
     !binding.providerImageId ||
     (input.expectedProviderImageId !== undefined &&
       binding.providerImageId !== input.expectedProviderImageId) ||
+    binding.runtimeAuthorityImageId !==
+      (input.runtimeAuthorityImageId ?? binding.providerImageId) ||
     binding.leaseId !== input.leaseId ||
     binding.leaseEpoch !== input.leaseEpoch ||
     binding.workspaceGeneration !== input.workspaceGeneration ||

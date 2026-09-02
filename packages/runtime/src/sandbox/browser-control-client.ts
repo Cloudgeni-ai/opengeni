@@ -410,6 +410,7 @@ export type TrustedRigPlatformSurfaceBinding = {
   instanceId: string;
   providerImage: string;
   providerImageId: string;
+  runtimeAuthorityImageId: string;
   leaseId: string;
   leaseEpoch: number;
   workspaceGeneration: number;

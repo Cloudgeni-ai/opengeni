@@ -28,6 +28,7 @@ const SURFACE_URL =
 
 type FailureMode =
   | "terminal"
+  | "controller_integrity"
   | "browser_unsupported"
   | "browser_empty_targets"
   | "browser_generation_mismatch"
@@ -418,6 +419,7 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         mode === "trusted_image_id_mismatch"
           ? "im-other-platform-image"
           : "im-trusted-platform-image",
+      runtimeAuthorityImageId: "im-trusted-platform-image",
       leaseId: LEASE_ID,
       leaseEpoch: 8,
       workspaceGeneration: 3,
@@ -459,6 +461,9 @@ function harness(mode?: FailureMode, disabled: { terminal?: boolean; desktop?: b
         providerImage: "example.invalid/opengeni:test",
         providerImageId: "im-trusted-platform-image",
       });
+      if (mode === "controller_integrity") {
+        throw new Error("candidate runtime changed after Terminal");
+      }
       return { client: controller };
     },
     tearDownController: async (options: { timeoutMs: number }) => {
@@ -580,6 +585,7 @@ describe("mandatory Rig platform surface validation", () => {
 
   for (const [mode, message] of [
     ["terminal", "interactive root terminal"],
+    ["controller_integrity", "candidate runtime changed after Terminal"],
     ["browser_unsupported", "unsupported"],
     ["browser_empty_targets", "no real targets"],
     ["browser_generation_mismatch", "another session/controller binding"],
@@ -624,6 +630,17 @@ describe("mandatory Rig platform surface validation", () => {
     expect(state.mutableExecCalls()).toBe(0);
     expect(state.events).not.toContain("terminal:command");
     expect(state.events).not.toContain("controller:provision");
+  });
+
+  test("a post-Terminal integrity failure reaches no Browser or Computer helper", async () => {
+    const state = harness("controller_integrity");
+    await expect(runRigPlatformSurfaceValidation(state.input, state.dependencies)).rejects.toThrow(
+      "candidate runtime changed after Terminal",
+    );
+    expect(state.events).toEqual(["terminal:command", "controller:provision", "controller:down"]);
+    expect(state.events.some((event) => event.startsWith("browser:"))).toBe(false);
+    expect(state.events.some((event) => event.startsWith("computer:"))).toBe(false);
+    expect(state.mutableExecCalls()).toBe(0);
   });
 
   test("still ends browser and controller when computer creation is unsupported", async () => {

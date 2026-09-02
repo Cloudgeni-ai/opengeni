@@ -476,6 +476,7 @@ export type RigVerificationSandboxRunContext = {
   signal: AbortSignal;
   commandRunner: SandboxLifecycleCommandRunner;
   trustedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
+  runtimeAuthorityImageId: string;
   ownership: {
     leaseId: string;
     leaseEpoch: number;
@@ -523,6 +524,13 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     /** Assertion-only immutable image identity. Provider-owned validation
      * still discovers its authority from the exact live sandbox instance. */
     expectedProviderImageId?: string;
+    /** Logical image persisted on the verifier lease. Cold provider-image
+     * validation keeps this source fence separate from the physical image ID. */
+    leaseImage?: string;
+    /** Image identity projected into the platform-surface provenance. */
+    providerImage?: string;
+    /** Pristine deployment image that hosts protected validation commands. */
+    runtimeAuthorityImageId?: string;
     /** Pristine deployment helper/runtime bytes. A derived provider image must
      * match this exact manifest before any candidate command is invoked. */
     expectedRuntimeManifest?: TrustedRigPlatformRuntimeManifest;
@@ -643,7 +651,9 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       holderId,
       subjectId: null,
       backend: input.settings.sandboxBackend,
-      image: rigProviderImageSourceImage(input.settings, input.settings.sandboxBackend),
+      image:
+        input.leaseImage ??
+        rigProviderImageSourceImage(input.settings, input.settings.sandboxBackend),
       rigVersionId: input.rigVersionId,
       leaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
       warmingLeaseTtlMs: RIG_VERIFICATION_OWNER_TTL_MS,
@@ -742,7 +752,8 @@ export async function runWithOwnedRigVerificationSandbox<T>(
     void establishmentPromise.catch(() => undefined);
     const established = await waitForAbortable(establishmentPromise, signal);
     cleanupTarget = established;
-    const providerImage = requiredRigVerificationProviderImage(input.settings);
+    const providerImage =
+      input.providerImage ?? requiredRigVerificationProviderImage(input.settings);
     const remainingInspectionMs =
       input.lifecycle?.workDeadlineAtMs == null
         ? input.settings.sandboxSnapshotTimeoutMs
@@ -803,6 +814,9 @@ export async function runWithOwnedRigVerificationSandbox<T>(
       ...(input.expectedProviderImageId
         ? { expectedProviderImageId: input.expectedProviderImageId }
         : {}),
+      ...(input.runtimeAuthorityImageId
+        ? { runtimeAuthorityImageId: input.runtimeAuthorityImageId }
+        : {}),
       leaseId: committed.lease.id,
       leaseEpoch: committed.lease.leaseEpoch,
       workspaceGeneration: committed.lease.workspaceGeneration,
@@ -815,10 +829,12 @@ export async function runWithOwnedRigVerificationSandbox<T>(
         `sandbox backend ${established.backendId} has no deployment-owned Rig platform validation authority`,
       );
     }
+    const runtimeAuthorityImageId = observedRuntimeAuthorityImageId(established);
     const result = await run(established, {
       signal,
       commandRunner,
       trustedRuntimeManifest,
+      runtimeAuthorityImageId,
       ownership: {
         leaseId: committed.lease.id,
         leaseEpoch: committed.lease.leaseEpoch,
@@ -1067,6 +1083,15 @@ function observedProviderImageId(established: EstablishedSandboxSession): string
   return imageId;
 }
 
+function observedRuntimeAuthorityImageId(established: EstablishedSandboxSession): string {
+  const imageId = (established.session as BrowserControlPlacementSession).trustedRigPlatformSurface
+    ?.binding.runtimeAuthorityImageId;
+  if (!imageId) {
+    throw new Error("Rig verification has no immutable trusted runtime authority image binding");
+  }
+  return imageId;
+}
+
 function rigProviderImageContentMarker(
   contentHash: string,
   markerRoot = "/var/opengeni",
@@ -1108,6 +1133,8 @@ export async function verifyRigProviderImageColdBoot(
     verificationExecutionGeneration: number;
     sessionIdPrefix: string;
     imageId: string;
+    sourceImage: string;
+    runtimeAuthorityImageId: string;
     expectedRuntimeManifest: TrustedRigPlatformRuntimeManifest;
     contentHash: string;
     checks: RigProviderImageDefinition["checks"];
@@ -1119,15 +1146,26 @@ export async function verifyRigProviderImageColdBoot(
   platformSurfaceValidation: RigPlatformSurfaceValidationReceipt;
 }> {
   const { marker } = rigProviderImageContentMarker(input.contentHash);
+  const coldBootSettings =
+    input.settings.sandboxBackend === "modal"
+      ? {
+          ...input.settings,
+          modalImageId: input.imageId,
+          // The full-machine provider image is the immutable rig base. Any future
+          // workspace recovery must layer /workspace onto it, never replace it.
+          modalWorkspacePersistence: "snapshot_directory" as const,
+        }
+      : input.settings.sandboxBackend === "docker"
+        ? { ...input.settings, dockerImageId: input.imageId }
+        : null;
+  if (!coldBootSettings) {
+    throw new Error(
+      `sandbox backend ${input.settings.sandboxBackend} has no provider-image cold-boot contract`,
+    );
+  }
   const platformSurfaceValidation = await dependencies.runOwnedSandbox(
     {
-      settings: {
-        ...input.settings,
-        modalImageId: input.imageId,
-        // The full-machine provider image is the immutable rig base. Any future
-        // workspace recovery must layer /workspace onto it, never replace it.
-        modalWorkspacePersistence: "snapshot_directory",
-      },
+      settings: coldBootSettings,
       db: input.db,
       observability: input.observability,
       accountId: input.accountId,
@@ -1142,6 +1180,9 @@ export async function verifyRigProviderImageColdBoot(
         executionGeneration: input.verificationExecutionGeneration,
       }),
       expectedProviderImageId: input.imageId,
+      leaseImage: input.sourceImage,
+      providerImage: input.imageId,
+      runtimeAuthorityImageId: input.runtimeAuthorityImageId,
       expectedRuntimeManifest: input.expectedRuntimeManifest,
       lifecycle: input.lifecycle,
     },
@@ -1176,6 +1217,7 @@ export async function verifyRigProviderImageColdBoot(
         rigVersionId: input.rigVersionId,
         providerImage: input.imageId,
         providerImageId: input.imageId,
+        leaseImage: input.sourceImage,
         established,
         ownership: runContext.ownership,
         lifecycle: input.lifecycle,
@@ -1222,6 +1264,7 @@ export async function buildVerifiedRigProviderImage(
     established: EstablishedSandboxSession;
     ownership: RigVerificationSandboxRunContext["ownership"];
     runtimeManifest: TrustedRigPlatformRuntimeManifest;
+    runtimeAuthorityImageId: string;
     lifecycle: RigVerificationActivityLifecycle;
     signal: AbortSignal;
   },
@@ -1251,6 +1294,9 @@ export async function buildVerifiedRigProviderImage(
     sourceImage,
     definition: input.definition,
   });
+  if (!sourceImage) {
+    throw new Error(`sandbox backend ${backend} has no deployment platform image source`);
+  }
   const startedAt = new Date().toISOString();
   let building: RigProviderImage = {
     backend,
@@ -1305,6 +1351,8 @@ export async function buildVerifiedRigProviderImage(
         verificationExecutionGeneration: input.verificationExecutionGeneration,
         sessionIdPrefix: `rig-provider-image-${input.target.id}`,
         imageId: claim.image.imageId,
+        sourceImage,
+        runtimeAuthorityImageId: input.runtimeAuthorityImageId,
         expectedRuntimeManifest: input.runtimeManifest,
         contentHash,
         checks: input.definition.checks,
@@ -1536,28 +1584,33 @@ export async function buildVerifiedRigProviderImage(
       if (!obligationSettled) {
         throw new Error("Modal provider image cleanup ownership could not be transferred");
       }
-
-      // A snapshot receipt is not proof that the artifact can cold-start. Boot
-      // a second, independently owned sandbox from the exact image before it
-      // can become runtime-selectable.
-      coldBootVerification = await verifyRigProviderImageColdBoot({
-        settings: input.settings,
-        db: input.db,
-        observability: input.observability,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        buildRequestId: building.buildRequestId,
-        rigVersionId: input.target.id,
-        verificationAttemptId: input.verificationAttemptId,
-        verificationExecutionGeneration: input.verificationExecutionGeneration,
-        sessionIdPrefix: `rig-provider-image-${input.target.id}`,
-        imageId: built.imageId,
-        expectedRuntimeManifest: input.runtimeManifest,
-        contentHash,
-        checks: input.definition.checks,
-        lifecycle: input.lifecycle,
-      });
     }
+    if (!built.imageId) {
+      throw new Error(`${backend} provider image build returned no cold-bootable image id`);
+    }
+    // A provider build receipt is not proof that the artifact can cold-start.
+    // Boot a second, independently owned sandbox from the exact image before it
+    // can become runtime-selectable. Modal retains its artifact ledger above;
+    // Docker uses its daemon-local content-addressed image identity directly.
+    coldBootVerification = await verifyRigProviderImageColdBoot({
+      settings: input.settings,
+      db: input.db,
+      observability: input.observability,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      buildRequestId: building.buildRequestId,
+      rigVersionId: input.target.id,
+      verificationAttemptId: input.verificationAttemptId,
+      verificationExecutionGeneration: input.verificationExecutionGeneration,
+      sessionIdPrefix: `rig-provider-image-${input.target.id}`,
+      imageId: built.imageId,
+      sourceImage,
+      runtimeAuthorityImageId: input.runtimeAuthorityImageId,
+      expectedRuntimeManifest: input.runtimeManifest,
+      contentHash,
+      checks: input.definition.checks,
+      lifecycle: input.lifecycle,
+    });
     if (!coldBootVerification) {
       throw new Error(`${backend} provider image build has no independent cold-boot validator`);
     }
@@ -1908,6 +1961,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     established,
                     ownership: runContext.ownership,
                     runtimeManifest: runContext.trustedRuntimeManifest,
+                    runtimeAuthorityImageId: runContext.runtimeAuthorityImageId,
                     lifecycle,
                     signal: runContext.signal,
                   })
@@ -2145,6 +2199,7 @@ export function createRigVerificationActivities(services: () => Promise<ControlA
                     established,
                     ownership: runContext.ownership,
                     runtimeManifest: runContext.trustedRuntimeManifest,
+                    runtimeAuthorityImageId: runContext.runtimeAuthorityImageId,
                     lifecycle,
                     signal: runContext.signal,
                   })

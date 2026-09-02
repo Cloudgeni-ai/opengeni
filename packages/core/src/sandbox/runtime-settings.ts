@@ -110,6 +110,7 @@ export function settingsWithPackSandboxImage(
   return {
     ...settings,
     dockerImage: sandboxImage,
+    dockerImageId: undefined,
     modalImageRef: sandboxImage,
     modalImageId: sandboxProviderImages?.modal?.imageId,
   };
@@ -154,7 +155,7 @@ export function resolveRigProviderImageSelection(
   imageId: string | null;
 } {
   if (!version) return { settings, reason: "missing", contentHash: null, imageId: null };
-  if (backend !== "modal") {
+  if (backend !== "modal" && backend !== "docker") {
     return { settings, reason: "provider_unsupported", contentHash: null, imageId: null };
   }
   const image = version.providerImages[backend];
@@ -193,24 +194,29 @@ export function resolveRigProviderImageSelection(
       imageId: null,
     };
   }
-  if (!image.providerBindingKeyHash || !currentProviderBindingKeyHash) {
-    return {
-      settings,
-      reason: "provider_binding_unavailable",
-      contentHash: expectedContentHash,
-      imageId: null,
-    };
-  }
-  if (image.providerBindingKeyHash !== currentProviderBindingKeyHash) {
-    return {
-      settings,
-      reason: "provider_binding_mismatch",
-      contentHash: expectedContentHash,
-      imageId: null,
-    };
+  if (backend === "modal") {
+    if (!image.providerBindingKeyHash || !currentProviderBindingKeyHash) {
+      return {
+        settings,
+        reason: "provider_binding_unavailable",
+        contentHash: expectedContentHash,
+        imageId: null,
+      };
+    }
+    if (image.providerBindingKeyHash !== currentProviderBindingKeyHash) {
+      return {
+        settings,
+        reason: "provider_binding_mismatch",
+        contentHash: expectedContentHash,
+        imageId: null,
+      };
+    }
   }
   return {
-    settings: { ...settings, modalImageId: image.imageId },
+    settings:
+      backend === "modal"
+        ? { ...settings, modalImageId: image.imageId }
+        : { ...settings, dockerImageId: image.imageId },
     reason: "selected",
     contentHash: expectedContentHash,
     imageId: image.imageId,
@@ -223,8 +229,8 @@ export async function resolveRigProviderImageForRun(
   backend: SandboxBackend,
   resolveBinding: typeof resolveModalCheckpointProviderBinding = resolveModalCheckpointProviderBinding,
 ): Promise<ReturnType<typeof resolveRigProviderImageSelection>> {
-  const image = backend === "modal" ? version?.providerImages.modal : null;
-  if (image?.status !== "ready" || !image.providerBindingKeyHash) {
+  const image = version?.providerImages[backend];
+  if (backend !== "modal" || image?.status !== "ready" || !image.providerBindingKeyHash) {
     return resolveRigProviderImageSelection(settings, version, backend, null);
   }
   const structural = resolveRigProviderImageSelection(
