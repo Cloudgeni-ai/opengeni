@@ -448,7 +448,7 @@ endpoint provider.
 
 | Product                | Approved provider order      | Supplier input / cache read / output                                                                   | Conservative retail fallback (+5%)                        |
 | ---------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ | --------------------------------------------------------- |
-| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.03 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M  | $0.147 / $0.0315 / $0.294 per 1M (highest approved route) |
+| DeepSeek V4 Flash 0731 | Baseten → Novita → DeepInfra | Baseten $0.13 / $0.028 / $0.26; Novita $0.14 / $0.028 / $0.28; DeepInfra $0.09 / $0.018 / $0.18 per 1M | $0.147 / $0.0294 / $0.294 per 1M (highest approved route) |
 | Kimi K3                | Baseten → Fireworks          | $3 / $0.30 / $15 per 1M on both routes                                                                 | $3.15 / $0.315 / $15.75 per 1M                            |
 
 Prices are a reviewed 2026-09-02 snapshot from public Gateway endpoint metadata.

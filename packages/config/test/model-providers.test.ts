@@ -205,7 +205,7 @@ describe("curated AI Gateway catalogue", () => {
 
     expect(configuredModelPricing(settings)[deepseek.id]).toEqual({
       inputMicrosPerMillionTokens: 140_000,
-      cachedInputMicrosPerMillionTokens: 30_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
       outputMicrosPerMillionTokens: 280_000,
       marginBps: 500,
     });
@@ -414,7 +414,7 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 1_000_000,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(325_500);
+    ).toBe(323_400);
   });
 
   test("managed debit fallback applies normal Kimi cache-read pricing", () => {

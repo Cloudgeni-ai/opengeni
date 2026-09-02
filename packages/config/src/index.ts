@@ -2685,7 +2685,7 @@ export const defaultModelPricing: Record<string, ModelPricingScheduleV1> = {
   [OPENGENI_GATEWAY_MODELS.deepseek.productId]: {
     default: {
       inputMicrosPerMillionTokens: 140_000,
-      cachedInputMicrosPerMillionTokens: 30_000,
+      cachedInputMicrosPerMillionTokens: 28_000,
       outputMicrosPerMillionTokens: 280_000,
       marginBps: 500,
     },
