@@ -186,6 +186,40 @@ describe("recordAuthoritativeModelCallFact", () => {
     expect(debitSpy).not.toHaveBeenCalled();
   });
 
+  test("external Codex ignores non-Gateway billing metadata and uses product list pricing", async () => {
+    const recordSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
+    restores.push(() => recordSpy.mockRestore());
+    const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
+      async () => {
+        throw new Error("credits must NOT be debited for an externally billed turn");
+      },
+    );
+    restores.push(() => debitSpy.mockRestore());
+
+    const billing = await recordModelUsageAndDebitCredits(billedSettings(), db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-codex-gateway",
+      turnId: "turn-codex-gateway",
+      turnAttemptId: "attempt-codex-gateway",
+      model: "codex/gpt-5.6-sol",
+      externallyBilled: true,
+      gatewayBilling: { finalProvider: "openai", inferenceCostUsd: "0.014" },
+      usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+      sourceKey: "response-codex-gateway",
+    });
+
+    expect(billing).toMatchObject({
+      billingPath: "external",
+      pricedCostMicros: 0,
+      estimatedProviderCostMicros: 14_000,
+      equivalentCreditCostMicros: 14_700,
+      pricingSource: "configured_list_price",
+    });
+    expect(billing).not.toHaveProperty("upstreamProvider");
+    expect(debitSpy).not.toHaveBeenCalled();
+  });
+
   test("persists free external billing authority before a soft fact-write failure", async () => {
     const usageSpy = spyOn(opengeniDb, "recordUsageEvent").mockResolvedValue(undefined as never);
     restores.push(() => usageSpy.mockRestore());

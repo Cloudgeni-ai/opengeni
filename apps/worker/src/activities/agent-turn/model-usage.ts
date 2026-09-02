@@ -676,7 +676,7 @@ export async function recordModelUsageAndDebitCredits(
         }
       : calculateGatewayReportedCostBreakdown(
           settings,
-          input.model,
+          configuredPricingModel ?? input.model,
           gatewayBilling.inferenceCostUsd,
           { inputTokens },
         )
