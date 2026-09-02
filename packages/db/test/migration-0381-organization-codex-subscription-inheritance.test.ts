@@ -254,6 +254,68 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(organizationOverride?.source).toBe("organization");
   });
 
+  test("allows an equivalent workspace-source preference while active work remains fenced", async () => {
+    if (!shared || !app || !client) return;
+    const [account] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('codex-equivalent-source-preference') returning id`;
+    const [workspace] = await shared.admin<{ id: string }[]>`
+      insert into workspaces (account_id, name)
+      values (${account!.id}, 'shared') returning id`;
+    await shared.admin`
+      insert into workspace_inference_controls (workspace_id, account_id)
+      values (${workspace!.id}, ${account!.id})`;
+    await shared.admin`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, authority_scope,
+        credential_encrypted, chatgpt_account_id, status
+      ) values (
+        ${account!.id}, ${workspace!.id}, 'workspace',
+        'ciphertext', 'workspace-provider-account', 'active'
+      )`;
+
+    const session = await createSession(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      initialMessage: "keep the effective workspace source",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "codex/gpt-5",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    });
+    await shared.admin.begin(async (transaction) => {
+      await transaction`set local session_replication_role = replica`;
+      await transaction`
+        insert into session_turns (
+          account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
+          status, position, prompt, model, reasoning_effort, sandbox_backend
+        ) values (
+          ${account!.id}, ${workspace!.id}, ${session.id}, ${crypto.randomUUID()},
+          ${`migration-0381-equivalent-${crypto.randomUUID()}`}, 'running', 0,
+          'keep the effective workspace source', 'codex/gpt-5', 'medium', 'none'
+        )`;
+    });
+
+    const pinned = await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      subjectId: null,
+      mode: "workspace",
+    });
+    expect(pinned).toMatchObject({ mode: "workspace", effectiveSource: "workspace" });
+
+    await expect(
+      setWorkspaceCodexSubscriptionMode(client.db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        subjectId: null,
+        mode: "disabled",
+      }),
+    ).rejects.toThrow("Codex subscription source cannot change while active turns are using it");
+  });
+
   test("allows an organization credential lease only in an inheriting shared workspace", async () => {
     if (!shared || !app || !client) return;
     const dbClient = client;

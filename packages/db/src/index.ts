@@ -21844,6 +21844,20 @@ function codexCredentialPoolCondition(input: {
       )!;
 }
 
+function effectiveCodexSubscriptionSourceForMode(
+  current: Pick<
+    WorkspaceCodexSubscriptionSource,
+    "workspaceKind" | "workspaceAvailable" | "organizationAvailable"
+  >,
+  mode: WorkspaceCodexSubscriptionMode,
+): EffectiveCodexSubscriptionSource {
+  if (current.workspaceKind === "personal") return "workspace";
+  if (mode !== "automatic") return mode;
+  if (current.workspaceAvailable) return "workspace";
+  if (current.organizationAvailable) return "organization";
+  return "workspace";
+}
+
 async function effectiveCodexCredentialPoolCondition(
   scopedDb: Database,
   workspaceId: string,
@@ -21880,29 +21894,32 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     throw new Error("personal workspaces always use workspace Codex subscriptions");
   }
   if (current.mode === input.mode) return current;
-  const [activeCodexTurn] = await scopedDb
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-        sql`${schema.sessionTurns.model} like 'codex/%'`,
-      ),
-    )
-    .limit(1);
-  const [liveLease] = await scopedDb
-    .select({ id: schema.codexCredentialLeases.id })
-    .from(schema.codexCredentialLeases)
-    .where(
-      and(
-        eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-        gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-      ),
-    )
-    .limit(1);
-  if (activeCodexTurn || liveLease) {
-    throw new Error("Codex subscription source cannot change while active turns are using it");
+  const nextEffectiveSource = effectiveCodexSubscriptionSourceForMode(current, input.mode);
+  if (nextEffectiveSource !== current.effectiveSource) {
+    const [activeCodexTurn] = await scopedDb
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+          sql`${schema.sessionTurns.model} like 'codex/%'`,
+        ),
+      )
+      .limit(1);
+    const [liveLease] = await scopedDb
+      .select({ id: schema.codexCredentialLeases.id })
+      .from(schema.codexCredentialLeases)
+      .where(
+        and(
+          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+        ),
+      )
+      .limit(1);
+    if (activeCodexTurn || liveLease) {
+      throw new Error("Codex subscription source cannot change while active turns are using it");
+    }
   }
   await scopedDb
     .insert(schema.workspaceCodexSubscriptionPreferences)
