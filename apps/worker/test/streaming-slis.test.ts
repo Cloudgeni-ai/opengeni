@@ -496,25 +496,18 @@ describe("context-pressure signals", () => {
       expect(metrics).toMatch(
         new RegExp(`opengeni_context_compactions_total\\{[^}]*trigger="${trigger}"[^}]*\\} 0\\b`),
       );
-      for (const event of ["started", "completed"]) {
-        expect(metrics).toMatch(
-          new RegExp(
-            `opengeni_context_compaction_last_event_timestamp_seconds\\{[^}]*event="${event}"[^}]*trigger="${trigger}"[^}]*\\} 0\\b`,
-          ),
-        );
-      }
     }
   });
 
   test("compaction lifecycle metrics update by trigger", async () => {
     const observability = worker();
     initializeContextCompactionMetrics(observability);
-    recordContextCompactionStarted(observability, "auto", 1_700_000_000);
+    recordContextCompactionStarted(observability, "auto");
     initializeContextCompactionMetrics(observability);
-    recordContextCompactionStarted(observability, "operator", 1_700_000_001);
-    recordContextCompaction(observability, "overflow", 1_700_000_002);
-    recordContextCompaction(observability, "overflow", 1_700_000_003);
-    recordContextCompaction(observability, "operator", 1_700_000_004);
+    recordContextCompactionStarted(observability, "operator");
+    recordContextCompaction(observability, "overflow");
+    recordContextCompaction(observability, "overflow");
+    recordContextCompaction(observability, "operator");
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
@@ -529,12 +522,7 @@ describe("context-pressure signals", () => {
     expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
     );
-    expect(metrics).toMatch(
-      /opengeni_context_compaction_last_event_timestamp_seconds\{[^}]*event="started"[^}]*trigger="auto"[^}]*\} 1700000000\b/,
-    );
-    expect(metrics).toMatch(
-      /opengeni_context_compaction_last_event_timestamp_seconds\{[^}]*event="completed"[^}]*trigger="operator"[^}]*\} 1700000004\b/,
-    );
+    expect(metrics).not.toContain("opengeni_context_compaction_last_event_timestamp_seconds");
   });
 
   test("Company Brain exposure metrics use only bounded classification labels", async () => {

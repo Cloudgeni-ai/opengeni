@@ -233,14 +233,16 @@ successful replacement records `opengeni_context_compactions_total{trigger}`.
 Both counters publish the closed trigger set (`auto`, `operator`, `proactive`,
 `overflow`) at zero during turn-worker metric initialization.
 
-`opengeni_context_compaction_last_event_timestamp_seconds{event,trigger}` also
-publishes every bounded event/trigger pair at zero, then records the latest
-durable start or successful completion timestamp. The Helm
-`OpenGeniCompactionNotFiring` rule compares automatic start and completion on
-the same scrape target. This follows the resolved model's real compaction
-threshold and avoids both the old static 150,000-token guess and the
-startup-to-first-scrape counter blind spot. Durable session events remain the
-source of truth; these Prometheus series are process-local operational signals.
+The same durable event transaction updates a content-free exact-attempt pending
+projection. Terminal `compacted`/`skipped` landmarks, attempt closure, and active
+attempt replacement clear it. A control-worker monitor exports
+`opengeni_context_compaction_pending`,
+`opengeni_context_compaction_oldest_pending_age_seconds`, and a same-target
+freshness gauge. The Helm `OpenGeniCompactionNotFiring` rule alerts when the
+oldest pending automatic start exceeds 15 minutes. This remains correct across
+concurrent turn activities, terminal skips, and turn-worker restarts while
+following the resolved model's real compaction threshold instead of a static
+token guess. No tenant or attempt identity becomes a Prometheus label.
 
 ## Turn behavior
 

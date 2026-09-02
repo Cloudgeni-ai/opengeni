@@ -45598,6 +45598,36 @@ export async function countSessionRecoveryBacklog(
   return counts;
 }
 
+export type ContextCompactionPendingSummary = {
+  pendingCount: number;
+  oldestStartedAt: Date | null;
+};
+
+/**
+ * Content-free cross-workspace projection of exact active attempts whose latest
+ * automatic compaction landmark is still `started`. The trigger-maintained
+ * private ledger survives turn-worker loss without exposing tenant identities.
+ */
+export async function getContextCompactionPendingSummary(
+  db: Database,
+): Promise<ContextCompactionPendingSummary> {
+  const rows = await rawRows<{
+    pending_count: number | string;
+    oldest_started_at: Date | string | null;
+  }>(
+    db,
+    sql`
+      select pending_count, oldest_started_at
+      from opengeni_private.context_compaction_pending_summary()
+    `,
+  );
+  const row = rows[0];
+  return {
+    pendingCount: Number(row?.pending_count ?? 0),
+    oldestStartedAt: row?.oldest_started_at == null ? null : new Date(row.oldest_started_at),
+  };
+}
+
 export async function countSandboxLeasesByLiveness(
   db: Database,
 ): Promise<Record<SandboxLeaseLiveness, number>> {

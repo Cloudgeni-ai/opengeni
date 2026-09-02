@@ -219,15 +219,16 @@ describe("turn-capacity Prometheus alerts", () => {
     );
     const expression = alertExpression(template, "OpenGeniCompactionNotFiring");
 
-    expect(expression).toContain("opengeni_context_compaction_last_event_timestamp_seconds");
-    expect(expression).toContain('event="started",trigger="auto"');
-    expect(expression).toContain('event="completed",trigger="auto"');
+    expect(expression).toContain("opengeni_context_compaction_oldest_pending_age_seconds");
+    expect(expression).toContain("opengeni_context_compaction_monitor_fresh");
     expect(expression).toContain("on(namespace, release, environment, component, instance)");
+    expect(expression).toContain("> 900");
     expect(expression).not.toContain("opengeni_model_input_tokens_bucket");
+    expect(expression).not.toContain("opengeni_context_compaction_last_event_timestamp_seconds");
     expect(expression).not.toContain("150000");
     for (const selector of metricSelectors(expression)) {
       expect(selector).toContain(DEPLOYMENT_SCOPE);
-      expect(selector).toContain('component="worker-turn"');
+      expect(selector).toContain('component="worker-control"');
     }
   });
 

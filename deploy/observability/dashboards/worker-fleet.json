@@ -865,7 +865,7 @@
     {
       "type": "timeseries",
       "title": "Compaction starts and completions by trigger (per 15m)",
-      "description": "Durable starts follow each resolved model's compaction threshold; a start without a completion is the alert signal.",
+      "description": "Durable starts follow each resolved model's compaction threshold; the alert uses the restart-safe exact-attempt pending projection.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"

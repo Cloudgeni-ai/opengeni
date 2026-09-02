@@ -867,24 +867,22 @@ spec:
             description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
         # ── Context / compaction ─────────────────────────────────────────────
         - alert: OpenGeniCompactionNotFiring
-          # A durable automatic start means the exact model-specific threshold
-          # was reached and the attempt fence committed. Compare the latest
-          # start and completion on one scrape target instead of guessing from a
-          # static token histogram threshold. Both bounded event/trigger series
-          # initialize at zero, so a first failure before the first scrape still
-          # leaves a positive start-minus-completion timestamp.
+          # The control worker projects the latest exact-attempt compaction
+          # landmark from a trigger-maintained durable ledger. Filter age by the
+          # freshness series from the same scrape target so a stale replica
+          # cannot combine with another replica's successful read.
           expr: |
             max(
-              opengeni_context_compaction_last_event_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn",event="started",trigger="auto"}
-              - on(namespace, release, environment, component, instance)
-              opengeni_context_compaction_last_event_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn",event="completed",trigger="auto"}
-            ) > 0
-          for: 15m
+              opengeni_context_compaction_oldest_pending_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"}
+              and on(namespace, release, environment, component, instance)
+              opengeni_context_compaction_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-control"} == 1
+            ) > 900
+          for: 1m
           labels:
             severity: warning
           annotations:
             summary: OpenGeni automatic compaction started but did not complete
-            description: A model-aware automatic context compaction durably started on a turn worker, but that worker has not recorded a later automatic compaction completion. Inspect compaction failures and attempt fencing.
+            description: An exact active attempt has retained a durable automatic context-compaction start without a compacted/skipped settlement for more than 15 minutes. Inspect the owning attempt, provider call, and worker recovery.
         - alert: OpenGeniCodexPromptCacheHitRatioLow
           # The codex-subscription prompt cache is doing little work: median per-call
           # cache-hit ratio below 40% over 30m while codex calls are actually flowing.
