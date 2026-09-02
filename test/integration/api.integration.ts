@@ -6655,7 +6655,7 @@ describe("API component integration", () => {
     const workspaceBefore = (await beforeSettings.json()) as {
       settings: Record<string, unknown>;
     };
-    expect(workspaceBefore.settings.memoryEnabled ?? true).toBe(true);
+    expect(workspaceBefore.settings.memoryEnabled).toBe(true);
 
     const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",

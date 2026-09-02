@@ -2147,7 +2147,7 @@ export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 // defaults on; malformed settings still fail closed so invalid state cannot
 // unexpectedly enable durable retention.
 export function resolveWorkspaceMemoryEnabled(settings?: unknown): boolean {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  const parsed = WorkspaceSettingsSchema.safeParse(settings === undefined ? {} : settings);
   return parsed.success ? parsed.data.memoryEnabled !== false : false;
 }
 

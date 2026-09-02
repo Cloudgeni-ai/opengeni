@@ -13,6 +13,7 @@ describe("workspace Memory V1 prompt mode", () => {
     expect(resolveWorkspaceMemoryEnabled({})).toBe(true);
     expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: true })).toBe(true);
     expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: false })).toBe(false);
+    expect(resolveWorkspaceMemoryEnabled(null)).toBe(false);
     expect(resolveWorkspaceMemoryEnabled({ memoryEnabled: "yes" })).toBe(false);
   });
 
