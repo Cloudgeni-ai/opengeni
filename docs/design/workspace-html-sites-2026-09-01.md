@@ -43,6 +43,13 @@ should build on that existing artifact and renderer instead of introducing a
 second host, wildcard domain, container deployment, or Site-specific storage
 model.
 
+Artifact HTML is publisher-controlled active content. The opaque origin blocks
+parent DOM, cookie, and storage access, but the current renderer deliberately
+allows scripts, external resources, forms, popups, and outbound network
+requests. Opening an artifact therefore must not disclose an OpenGeni credential
+or silently grant API or tool authority. Authenticated Site capabilities require
+an additional explicit trust and capability boundary described below.
+
 The finished artifact is one self-contained HTML document. Source retention for
 future agent editing is useful, but is a separate authoring concern from the
 runtime format.
@@ -68,6 +75,7 @@ import { OpenGeniClient } from "@opengeni/sdk/browser";
 
 const client = new OpenGeniClient({
   baseUrl: runtime.apiBaseUrl,
+  // Available only after the viewer enables this exact version's capabilities.
   accessToken: () => runtime.accessToken,
 });
 
@@ -183,30 +191,49 @@ The detailed package boundary is intentionally not settled in this record. It
 must be derived from the current runtime and contracts rather than created by
 renaming files prematurely.
 
-### Runtime communication should be ordinary authenticated HTTP
+### Authenticated runtime communication requires explicit trust and confinement
 
-The Site should talk to the OpenGeni backend over ordinary HTTP/SSE using an
-authenticated token. A parent-page `fetch` RPC bridge is not the default
-architecture. The iframe cannot use the parent page's cookies directly, so the
-host must provide browser-usable runtime authentication and workspace context.
+Opening a Site should provide only non-secret runtime context such as the API
+base URL and workspace id. It must not place a general viewer credential in the
+iframe. Publisher-controlled code can send any readable bearer to an external
+endpoint, and an opaque origin does not prevent that exfiltration.
+
+Ordinary HTTP/SSE remains the preferred transport only after the viewer
+explicitly enables authenticated capabilities for one exact immutable artifact
+version and the server can mint a sufficiently confined browser credential. If
+the required authority cannot be represented safely in an artifact-readable
+bearer, the privileged call must instead cross a parent-mediated,
+capability-checked boundary that keeps the credential outside the iframe. A
+parent-page `fetch` RPC bridge is therefore a containment fallback, not a
+forbidden architecture or the default for every request.
 
 The exact token/session mechanism remains open pending a full authority review.
 Whatever is selected must:
 
-- represent the actual current human and exact workspace;
+- require explicit viewer trust/consent for the exact artifact version and
+  disclosed API/tool capabilities before granting them;
+- bind authority to the exact viewer, workspace, artifact, version, and approved
+  API/tool allowlist rather than representing unrestricted viewer authority;
 - work with the existing typed SDK;
-- renew without interrupting a long-open Site;
+- renew only while the exact consented capability grant remains live, without
+  interrupting a long-open Site;
 - observe logout, membership, permission, and connection changes;
 - preserve personal as well as workspace-owned connection behavior;
-- authorize every API and tool call on the server;
+- authorize every API and tool call on the server against both current viewer
+  authority and the narrower artifact capability grant;
+- require fresh consent when published code changes to another immutable
+  version;
 - avoid shipping a standing shared API key; and
 - produce clear reauthentication or access-loss behavior instead of scattered
   tool failures.
 
 The implementation should prefer existing access-grant and browser-auth
-machinery. A new server-backed runtime-session model, a stateless delegated
-token, or a parent-mediated request path are candidate mechanisms, not settled
-product decisions.
+machinery to authorize creation and refresh of the narrower artifact grant, but
+must never copy a managed browser session credential into the iframe. A new
+server-backed runtime-session model, an artifact/version-bound delegated token,
+or a parent-mediated request path are candidate mechanisms, not settled product
+decisions. A general bearer that lets artifact code act as the current human is
+not a candidate.
 
 ## Things not to build
 
@@ -217,8 +244,8 @@ product decisions.
 - A bespoke Site build service or required OpenGeni build command.
 - A user-facing Site deployment CLI.
 - A second React component system for agent sessions.
-- A custom `fetch` transport unless the final authentication design proves it
-  necessary.
+- A custom `fetch` transport except where the final authentication design needs
+  parent mediation to keep credentials outside untrusted artifact code.
 
 ## Existing surfaces to reuse
 
@@ -263,7 +290,9 @@ extraction and an additional public adapter, not a replacement tool platform.
   that a Site should compose by default.
 - Workspace HTML artifacts already provide immutable content-addressed blobs,
   versioning, rollback, and exact `srcDoc` rendering in an opaque-origin iframe.
-  The current HTML limit is 4 MiB of UTF-8.
+  The current HTML limit is 4 MiB of UTF-8. Scripts and network requests work,
+  so opaque-origin isolation is not credential containment; the current artifact
+  runtime contract correctly gives artifact code no OpenGeni credentials.
 - Runtime MCP preparation already discovers configured capability and API
   integration servers, resolves credentials, freezes tool definitions, applies
   allowlists, and creates `PrefixedMcpServer` instances.
@@ -297,13 +326,17 @@ extraction and an additional public adapter, not a replacement tool platform.
    tools OpenGeni already gives an agent. It must assemble configured external
    integrations as well as first-party tools and call the existing executor,
    not duplicate provider implementations.
-4. Add browser-usable runtime authentication that the server can positively
-   link to the actual live managed-human login. A plain delegated bearer that
-   merely claims the human's subject id is insufficient: current access code
-   deliberately refuses delegated bearers the canonical managed-human stamp and
-   personal-connection authority. The host-owned MCP authority path is also a
-   different concern: it lets an embedding host supply connector authority; it
-   does not authenticate the human running code inside the iframe.
+4. Add an explicit artifact trust and capability grant plus browser-usable
+   runtime authentication or parent mediation. The server must positively link
+   grant creation and refresh to the live managed-human login, bind the grant to
+   the exact artifact version and approved API/tool allowlist, and revoke it on
+   trust, login, membership, permission, or connection changes. A plain
+   delegated bearer that merely claims the human's subject id is insufficient:
+   current access code deliberately refuses delegated bearers the canonical
+   managed-human stamp and personal-connection authority. The host-owned MCP
+   authority path is also a different concern: it lets an embedding host supply
+   connector authority; it does not establish viewer consent for publisher-
+   controlled code or safely expose the human's authority inside the iframe.
 5. Define direct-human approval and durable operation semantics for UI tool
    calls. Retries of mutating calls need the same no-duplicate and
    outcome-unknown guarantees as Codemode without pretending that the call
@@ -334,30 +367,42 @@ catalog changed after the Site was built.
 
 ### When the Site opens
 
-1. The OpenGeni host gives the iframe its API base URL, workspace id, and a
-   short-lived runtime token. This can be a one-time bootstrap handoff; it does
-   not require forwarding every `fetch` call through the parent page.
-2. `OpenGeniClient` reads the current token through a callback so renewal does
-   not require rebuilding the client.
-3. A call through `client.tools` sends a normal authenticated HTTP request with
-   an operation id, canonical tool identity, arguments, and any catalog version
-   needed to detect stale code.
-4. The API resolves the token to server-owned current-human evidence, checks
-   the exact live workspace authority, and resolves that viewer's current
-   connection authority. It must not trust a client-supplied subject claim.
-5. The generic tool host obtains the allowed descriptor from the same runtime
+1. The OpenGeni host gives the iframe non-secret context such as its API base
+   URL, workspace id, artifact id, and immutable version id. No credential or
+   privileged capability is present merely because the artifact was opened.
+2. The host shows the exact artifact version and requested API/tool capabilities
+   before the viewer explicitly enables them. A new published version requires
+   a new decision.
+3. The host either gives the iframe a short-lived, revocable, artifact/version-
+   bound bearer limited to the consented capabilities, or keeps the credential
+   outside the iframe and exposes a parent-mediated capability-checked call
+   boundary.
+4. In bearer mode, `OpenGeniClient` reads the current narrow token through a
+   callback so renewal does not require rebuilding the client. In parent-
+   mediated mode, an SDK transport adapter presents the same typed call shape
+   without exposing credential bytes.
+5. A call through `client.tools` sends an operation id, canonical tool identity,
+   arguments, and any catalog version needed to detect stale code.
+6. The API or parent boundary resolves server-owned current-human evidence,
+   checks the exact live workspace authority, revalidates the exact artifact
+   version and consented capability grant, and resolves the viewer's current
+   connection authority. It must not trust a client-supplied subject or grant
+   claim.
+7. The generic tool host obtains the allowed descriptor from the same runtime
    preparation path used for agents, validates the input, applies approval and
    operation policy, and invokes the existing `PrefixedMcpServer` executor.
-6. The executor performs the provider call and returns the existing structured
+8. The executor performs the provider call and returns the existing structured
    result, attachment, auth-needed, or outcome-unknown projection. The generic
    host validates the successful structured output and the SDK returns the
    typed value.
 
 The managed session-set implementation already contains useful live actor,
 refresh, epoch, and revocation machinery. It may be the right authority behind
-the runtime token, but the iframe-facing bearer and its positive server-owned
-provenance are not present today. That is the main security design task; it
-should not be hidden inside a custom SDK transport.
+creating and refreshing an artifact capability grant, but its credential must
+never enter the iframe. The consented exact-version grant, safe iframe-facing
+bearer or parent-mediated boundary, and positive server-owned provenance are not
+present today. That is the main security design task; transport convenience
+must not hide or replace it.
 
 ## Open technical questions
 
@@ -366,17 +411,22 @@ should not be hidden inside a custom SDK transport.
 2. Can the existing SDK client gain `client.tools` without introducing a second
    client, transport, or package-level authority model?
 3. Should browser tool invocation use an existing MCP HTTP route, a generic
-   typed call route, or an SDK adapter over one of those existing protocols?
+   typed call route, or an SDK adapter over one of those protocols or a parent-
+   mediated capability boundary?
 4. How is the runtime tool catalog selected and typed when different viewers
-   have different connections or grants?
-5. Which current connection-authority paths can safely recognize the embedded
-   application as the actual current human rather than an impersonating bearer?
-6. What token renewal and revocation behavior already exists and can be reused?
-7. How should approval-required direct UI tool calls enter the existing human
+   have different connections, grants, and exact-version consented allowlists?
+5. What trust UI and durable grant model binds viewer consent to one immutable
+   artifact version and makes newly published code require a new decision?
+6. Which current connection-authority paths can authorize creation of a narrow
+   artifact capability without treating iframe code as the current human or
+   exposing the managed browser credential?
+7. What token renewal and revocation behavior already exists and can be reused,
+   and when is parent mediation required instead?
+8. How should approval-required direct UI tool calls enter the existing human
    approval lifecycle?
-8. Which operation-id and outcome-unknown contracts should be shared with
+9. Which operation-id and outcome-unknown contracts should be shared with
    Codemode so browser-side retries cannot duplicate side effects?
-9. How should the source project be retained for future `Edit with Geni`
+10. How should the source project be retained for future `Edit with Geni`
    iterations without changing the single-HTML runtime contract?
 
 These questions should be answered from current code before an implementation
