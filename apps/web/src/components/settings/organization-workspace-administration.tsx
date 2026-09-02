@@ -30,6 +30,17 @@ export function useOrganizationWorkspaceAdministration(): OrganizationWorkspaceA
   return useContext(OrganizationWorkspaceAdministrationContext);
 }
 
+export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
+  return accessContext.accountGrants
+    .filter(
+      (grant) =>
+        grant.subjectId === accessContext.subjectId &&
+        (grant.role === "owner" || grant.role === "admin"),
+    )
+    .map((grant) => grant.accountId)
+    .sort();
+}
+
 export function OrganizationWorkspaceAdministrationBoundary(props: {
   client: OpenGeniBrowserClient;
   accessContext: AccessContext;
@@ -39,15 +50,7 @@ export function OrganizationWorkspaceAdministrationBoundary(props: {
   children: (administration: OrganizationWorkspaceAdministration) => ReactNode;
 }) {
   const organizationIds = useMemo(
-    () =>
-      props.accessContext.accountGrants
-        .filter(
-          (grant) =>
-            grant.subjectId === props.accessContext.subjectId &&
-            grant.permissions.includes("account:admin"),
-        )
-        .map((grant) => grant.accountId)
-        .sort(),
+    () => organizationAdministrationAccountIds(props.accessContext),
     [props.accessContext],
   );
   const authorityKey = `${props.accessKeyVersion}:${props.workspaceId}:${organizationIds.join(",")}`;
