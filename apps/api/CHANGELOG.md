@@ -1,5 +1,36 @@
 # @opengeni/api-router
 
+## 2.8.0
+
+### Minor Changes
+
+- 8f81b57: Add authenticated, bounded GitHub branch suggestions for exact workspace App
+  repositories and exact selected personal OAuth repositories, including focused
+  contract and SDK subpaths. Recheck repository authority around provider
+  requests, keep provider credentials server-side, and preserve arbitrary refs at
+  the session resource boundary. Add lazy branch pickers, verified public GitHub
+  URL attachment with immutable commit fencing, explicit anonymous-clone warnings
+  for other HTTPS hosts, render-safe manual drafts, idempotent unlink
+  reconciliation, and debounced live repository refreshes across new and existing
+  sessions.
+
+### Patch Changes
+
+- Updated dependencies [a5ca001]
+- Updated dependencies [8f81b57]
+  - @opengeni/db@3.8.1
+  - @opengeni/contracts@2.11.0
+  - @opengeni/github@0.7.0
+  - @opengeni/runtime@2.1.1
+  - @opengeni/core@2.7.1
+  - @opengeni/documents@0.8.16
+  - @opengeni/events@0.4.14
+  - @opengeni/artifact-tool@0.3.16
+  - @opengeni/codemode@0.4.24
+  - @opengeni/config@0.23.1
+  - @opengeni/observability@0.8.16
+  - @opengeni/storage@0.2.117
+
 ## 2.7.0
 
 ### Minor Changes

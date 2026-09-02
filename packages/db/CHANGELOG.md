@@ -1,5 +1,15 @@
 # @opengeni/db
 
+## 3.8.1
+
+### Patch Changes
+
+- a5ca001: Keep provider-deadline interaction cleanup visible under FORCE RLS for lease-free controllers, prevent unrelated overdue leases from starving the bounded deadline batch, and clean already-draining Modal leases at their deadline.
+- Updated dependencies [8f81b57]
+  - @opengeni/contracts@2.11.0
+  - @opengeni/codemode@0.4.24
+  - @opengeni/config@0.23.1
+
 ## 3.8.0
 
 ### Minor Changes
