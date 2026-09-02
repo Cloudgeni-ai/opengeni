@@ -4,6 +4,7 @@
 // Collapsed, the whole block reduces to a workspace-initial avatar that opens
 // the same workspace menu.
 import { Link } from "@tanstack/react-router";
+import { OpenGeniApiError } from "@opengeni/sdk";
 import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -31,6 +32,12 @@ const LazyCreateOrganizationDialog = lazy(() =>
   })),
 );
 
+type AdditionalOrganizationCreationState = "draft" | "uncertain" | "committed";
+
+export function additionalOrganizationCreationOutcomeUnknown(error: unknown): boolean {
+  return error instanceof OpenGeniApiError ? error.outcomeUnknown : error instanceof TypeError;
+}
+
 export const WORKSPACE_SWITCHER_GRID_CLASS =
   "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 px-3 pt-1";
 
@@ -55,14 +62,14 @@ export function SwitcherBlock() {
   const [organizationName, setOrganizationName] = useState("");
   const [workspaceName, setWorkspaceName] = useState("General");
   const [createBusy, setCreateBusy] = useState(false);
-  const [createCommitted, setCreateCommitted] = useState(false);
+  const [creationState, setCreationState] = useState<AdditionalOrganizationCreationState>("draft");
   const operationId = useRef<string | null>(null);
   const operationOwnerUserId = useRef<string | null>(null);
 
   function resetCreateOrganizationDraft() {
     setOrganizationName("");
     setWorkspaceName("General");
-    setCreateCommitted(false);
+    setCreationState("draft");
     operationId.current = null;
     operationOwnerUserId.current = null;
   }
@@ -78,7 +85,7 @@ export function SwitcherBlock() {
   function updateCreateOpen(open: boolean) {
     if (createBusy && !open) return;
     setCreateOpen(open);
-    if (!open && !createCommitted) {
+    if (!open && creationState === "draft") {
       resetCreateOrganizationDraft();
     }
   }
@@ -93,15 +100,19 @@ export function SwitcherBlock() {
       operationOwnerUserId.current = managedUserId;
     }
     setCreateBusy(true);
-    let committed = createCommitted;
+    let attemptedState: AdditionalOrganizationCreationState = creationState;
+    if (attemptedState === "draft") {
+      attemptedState = "uncertain";
+      setCreationState("uncertain");
+    }
     try {
       const created = await context.client.createAdditionalOrganization({
         name,
         workspaceName: initialWorkspaceName,
         operationId: operationId.current,
       });
-      committed = true;
-      setCreateCommitted(true);
+      attemptedState = "committed";
+      setCreationState("committed");
       const refreshed = await context.refreshPrincipalAccess();
       if (!refreshed) {
         throw new Error("Your access changed before the new organization could be opened");
@@ -115,12 +126,26 @@ export function SwitcherBlock() {
       rail.openWorkspace(created.workspaceId);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const outcomeUnknown = additionalOrganizationCreationOutcomeUnknown(error);
+      if (attemptedState !== "committed" && !outcomeUnknown) {
+        attemptedState = "draft";
+        setCreationState("draft");
+        operationId.current = null;
+        operationOwnerUserId.current = null;
+      }
       toast.error(
-        committed ? "Organization created, but not opened" : "Failed to create organization",
+        attemptedState === "committed"
+          ? "Organization created, but not opened"
+          : attemptedState === "uncertain"
+            ? "Creation could not be confirmed"
+            : "Failed to create organization",
         {
-          description: committed
-            ? `${message}. Try again to refresh access and open the same organization.`
-            : message,
+          description:
+            attemptedState === "committed"
+              ? `${message}. Try again to refresh access and open the same organization.`
+              : attemptedState === "uncertain"
+                ? `${message}. Try again to safely replay this exact request and confirm the result.`
+                : message,
         },
       );
       setCreateBusy(false);
@@ -144,7 +169,7 @@ export function SwitcherBlock() {
               organizationName={organizationName}
               workspaceName={workspaceName}
               busy={createBusy}
-              committed={createCommitted}
+              creationState={creationState}
               onOrganizationNameChange={setOrganizationName}
               onWorkspaceNameChange={setWorkspaceName}
               onOpenChange={updateCreateOpen}
@@ -173,7 +198,7 @@ export function SwitcherBlock() {
             organizationName={organizationName}
             workspaceName={workspaceName}
             busy={createBusy}
-            committed={createCommitted}
+            creationState={creationState}
             onOrganizationNameChange={setOrganizationName}
             onWorkspaceNameChange={setWorkspaceName}
             onOpenChange={updateCreateOpen}

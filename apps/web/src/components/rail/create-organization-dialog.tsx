@@ -24,7 +24,7 @@ type CreateOrganizationFormProps = {
   organizationName: string;
   workspaceName: string;
   busy: boolean;
-  committed?: boolean;
+  creationState?: "draft" | "uncertain" | "committed";
   onOrganizationNameChange: (name: string) => void;
   onWorkspaceNameChange: (name: string) => void;
   onCancel: () => void;
@@ -35,6 +35,8 @@ type CreateOrganizationFormProps = {
 export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
   const organizationName = props.organizationName.trim() || "Your organization";
   const workspaceName = props.workspaceName.trim() || "First shared workspace";
+  const creationState = props.creationState ?? "draft";
+  const requestLocked = creationState !== "draft";
 
   return (
     <form
@@ -61,7 +63,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
             onChange={(event) => props.onOrganizationNameChange(event.target.value)}
             placeholder="Acme"
             maxLength={120}
-            disabled={props.committed}
+            disabled={requestLocked}
             autoFocus
           />
         </div>
@@ -73,7 +75,7 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
             onChange={(event) => props.onWorkspaceNameChange(event.target.value)}
             placeholder="General"
             maxLength={120}
-            disabled={props.committed}
+            disabled={requestLocked}
           />
           <p className="text-xs text-fg-subtle">
             Your team can start working here. You can add more workspaces later.
@@ -104,13 +106,13 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
 
       <DialogFooter className="mt-5">
         <Button type="button" variant="ghost" disabled={props.busy} onClick={props.onCancel}>
-          {props.committed ? "Close" : "Cancel"}
+          {requestLocked ? "Close" : "Cancel"}
         </Button>
         <Button
           type="submit"
           disabled={
             props.busy ||
-            (!props.committed && (!props.organizationName.trim() || !props.workspaceName.trim()))
+            (!requestLocked && (!props.organizationName.trim() || !props.workspaceName.trim()))
           }
         >
           {props.busy ? (
@@ -118,7 +120,11 @@ export function CreateOrganizationForm(props: CreateOrganizationFormProps) {
           ) : (
             <CheckIcon aria-hidden="true" className="size-4" />
           )}
-          {props.committed ? "Try opening again" : "Create organization"}
+          {creationState === "committed"
+            ? "Try opening again"
+            : creationState === "uncertain"
+              ? "Check creation again"
+              : "Create organization"}
         </Button>
       </DialogFooter>
     </form>
@@ -131,6 +137,7 @@ export function CreateOrganizationDialog(
     onOpenChange: (open: boolean) => void;
   },
 ) {
+  const creationState = props.creationState ?? "draft";
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -139,12 +146,18 @@ export function CreateOrganizationDialog(
           header={
             <DialogHeader>
               <DialogTitle>
-                {props.committed ? `${props.organizationName} was created` : "New organization"}
+                {creationState === "committed"
+                  ? `${props.organizationName} was created`
+                  : creationState === "uncertain"
+                    ? "Confirm organization creation"
+                    : "New organization"}
               </DialogTitle>
               <DialogDescription>
-                {props.committed
+                {creationState === "committed"
                   ? "Try again to refresh your access and open the new organization. This will not create another one."
-                  : "Create a separate home for another team, with its own members, workspaces, and data."}
+                  : creationState === "uncertain"
+                    ? "OpenGeni could not confirm the result. Try again to safely replay this exact request without creating a duplicate."
+                    : "Create a separate home for another team, with its own members, workspaces, and data."}
               </DialogDescription>
             </DialogHeader>
           }
