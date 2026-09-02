@@ -1,5 +1,24 @@
 # @opengeni/db
 
+## 3.8.2
+
+### Patch Changes
+
+- 38de50d: Enable Workspace Memory by default, require approval by default for agent-derived Workspace instructions and Skills, and use the clearer Require approval label for workspace and organization governance settings.
+- 8b42f58: Add the managed-human API, SDK, and atomic tenant lifecycle for creating additional organizations with an isolated Personal workspace and a first shared team workspace.
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- 7c5897f: Preempt sandbox writers and persistent interaction holders at the provider-deadline rotation lead boundary so the zero-holder reaper can capture the exact workspace generation before provider destruction.
+- e2a668b: Add the built-in, instruction-only OpenGeni Product Integration Pack for adaptive, tenant-safe customer integrations, with explicit per-session activation that prevents its implementation guidance from entering ordinary customer chats.
+- ae19409: Enforce idle-boundary admission for skip-overlap scheduled sessions.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/config@0.23.2
+  - @opengeni/codemode@0.4.25
+
 ## 3.8.1
 
 ### Patch Changes

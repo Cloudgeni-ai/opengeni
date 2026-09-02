@@ -1,5 +1,27 @@
 # @opengeni/core
 
+## 2.7.2
+
+### Patch Changes
+
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- e2a668b: Add the built-in, instruction-only OpenGeni Product Integration Pack for adaptive, tenant-safe customer integrations, with explicit per-session activation that prevents its implementation guidance from entering ordinary customer chats.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [7c5897f]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+- Updated dependencies [ae19409]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/db@3.8.2
+  - @opengeni/config@0.23.2
+  - @opengeni/runtime@2.1.2
+  - @opengeni/documents@0.8.17
+  - @opengeni/events@0.4.15
+  - @opengeni/observability@0.8.17
+  - @opengeni/storage@0.2.118
+
 ## 2.7.1
 
 ### Patch Changes
