@@ -56,12 +56,18 @@ SET search_path FROM CURRENT
 AS $body$
 DECLARE
   run_row record;
-  invalidation_error text := CASE
-    WHEN OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL
+  invalidation_error text;
+BEGIN
+  invalidation_error := CASE
+    -- 0275 introduced deleted_at. JSON row introspection keeps this rolling
+    -- trigger installable in legacy-upgrade fixtures that intentionally replay
+    -- 0275 after the current tail, while current schemas still classify delete.
+    WHEN pg_catalog.to_jsonb(OLD) ->> 'deleted_at' IS NULL
+      AND pg_catalog.to_jsonb(NEW) ->> 'deleted_at' IS NOT NULL
       THEN 'scheduled_task_deleted_before_claim'
     ELSE 'scheduled_task_paused_before_claim'
   END;
-BEGIN
+
   INSERT INTO opengeni_private.scheduled_personal_resource_capabilities (
     backend_pid, transaction_id, capability_kind
   ) VALUES (
@@ -118,12 +124,9 @@ END
 $body$;
 
 CREATE TRIGGER scheduled_task_unclaimed_occurrence_invalidation
-AFTER UPDATE OF status, deleted_at ON scheduled_tasks
+AFTER UPDATE OF status ON scheduled_tasks
 FOR EACH ROW
-WHEN (
-  (OLD.status = 'active' AND NEW.status = 'paused')
-  OR (OLD.deleted_at IS NULL AND NEW.deleted_at IS NOT NULL)
-)
+WHEN (OLD.status = 'active' AND NEW.status = 'paused')
 EXECUTE FUNCTION invalidate_unclaimed_scheduled_agent_runs_on_task_inactive();
 
 REVOKE ALL ON FUNCTION
