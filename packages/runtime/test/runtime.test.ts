@@ -64,6 +64,7 @@ import {
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   hasCanonicalEditableArtifactToolSurface,
+  hasCanonicalSiteAuthoringToolSurface,
   oneShotGenesisTitleInputFilter,
   composeRuntimeSkills,
   effectiveSkillSelectionsForAgent,
@@ -10230,6 +10231,34 @@ function editableArtifactAttemptToolCatalog() {
   }).catalog;
 }
 
+function siteAttemptToolCatalog(
+  toolNames: readonly ("artifacts_create" | "artifacts_get_source" | "artifacts_publish")[],
+) {
+  return createAttemptToolEnvironment({
+    scope: {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 1,
+    },
+    generation: 1,
+    definitions: toolNames.map((toolName) => ({
+      identity: { serverId: "opengeni", toolName },
+      modelName: `opengeni__${toolName}`,
+      codemodePath: ["opengeni", toolName],
+      inputSchema: { type: "object", additionalProperties: false },
+      source: "opengeni" as const,
+      approval: "none" as const,
+      execute: async () => ({
+        content: [{ type: "text" as const, text: "ok" }],
+        structuredContent: { ok: true },
+      }),
+    })),
+  }).catalog;
+}
+
 describe("runtime Skill activation", () => {
   const infraSkill = {
     name: "infra-ops",
@@ -10258,6 +10287,7 @@ describe("runtime Skill activation", () => {
   test("artifact skills join the index when their canonical tool surface is available", () => {
     const composition = composeRuntimeSkills([], {
       editableArtifacts: true,
+      sites: false,
       videoGeneration: false,
     });
     const source = composition.lazySource;
@@ -10281,6 +10311,57 @@ describe("runtime Skill activation", () => {
         source: "native_tool",
       }),
     );
+  });
+
+  test("the Site Skill joins the index only for a complete create or edit surface", () => {
+    const enabled = composeRuntimeSkills([], {
+      editableArtifacts: false,
+      sites: true,
+      videoGeneration: false,
+    });
+    const index = enabled.lazySource.getIndex?.(emptyManifest, ".agents") ?? [];
+    expect(index.map((entry) => entry.name)).toContain("opengeni-sites");
+    expect(enabled.selections).toContainEqual({
+      id: "native-tool:opengeni-sites",
+      name: "opengeni-sites",
+      source: "native_tool",
+      version: null,
+      contentSha256: null,
+      reason: "native Site-authoring tool surface",
+    });
+
+    const createCatalog = siteAttemptToolCatalog(["artifacts_create"]);
+    expect(hasCanonicalSiteAuthoringToolSurface(createCatalog)).toBe(true);
+    expect(
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+          attemptToolCatalog: createCatalog,
+        }),
+        emptyManifest,
+      ),
+    ).toContain("opengeni-sites");
+
+    const editCatalog = siteAttemptToolCatalog(["artifacts_get_source", "artifacts_publish"]);
+    expect(hasCanonicalSiteAuthoringToolSurface(editCatalog)).toBe(true);
+    expect(
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+          attemptToolCatalog: editCatalog,
+        }),
+        emptyManifest,
+      ),
+    ).toContain("opengeni-sites");
+
+    const incompleteEditCatalog = siteAttemptToolCatalog(["artifacts_get_source"]);
+    expect(hasCanonicalSiteAuthoringToolSurface(incompleteEditCatalog)).toBe(false);
+    expect(
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+          attemptToolCatalog: incompleteEditCatalog,
+        }),
+        emptyManifest,
+      ),
+    ).not.toContain("opengeni-sites");
   });
 
   test("artifact skills follow the exact tool catalog, independently of local runtime support", () => {

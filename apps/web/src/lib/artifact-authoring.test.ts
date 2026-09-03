@@ -1,13 +1,22 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ARTIFACT_CREATE_TOOLS,
+  ARTIFACT_EDIT_TOOLS,
   applyNewSessionModelPreference,
+  artifactCreateInstructions,
   artifactCreateOpeningMessage,
   artifactEditInstructions,
   artifactEditOpeningMessage,
 } from "./artifact-authoring";
 
 describe("artifact authoring sessions", () => {
+  test("selects the exact native Site Skill tool surfaces", () => {
+    expect(ARTIFACT_CREATE_TOOLS).toEqual(["artifacts_create"]);
+    expect(ARTIFACT_EDIT_TOOLS).toEqual(["artifacts_get_source", "artifacts_publish"]);
+    expect(artifactCreateInstructions()).toContain("follow the opengeni-sites Skill");
+  });
+
   test("create opening does not name the create tool", () => {
     expect(artifactCreateOpeningMessage()).not.toContain("artifacts_create");
   });
@@ -24,6 +33,7 @@ describe("artifact authoring sessions", () => {
     expect(opening).not.toContain("artifact id");
     expect(instructions).toContain("artifact id artifact-1");
     expect(instructions).toContain("current version version-2");
+    expect(instructions).toContain("follow the opengeni-sites Skill");
   });
 
   test("applies the durable model preference without replacing an explicit choice", () => {

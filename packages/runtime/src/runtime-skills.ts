@@ -61,6 +61,7 @@ export type RuntimeSkillActivation =
 
 export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
+  sites?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -97,10 +98,12 @@ type ValidatedRuntimeSkillActivation = Readonly<{
 
 const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
   editableArtifacts: false,
+  sites: false,
   videoGeneration: false,
 });
 
 let stagedBundledArtifactSkillsDir: string | null = null;
+let stagedBundledSiteSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;
 
 /**
@@ -299,6 +302,15 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
       reason: "native editable-artifact tool surface",
     });
   }
+  if (nativeTools.sites) {
+    const directory = bundledSiteSkillsDir();
+    sources.push({
+      directory,
+      lazySource: localDirLazySkillSource({ src: directory }),
+      names: skillDirNames(directory),
+      reason: "native Site-authoring tool surface",
+    });
+  }
   if (nativeTools.videoGeneration) {
     const directory = bundledVideoSkillsDir();
     sources.push({
@@ -332,6 +344,18 @@ function bundledArtifactSkillsDir(): string {
     );
   }
   return stagedBundledArtifactSkillsDir;
+}
+
+function bundledSiteSkillsDir(): string {
+  const packaged = packagedSkillDirectory("bundled_site_skills");
+  if (isPathWithin(process.cwd(), packaged)) return packaged;
+  if (!stagedBundledSiteSkillsDir) {
+    stagedBundledSiteSkillsDir = stageSkillDirectory(
+      packaged,
+      join(process.cwd(), ".opengeni", "bundled_site_skills"),
+    );
+  }
+  return stagedBundledSiteSkillsDir;
 }
 
 function bundledVideoSkillsDir(): string {

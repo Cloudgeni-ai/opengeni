@@ -344,6 +344,13 @@ or React session implementation is required.
    the resulting self-contained HTML, retained source bundle, and exact
    requested canonical identities together.
 
+The product runtime packages this guidance as the native tool-bound
+`opengeni-sites` Skill. A create-only Site session admits it when
+`artifacts_create` is present; an edit session admits it only when both
+`artifacts_get_source` and `artifacts_publish` are present. Repository-local
+`.agents/skills` is only the reviewed source copy, not the product activation
+mechanism.
+
 Generated types improve authoring but do not grant access. The server remains
 authoritative if a viewer lacks a required permission or connection, or if the
 catalog changed after the Site was built.
