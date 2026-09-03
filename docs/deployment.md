@@ -57,6 +57,15 @@ Site calls do not use this approval store: their active immutable version's
 requested identities are intersected with the current viewer's live gateway and
 revalidated by the API on every direct call.
 
+Migrations `0401_mcp_oauth_authorization_server.sql` and
+`0402_tool_gateway_approval_capabilities.sql` are one drained maintenance
+boundary even when `OPENGENI_MCP_OAUTH_ENABLED=false`. They add tables, grants,
+and FORCE-RLS state to the exact startup/readiness posture, so neither the
+previous runtime evaluator nor the target evaluator can operate in a mixed
+pre/post-schema fleet. Follow the
+[0401-0402 operator cutover](#mcp-oauth-and-tool-gateway-posture-cutover-0401-0402)
+before deploying the release that contains them.
+
 Refresh-token rotation is family-fenced. Reuse of any known revoked generation
 atomically revokes every descendant refresh and access token before returning
 `invalid_grant`.
@@ -333,7 +342,9 @@ maintenance migration must be selected explicitly; migration 0389 uses
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
 plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
 operator completes the documented database-role, image-digest, and application
-drain preflight. Migration 0394 likewise requires a complete API and worker
+drain preflight. The 0401-0402 posture boundary uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_mcp_oauth_authorization_server`
+with the same preflight acknowledgement. Migration 0394 likewise requires a complete API and worker
 drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
 a pre-0394 worker would treat the newly admitted activation mode as an ambient
@@ -1905,6 +1916,62 @@ The runtime secret must provide values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+### MCP OAuth and tool-gateway posture cutover (0401-0402)
+
+Migrations `0401_mcp_oauth_authorization_server.sql` and
+`0402_tool_gateway_approval_capabilities.sql` change the exact application-role
+table, grant, and RLS inventory. The previous API/worker runtime-posture
+evaluator rejects the provisioned target schema, while the target evaluator
+rejects the old schema. This is therefore a single drained, forward-only
+maintenance rollout; it is not safe to let the normal Helm pre-upgrade Job run
+while old application pods still serve traffic.
+
+1. Bind the exact database, schema, release artifacts, and every API/control
+   worker/turn worker database login. Set
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to the complete
+   comma-separated old/new login list (normally `opengeni_app`). During a role
+   rotation, include both identities. This list is drain detection only; it is
+   not a grant allow-list. `OPENGENI_APP_DATABASE_USER` and its password name
+   the sole target role that `db:provision-roles` grants after migration.
+2. Bind the drain and final upgrade to the same immutable API/worker/web and
+   migrations images. For a generated Kubernetes plan, set:
+
+   ```bash
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_mcp_oauth_authorization_server
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
+   ```
+
+   Do not set the confirmation until the release/database/login binding,
+   accepted-turn handling, and exact image digests have been reviewed. The
+   generated plan emits the migrations-disabled application drain only with
+   both values present.
+3. Stop every API, control worker, and turn worker using the target database and
+   prove that every listed old/new login has zero other sessions in
+   `pg_stat_activity`. Keep the application stopped through migration, role
+   provisioning, and posture assertion.
+4. From the exact new image, run the ordinary rollout gate in this order:
+
+   ```bash
+   bun run db:migrate
+   bun run db:provision-roles
+   bun run db:assert-runtime-posture
+   ```
+
+   Migration 0401 and migration 0402 each validate the explicit role list and
+   repeat the live-session check after installing their schema. A live listed
+   identity aborts with SQLSTATE `55000` and rolls back that migration. Both
+   migrations remove every explicit non-owner ACL inherited from owner default
+   privileges; they grant none of the listed drain identities. Only the
+   following role-provision step grants the exact current target role.
+5. Require both migration receipts in `schema_migrations`, then start only the
+   same new image generation and require startup/readiness posture checks before
+   reopening admission. `OPENGENI_MCP_OAUTH_ENABLED` may remain false; feature
+   enablement is independent of the mandatory schema/posture cutover.
+
+After either migration commits, do not restart a pre-0401 application image or
+attempt a mixed-version rolling rollback. Keep the application drained and fix
+forward on the target schema.
 
 ### Deployment database model catalog cutover
 

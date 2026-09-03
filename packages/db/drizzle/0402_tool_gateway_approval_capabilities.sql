@@ -1,9 +1,65 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Current-human HTTP tool calls use hash-only, single-use approval capabilities
 -- instead of trusting a caller-provided approval boolean.
+-- This changes the exact runtime-posture table/grant/RLS contract. Stop every
+-- API, control worker, and turn worker before applying it, and never restart a
+-- pre-0402 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+
+DO $tool_gateway_approval_runtime_drain_before$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0402 tool gateway approval activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0402 tool gateway approval activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0402 tool gateway approval activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0402 tool gateway approval activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$tool_gateway_approval_runtime_drain_before$;
 
 CREATE TABLE "tool_gateway_approval_capabilities" (
   "token_hash" text PRIMARY KEY,
@@ -57,24 +113,64 @@ CREATE POLICY "workspace_subject_isolation" ON "tool_gateway_approval_capabiliti
 
 REVOKE ALL ON "tool_gateway_approval_capabilities" FROM PUBLIC;
 
-DO $application_grants$
+-- The application role list is drain detection only. Remove any explicit ACL
+-- inherited from owner default privileges, including an old side of a runtime
+-- role rotation. The post-migration role provisioner grants only the exact
+-- current target application role.
+DO $tool_gateway_approval_table_acl_reset$
 DECLARE
-  data_schema text := current_schema();
-  application_role text;
+  data_schema text := pg_catalog.current_schema();
+  role_name text;
 BEGIN
-  FOR application_role IN
-    SELECT role_value.rolname
-    FROM pg_catalog.jsonb_array_elements_text(
-      coalesce(nullif(current_setting('opengeni.migration_application_roles', true), ''), '[]')::jsonb
-    ) configured(value)
-    JOIN pg_catalog.pg_roles role_value ON role_value.rolname = configured.value
-    UNION SELECT 'opengeni_app'
-      WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app')
+  EXECUTE pg_catalog.format(
+    'REVOKE ALL ON TABLE %I.tool_gateway_approval_capabilities FROM PUBLIC',
+    data_schema
+  );
+  FOR role_name IN
+    SELECT grantee_role.rolname
+    FROM pg_catalog.pg_class relation
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+      coalesce(
+        relation.relacl,
+        pg_catalog.acldefault('r', relation.relowner)
+      )
+    ) privilege
+    INNER JOIN pg_catalog.pg_roles grantee_role
+      ON grantee_role.oid = privilege.grantee
+    WHERE relation.oid = pg_catalog.to_regclass(
+        pg_catalog.format('%I.tool_gateway_approval_capabilities', data_schema)
+      )
+      AND privilege.grantee <> 0
+      AND privilege.grantee <> relation.relowner
+    GROUP BY grantee_role.rolname
+    ORDER BY grantee_role.rolname COLLATE "C"
   LOOP
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %I.tool_gateway_approval_capabilities TO %I',
-      data_schema, application_role
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON TABLE %I.tool_gateway_approval_capabilities FROM %I',
+      data_schema,
+      role_name
     );
   END LOOP;
 END
-$application_grants$;
+$tool_gateway_approval_table_acl_reset$;
+
+DO $tool_gateway_approval_runtime_drain_after$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0402 tool gateway approval activation observed a configured OpenGeni application database session after schema installation'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$tool_gateway_approval_runtime_drain_after$;

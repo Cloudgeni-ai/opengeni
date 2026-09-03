@@ -1813,6 +1813,13 @@ const HELM_APPLICATION_DRAIN_ARGS = [
 ].join(" ");
 
 export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
+export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0401_mcp_oauth_authorization_server";
+
+const SUPPORTED_MAINTENANCE_CUTOVERS = [
+  MODEL_CATALOG_MAINTENANCE_CUTOVER,
+  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
+] as const;
+type MaintenanceCutover = (typeof SUPPORTED_MAINTENANCE_CUTOVERS)[number];
 
 const MAINTENANCE_IMAGE_DIGEST_ENV = {
   api: "OPENGENI_API_IMAGE_DIGEST",
@@ -1848,13 +1855,14 @@ function maintenanceImageDigestHelmArgs(
   terraformRoot: string | null,
   env: Record<string, string | undefined>,
 ): string {
-  if (!requestedMaintenanceCutover(env)) return "";
+  const maintenanceCutover = requestedMaintenanceCutover(env);
+  if (!maintenanceCutover) return "";
   // Managed plans resolve registry digests after publishing the exact images
   // and inject them through helm-values.generated.yaml.
   if (terraformRoot) return "";
   if (contract.runtime.platform !== "kubernetes") {
     throw new Error(
-      `${MODEL_CATALOG_MAINTENANCE_CUTOVER} requires a non-local Kubernetes deployment with immutable image artifacts`,
+      `${maintenanceCutover} requires a non-local Kubernetes deployment with immutable image artifacts`,
     );
   }
   // Local Kubernetes derives one content identity from the freshly built
@@ -1868,10 +1876,10 @@ function maintenanceImageDigestHelmArgs(
 
 function requestedMaintenanceCutover(
   env: Record<string, string | undefined>,
-): typeof MODEL_CATALOG_MAINTENANCE_CUTOVER | null {
+): MaintenanceCutover | null {
   const requested = env.OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER?.trim();
   if (!requested) return null;
-  if (requested !== MODEL_CATALOG_MAINTENANCE_CUTOVER) {
+  if (!(SUPPORTED_MAINTENANCE_CUTOVERS as readonly string[]).includes(requested)) {
     throw new Error(`unsupported OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: ${requested}`);
   }
   if (env.OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED !== "true") {
@@ -1879,7 +1887,7 @@ function requestedMaintenanceCutover(
       "OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true is required for a maintenance cutover",
     );
   }
-  return requested;
+  return requested as MaintenanceCutover;
 }
 
 function helmApplicationDrainWaitCommand(namespace: string, release: string): string {
@@ -2389,9 +2397,14 @@ function planNotes(
       "Create the runtime, migration, Postgres, and Garage Secrets (env keys plus garage.toml) before the two-phase Helm bootstrap.",
     );
   }
-  if (requestedMaintenanceCutover(env)) {
+  const maintenanceCutover = requestedMaintenanceCutover(env);
+  if (maintenanceCutover) {
+    const migrationSummary =
+      maintenanceCutover === MODEL_CATALOG_MAINTENANCE_CUTOVER
+        ? "migration 0389"
+        : "migrations 0401 and 0402";
     notes.push(
-      `This plan includes the explicit ${MODEL_CATALOG_MAINTENANCE_CUTOVER} application drain; keep the application stopped until migration 0389 and the final exact-digest upgrade succeed.`,
+      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until ${migrationSummary} and the final exact-digest upgrade succeed.`,
     );
   }
   return notes;

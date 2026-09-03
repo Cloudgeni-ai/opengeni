@@ -1,11 +1,67 @@
--- deployment-mode: rolling
+-- deployment-mode: maintenance
 -- Opt-in OAuth 2.1-style authorization-server state for exact workspace MCP
 -- resources. Only hashes of authorization codes and bearer/refresh tokens are
 -- retained; grants freeze permissions and tool identities for later live
 -- intersection.
+-- This changes the exact runtime-posture table/grant contract. Stop every API,
+-- control worker, and turn worker before applying it, and never restart a
+-- pre-0401 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
+
+DO $mcp_oauth_runtime_drain_before$
+DECLARE
+  configured_roles_text text := nullif(
+    current_setting('opengeni.migration_application_roles', true), ''
+  );
+  configured_roles jsonb;
+BEGIN
+  IF configured_roles_text IS NULL THEN
+    RAISE EXCEPTION
+      '0401 MCP OAuth activation requires an explicit application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  BEGIN
+    configured_roles := configured_roles_text::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION
+      '0401 MCP OAuth activation received a malformed application database role list'
+      USING ERRCODE = '55000';
+  END;
+  IF jsonb_typeof(configured_roles) <> 'array'
+    OR jsonb_array_length(configured_roles) NOT BETWEEN 1 AND 16
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
+      WHERE jsonb_typeof(value) <> 'string'
+        OR btrim(value #>> '{}') = ''
+        OR octet_length(value #>> '{}') > 63
+    )
+    OR (
+      SELECT count(*) FROM jsonb_array_elements_text(configured_roles)
+    ) <> (
+      SELECT count(DISTINCT value)
+      FROM jsonb_array_elements_text(configured_roles) AS roles(value)
+    )
+  THEN
+    RAISE EXCEPTION
+      '0401 MCP OAuth activation received an invalid application database role list'
+      USING ERRCODE = '55000';
+  END IF;
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0401 MCP OAuth activation requires all configured OpenGeni application database sessions to be stopped'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$mcp_oauth_runtime_drain_before$;
 
 CREATE TABLE mcp_oauth_clients (
   client_id text PRIMARY KEY CHECK (octet_length(client_id) BETWEEN 16 AND 256),
@@ -282,32 +338,134 @@ REVOKE ALL ON FUNCTION opengeni_private.register_mcp_oauth_client(
   text, jsonb, text, jsonb, jsonb, text
 ) FROM PUBLIC;
 
-DO $application_grants$
+-- Owner ALTER DEFAULT PRIVILEGES may still name a legacy application login or
+-- an old side of a role rotation. The exact role list above is drain detection
+-- only. Strip every explicit non-owner ACL from the new objects; the mandatory
+-- post-migration db:provision-roles step grants only the deployment's current
+-- target application role.
+DO $mcp_oauth_table_acl_reset$
 DECLARE
-  data_schema text := current_schema();
-  application_role text;
+  data_schema text := pg_catalog.current_schema();
+  relation_name text;
+  role_name text;
 BEGIN
-  FOR application_role IN
-    SELECT role_value.rolname
-    FROM pg_catalog.jsonb_array_elements_text(
-      coalesce(nullif(current_setting('opengeni.migration_application_roles', true), ''), '[]')::jsonb
-    ) configured(value)
-    JOIN pg_catalog.pg_roles role_value ON role_value.rolname = configured.value
-    UNION SELECT 'opengeni_app'
-      WHERE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'opengeni_app')
+  FOR relation_name IN
+    SELECT relation.value
+    FROM pg_catalog.unnest(
+      ARRAY[
+        'mcp_oauth_clients',
+        'mcp_oauth_authorization_requests',
+        'mcp_oauth_authorization_codes',
+        'mcp_oauth_refresh_tokens',
+        'mcp_oauth_access_tokens'
+      ]::text[]
+    ) AS relation(value)
   LOOP
-    EXECUTE format(
-      'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE %1$I.mcp_oauth_clients, %1$I.mcp_oauth_authorization_requests, %1$I.mcp_oauth_authorization_codes, %1$I.mcp_oauth_refresh_tokens, %1$I.mcp_oauth_access_tokens TO %2$I',
-      data_schema, application_role
+    EXECUTE pg_catalog.format(
+      'REVOKE ALL ON TABLE %I.%I FROM PUBLIC',
+      data_schema,
+      relation_name
     );
-    EXECUTE format(
-      'GRANT EXECUTE ON FUNCTION opengeni_private.reap_mcp_oauth_state(integer) TO %I',
-      application_role
-    );
-    EXECUTE format(
-      'GRANT EXECUTE ON FUNCTION opengeni_private.register_mcp_oauth_client(text, jsonb, text, jsonb, jsonb, text) TO %I',
-      application_role
-    );
+    FOR role_name IN
+      SELECT grantee_role.rolname
+      FROM pg_catalog.pg_class relation
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        coalesce(
+          relation.relacl,
+          pg_catalog.acldefault('r', relation.relowner)
+        )
+      ) privilege
+      INNER JOIN pg_catalog.pg_roles grantee_role
+        ON grantee_role.oid = privilege.grantee
+      WHERE relation.oid = pg_catalog.to_regclass(
+          pg_catalog.format('%I.%I', data_schema, relation_name)
+        )
+        AND privilege.grantee <> 0
+        AND privilege.grantee <> relation.relowner
+      GROUP BY grantee_role.rolname
+      ORDER BY grantee_role.rolname COLLATE "C"
+    LOOP
+      EXECUTE pg_catalog.format(
+        'REVOKE ALL ON TABLE %I.%I FROM %I',
+        data_schema,
+        relation_name,
+        role_name
+      );
+    END LOOP;
   END LOOP;
 END
-$application_grants$;
+$mcp_oauth_table_acl_reset$;
+
+DO $mcp_oauth_function_acl_reset$
+DECLARE
+  role_name text;
+  target record;
+BEGIN
+  FOR target IN
+    SELECT *
+    FROM (VALUES
+      (
+        'reap_mcp_oauth_state'::text,
+        'p_limit integer'::text,
+        'integer'::text
+      ),
+      (
+        'register_mcp_oauth_client'::text,
+        'p_client_id text, p_redirect_uris jsonb, p_client_name text, p_grant_types jsonb, p_response_types jsonb, p_registration_scope_hash text'::text,
+        'text, jsonb, text, jsonb, jsonb, text'::text
+      )
+    ) target_row(function_name, identity_arguments, call_arguments)
+  LOOP
+    FOR role_name IN
+      SELECT grantee_role.rolname
+      FROM pg_catalog.pg_proc procedure
+      INNER JOIN pg_catalog.pg_namespace namespace
+        ON namespace.oid = procedure.pronamespace
+      CROSS JOIN LATERAL pg_catalog.aclexplode(
+        coalesce(
+          procedure.proacl,
+          pg_catalog.acldefault('f', procedure.proowner)
+        )
+      ) privilege
+      INNER JOIN pg_catalog.pg_roles grantee_role
+        ON grantee_role.oid = privilege.grantee
+      WHERE namespace.nspname = 'opengeni_private'
+        AND procedure.proname = target.function_name
+        AND pg_catalog.pg_get_function_identity_arguments(procedure.oid) =
+          target.identity_arguments
+        AND privilege.grantee <> 0
+        AND privilege.grantee <> procedure.proowner
+      GROUP BY grantee_role.rolname
+      ORDER BY grantee_role.rolname COLLATE "C"
+    LOOP
+      EXECUTE pg_catalog.format(
+        'REVOKE ALL ON FUNCTION opengeni_private.%I(%s) FROM %I',
+        target.function_name,
+        target.call_arguments,
+        role_name
+      );
+    END LOOP;
+  END LOOP;
+END
+$mcp_oauth_function_acl_reset$;
+
+DO $mcp_oauth_runtime_drain_after$
+DECLARE
+  configured_roles jsonb := current_setting(
+    'opengeni.migration_application_roles', false
+  )::jsonb;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_stat_activity activity
+    JOIN jsonb_array_elements_text(configured_roles) roles(role_name)
+      ON roles.role_name = activity.usename
+    WHERE activity.datname = current_database()
+      AND activity.pid <> pg_backend_pid()
+  )
+  THEN
+    RAISE EXCEPTION
+      '0401 MCP OAuth activation observed a configured OpenGeni application database session after schema installation'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$mcp_oauth_runtime_drain_after$;

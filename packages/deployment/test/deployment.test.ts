@@ -5,6 +5,7 @@ import {
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
+  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
@@ -495,26 +496,31 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications only for the exact model-catalog maintenance cutover", () => {
-    const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-    });
-    const commands = plan.deployCommands.join("\n");
+  test("drains applications only for a supported exact maintenance cutover", () => {
+    for (const maintenanceCutover of [
+      MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
+    ]) {
+      const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: maintenanceCutover,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+      });
+      const commands = plan.deployCommands.join("\n");
 
-    expect(
-      plan.deployCommands.filter(
-        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      ),
-    ).toHaveLength(2);
-    expect(commands).toContain("--set migrations.enabled=false");
-    expect(commands).toContain("wait --for=delete pod");
-    expect(plan.notes.join("\n")).toContain(MODEL_CATALOG_MAINTENANCE_CUTOVER);
-    expect(() =>
-      stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      }),
-    ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
+      expect(
+        plan.deployCommands.filter(
+          (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+        ),
+      ).toHaveLength(2);
+      expect(commands).toContain("--set migrations.enabled=false");
+      expect(commands).toContain("wait --for=delete pod");
+      expect(plan.notes.join("\n")).toContain(maintenanceCutover);
+      expect(() =>
+        stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: maintenanceCutover,
+        }),
+      ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
+    }
     expect(() =>
       stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
         OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: "unknown-maintenance-cutover",

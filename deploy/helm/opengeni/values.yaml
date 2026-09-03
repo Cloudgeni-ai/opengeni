@@ -756,8 +756,10 @@ migrations:
     # application username/password consumed by db:provision-roles. During a
     # role rotation, include old and new identities in the login list only for
     # drain detection; the exact application username/password names the sole
-    # target role provisioned after migration. Production must not reuse the
-    # runtime Secret here; API/worker receive only the restricted URL.
+    # target role provisioned after migration. Maintenance migrations 0401 and
+    # 0402 require this complete list even when MCP OAuth stays disabled.
+    # Production must not reuse the runtime Secret here; API/worker receive only
+    # the restricted URL.
     # Empty reuse is retained only for disposable conformance fixtures.
     existingSecret: ""
   # The pre-upgrade hook is the rollout gate: schema first, then exact runtime

@@ -2,7 +2,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/testing";
 import postgres from "postgres";
-import { createDb, rotateMcpOAuthRefreshToken, type DbClient } from "../src";
+import { createDb, provisionRoles, rotateMcpOAuthRefreshToken, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
@@ -39,7 +39,17 @@ beforeAll(async () => {
     );
   `);
   await admin.begin(async (transaction) => {
+    await transaction`select set_config(
+      'opengeni.migration_application_roles',
+      '["opengeni_app"]',
+      true
+    )`;
     await transaction.unsafe(source);
+  });
+  await provisionRoles(blank.databaseUrl, {
+    appRole: "opengeni_app",
+    appPassword: blank.appPassword,
+    rlsStrategy: "force",
   });
   const appUrl = new URL(blank.databaseUrl);
   appUrl.username = "opengeni_app";
@@ -57,7 +67,14 @@ afterAll(async () => {
 
 describe("migration 0401 MCP OAuth authorization server", () => {
   test("stores only token hashes and binds every grant to workspace/account/resource", () => {
-    expect(source).toContain("-- deployment-mode: rolling");
+    expect(source).toContain("-- deployment-mode: maintenance");
+    expect(source).toContain("opengeni.migration_application_roles");
+    expect(source).toContain("mcp_oauth_runtime_drain_before");
+    expect(source).toContain("mcp_oauth_runtime_drain_after");
+    expect(source).toContain("pg_stat_activity");
+    expect(source.match(/0401 MCP OAuth activation/g)).toHaveLength(5);
+    expect(source).toContain("never restart a");
+    expect(source).toContain("pre-0401 image after commit");
     expect(source).toContain("CREATE TABLE mcp_oauth_clients");
     expect(source).toContain("CREATE TABLE mcp_oauth_authorization_codes");
     expect(source).toContain("CREATE TABLE mcp_oauth_refresh_tokens");
@@ -70,14 +87,16 @@ describe("migration 0401 MCP OAuth authorization server", () => {
     expect(source).toContain("tool_identities jsonb NOT NULL");
   });
 
-  test("keeps public access revoked and grants only configured application roles", () => {
+  test("keeps public access revoked and defers the sole runtime grant to role provisioning", () => {
     expect(source).toContain("REVOKE ALL ON mcp_oauth_clients");
     expect(source).toContain("REVOKE ALL ON FUNCTION opengeni_private.reap_mcp_oauth_state");
-    expect(source).toContain("opengeni.migration_application_roles");
-    expect(source).toContain("GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE");
-    expect(source).toContain(
-      "GRANT EXECUTE ON FUNCTION opengeni_private.register_mcp_oauth_client",
-    );
+    expect(source).toContain("mcp_oauth_table_acl_reset");
+    expect(source).toContain("mcp_oauth_function_acl_reset");
+    expect(source).toContain("pg_catalog.aclexplode");
+    expect(source).toContain("migration_application_roles");
+    expect(source).toContain("db:provision-roles");
+    expect(source).not.toContain("DO $application_grants$");
+    expect(source).not.toContain("UNION SELECT 'opengeni_app'");
     for (const table of [
       "mcp_oauth_access_tokens",
       "mcp_oauth_authorization_codes",
