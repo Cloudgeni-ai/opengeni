@@ -412,6 +412,7 @@ import {
   SESSION_GOAL_CAP_PAUSED_REASON,
   SESSION_GOAL_CONTINUATION_EPOCH_RESET,
   SESSION_GOAL_HOLD_CLEARED,
+  SESSION_GOAL_SUPPRESSION_CLEARED,
   type SessionGoalAutoResumedByExternalInput,
 } from "./session-goal-pacing";
 
@@ -56502,6 +56503,7 @@ export async function upsertSessionGoal(
           versionAtLastContinuation: null,
           continuationWakeRevision: existing.continuationWakeRevision + 1,
           ...SESSION_GOAL_HOLD_CLEARED,
+          ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -57110,6 +57112,7 @@ export async function updateSessionGoal(
         ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
         ...SESSION_GOAL_HOLD_CLEARED,
+        ...SESSION_GOAL_SUPPRESSION_CLEARED,
         updatedAt: new Date(),
       })
       .where(
@@ -57464,6 +57467,7 @@ export async function updateSessionGoalWithEvent(
           objectiveRevision: existing.objectiveRevision + 1,
           // An applied semantic change supersedes any agent-declared hold.
           ...SESSION_GOAL_HOLD_CLEARED,
+          ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -57676,6 +57680,7 @@ export async function holdSessionGoalContinuationWithEvent(
           continuationHoldUntil: until,
           continuationHoldReason: input.reason,
           continuationHoldSetAt: now,
+          ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: now,
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -58146,6 +58151,7 @@ export async function setSessionGoalStatus(
         // Every lifecycle transition is newer truth than an agent-declared
         // goal_wait hold; a human redirect must never sit behind it.
         ...SESSION_GOAL_HOLD_CLEARED,
+        ...SESSION_GOAL_SUPPRESSION_CLEARED,
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
@@ -58508,15 +58514,9 @@ export async function evaluateGoalContinuation(
               "context_compaction_failed",
             )
           : false;
-        const codexFailoverExhausted = latestFinished
-          ? await turnHasFailureCodeTx(
-              tx as unknown as Database,
-              input.workspaceId,
-              input.sessionId,
-              latestFinished.id,
-              "codex_credential_failover_exhausted",
-            )
-          : false;
+        const codexFailoverExhausted =
+          row.continuationSuppressedTurnId !== null &&
+          row.continuationSuppressedTurnId === latestFinished?.id;
         // Some terminal failures make unchanged autonomous input unsafe:
         // checkpoint failure would repeat the same inference without durable
         // state, while bounded Codex failover exhaustion would create a fresh
@@ -58940,15 +58940,26 @@ export async function materializeGoalContinuation(
         // goal wake from equal revisions: that synthesized turn would reset
         // the per-turn failover budget. New pending input already won above,
         // and a later externally driven turn becomes the newest finished truth.
-        if (
-          await latestFinishedTurnHasFailureCodeTx(
-            tx,
-            input.workspaceId,
-            input.sessionId,
-            "codex_credential_failover_exhausted",
-          )
-        ) {
-          return { action: "none", events: [] } as const;
+        if (goalRead.continuationSuppressedTurnId) {
+          const [latestFinished] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            .orderBy(
+              desc(schema.sessionTurns.finishedAt),
+              desc(schema.sessionTurns.position),
+              desc(schema.sessionTurns.createdAt),
+            )
+            .limit(1);
+          if (latestFinished?.id === goalRead.continuationSuppressedTurnId) {
+            return { action: "none", events: [] } as const;
+          }
         }
 
         // A hold whose deadline has just passed is due now: the evaluation
@@ -66840,7 +66851,25 @@ export async function applySessionTurnSettlement(
           ),
         );
       // Supersession already has newer human/Agent direction waiting. It must
-      // not also arm an autonomous goal continuation behind that Steer.
+      // not also arm or suppress an autonomous goal continuation behind that
+      // Steer.
+      if (
+        terminal &&
+        input.turnStatus !== "superseded" &&
+        input.activeTurnId === null &&
+        input.suppressGoalContinuation
+      ) {
+        await tx
+          .update(schema.sessionGoals)
+          .set({ continuationSuppressedTurnId: input.turnId, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          );
+      }
       if (
         terminal &&
         input.turnStatus !== "superseded" &&
@@ -66851,6 +66880,7 @@ export async function applySessionTurnSettlement(
           .update(schema.sessionGoals)
           .set({
             continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+            ...SESSION_GOAL_SUPPRESSION_CLEARED,
             updatedAt: now,
           })
           .where(

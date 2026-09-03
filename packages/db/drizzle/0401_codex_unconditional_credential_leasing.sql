@@ -63,6 +63,7 @@ $codex_unconditional_leasing_runtime_drain_before_lock$;
 
 LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE;
 
 DO $codex_unconditional_leasing_runtime_drain_after_lock$
 DECLARE
@@ -84,6 +85,11 @@ BEGIN
   END IF;
 END
 $codex_unconditional_leasing_runtime_drain_after_lock$;
+
+-- Preserve an active goal without allowing an unchanged bounded Codex
+-- failover failure to synthesize a fresh turn and reset its per-turn budget.
+ALTER TABLE session_goals
+  ADD COLUMN IF NOT EXISTS continuation_suppressed_turn_id uuid;
 
 ALTER TABLE organization_codex_rotation_settings
   DROP COLUMN IF EXISTS lease_rotation_enabled;

@@ -7658,6 +7658,10 @@ export const sessionGoals = pgTable(
     })
       .notNull()
       .default(0),
+    // A terminal condition can keep the goal active while making unchanged
+    // autonomous input unsafe. The fence is honored only while this remains
+    // the newest finished turn; newer work or a goal mutation clears it.
+    continuationSuppressedTurnId: uuid("continuation_suppressed_turn_id"),
     // Agent-declared continuation hold (`goal_wait`, migration 0317). Honored
     // only while `continuationHoldTurnId` is still the latest finished turn and
     // the deadline has not passed; it never consumes the wake/observed ledger.

@@ -1038,6 +1038,13 @@ describe("durable active-goal wake", () => {
     });
 
     expect(settled.action).toBe("settled");
+    const [suppression] = await shared.admin<
+      Array<{ continuation_suppressed_turn_id: string | null }>
+    >`
+      select continuation_suppressed_turn_id
+      from session_goals
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
+    expect(suppression?.continuation_suppressed_turn_id).toBe(ctx.turn.id);
     expect(await counts(ctx)).toEqual({
       autoContinuations: 0,
       wakeRevision: 0,
@@ -1090,6 +1097,42 @@ describe("durable active-goal wake", () => {
       }),
     ).toEqual({ decision: "queue" });
     expect((await materialize(ctx)).action).toBe("queue");
+
+    const humanAttemptId = crypto.randomUUID();
+    const humanClaim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: humanAttemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(humanClaim.action).toBe("claimed");
+    if (humanClaim.action !== "claimed") throw new Error("new human work was not claimed");
+    expect(humanClaim.turn.source).toBe("user");
+    const humanSettled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      turnId: humanClaim.turn.id,
+      triggerEventId: humanClaim.turn.triggerEventId,
+      attemptId: humanAttemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { reason: "new_external_work" } }],
+    });
+    expect(humanSettled.action).toBe("settled");
+    const [rearmed] = await shared.admin<
+      Array<{
+        continuation_suppressed_turn_id: string | null;
+        continuation_wake_revision: string | number;
+      }>
+    >`
+      select continuation_suppressed_turn_id, continuation_wake_revision
+      from session_goals
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
+    expect(rearmed?.continuation_suppressed_turn_id).toBeNull();
+    expect(Number(rearmed?.continuation_wake_revision)).toBe(1);
+    expect((await materialize(ctx)).action).toBe("continue");
   });
 
   test("concurrent evaluators and a lost COMMIT response materialize one update, event, and usage row", async () => {

@@ -29,7 +29,7 @@ describe("migration 0401 unconditional Codex credential leasing", () => {
     await owned?.release();
   }, 120_000);
 
-  test("is maintenance-classified and drops only the temporary cutover columns", async () => {
+  test("is maintenance-classified, adds the goal fence, and drops the temporary columns", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
     expect(source).toContain("opengeni.migration_application_roles");
@@ -39,6 +39,10 @@ describe("migration 0401 unconditional Codex credential leasing", () => {
       "LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE",
     );
     expect(source).toContain("LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain(
+      "ALTER TABLE session_goals\n  ADD COLUMN IF NOT EXISTS continuation_suppressed_turn_id uuid",
+    );
     expect(source).toContain(
       "ALTER TABLE organization_codex_rotation_settings\n  DROP COLUMN IF EXISTS lease_rotation_enabled",
     );
@@ -71,5 +75,12 @@ describe("migration 0401 unconditional Codex credential leasing", () => {
         column_default: "false",
       },
     ]);
+    const [goalFence] = await owned.admin<Array<{ data_type: string; is_nullable: string }>>`
+      select data_type, is_nullable
+      from information_schema.columns
+      where table_schema = 'public'
+        and table_name = 'session_goals'
+        and column_name = 'continuation_suppressed_turn_id'`;
+    expect(goalFence).toEqual({ data_type: "uuid", is_nullable: "YES" });
   });
 });

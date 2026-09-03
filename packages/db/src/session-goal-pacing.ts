@@ -10,6 +10,11 @@ export const SESSION_GOAL_HOLD_CLEARED = {
   continuationHoldSetAt: null,
 } as const;
 
+/** Clear a terminal unchanged-input continuation fence after newer goal truth. */
+export const SESSION_GOAL_SUPPRESSION_CLEARED = {
+  continuationSuppressedTurnId: null,
+} as const;
+
 /** The pause reason written when a per-goal or deployment continuation ceiling is reached. */
 export const SESSION_GOAL_CAP_PAUSED_REASON = "max_auto_continuations";
 
@@ -104,6 +109,7 @@ export async function autoResumeGoalPausedByCapInTransaction(
       continuationWakeRevision: existing.continuationWakeRevision + 1,
       ...SESSION_GOAL_CONTINUATION_EPOCH_RESET,
       ...SESSION_GOAL_HOLD_CLEARED,
+      ...SESSION_GOAL_SUPPRESSION_CLEARED,
       updatedAt: input.now,
     })
     .where(eq(schema.sessionGoals.id, existing.id))

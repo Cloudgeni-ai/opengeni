@@ -313,7 +313,10 @@ explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
 bounded by pool size so a malformed classification cannot walk forever; a stale
 holder cannot quarantine a credential or settle the turn. Reaching the bound is
 a terminal result for that accepted turn and explicitly suppresses an active
-goal's autonomous continuation wake, so another synthesized turn cannot reset
+goal's autonomous continuation wake. The goal row fences that suppression to
+the exact exhausted turn; evaluation and invariant repair keep unchanged input
+inert, while a later human, API, machine-input, or goal mutation becomes newer
+truth and proceeds normally. Another synthesized turn therefore cannot reset
 the per-turn counter without new external work.
 
 If no alternate is eligible, or rotation/manual-pin policy forbids leaving the
