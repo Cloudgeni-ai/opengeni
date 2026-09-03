@@ -2449,7 +2449,12 @@ export function buildOpenGeniAgent(
 
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
     editableArtifacts: editableArtifactToolsAvailable,
-    sites: siteAuthoringToolsAvailable,
+    // Connected Machine attempts execute the Site tools through the frozen
+    // gateway, but the machine does not receive this worker-bundled lazy Skill.
+    // Do not advertise an entry whose load path cannot exist there.
+    sites:
+      siteAuthoringToolsAvailable &&
+      (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
     // A connected machine owns its filesystem, and its session deliberately
     // does not materialize host-local lazy entries. Advertising this bundled
     // skill there makes load_skill report a path that does not exist. Keep the

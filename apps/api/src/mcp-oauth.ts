@@ -11,6 +11,7 @@ import {
   McpOAuthProtectedResourceMetadata,
   McpOAuthTokenResponse,
   type AccessGrant,
+  type ToolGatewayCatalog,
   type ToolGatewayIdentity,
 } from "@opengeni/contracts";
 import {
@@ -168,7 +169,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         codeChallenge: requireCodeChallenge(query),
         state: boundedState(query.get("state")),
         permissions: grant.permissions,
-        toolIdentities: prepared.toolGatewayCatalog.entries.map((entry) => entry.identity),
+        toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
     } finally {
@@ -331,6 +332,10 @@ export function mcpOAuthBearerToken(request: Request): string | null {
 
 export function isMcpOAuthResourcePath(pathname: string): boolean {
   return WORKSPACE_MCP_PATH.test(pathname);
+}
+
+export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): ToolGatewayIdentity[] {
+  return catalog.entries.map((entry) => entry.identity);
 }
 
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {

@@ -15,6 +15,10 @@ The public MCP authorization server is disabled by default. Enable it only in
 managed or local product-access mode with
 `OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
 `OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
+Generated runtime env and Helm artifacts carry the explicit enable switch and
+`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
+URL a required artifact input and rejects configured product-access profiles
+before deployment.
 
 The deployment then publishes authorization-server and protected-resource
 metadata, public Dynamic Client Registration, and authorization-code/token

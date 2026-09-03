@@ -349,7 +349,9 @@ The product runtime packages this guidance as the native tool-bound
 `artifacts_create` is present; an edit session admits it only when both
 `artifacts_get_source` and `artifacts_publish` are present. Repository-local
 `.agents/skills` is only the reviewed source copy, not the product activation
-mechanism.
+mechanism. Connected Machine attempts keep the same frozen Site tool surface,
+but do not advertise this worker-bundled filesystem Skill until its files have
+an explicit machine-delivery path.
 
 Generated types improve authoring but do not grant access. The server remains
 authoritative if a viewer lacks a required permission or connection, or if the

@@ -11,6 +11,7 @@ import {
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
 import {
+  FIRST_PARTY_MCP_TOOL_NAMES,
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
   ToolGatewayApprovalRequest,
@@ -18,6 +19,7 @@ import {
   ToolGatewayDeclarationsResponse,
   type AccessGrant,
   type ToolGatewayCatalog,
+  type ToolGatewayIdentity,
   type ToolRef,
 } from "@opengeni/contracts";
 import {
@@ -55,6 +57,7 @@ import {
   ToolGatewayToolNotFoundError,
   digestCanonicalJson,
   generateToolGatewayDeclarations,
+  type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 
@@ -253,16 +256,7 @@ async function prepareWorkspaceToolGatewayForGrant(
       workspaceToolGateway: {
         requireApproval: (entry, _caller, context) =>
           entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
-        ...(allowedIdentities
-          ? {
-              filterDefinition: (definition) =>
-                allowedIdentities.some(
-                  (identity) =>
-                    identity.serverId === definition.identity.serverId &&
-                    identity.toolName === definition.identity.toolName,
-                ),
-            }
-          : {}),
+        filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
       },
     },
   );
@@ -275,6 +269,31 @@ async function prepareWorkspaceToolGatewayForGrant(
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
   };
+}
+
+export function workspaceToolGatewayDefinitionFilter(
+  settings: Pick<Settings, "allowedFirstPartyMcpTools">,
+  allowedIdentities?: readonly ToolGatewayIdentity[],
+): (definition: ToolGatewayDefinition) => boolean {
+  const allowedFirstPartyTools: ReadonlySet<string> = new Set(
+    settings.allowedFirstPartyMcpTools ?? FIRST_PARTY_MCP_TOOL_NAMES,
+  );
+  const frozenIdentityKeys = allowedIdentities
+    ? new Set(allowedIdentities.map(workspaceToolGatewayIdentityKey))
+    : null;
+  return (definition) => {
+    if (
+      definition.identity.serverId === "opengeni" &&
+      !allowedFirstPartyTools.has(definition.identity.toolName)
+    ) {
+      return false;
+    }
+    return frozenIdentityKeys?.has(workspaceToolGatewayIdentityKey(definition.identity)) ?? true;
+  };
+}
+
+function workspaceToolGatewayIdentityKey(identity: ToolGatewayIdentity): string {
+  return JSON.stringify([identity.serverId, identity.toolName]);
 }
 
 export function workspaceToolGatewaySettingsForGrant(

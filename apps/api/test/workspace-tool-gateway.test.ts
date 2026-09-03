@@ -1,15 +1,20 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, test } from "bun:test";
+import type { MCPServer } from "@openai/agents";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
+import { testSettings } from "@opengeni/testing";
 import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
+import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
 import {
   buildWorkspaceToolGatewayMcpServer,
   approveWorkspaceToolGatewayCall,
   callWorkspaceToolGateway,
   requireWorkspaceToolGatewayGrant,
+  workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
@@ -78,7 +83,126 @@ function preparedGateway(
   };
 }
 
+async function policyCeilingGateway(
+  calls: Array<{ serverId: string; toolName: string }>,
+): Promise<PreparedWorkspaceToolGateway> {
+  const toolsByServer = {
+    opengeni: ["session_get", "session_create"],
+    files: ["files_get_download_url"],
+    docs: ["search_documents"],
+  } as const;
+  const settings = testSettings({
+    allowedFirstPartyMcpTools: ["session_get"],
+    mcpServers: Object.keys(toolsByServer).map((id) => ({
+      id,
+      url: `https://${id}.example.test/mcp`,
+      cacheToolsList: true,
+    })),
+  });
+  const localMcpServers = Object.entries(toolsByServer).map(([serverId, toolNames]) => ({
+    id: serverId,
+    server: {
+      name: `${serverId}-gateway-policy-test`,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return toolNames.map((toolName) => ({
+          name: toolName,
+          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+        }));
+      },
+      async callTool(toolName) {
+        calls.push({ serverId, toolName });
+        return [{ type: "text" as const, text: `${serverId}:${toolName}` }];
+      },
+      async invalidateToolsCache() {},
+    } satisfies MCPServer,
+  }));
+  const prepared = await prepareWorkspaceToolGatewayTools(
+    settings,
+    settings.mcpServers.map((server) => ({ kind: "mcp" as const, id: server.id })),
+    {
+      accountId,
+      workspaceId,
+      subjectId,
+      localMcpServers,
+      workspaceToolGateway: {
+        createdAt: new Date("2026-09-03T00:00:00.000Z"),
+        filterDefinition: workspaceToolGatewayDefinitionFilter(settings, [
+          { serverId: "opengeni", toolName: "session_get" },
+          { serverId: "opengeni", toolName: "session_create" },
+          { serverId: "files", toolName: "files_get_download_url" },
+          { serverId: "docs", toolName: "search_documents" },
+        ]),
+      },
+    },
+  );
+  if (!prepared.toolGateway || !prepared.toolGatewayCatalog) {
+    await prepared.close();
+    throw new Error("test gateway preparation failed");
+  }
+  return {
+    toolGateway: prepared.toolGateway,
+    toolGatewayCatalog: prepared.toolGatewayCatalog,
+    close: prepared.close,
+  };
+}
+
 describe("workspace tool gateway adapters", () => {
+  test("enforces the first-party ceiling across the production HTTP, MCP, and consent assembly", async () => {
+    const calls: Array<{ serverId: string; toolName: string }> = [];
+    const prepared = await policyCeilingGateway(calls);
+    const access = grant({
+      permissions: ["workspace:read", "documents:search", "files:read"],
+    });
+    const identities = [
+      { serverId: "opengeni", toolName: "session_get" },
+      { serverId: "files", toolName: "files_get_download_url" },
+      { serverId: "docs", toolName: "search_documents" },
+    ];
+    expect(prepared.toolGatewayCatalog.entries.map((entry) => entry.identity)).toEqual(identities);
+    expect(mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog)).toEqual(identities);
+
+    const server = buildWorkspaceToolGatewayMcpServer(prepared, access);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "workspace-tool-gateway-policy-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      expect((await client.listTools()).tools.map((tool) => tool.name)).toEqual([
+        "opengeni__session_get",
+        "files__files_get_download_url",
+        "docs__search_documents",
+      ]);
+      await client.callTool({ name: "opengeni__session_get", arguments: {} });
+      await expect(
+        client.callTool({ name: "opengeni__session_create", arguments: {} }),
+      ).rejects.toThrow("Tool is not present in the active gateway catalog");
+
+      await callWorkspaceToolGateway(prepared, access, {
+        operationId: "33333333-3333-4333-8333-333333333333",
+        catalogDigest: prepared.toolGatewayCatalog.digest,
+        identity: { serverId: "files", toolName: "files_get_download_url" },
+        arguments: {},
+      });
+      await expect(
+        callWorkspaceToolGateway(prepared, access, {
+          operationId: "44444444-4444-4444-8444-444444444444",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "opengeni", toolName: "session_create" },
+          arguments: {},
+        }),
+      ).rejects.toMatchObject({ status: 404 });
+      expect(calls).toEqual([
+        { serverId: "opengeni", toolName: "session_get" },
+        { serverId: "files", toolName: "files_get_download_url" },
+      ]);
+    } finally {
+      await Promise.allSettled([client.close(), server.close(), prepared.close()]);
+    }
+  });
+
   test("publishes and executes the same callable catalog through MCP and HTTP", async () => {
     const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
     const prepared = preparedGateway(calls);

@@ -16,6 +16,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV,
+  MCP_OAUTH_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -295,6 +296,51 @@ describe("deployment contract", () => {
     expect(vars).toContain("OPENGENI_PRODUCT_ACCESS_MODE");
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_BACKEND");
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
+  });
+
+  test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
+    const enabledEnv = {
+      OPENGENI_MCP_OAUTH_ENABLED: "true",
+      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
+    };
+    const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
+    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+      expect(enabledVars).toContain(key);
+    }
+    expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const enabled = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      enabledEnv,
+    );
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const missingOrigin = generateRuntimeArtifacts(
+      deploymentProfiles["local-compose"],
+      {},
+      {
+        OPENGENI_MCP_OAUTH_ENABLED: "true",
+      },
+    );
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
+    expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("rejects MCP OAuth artifacts for configured product-access deployments", () => {
+    const env = { OPENGENI_MCP_OAUTH_ENABLED: "true" };
+    expect(() => requiredRuntimeEnvVars(deploymentProfiles["azure-managed"], env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
+    expect(() => generateRuntimeArtifacts(deploymentProfiles["azure-managed"], {}, env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
   });
 
   test("lists native cloud storage environment variables without static key assumptions", () => {

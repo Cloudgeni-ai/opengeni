@@ -10364,6 +10364,27 @@ describe("runtime Skill activation", () => {
     ).not.toContain("opengeni-sites");
   });
 
+  test("does not advertise the worker-bundled Site Skill on Connected Machine attempts", () => {
+    const createCatalog = siteAttemptToolCatalog(["artifacts_create"]);
+    expect(hasCanonicalSiteAuthoringToolSurface(createCatalog)).toBe(true);
+
+    for (const settings of [
+      testSettings({ sandboxBackend: "selfhosted" }),
+      testSettings({ sandboxBackend: "docker" }),
+    ]) {
+      expect(
+        indexedSkillNames(
+          buildOpenGeniAgent(settings, [], {
+            attemptToolCatalog: createCatalog,
+            activeSandboxBackend: "selfhosted",
+            sandboxWorkspaceRoot: "/srv/opengeni-connected-machine",
+          }),
+          emptyManifest,
+        ),
+      ).not.toContain("opengeni-sites");
+    }
+  });
+
   test("artifact skills follow the exact tool catalog, independently of local runtime support", () => {
     const settings = testSettings({ sandboxBackend: "docker" });
     expect(() =>
