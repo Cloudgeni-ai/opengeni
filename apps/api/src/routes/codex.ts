@@ -1124,6 +1124,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       upserted: Awaited<ReturnType<typeof upsertCodexSubscriptionCredential>>;
       isActive: boolean;
     }>(db, { workspaceId, reason: "codex_credential_connected" }, async (tx) => {
+      // The capacity mutation holds the source lock before entering this callback.
+      const sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource(tx, workspaceId);
       const upserted = await upsertCodexSubscriptionCredential(tx, {
         accountId: grant.accountId,
         workspaceId,
@@ -1151,12 +1153,12 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       await ensureCodexRotationSettings(tx, grant.accountId, workspaceId);
       await setInitialActiveCodexCredential(tx, workspaceId, upserted.id);
-      const source = await getWorkspaceCodexSubscriptionSource(tx, workspaceId);
       await setWorkspaceCodexSubscriptionModeInTransaction(tx, {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
-        mode: source.workspaceKind === "personal" ? "automatic" : "workspace",
+        mode: sourceBeforeConnect.workspaceKind === "personal" ? "automatic" : "workspace",
+        effectiveSourceBeforeMutation: sourceBeforeConnect.effectiveSource,
       });
       const rotation = await getCodexRotationSettings(tx, workspaceId);
       return {
@@ -1166,6 +1168,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         changed: true,
       };
+    }).catch((error: unknown) => {
+      const cause = (error as { cause?: unknown } | null)?.cause;
+      const message =
+        cause instanceof Error ? cause.message : error instanceof Error ? error.message : "";
+      if (message.includes("active turns are using it")) {
+        throw new HTTPException(409, { message });
+      }
+      throw error;
     });
     const { upserted, isActive } = mutation.result;
     if (upserted.kind === "unresolved_redemption") {
