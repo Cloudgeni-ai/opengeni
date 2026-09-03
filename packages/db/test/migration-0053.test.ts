@@ -4,9 +4,10 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { sql } from "drizzle-orm";
 
 import { selectCodexCredentialLeaseForTurn } from "../../../apps/worker/src/activities/codex-rotation";
-import { acquireCodexCredentialLease, createDb } from "../src/index";
+import { acquireCodexCredentialLease, createDb, withSessionActivityRlsContext } from "../src/index";
 import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -132,14 +133,20 @@ describe("migration 0053 (Codex credential leases)", () => {
       });
 
       await migrate(databaseUrl);
+      client = createDb(databaseUrl, { max: 2 });
 
       const attemptId = crypto.randomUUID();
       const dispatchId = `migration-0053:${attemptId}`;
       const workflowRunId = `run:${attemptId}`;
-      await admin.begin(async (transaction) => {
-        await transaction`set constraints all deferred`;
-        await transaction`select set_config('opengeni.session_inference_claim', '1', true)`;
-        await transaction`
+      await withSessionActivityRlsContext(
+        client.db,
+        { accountId: account!.id, workspaceId: workspace!.id },
+        async (transaction) => {
+          await transaction.execute(sql`set constraints all deferred`);
+          await transaction.execute(
+            sql`select set_config('opengeni.session_inference_claim', '1', true)`,
+          );
+          await transaction.execute(sql`
           update session_turns
           set status = 'running', execution_generation = 1,
               active_attempt_id = ${attemptId},
@@ -150,12 +157,12 @@ describe("migration 0053 (Codex credential leases)", () => {
                   'triggerEventId', ${triggerEventId}::uuid
                 )
               )
-          where id = ${turnId}`;
-        await transaction`
+          where id = ${turnId}`);
+          await transaction.execute(sql`
           update sessions
           set status = 'running', active_turn_id = ${turnId}, updated_at = now()
-          where id = ${sessionId}`;
-        await transaction`
+          where id = ${sessionId}`);
+          await transaction.execute(sql`
           insert into session_turn_attempts (
             id, account_id, workspace_id, session_id, turn_id, execution_generation,
             state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
@@ -164,8 +171,9 @@ describe("migration 0053 (Codex credential leases)", () => {
             ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 1,
             'running', 'lease-foundation-workflow', ${workflowRunId}, ${dispatchId}, 0,
             '{}'::jsonb
-          )`;
-      });
+          )`);
+        },
+      );
 
       const retiredColumns = await admin<{ column_name: string }[]>`
         select column_name from information_schema.columns
@@ -183,7 +191,6 @@ describe("migration 0053 (Codex credential leases)", () => {
         rotation_enabled: false,
       });
 
-      client = createDb(databaseUrl, { max: 2 });
       const leased = await acquireCodexCredentialLease(
         client.db,
         {
