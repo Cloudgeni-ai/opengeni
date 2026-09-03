@@ -4100,6 +4100,12 @@
       }
     }
   }
+:where(.og-root).focus-visible\:outline-none,:where(.og-root) .focus-visible\:outline-none {
+    &:focus-visible {
+      --tw-outline-style: none;
+      outline-style: none;
+    }
+  }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {
     &:focus-visible {
       --tw-ring-inset: inset;
