@@ -67,10 +67,11 @@ describe("Workspace switcher trigger in Chromium", () => {
       "Product Testing",
       "Research Sandbox",
       "New workspace…",
+      "New organization…",
+      "Organization settings",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
-    expect(await page.getByRole("menuitem", { name: "Settings", exact: true }).count()).toBe(0);
     const personalMenuItem = page.getByRole("menuitem", {
       name: "Personal workspace Personal workspace",
       exact: true,
@@ -91,6 +92,27 @@ describe("Workspace switcher trigger in Chromium", () => {
 
     await page.getByRole("menuitem", { name: "Product Testing", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("Opened Product Testing");
+  }, 15_000);
+
+  test("the combined menu exposes organization creation and settings to pointer and keyboard", async () => {
+    await page.goto(`${baseUrl}/test/workspace-switcher-trigger.html`, {
+      waitUntil: "networkidle",
+    });
+    const trigger = page.locator('button[aria-label$="Switch workspace"]');
+
+    await trigger.click();
+    await page.getByRole("menuitem", { name: "New organization…", exact: true }).click();
+    expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
+
+    const organizationSettings = page.getByRole("menuitem", {
+      name: "Organization settings",
+      exact: true,
+    });
+    await organizationSettings.focus();
+    await organizationSettings.press("Enter");
+    expect(await page.getByTestId("route-path").textContent()).toBe(
+      "/workspaces/workspace-personal/organization",
+    );
   }, 15_000);
 
   test("the narrow expanded rail contains the same trigger without page overflow", async () => {
