@@ -9,6 +9,7 @@ import {
   type SessionEventStreamTransport,
   type StreamSessionEventsOptions,
 } from "./stream";
+import type { SessionModelContextResponse } from "./model-context";
 import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
@@ -1061,6 +1062,17 @@ export class OpenGeniClient {
       path,
       (signal) => this.requestJson<Session>("GET", path, undefined, {}, { signal }),
       options,
+    );
+  }
+
+  /** Exact model-visible prefix captured from the latest provider request. */
+  async getSessionModelContext(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionModelContextResponse> {
+    return await this.requestJson<SessionModelContextResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-context`,
     );
   }
 

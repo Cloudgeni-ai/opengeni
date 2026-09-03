@@ -113,6 +113,7 @@ import {
   getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
+  getLatestSessionModelContext,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
   getSessionGoalRevision,
@@ -888,6 +889,32 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(
+      await getLatestSessionModelContext(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/background-commands", async (c) => {
@@ -4350,6 +4377,7 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (suffix === "/model-context" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }
