@@ -644,6 +644,48 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       continue;
     }
+    if (peek.kind === "input-wait") {
+      const settlement = await activity.settleSessionInputWait({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waitTurnId: peek.waitTurnId,
+        disposition: peek.disposition,
+      });
+      if (settlement.action !== "held") continue;
+
+      // The durable outbox owns the long deadline. Keep this workflow run open
+      // only for the same bounded close-race window used by ordinary idle; any
+      // signal is a hint to re-peek PostgreSQL truth.
+      const seenWakeups = wakeups;
+      const seenApprovalWakeups = approvalWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      const woke = await condition(
+        () =>
+          interruptionWakeups !== seenInterruptionWakeups ||
+          wakeups !== seenWakeups ||
+          approvalWakeups !== seenApprovalWakeups,
+        "5s",
+      );
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (
+        finalPeek.kind !== "input-wait" ||
+        finalPeek.disposition !== "held" ||
+        finalPeek.waitTurnId !== peek.waitTurnId
+      ) {
+        continue;
+      }
+      await activity.markSessionIdle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
+    }
     if (peek.kind === "idle") {
       let continuation: activities.MaybeContinueGoalResult = { action: "none" };
       try {
@@ -663,11 +705,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
       if (continuation.action === "continue" || continuation.action === "queue") continue;
-      // `none`, `paused`, `held`, and `deferred` all close this run below. A
-      // held or deferred (idle-backoff) goal keeps its durable obligation
-      // armed; the delayed wake-outbox row at the hold/pacing deadline, pending
-      // machine input, a human prompt, or any producer's signalWithStart
-      // restarts the workflow. No Temporal timer is used for pacing.
+      // `none`, `paused`, and `deferred` all close this run below. A deferred
+      // idle-backoff goal keeps its durable obligation armed; the delayed
+      // wake-outbox row at the pacing deadline or any producer signal restarts
+      // the workflow. No Temporal timer is used for pacing.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;

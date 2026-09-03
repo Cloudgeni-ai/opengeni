@@ -3989,6 +3989,14 @@ export const sessions = pgTable(
     nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
+    // Session-scoped out-of-turn wait (`wait_for_input`). The exact declaring
+    // turn and absolute deadline are durable PostgreSQL authority; workflow
+    // signals and timers only nudge reevaluation. A newer finished turn or a
+    // terminal timeout input retires all four fields together.
+    inputWaitTurnId: uuid("input_wait_turn_id"),
+    inputWaitUntil: timestamp("input_wait_until", { withTimezone: true }),
+    inputWaitReason: text("input_wait_reason"),
+    inputWaitSetAt: timestamp("input_wait_set_at", { withTimezone: true }),
     // Actual input tokens reported for the latest authoritative ordinary model
     // call. Compaction/context clearing invalidates it to null; local history
     // estimates must never be stored here.
@@ -4145,6 +4153,21 @@ export const sessions = pgTable(
       "sessions_initial_model_context_check",
       sql`${table.initialModelContext} is null
         or opengeni_private.model_context_value_valid(${table.initialModelContext})`,
+    ),
+    inputWaitValid: check(
+      "sessions_input_wait_check",
+      sql`(
+          ${table.inputWaitTurnId} is null
+          and ${table.inputWaitUntil} is null
+          and ${table.inputWaitReason} is null
+          and ${table.inputWaitSetAt} is null
+        ) or (
+          ${table.inputWaitTurnId} is not null
+          and ${table.inputWaitUntil} is not null
+          and ${table.inputWaitReason} is not null
+          and octet_length(btrim(${table.inputWaitReason})) between 1 and 2048
+          and ${table.inputWaitSetAt} is not null
+        )`,
     ),
   }),
 );
@@ -7177,6 +7200,9 @@ export const sessionCommandReceipts = pgTable(
     goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
       .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
       .where(sql`${table.action} = 'goal.update'`),
+    waitForInputOperation: uniqueIndex("session_command_receipts_wait_for_input_operation_uq")
+      .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
+      .where(sql`${table.action} = 'session.wait_for_input'`),
     actorValid: check(
       "session_command_receipts_actor_check",
       sql`(
@@ -7451,7 +7477,7 @@ export const sessionSystemUpdates = pgTable(
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -7663,19 +7689,6 @@ export const sessionGoals = pgTable(
     })
       .notNull()
       .default(0),
-    // Agent-declared continuation hold (`goal_wait`, migration 0317). Honored
-    // only while `continuationHoldTurnId` is still the latest finished turn and
-    // the deadline has not passed; it never consumes the wake/observed ledger.
-    // Any newer finished turn, a passed deadline, or a goal mutation clears all
-    // four columns together.
-    continuationHoldTurnId: uuid("continuation_hold_turn_id"),
-    continuationHoldUntil: timestamp("continuation_hold_until", {
-      withTimezone: true,
-    }),
-    continuationHoldReason: text("continuation_hold_reason"),
-    continuationHoldSetAt: timestamp("continuation_hold_set_at", {
-      withTimezone: true,
-    }),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -7693,10 +7706,6 @@ export const sessionGoals = pgTable(
     continuationRevisionValid: check(
       "session_goals_continuation_revision_check",
       sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
-    ),
-    continuationHoldValid: check(
-      "session_goals_continuation_hold_check",
-      sql`(${table.continuationHoldTurnId} is null and ${table.continuationHoldUntil} is null and ${table.continuationHoldReason} is null and ${table.continuationHoldSetAt} is null) or (${table.continuationHoldTurnId} is not null and ${table.continuationHoldUntil} is not null and ${table.continuationHoldSetAt} is not null and (${table.continuationHoldReason} is null or octet_length(${table.continuationHoldReason}) <= 2048))`,
     ),
   }),
 );

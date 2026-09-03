@@ -760,7 +760,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
-  "goal_wait",
+  "wait_for_input",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -800,6 +800,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_get",
   "session_events",
   "session_wait",
+  "command_wait",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -5996,7 +5997,7 @@ export const SessionGoalContinuation = z.object({
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
   /**
-   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
    * human can see why the goal is waiting and until when (`nextAttemptAt`).
    * Null for every other state; omitted by older servers.
    */
@@ -7493,6 +7494,8 @@ export const SessionSystemUpdateKind = z.enum([
   "goal_continuation",
   "agent_message",
   "agent_steer_instruction",
+  "session_wait_timeout",
+  "background_command_result",
   "child_terminal_result",
   "media_generation_result",
   "child_requires_action",
@@ -7506,7 +7509,7 @@ export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 /**
  * How a newly pending machine input affects an idle receiving session.
  * `immediate` registers a workflow wake in the same commit (the behaviour of
- * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * every pre-existing kind) and ends a `wait_for_input` hold at the next idle
  * evaluation; `deferred` only inserts the durable pending row plus its
  * `system.update.pending` event and is delivered coalesced with the next claim.
  */
@@ -7520,6 +7523,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   goal_continuation: "immediate",
   agent_message: "immediate",
   agent_steer_instruction: "immediate",
+  session_wait_timeout: "immediate",
+  background_command_result: "immediate",
   child_terminal_result: "immediate",
   media_generation_result: "immediate",
   child_requires_action: "immediate",
@@ -7701,6 +7706,29 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("agent_steer_instruction"),
       instruction: z.string().min(1),
       operationId: z.string().uuid(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("session_wait_timeout"),
+      waitTurnId: z.string().uuid(),
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: boundedUtf8String(2 * 1024),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("background_command_result"),
+      commandId: z.string().uuid(),
+      state: z.enum(["exited", "lost"]),
+      exitCode: z.number().int().nullable(),
+      reason: boundedUtf8String(512),
+      outputLocator: z
+        .object({
+          eventType: z.literal("sandbox.command.output.delta"),
+          commandId: z.string().uuid(),
+        })
+        .strict(),
     })
     .passthrough(),
   z
@@ -12177,6 +12205,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -12382,6 +12412,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.command.backgrounded",
+    "session.wait.started",
+    "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",

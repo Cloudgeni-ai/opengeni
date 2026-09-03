@@ -613,6 +613,107 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
   });
 
+  test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "bun test --watch",
+    });
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const functionName = `fail_command_settlement_${suffix}`;
+    const triggerName = `fail_command_settlement_${suffix}`;
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([expect.objectContaining({ id: fixture.process.id, state: "running" })]);
+    await admin.unsafe(`
+      create function ${functionName}() returns trigger language plpgsql as $$
+      begin
+        raise exception 'forced command settlement failure';
+      end
+      $$;
+      create trigger ${triggerName}
+      before update on session_background_commands
+      for each row execute function ${functionName}();
+    `);
+
+    let settlementFailure: unknown;
+    try {
+      await settleRetainedProcess(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      });
+    } catch (error) {
+      settlementFailure = error;
+    } finally {
+      await admin.unsafe(`
+        drop trigger if exists ${triggerName} on session_background_commands;
+        drop function if exists ${functionName}();
+      `);
+    }
+    expect(settlementFailure).toBeInstanceOf(Error);
+    const failureMessages: string[] = [];
+    let currentFailure: unknown = settlementFailure;
+    while (currentFailure instanceof Error) {
+      failureMessages.push(currentFailure.message);
+      currentFailure = currentFailure.cause;
+    }
+    expect(failureMessages.join("\n")).toContain("forced command settlement failure");
+
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+    });
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([expect.objectContaining({ id: fixture.process.id, state: "running" })]);
+
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(settled.settled).toBe(true);
+    expect(settled.backgroundCommandEvents.map((event) => event.type)).toEqual([
+      "session.command.finished",
+      "system.update.pending",
+    ]);
+    const replay = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(settled.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(replay).toMatchObject({ settled: false, backgroundCommandEvents: [] });
+  });
+
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
     expect(
       classifyRetainedProcessPollResult(

@@ -2198,7 +2198,7 @@ function goalToolPreview(name: string, args: unknown): string | null {
     leaf !== "goal_update" &&
     leaf !== "goal_complete" &&
     leaf !== "goal_pause" &&
-    leaf !== "goal_wait"
+    leaf !== "wait_for_input"
   ) {
     return null;
   }

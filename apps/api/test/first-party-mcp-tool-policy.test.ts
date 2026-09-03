@@ -169,6 +169,17 @@ describe("first-party MCP tool visibility policy", () => {
     expect(registeredToolNames(server)).toEqual(["set_session_title"]);
   });
 
+  test("wait_for_input requires session control but not goal management", () => {
+    const waitOnly = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:control"], ["wait_for_input"]),
+    );
+    expect(registeredToolNames(waitOnly)).toEqual(["wait_for_input"]);
+
+    const goalOnly = buildOpenGeniMcpServer(deps(), grant(["goals:manage"], ["wait_for_input"]));
+    expect(registeredToolNames(goalOnly)).toEqual([]);
+  });
+
   test("the operator can stop exact-attempt work-claim mutations without deleting evidence", () => {
     const selected: FirstPartyMcpToolName[] = ["work_claim_upsert", "work_claim_release"];
     const enabled = buildOpenGeniMcpServer(deps(), grant(["sessions:control"], selected));
