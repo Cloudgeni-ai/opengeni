@@ -242,6 +242,12 @@ export async function probeMcpEndpoint(
       if (!(error instanceof McpOAuthDiscoveryError)) {
         if (error instanceof CatalogOAuthMetadataTransientError) throw error;
         if (
+          error instanceof DestinationPolicyError &&
+          (error.reason === "dns_failed" || error.reason === "dns_empty")
+        ) {
+          throw error;
+        }
+        if (
           !(error instanceof CatalogOAuthMetadataBrokenError) &&
           !(error instanceof DestinationPolicyError)
         ) {

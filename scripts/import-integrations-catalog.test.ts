@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DestinationPolicyError } from "../packages/network/src/index";
 import {
   CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
@@ -1180,6 +1181,51 @@ describe("integrations.sh MCP endpoint probe", () => {
       attempts.get("https://rate-limited.example/.well-known/oauth-authorization-server"),
     ).toBe(2);
     expect(sleeps).toEqual([10]);
+
+    for (const dnsReason of ["dns_failed", "dns_empty"] as const) {
+      const domain = dnsReason.replace("_", "-") + ".example";
+      const mcpUrl = `https://${domain}/mcp`;
+      const metadataUrl = `https://${domain}/.well-known/oauth-protected-resource/mcp`;
+      const dnsNormalized = normalizeCatalogSnapshot(
+        {
+          generatedAt: "2026-09-03T00:00:00.000Z",
+          importRows: [row({ domain, mcpUrl })],
+        },
+        { allowUnprobedCandidates: true },
+      );
+      const dnsAttempts = new Map<string, number>();
+      const dnsSleeps: number[] = [];
+      const dnsRetried = await probeCatalogSnapshot(dnsNormalized, {
+        concurrency: 1,
+        transientRetries: 1,
+        transientRetryDelayMs: 10,
+        sleep: async (ms) => {
+          dnsSleeps.push(ms);
+        },
+        fetchImpl: async (input) => {
+          const url = String(input);
+          const attempt = (dnsAttempts.get(url) ?? 0) + 1;
+          dnsAttempts.set(url, attempt);
+          if (url === mcpUrl) {
+            return new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": "Bearer" },
+            });
+          }
+          if (url === metadataUrl && attempt === 1) {
+            throw new DestinationPolicyError(
+              dnsReason,
+              `catalog OAuth metadata hostname returned ${dnsReason}`,
+            );
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      expect(dnsRetried.rows.map((candidate) => candidate.domain)).toEqual([domain]);
+      expect(dnsAttempts.get(mcpUrl)).toBe(2);
+      expect(dnsAttempts.get(metadataUrl)).toBe(2);
+      expect(dnsSleeps).toEqual([10]);
+    }
   });
 
   test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {
