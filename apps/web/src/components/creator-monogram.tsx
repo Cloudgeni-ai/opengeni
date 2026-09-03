@@ -13,9 +13,12 @@ import { cn } from "@/lib/utils";
 export function CreatorMonogram({
   createdBy,
   className,
+  showTitle = true,
 }: {
   createdBy: CreatorRef;
   className?: string;
+  /** Disable the native delayed tooltip when a richer parent hover surface owns the label. */
+  showTitle?: boolean;
 }) {
   const initials = creatorInitials(createdBy);
   if (!initials) return null;
@@ -23,7 +26,7 @@ export function CreatorMonogram({
     <span
       data-creator-monogram
       aria-hidden="true"
-      title={creatorLabel(createdBy)}
+      title={showTitle ? creatorLabel(createdBy) : undefined}
       className={cn(
         "flex size-4 shrink-0 items-center justify-center rounded-full text-[8px] font-semibold leading-none text-white/90",
         className,

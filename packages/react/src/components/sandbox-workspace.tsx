@@ -102,6 +102,12 @@ function isWorkbenchSurface(value: string): value is SandboxWorkspaceSurface {
   return (WORKBENCH_SURFACES as readonly string[]).includes(value);
 }
 
+function isCanonicalAbsoluteSandboxPath(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const portable = value.replaceAll("\\", "/");
+  return portable.startsWith("/") || /^[A-Za-z]:\//u.test(portable);
+}
+
 function sourceDrivenDefaultTab(
   hasChanges: boolean,
   changesEnabled: boolean,
@@ -468,6 +474,9 @@ export function useSandboxWorkspaceTabs(
   // is still pending.
   const liveIoLiveness = liveness ?? null;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
+  const fileSystemRoute = capabilities
+    ? { epoch: capabilities.leaseEpoch, root: capabilities.FileSystem.root }
+    : undefined;
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
   // must not offer create/rename/delete/edit affordances — you cannot mutate a
@@ -575,9 +584,10 @@ export function useSandboxWorkspaceTabs(
     active: filesActive && !turnInFlight,
     // A deliberate canonical absolute-path open browses in the selected target's
     // advertised namespace, so the authoritative tree and link share exact paths.
-    ...(requestedFilePath?.startsWith("/") && capabilities?.FileSystem.root
+    ...(isCanonicalAbsoluteSandboxPath(requestedFilePath) && capabilities?.FileSystem.root
       ? { rootPath: capabilities.FileSystem.root }
       : {}),
+    ...(fileSystemRoute ? { route: fileSystemRoute } : {}),
     repoPaths,
     liveness: liveIoLiveness,
     capture: captureState.capture,

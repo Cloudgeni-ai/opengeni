@@ -520,6 +520,7 @@ export function wrapChannelABoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    bindActiveRouteOnFirstResolve: true,
     defaultResolved: {
       session: established.session as RoutableBackendSession,
       sandboxId: null,

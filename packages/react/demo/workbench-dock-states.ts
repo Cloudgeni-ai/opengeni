@@ -823,9 +823,15 @@ export class DockStateMockClient extends MockOpenGeniClient {
   // make the header chip lie about a live box once the Files tab warms it).
   override async attachViewer(): Promise<Awaited<ReturnType<MockOpenGeniClient["attachViewer"]>>> {
     const base = await super.attachViewer();
-    const liveness =
-      this.state.capabilities === "error" ? "cold" : this.state.capabilities.liveness;
-    return { ...base, liveness };
+    if (this.state.capabilities === "error") return { ...base, liveness: "cold" };
+    // The holder and descriptor describe one exact lease. Regressing the mock
+    // holder to the base fixture's epoch 0 makes a legitimate Files route fence
+    // reset the editor after its first edit intent.
+    return {
+      ...base,
+      liveness: this.state.capabilities.liveness,
+      leaseEpoch: this.state.capabilities.leaseEpoch,
+    };
   }
 
   override async getWorkspaceCapture(): Promise<GetWorkspaceCaptureResponse> {
