@@ -28,6 +28,9 @@ export type ModelPreparationPhase =
   | "runner_before_mcp_tools"
   | "mcp_tools_snapshot"
   | "mcp_tools_before_input_filter"
+  | "mcp_tools_before_repository_skill_discovery"
+  | "repository_skill_discovery"
+  | "repository_skill_discovery_before_input_filter"
   | "input_filter_base"
   | "input_filter_genesis"
   | "input_filter_host"
@@ -50,9 +53,11 @@ type ModelPreparationObservation = {
   observer: ModelPreparationObserver;
   startedAt: number;
   mcpToolsEndedAt?: number;
+  repositorySkillDiscoveryEndedAt?: number;
   firstSandboxOperationEndedAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
+  postRepositorySkillDiscoveryGapRecorded: boolean;
   sdkAfterSandboxRecorded: boolean;
 };
 
@@ -102,6 +107,7 @@ export function withModelPreparationObserver<T>(
           startedAt: performance.now(),
           runnerGapRecorded: false,
           postMcpGapRecorded: false,
+          postRepositorySkillDiscoveryGapRecorded: false,
           sdkAfterSandboxRecorded: false,
         },
         callback,
@@ -175,7 +181,47 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
         });
       }
       observation.mcpToolsEndedAt = endedAt;
+    } else if (measurement.phase === "repository_skill_discovery") {
+      if (!observation.postMcpGapRecorded && observation.mcpToolsEndedAt !== undefined) {
+        observation.postMcpGapRecorded = true;
+        observation.observer({
+          phase: "mcp_tools_before_repository_skill_discovery",
+          outcome: measurement.outcome,
+          durationSeconds: Math.max(0, startedAt - observation.mcpToolsEndedAt) / 1_000,
+        });
+      }
+      // The first routed sandbox operation normally occurs inside repository
+      // skill discovery. Prevent the later SDK catch-all from charging the rest
+      // of this named phase to sdk_after_first_sandbox_operation as well.
+      if (
+        !observation.sdkAfterSandboxRecorded &&
+        observation.firstSandboxOperationEndedAt !== undefined
+      ) {
+        observation.sdkAfterSandboxRecorded = true;
+        const sdkGapSeconds =
+          Math.max(0, startedAt - observation.firstSandboxOperationEndedAt) / 1_000;
+        if (sdkGapSeconds > 0) {
+          observation.observer({
+            phase: "sdk_after_first_sandbox_operation",
+            outcome: measurement.outcome,
+            durationSeconds: sdkGapSeconds,
+          });
+        }
+      }
+      observation.repositorySkillDiscoveryEndedAt = endedAt;
     } else if (measurement.phase.startsWith("input_filter_")) {
+      if (
+        !observation.postRepositorySkillDiscoveryGapRecorded &&
+        observation.repositorySkillDiscoveryEndedAt !== undefined
+      ) {
+        observation.postRepositorySkillDiscoveryGapRecorded = true;
+        observation.observer({
+          phase: "repository_skill_discovery_before_input_filter",
+          outcome: measurement.outcome,
+          durationSeconds:
+            Math.max(0, startedAt - observation.repositorySkillDiscoveryEndedAt) / 1_000,
+        });
+      }
       if (!observation.postMcpGapRecorded && observation.mcpToolsEndedAt !== undefined) {
         observation.postMcpGapRecorded = true;
         observation.observer({

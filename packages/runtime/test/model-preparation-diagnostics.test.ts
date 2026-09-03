@@ -47,6 +47,53 @@ describe("model preparation diagnostics", () => {
     expect(measurements.some(({ phase }) => phase === "runner_before_mcp_tools")).toBe(false);
   });
 
+  test("attributes repository skill discovery without charging it to surrounding SDK gaps", () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+
+    withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () => {
+        recordModelPreparationMeasurement({
+          phase: "mcp_tools_snapshot",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+        markModelPreparationFirstSandboxOperation(0.001);
+        recordModelPreparationMeasurement({
+          phase: "repository_skill_discovery",
+          outcome: "completed",
+          durationSeconds: 0.01,
+          count: 10,
+        });
+        recordModelPreparationMeasurement({
+          phase: "input_filter_base",
+          outcome: "completed",
+          durationSeconds: 0,
+        });
+      },
+    );
+
+    expect(measurements.map(({ phase }) => phase)).toEqual([
+      "runner_before_mcp_tools",
+      "mcp_tools_snapshot",
+      "mcp_tools_before_repository_skill_discovery",
+      "repository_skill_discovery",
+      "repository_skill_discovery_before_input_filter",
+      "input_filter_base",
+    ]);
+    expect(measurements.find(({ phase }) => phase === "repository_skill_discovery")).toMatchObject({
+      outcome: "completed",
+      count: 10,
+    });
+    expect(
+      measurements.some(
+        ({ phase }) =>
+          phase === "sdk_after_first_sandbox_operation" ||
+          phase === "mcp_tools_before_input_filter",
+      ),
+    ).toBe(false);
+  });
+
   test("manifest inventory remains fail-open when iteration throws", () => {
     const measurements: ModelPreparationMeasurement[] = [];
     const manifest = {

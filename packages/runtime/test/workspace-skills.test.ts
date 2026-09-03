@@ -4,6 +4,10 @@ import { Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { testSettings } from "@opengeni/testing";
 
 import { buildAgentCapabilities, repositoryWorkspaceSkillPathsOption } from "../src";
+import {
+  type ModelPreparationMeasurement,
+  withModelPreparationObserver,
+} from "../src/model-preparation-diagnostics";
 import { discoverWorkspaceSkills } from "../src/workspace-skills";
 
 describe("workspace repository skills", () => {
@@ -69,6 +73,54 @@ description: Prepare a safe release.
       name: "release",
       description: "Prepare a safe release.",
       path: ".agents/skills/release/SKILL.md",
+    });
+  });
+
+  test("records repository skill discovery duration and search-root count", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    const session = fakeSession({
+      ".agents/skills/release/SKILL.md":
+        "---\nname: release\ndescription: Prepare a safe release.\n---\n",
+    });
+
+    await withModelPreparationObserver(
+      (measurement) => measurements.push(measurement),
+      () =>
+        discoverWorkspaceSkills(session, [
+          { path: ".agents/skills", source: ".agents/skills" },
+          { path: ".claude/skills", source: ".claude/skills" },
+        ]),
+    );
+
+    expect(measurements).toHaveLength(1);
+    expect(measurements[0]).toMatchObject({
+      phase: "repository_skill_discovery",
+      outcome: "completed",
+      count: 2,
+    });
+    expect(measurements[0]!.durationSeconds).toBeGreaterThanOrEqual(0);
+  });
+
+  test("records failed repository skill discovery", async () => {
+    const measurements: ModelPreparationMeasurement[] = [];
+    const session = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+    } as SandboxSessionLike;
+
+    await expect(
+      withModelPreparationObserver(
+        (measurement) => measurements.push(measurement),
+        () =>
+          discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: ".agents/skills" }]),
+      ),
+    ).rejects.toThrow(
+      "Workspace skill discovery requires sandbox listDir() and readFile() support",
+    );
+    expect(measurements).toHaveLength(1);
+    expect(measurements[0]).toMatchObject({
+      phase: "repository_skill_discovery",
+      outcome: "failed",
+      count: 1,
     });
   });
 
