@@ -128,9 +128,7 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe(
-      "0403_tool_gateway_approval_capabilities.sql",
-    );
+    expect(completeSourceContract.latestMigration).toBe("0404_workspace_html_site_sources.sql");
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );
@@ -144,7 +142,7 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
     );
     const workspaceHtmlSiteSourcesIndex = completeSourceContract.migrations.findIndex(
-      (migration) => migration.path === "0401_workspace_html_site_sources.sql",
+      (migration) => migration.path === "0404_workspace_html_site_sources.sql",
     );
     const mcpOauthAuthorizationServerIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0402_mcp_oauth_authorization_server.sql",
@@ -158,9 +156,11 @@ describe("release schema contract", () => {
     expect(sessionAttemptModelContextSnapshotsIndex).toBeGreaterThan(
       additionalManagedOrganizationCreationIndex,
     );
-    expect(workspaceHtmlSiteSourcesIndex).toBeGreaterThan(sessionAttemptModelContextSnapshotsIndex);
-    expect(mcpOauthAuthorizationServerIndex).toBeGreaterThan(workspaceHtmlSiteSourcesIndex);
+    expect(mcpOauthAuthorizationServerIndex).toBeGreaterThan(
+      sessionAttemptModelContextSnapshotsIndex,
+    );
     expect(toolGatewayApprovalCapabilitiesIndex).toBeGreaterThan(mcpOauthAuthorizationServerIndex);
+    expect(workspaceHtmlSiteSourcesIndex).toBeGreaterThan(toolGatewayApprovalCapabilitiesIndex);
     expect(
       completeSourceContract.migrations.find(
         (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
@@ -189,6 +189,23 @@ describe("release schema contract", () => {
 
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
+    const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0404_workspace_html_site_sources.sql",
+    );
+    const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
+    const workspaceHtmlSiteSourcesMigrationIndex =
+      completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
+        (migration) => migration.path === "0404_workspace_html_site_sources.sql",
+      );
+    completeSourceContract = workspaceHtmlSiteSources
+      ? {
+          ...completeSourceContractWithWorkspaceHtmlSiteSources,
+          latestMigration:
+            completeSourceContractWithWorkspaceHtmlSiteSources.migrations[
+              workspaceHtmlSiteSourcesMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
+        }
+      : completeSourceContractWithWorkspaceHtmlSiteSources;
     const toolGatewayApprovalCapabilities = completeSourceContract.migrations.some(
       (migration) => migration.path === "0403_tool_gateway_approval_capabilities.sql",
     );
@@ -223,23 +240,6 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
         }
       : completeSourceContractWithMcpOauthAuthorizationServer;
-    const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0401_workspace_html_site_sources.sql",
-    );
-    const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
-    const workspaceHtmlSiteSourcesMigrationIndex =
-      completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
-        (migration) => migration.path === "0401_workspace_html_site_sources.sql",
-      );
-    completeSourceContract = workspaceHtmlSiteSources
-      ? {
-          ...completeSourceContractWithWorkspaceHtmlSiteSources,
-          latestMigration:
-            completeSourceContractWithWorkspaceHtmlSiteSources.migrations[
-              workspaceHtmlSiteSourcesMigrationIndex - 1
-            ]?.path ?? completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
-        }
-      : completeSourceContractWithWorkspaceHtmlSiteSources;
     const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
       (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
     );
@@ -466,12 +466,6 @@ describe("release schema contract", () => {
         latestMigration: "0396_model_call_equivalent_credit_cost.sql",
       };
     }
-    if (workspaceHtmlSiteSources) {
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0401_workspace_html_site_sources.sql",
-      };
-    }
     if (mcpOauthAuthorizationServer) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -482,6 +476,12 @@ describe("release schema contract", () => {
       completeSourceContract = {
         ...completeSourceContract,
         latestMigration: "0403_tool_gateway_approval_capabilities.sql",
+      };
+    }
+    if (workspaceHtmlSiteSources) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0404_workspace_html_site_sources.sql",
       };
     }
     const automaticSessionTitleMigrationPaths = new Set([
@@ -530,9 +530,9 @@ describe("release schema contract", () => {
       "0391_sandbox_provider_deadline_interaction_followup.sql",
       "0393_workspace_memory_and_learning_defaults.sql",
       "0396_model_call_equivalent_credit_cost.sql",
-      "0401_workspace_html_site_sources.sql",
       "0402_mcp_oauth_authorization_server.sql",
       "0403_tool_gateway_approval_capabilities.sql",
+      "0404_workspace_html_site_sources.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -709,14 +709,14 @@ describe("release schema contract", () => {
       ...(sessionAttemptModelContextSnapshots
         ? { latestMigration: "0400_session_attempt_model_context_snapshots.sql" }
         : {}),
-      ...(workspaceHtmlSiteSources
-        ? { latestMigration: "0401_workspace_html_site_sources.sql" }
-        : {}),
       ...(mcpOauthAuthorizationServer
         ? { latestMigration: "0402_mcp_oauth_authorization_server.sql" }
         : {}),
       ...(toolGatewayApprovalCapabilities
         ? { latestMigration: "0403_tool_gateway_approval_capabilities.sql" }
+        : {}),
+      ...(workspaceHtmlSiteSources
+        ? { latestMigration: "0404_workspace_html_site_sources.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -747,20 +747,20 @@ describe("release schema contract", () => {
         ? "0396_model_call_equivalent_credit_cost.sql"
         : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
-    expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
-      workspaceHtmlSiteSources
-        ? "0401_workspace_html_site_sources.sql"
-        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
-    );
     expect(completeSourceContractWithMcpOauthAuthorizationServer.latestMigration).toBe(
       mcpOauthAuthorizationServer
         ? "0402_mcp_oauth_authorization_server.sql"
-        : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
+        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration).toBe(
       toolGatewayApprovalCapabilities
         ? "0403_tool_gateway_approval_capabilities.sql"
         : completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
+    );
+    expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
+      workspaceHtmlSiteSources
+        ? "0404_workspace_html_site_sources.sql"
+        : completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration,
     );
   });
 
@@ -776,6 +776,23 @@ describe("release schema contract", () => {
       "0360_organization_identity_confirmation_prompt.sql",
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
+    const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0404_workspace_html_site_sources.sql",
+    );
+    const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
+    const workspaceHtmlSiteSourcesMigrationIndex =
+      completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
+        (migration) => migration.path === "0404_workspace_html_site_sources.sql",
+      );
+    completeSourceContract = workspaceHtmlSiteSources
+      ? {
+          ...completeSourceContractWithWorkspaceHtmlSiteSources,
+          latestMigration:
+            completeSourceContractWithWorkspaceHtmlSiteSources.migrations[
+              workspaceHtmlSiteSourcesMigrationIndex - 1
+            ]?.path ?? completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
+        }
+      : completeSourceContractWithWorkspaceHtmlSiteSources;
     const toolGatewayApprovalCapabilities = completeSourceContract.migrations.some(
       (migration) => migration.path === "0403_tool_gateway_approval_capabilities.sql",
     );
@@ -810,23 +827,6 @@ describe("release schema contract", () => {
             ]?.path ?? completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
         }
       : completeSourceContractWithMcpOauthAuthorizationServer;
-    const workspaceHtmlSiteSources = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0401_workspace_html_site_sources.sql",
-    );
-    const completeSourceContractWithWorkspaceHtmlSiteSources = completeSourceContract;
-    const workspaceHtmlSiteSourcesMigrationIndex =
-      completeSourceContractWithWorkspaceHtmlSiteSources.migrations.findIndex(
-        (migration) => migration.path === "0401_workspace_html_site_sources.sql",
-      );
-    completeSourceContract = workspaceHtmlSiteSources
-      ? {
-          ...completeSourceContractWithWorkspaceHtmlSiteSources,
-          latestMigration:
-            completeSourceContractWithWorkspaceHtmlSiteSources.migrations[
-              workspaceHtmlSiteSourcesMigrationIndex - 1
-            ]?.path ?? completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
-        }
-      : completeSourceContractWithWorkspaceHtmlSiteSources;
     const modelCallEquivalentCreditCost = completeSourceContract.migrations.some(
       (migration) => migration.path === "0396_model_call_equivalent_credit_cost.sql",
     );
@@ -1021,7 +1021,7 @@ describe("release schema contract", () => {
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0399_additional_managed_organization_creation.sql",
       "0400_session_attempt_model_context_snapshots.sql",
-      "0401_workspace_html_site_sources.sql",
+      "0404_workspace_html_site_sources.sql",
       "0402_mcp_oauth_authorization_server.sql",
       "0403_tool_gateway_approval_capabilities.sql",
     ].filter((path) =>
@@ -1219,12 +1219,6 @@ describe("release schema contract", () => {
         latestMigration: "0396_model_call_equivalent_credit_cost.sql",
       };
     }
-    if (workspaceHtmlSiteSources) {
-      completeSourceContract = {
-        ...completeSourceContract,
-        latestMigration: "0401_workspace_html_site_sources.sql",
-      };
-    }
     if (mcpOauthAuthorizationServer) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -1235,6 +1229,12 @@ describe("release schema contract", () => {
       completeSourceContract = {
         ...completeSourceContract,
         latestMigration: "0403_tool_gateway_approval_capabilities.sql",
+      };
+    }
+    if (workspaceHtmlSiteSources) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0404_workspace_html_site_sources.sql",
       };
     }
     expect(completeSourceContract).toMatchObject({
@@ -1405,14 +1405,14 @@ describe("release schema contract", () => {
       ...(modelCallEquivalentCreditCost
         ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
         : {}),
-      ...(workspaceHtmlSiteSources
-        ? { latestMigration: "0401_workspace_html_site_sources.sql" }
-        : {}),
       ...(mcpOauthAuthorizationServer
         ? { latestMigration: "0402_mcp_oauth_authorization_server.sql" }
         : {}),
       ...(toolGatewayApprovalCapabilities
         ? { latestMigration: "0403_tool_gateway_approval_capabilities.sql" }
+        : {}),
+      ...(workspaceHtmlSiteSources
+        ? { latestMigration: "0404_workspace_html_site_sources.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -1443,20 +1443,20 @@ describe("release schema contract", () => {
         ? "0396_model_call_equivalent_credit_cost.sql"
         : completeSourceContractWithSessionSelectedSkillActivation.latestMigration,
     );
-    expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
-      workspaceHtmlSiteSources
-        ? "0401_workspace_html_site_sources.sql"
-        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
-    );
     expect(completeSourceContractWithMcpOauthAuthorizationServer.latestMigration).toBe(
       mcpOauthAuthorizationServer
         ? "0402_mcp_oauth_authorization_server.sql"
-        : completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration,
+        : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration).toBe(
       toolGatewayApprovalCapabilities
         ? "0403_tool_gateway_approval_capabilities.sql"
         : completeSourceContractWithMcpOauthAuthorizationServer.latestMigration,
+    );
+    expect(completeSourceContractWithWorkspaceHtmlSiteSources.latestMigration).toBe(
+      workspaceHtmlSiteSources
+        ? "0404_workspace_html_site_sources.sql"
+        : completeSourceContractWithToolGatewayApprovalCapabilities.latestMigration,
     );
     expect(
       completeSourceContract.migrations.find(
