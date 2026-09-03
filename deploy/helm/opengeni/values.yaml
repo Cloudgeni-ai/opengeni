@@ -88,6 +88,11 @@ config:
   OPENGENI_AUTH_ALLOW_METRICS: "false"
   OPENGENI_WEB_ALLOWED_HOSTS: ""
   OPENGENI_PRODUCT_ACCESS_MODE: local
+  # Rolling-safe default. First deploy the compatible web handler, dedicated
+  # setup-account Ingress, and SPA query fallback everywhere. In a later
+  # release/config change, set this to "query" for mail-gateway-compatible
+  # invitation links. See docs/deployment.md before rollback.
+  OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
   # Canonical organization-tenancy authority activation. Pinned to the
   # reversible pre-activation posture so an upgrade can never cross the one-way
   # boundary implicitly. Flip to "true" only after proving the preconditions in
@@ -1014,13 +1019,13 @@ ingress:
   tls: []
   # Managed invitation emails use a query bearer because mail security
   # gateways may discard URL fragments. A separate exact route lets
-  # ingress-nginx disable access logging before the web process redirects the
-  # bearer into a browser-only fragment. Non-NGINX ingress controllers must
-  # supply an equivalent no-query-log annotation or edge policy.
+  # ingress-nginx disable access logs and request tracing before the web process
+  # redirects the bearer into a browser-only fragment. These two secure
+  # annotations are enforced by the template; this map is for additional
+  # deployment annotations. Non-NGINX/external edges need equivalent policy.
   setupAccountIngress:
     enabled: true
-    annotations:
-      nginx.ingress.kubernetes.io/enable-access-log: "false"
+    annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
   # (e.g. the preview environment, whose primary Ingress sits behind nginx

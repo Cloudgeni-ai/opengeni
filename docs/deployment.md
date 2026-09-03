@@ -574,16 +574,39 @@ configuration validation requires the provider key. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
-bearers are stable HMAC identities. Email links place the bearer in a bounded
-query parameter so mail security gateways preserve it; the production web
-handler immediately returns a no-store/no-referrer same-origin redirect into a
-browser fragment before loading the SPA. The setup shell is also no-store and
-no-referrer, and the SPA scrubs the fragment before API work. Configure edge
-and ingress access logging not to retain query strings for `/setup-account`.
-The managed Helm chart renders a dedicated exact ingress-nginx location with
-access logging disabled; deployments using another ingress or an additional
-edge must enforce the equivalent policy there. The database continues to retain
-only the bearer digest.
+bearers are stable HMAC identities. The repository-safe default,
+`OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=fragment`, preserves
+compatibility with pre-query web images. Query transport is a deliberate
+second-stage rollout because API and web replicas update independently:
+
+1. deploy the new chart/web image everywhere while the setting remains
+   `fragment`; verify every public web replica returns the protected
+   `/setup-account` behavior and the dedicated Ingress exists for every host
+   that routes to web;
+2. only after the web fleet converges, change the setting to `query` and roll
+   the API. Email links then use a bounded query parameter so mail security
+   gateways preserve it;
+3. before rolling web back to an image that predates query normalization,
+   restore `fragment` on every API replica, then wait until every previously
+   sent query link has expired or revoke/reissue those invitations. An
+   emergency rollback that skips this drain can strand live invitation links.
+
+The production web handler immediately returns a no-store/no-referrer
+same-origin relative redirect into a browser fragment before loading the SPA.
+The setup shell is also no-store and no-referrer, and the SPA accepts one
+canonical query bearer as a compatibility fallback, scrubs query and fragment
+before API work, and never stores the bearer. That SPA fallback supports Vite
+and generic static serving but does not make a rollback to an old SPA safe;
+follow the staged rollout above.
+
+The managed Helm chart renders a dedicated exact ingress-nginx location only
+for hosts that actually route to web and unconditionally disables both access
+logging and ingress-nginx OpenTelemetry tracing there. Do not remove those
+protections. An external load balancer, CDN, WAF, service mesh, analytics SDK,
+APM agent, non-NGINX ingress, or other edge can still retain the query URI or
+Referer; every such component must suppress query-bearing request telemetry for
+`/setup-account` before query transport is enabled. The database continues to
+retain only the bearer digest.
 
 The API records a durable attempt and `provider_started` marker before provider
 I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,

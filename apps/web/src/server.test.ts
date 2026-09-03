@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { createWebHandler, demoApiProxyFromEnvironment } from "./server";
 
 const roots: string[] = [];
+const VALID_SETUP_TOKEN = "A".repeat(43);
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -37,18 +38,18 @@ describe("production web handler", () => {
     const root = await fixture();
     const handler = createWebHandler(root);
     const redirect = await handler(
-      new Request("https://example.test/setup-account?preview=1&token=secret-bearer"),
+      new Request(`https://example.test/setup-account?preview=1&token=${VALID_SETUP_TOKEN}`),
     );
     expect(redirect.status).toBe(302);
     expect(redirect.headers.get("location")).toBe(
-      "https://example.test/setup-account?preview=1#token=secret-bearer",
+      `/setup-account?preview=1#token=${VALID_SETUP_TOKEN}`,
     );
     expect(redirect.headers.get("cache-control")).toBe("no-store");
     expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
     expect(redirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
 
     const shell = await handler(
-      new Request("https://example.test/setup-account#token=secret-bearer"),
+      new Request(`https://example.test/setup-account#token=${VALID_SETUP_TOKEN}`),
     );
     expect(shell.status).toBe(200);
     expect(shell.headers.get("cache-control")).toBe("no-store");
@@ -57,21 +58,47 @@ describe("production web handler", () => {
     expect(await shell.text()).toContain("OpenGeni");
   });
 
-  test("scrubs ambiguous or oversized setup query bearers without reflecting them", async () => {
+  test("keeps the setup redirect relative behind TLS termination", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root);
+    const redirect = await handler(
+      new Request(`http://web-internal:3000/setup-account?token=${VALID_SETUP_TOKEN}`, {
+        headers: {
+          host: "public.example.test",
+          "x-forwarded-host": "public.example.test",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("location")).toBe(`/setup-account#token=${VALID_SETUP_TOKEN}`);
+    expect(redirect.headers.get("location")).not.toContain("http://");
+    expect(redirect.headers.get("location")).not.toContain("web-internal");
+  });
+
+  test("scrubs malformed, ambiguous, or oversized setup query bearers without reflecting them", async () => {
     const root = await fixture();
     const handler = createWebHandler(root);
     const ambiguous = await handler(
       new Request("https://example.test/setup-account?token=first&token=second&preview=1"),
     );
     expect(ambiguous.status).toBe(302);
-    expect(ambiguous.headers.get("location")).toBe("https://example.test/setup-account?preview=1");
+    expect(ambiguous.headers.get("location")).toBe("/setup-account?preview=1");
     const oversizedToken = "x".repeat(2_049);
     const oversized = await handler(
       new Request(`https://example.test/setup-account?token=${oversizedToken}`),
     );
     expect(oversized.status).toBe(302);
-    expect(oversized.headers.get("location")).toBe("https://example.test/setup-account");
+    expect(oversized.headers.get("location")).toBe("/setup-account");
     expect(oversized.headers.get("location")).not.toContain(oversizedToken);
+    for (const malformedToken of ["not-base64url", "has space", "line%0Abreak", "A".repeat(42)]) {
+      const malformed = await handler(
+        new Request(`https://example.test/setup-account?preview=1&token=${malformedToken}`),
+      );
+      expect(malformed.status).toBe(302);
+      expect(malformed.headers.get("location")).toBe("/setup-account?preview=1");
+      expect(malformed.headers.get("location")).not.toContain(malformedToken);
+    }
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {

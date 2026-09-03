@@ -9,6 +9,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { storeOrganizationInvitationContinuation } from "@/lib/organization-invitation-continuation";
+import { setupAccountTokenFromUrl, takeBootstrappedSetupAccountToken } from "@/setup-account-token";
+
+export { setupAccountTokenFromUrl } from "@/setup-account-token";
 
 const MIN_PASSWORD_LENGTH = 8;
 const SETUP_TOKEN_REMOUNT_HANDOFF_MS = 30_000;
@@ -308,26 +311,16 @@ function titleCase(value: string): string {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`;
 }
 
-export function setupAccountTokenFromUrl(value: string): {
-  token: string | null;
-  scrubbedPath: string;
-} {
-  const url = new URL(value, "https://opengeni.invalid");
-  const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
-  const candidate = fragment.get("token");
-  const token = candidate && candidate.length <= 2_048 ? candidate : null;
-  fragment.delete("token");
-  url.searchParams.delete("token");
-  const remainingFragment = fragment.toString();
-  return {
-    token,
-    scrubbedPath: `${url.pathname}${url.search}${remainingFragment ? `#${remainingFragment}` : ""}`,
-  };
-}
-
 function consumeSetupAccountTokenFromBrowserLocation(): string | null {
   if (typeof window === "undefined") return null;
-  const { token, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  const bootstrappedToken = takeBootstrappedSetupAccountToken(window);
+  const { token: locationToken, scrubbedPath } = setupAccountTokenFromUrl(window.location.href);
+  const candidates = [bootstrappedToken, locationToken].filter(
+    (candidate): candidate is string => candidate !== null,
+  );
+  const token = candidates.length === 1 ? candidates[0]! : null;
+  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
   if (token) {
     cachePendingBrowserSetupToken(window.location.pathname, token);
   }
@@ -336,8 +329,6 @@ function consumeSetupAccountTokenFromBrowserLocation(): string | null {
     (pendingBrowserSetupToken?.pathname === window.location.pathname
       ? pendingBrowserSetupToken.token
       : null);
-  const currentPath = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (scrubbedPath !== currentPath) window.history.replaceState(null, "", scrubbedPath);
   return availableToken;
 }
 

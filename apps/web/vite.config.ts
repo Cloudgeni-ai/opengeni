@@ -1,3 +1,4 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +7,10 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import {
+  SETUP_ACCOUNT_RESPONSE_HEADERS,
+  setupAccountQueryRedirectLocation,
+} from "./src/setup-account-token";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +21,30 @@ const browserExtensionArchive = path.resolve(
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
+
+function redirectSetupAccountQueryBearer(
+  request: IncomingMessage,
+  response: ServerResponse,
+  next: () => void,
+): void {
+  if (request.method !== "GET" && request.method !== "HEAD") return next();
+  let location: string | null;
+  try {
+    location = setupAccountQueryRedirectLocation(
+      new URL(request.url ?? "/", "http://opengeni.invalid"),
+    );
+  } catch {
+    return next();
+  }
+  if (!location) return next();
+  response.statusCode = 302;
+  response.setHeader("cache-control", "no-store");
+  for (const [name, value] of Object.entries(SETUP_ACCOUNT_RESPONSE_HEADERS)) {
+    response.setHeader(name, value);
+  }
+  response.setHeader("location", location);
+  response.end();
+}
 
 export default defineConfig({
   build: {
@@ -202,6 +231,15 @@ export default defineConfig({
     viteReact(),
     tailwindcss(),
     safeReactHmrPlugin(),
+    {
+      name: "setup-account-query-bearer-redirect",
+      configureServer(server) {
+        server.middlewares.use(redirectSetupAccountQueryBearer);
+      },
+      configurePreviewServer(server) {
+        server.middlewares.use(redirectSetupAccountQueryBearer);
+      },
+    },
     {
       name: "opengeni-browser-extension-archive",
       configureServer(server) {

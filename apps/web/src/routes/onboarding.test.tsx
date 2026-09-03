@@ -64,6 +64,9 @@ mock.module("@tanstack/react-router", () => ({
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
+const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
+const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
+const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -689,15 +692,30 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("accepts setup authority only from a bounded fragment and scrubs every URL token", () => {
+  test("accepts one canonical fragment or compatibility query bearer and scrubs every URL token", () => {
     expect(
       setupAccountTokenFromUrl(
-        "https://opengeni.test/setup-account?token=logged&preview=1#token=fragment-secret&tab=invite",
+        `https://opengeni.test/setup-account?preview=1#token=${VALID_FRAGMENT_SETUP_TOKEN}&tab=invite`,
       ),
     ).toEqual({
-      token: "fragment-secret",
+      token: VALID_FRAGMENT_SETUP_TOKEN,
       scrubbedPath: "/setup-account?preview=1#tab=invite",
     });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&preview=1`,
+      ),
+    ).toEqual({ token: VALID_QUERY_SETUP_TOKEN, scrubbedPath: "/setup-account?preview=1" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}#token=${VALID_FRAGMENT_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&token=${VALID_QUERY_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
     expect(setupAccountTokenFromUrl("https://opengeni.test/setup-account?token=logged")).toEqual({
       token: null,
       scrubbedPath: "/setup-account",
@@ -705,6 +723,21 @@ describe("organization onboarding UI", () => {
     expect(
       setupAccountTokenFromUrl(`https://opengeni.test/setup-account#token=${"x".repeat(2_049)}`),
     ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+  });
+
+  test("takes the early bootstrap bearer exactly once and revalidates its canonical shape", () => {
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: VALID_QUERY_SETUP_TOKEN,
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBe(VALID_QUERY_SETUP_TOKEN);
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: "malformed",
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    expect("__OPENGENI_SETUP_ACCOUNT_TOKEN__" in window).toBe(false);
   });
 
   test("keeps the scrubbed fragment bearer across the lazy-route history remount only until preview settles", async () => {
@@ -720,14 +753,14 @@ describe("organization onboarding UI", () => {
         }),
     );
     window.history.replaceState(null, "", "/setup-account");
-    window.location.hash = "token=lazy-remount-fragment-token";
-    expect(window.location.hash).toBe("#token=lazy-remount-fragment-token");
+    window.location.hash = `token=${VALID_FRAGMENT_SETUP_TOKEN}`;
+    expect(window.location.hash).toBe(`#token=${VALID_FRAGMENT_SETUP_TOKEN}`);
 
     const firstContainer = document.createElement("div");
     document.body.appendChild(firstContainer);
     const firstRoot = createRoot(firstContainer);
     await act(async () => firstRoot.render(<SetupAccountRoute />));
-    expect(window.location.href).not.toContain("lazy-remount-fragment-token");
+    expect(window.location.href).not.toContain(VALID_FRAGMENT_SETUP_TOKEN);
     expect(firstContainer.textContent).toContain("Checking this invitation");
     await act(async () => firstRoot.unmount());
     firstContainer.remove();
@@ -739,8 +772,8 @@ describe("organization onboarding UI", () => {
       await act(async () => secondRoot.render(<SetupAccountRoute />));
       expect(secondContainer.textContent).toContain("Checking this invitation");
       expect(previewSetup.mock.calls.slice(-2).map(([request]) => request)).toEqual([
-        { token: "lazy-remount-fragment-token" },
-        { token: "lazy-remount-fragment-token" },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
       ]);
       await act(async () =>
         resolveSecondPreview({

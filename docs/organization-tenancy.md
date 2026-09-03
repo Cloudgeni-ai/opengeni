@@ -700,19 +700,26 @@ setup link. Provider availability is deliberately not part of that
 configuration precondition; the durable journal records the resulting delivery
 outcome.
 
-Email links carry the bearer in a bounded `token` query parameter because mail
-security and click-tracking gateways may discard URL fragments. The production
-web handler accepts that parameter only on the exact `/setup-account` route,
-returns a no-store/no-referrer same-origin redirect that moves it into the URL
-fragment, and serves the setup shell under the same response protections. The
-SPA continues to accept setup authority only from the fragment and scrubs it
-before API work or durable browser storage. Malformed, duplicate, and oversized
-query values are removed without being reflected. Edge and ingress access logs
-must not retain query strings for this route: the managed Helm chart renders a
-dedicated exact ingress-nginx location with access logging disabled, and any
-external edge must provide an equivalent policy. The database still stores
-only the bearer digest and the completion path remains single-use and
-expiry-bounded.
+Email links support a bounded `token` query parameter because mail security and
+click-tracking gateways may discard URL fragments, but generation remains on
+the rolling-safe `fragment` default until an operator completes the web-first
+cutover in `docs/deployment.md`. The production web handler accepts the query
+parameter only on the exact `/setup-account` route, requires one canonical
+base64url HMAC-SHA256 bearer, and returns a no-store/no-referrer same-origin
+relative redirect that moves it into the URL fragment. The setup shell carries
+the same response protections. The SPA accepts one canonical token from either
+the fragment or, for compatibility/static serving, the query; it rejects
+cross-source or same-source duplicates and scrubs both locations before API
+work or durable browser storage. Malformed and oversized values are removed
+without reflection.
+
+The managed chart emits the dedicated setup Ingress only for configured hosts
+with a web route and disables both ingress-nginx access logs and OpenTelemetry
+tracing for that exact location. External load balancers, CDNs, WAFs, service
+meshes, APM/analytics systems, non-NGINX ingresses, and other edges remain an
+operator responsibility: they must not retain the query URI or Referer. The
+database still stores only the bearer digest and the completion path remains
+single-use and expiry-bounded.
 
 `POST /v1/auth/organization-setup/preview` accepts the same signed-out bearer
 under the setup abuse limiter and returns only its frozen safe invitation

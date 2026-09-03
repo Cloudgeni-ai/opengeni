@@ -1,19 +1,18 @@
 import { readFileSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
+import {
+  SETUP_ACCOUNT_PATH,
+  SETUP_ACCOUNT_RESPONSE_HEADERS,
+  setupAccountQueryRedirectLocation,
+} from "./setup-account-token";
+
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "0.0.0.0";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
-const SETUP_ACCOUNT_PATH = "/setup-account";
-const SETUP_TOKEN_PARAMETER = "token";
-const SETUP_TOKEN_MAX_LENGTH = 2_048;
-const SETUP_ACCOUNT_RESPONSE_HEADERS = {
-  "referrer-policy": "no-referrer",
-  "x-robots-tag": "noindex, nofollow",
-} as const;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -96,23 +95,17 @@ export function createWebHandler(
  * even when malformed so it is never reflected indefinitely.
  */
 function redirectSetupAccountQueryBearer(url: URL): Response | null {
-  if (url.pathname !== SETUP_ACCOUNT_PATH || !url.searchParams.has(SETUP_TOKEN_PARAMETER)) {
-    return null;
-  }
-  const candidates = url.searchParams.getAll(SETUP_TOKEN_PARAMETER);
-  const candidate = candidates.length === 1 ? candidates[0] : null;
-  const location = new URL(url);
-  location.searchParams.delete(SETUP_TOKEN_PARAMETER);
-  location.hash = "";
-  if (candidate && candidate.length <= SETUP_TOKEN_MAX_LENGTH) {
-    location.hash = new URLSearchParams({ [SETUP_TOKEN_PARAMETER]: candidate }).toString();
-  }
+  const location = setupAccountQueryRedirectLocation(url);
+  if (!location) return null;
+  // Keep the redirect same-origin without trusting the backend request scheme
+  // or Host header. TLS-terminating proxies commonly present an internal HTTP
+  // URL here even though the browser used HTTPS.
   return new Response(null, {
     status: 302,
     headers: {
       ...SETUP_ACCOUNT_RESPONSE_HEADERS,
       "cache-control": "no-store",
-      location: location.toString(),
+      location,
     },
   });
 }
