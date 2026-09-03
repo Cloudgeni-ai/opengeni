@@ -35873,61 +35873,63 @@ function sessionEventProjectionSelect(
         end`;
 
   return {
-    id: sql<string>`${source.id}`,
-    workspaceId: sql<string>`${source.workspaceId}`,
-    sessionId: sql<string>`${source.sessionId}`,
-    sequence: sql<number>`${source.sequence}`,
+    id: sql<string>`${source.id}`.as("id"),
+    workspaceId: sql<string>`${source.workspaceId}`.as("workspace_id"),
+    sessionId: sql<string>`${source.sessionId}`.as("session_id"),
+    sequence: sql<number>`${source.sequence}`.as("sequence"),
     type:
       payloadMode === "full" && databaseReadProjection === false
-        ? sql<string>`${source.type}`
+        ? sql<string>`${source.type}`.as("type")
         : payloadMode === "full" && databaseReadProjection !== true
           ? sql<string>`case
             when ${databaseReadProjection} then ${projectedType}
             else ${source.type}
-          end`
-          : projectedType,
-    payload: selectedPayload,
+          end`.as("type")
+          : projectedType.as("type"),
+    payload: selectedPayload.as("payload"),
     payloadCodecVersion:
       payloadMode === "full" && databaseReadProjection === false
-        ? sql<number | null>`${source.payloadCodecVersion}`
+        ? sql<number | null>`${source.payloadCodecVersion}`.as("payload_codec_version")
         : payloadMode === "full" && databaseReadProjection !== true
           ? sql<number | null>`case
             when ${databaseReadProjection} then null
             else ${source.payloadCodecVersion}
-          end`
-          : sql<number | null>`null`,
-    occurredAt: sql<Date>`${source.occurredAt}`,
+          end`.as("payload_codec_version")
+          : sql<number | null>`null`.as("payload_codec_version"),
+    occurredAt: sql<Date>`${source.occurredAt}`.as("occurred_at"),
     clientEventId:
       payloadMode === "full" && databaseReadProjection === false
-        ? sql<string | null>`${source.clientEventId}`
+        ? sql<string | null>`${source.clientEventId}`.as("client_event_id")
         : payloadMode === "full" && databaseReadProjection !== true
           ? sql<string | null>`case
             when ${databaseReadProjection} then ${projectedClientEventId}
             else ${source.clientEventId}
-          end`
-          : projectedClientEventId,
-    turnId: sql<string | null>`${source.turnId}`,
-    turnGeneration: sql<number | null>`${source.turnGeneration}`,
-    turnAttemptId: sql<string | null>`${source.turnAttemptId}`,
+          end`.as("client_event_id")
+          : projectedClientEventId.as("client_event_id"),
+    turnId: sql<string | null>`${source.turnId}`.as("turn_id"),
+    turnGeneration: sql<number | null>`${source.turnGeneration}`.as("turn_generation"),
+    turnAttemptId: sql<string | null>`${source.turnAttemptId}`.as("turn_attempt_id"),
     turnAssociation:
       payloadMode === "full" && databaseReadProjection === false
-        ? sql<string | null>`${source.turnAssociation}`
+        ? sql<string | null>`${source.turnAssociation}`.as("turn_association")
         : payloadMode === "full" && databaseReadProjection !== true
           ? sql<string | null>`case
             when ${databaseReadProjection} then ${projectedTurnAssociation}
             else ${source.turnAssociation}
-          end`
-          : projectedTurnAssociation,
-    duplicateOfEventId: sql<string | null>`${source.duplicateOfEventId}`,
+          end`.as("turn_association")
+          : projectedTurnAssociation.as("turn_association"),
+    duplicateOfEventId: sql<string | null>`${source.duplicateOfEventId}`.as(
+      "duplicate_of_event_id",
+    ),
     duplicateReason:
       payloadMode === "full" && databaseReadProjection === false
-        ? sql<string | null>`${source.duplicateReason}`
+        ? sql<string | null>`${source.duplicateReason}`.as("duplicate_reason")
         : payloadMode === "full" && databaseReadProjection !== true
           ? sql<string | null>`case
             when ${databaseReadProjection} then ${projectedDuplicateReason}
             else ${source.duplicateReason}
-          end`
-          : projectedDuplicateReason,
+          end`.as("duplicate_reason")
+          : projectedDuplicateReason.as("duplicate_reason"),
   };
 }
 
