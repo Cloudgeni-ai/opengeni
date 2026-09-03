@@ -649,7 +649,20 @@ describe("organization onboarding UI", () => {
 
   test("lets the invited signed-in account accept directly without account creation", async () => {
     const invitationId = crypto.randomUUID();
+    const otherInvitationId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const otherWorkspaceId = crypto.randomUUID();
     const now = new Date().toISOString();
+    previewSetup.mockImplementationOnce(async () => ({
+      state: "pending",
+      organizationId: "00000000-0000-4000-8000-000000000001",
+      organizationName: "Test Organization",
+      targetEmail: "invitee@example.test",
+      targetName: "Grace Hopper",
+      organizationRole: "member",
+      sharedWorkspaceAccess: [{ workspaceId, workspaceName: "Expected workspace", role: "member" }],
+      expiresAt: now,
+    }));
     currentAuthSession = {
       session: { id: "session-1", userId: "user-1", expiresAt: now },
       user: {
@@ -662,12 +675,28 @@ describe("organization onboarding UI", () => {
     listSetupInvitations.mockImplementationOnce(async () => ({
       invitations: [
         {
+          id: otherInvitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [otherWorkspaceId],
+          role: "admin" as const,
+          status: "pending" as const,
+          revision: 3,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+        {
           id: invitationId,
           organizationId: "00000000-0000-4000-8000-000000000001",
           organizationName: "Test Organization",
           targetEmail: "invitee@example.test",
           targetName: "Grace Hopper",
-          initialWorkspaceIds: [],
+          initialWorkspaceIds: [workspaceId],
           role: "member" as const,
           status: "pending" as const,
           revision: 7,
