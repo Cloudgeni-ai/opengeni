@@ -141,6 +141,10 @@ function integrationCredentialResolver(
 ): IntegrationCredentialResolver {
   const connectionRef = integration.connectionRef;
   if (!connectionRef) throw new Error("Integration credential resolver requires a connection");
+  const expectedAuthorityGeneration = integration.connectionAuthorityGeneration;
+  if (expectedAuthorityGeneration === null) {
+    throw new Error("Integration credential resolver requires a connection authority generation");
+  }
   return {
     resolve: async (request) => {
       const result = await input.resolveCredential({
@@ -152,6 +156,7 @@ function integrationCredentialResolver(
         credentialTarget: "http_api",
         forceRefresh: request.forceRefresh === true,
         credentialResolutionMode,
+        expectedAuthorityGeneration,
       });
       if (result.status === "auth_needed") {
         await publishAuthNeeded(

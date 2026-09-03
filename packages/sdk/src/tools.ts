@@ -33,12 +33,14 @@ export type OpenGeniDynamicToolNode = OpenGeniDynamicToolNamespace & OpenGeniToo
 /** Declaration-generation target for one exact workspace catalog. */
 export interface OpenGeniGeneratedTools {}
 
-export type OpenGeniWorkspaceTools = OpenGeniGeneratedTools &
+export type OpenGeniWorkspaceTools<
+  TCatalog extends Pick<
+    ToolGatewayCatalog,
+    "version" | "generation" | "digest" | "createdAt" | "entries"
+  > = ToolGatewayCatalog,
+> = OpenGeniGeneratedTools &
   OpenGeniDynamicToolNamespace & {
-    readonly $catalog: (options?: {
-      refresh?: boolean;
-      signal?: AbortSignal;
-    }) => Promise<ToolGatewayCatalog>;
+    readonly $catalog: (options?: { refresh?: boolean; signal?: AbortSignal }) => Promise<TCatalog>;
     readonly $call: (
       identity: ToolGatewayIdentity,
       argumentsValue?: Record<string, unknown>,
@@ -74,10 +76,18 @@ export interface OpenGeniToolsFacade {
 export class OpenGeniToolCallError extends Error {
   readonly code: string;
   readonly retryable: boolean;
+  readonly outcomeUnknown: boolean;
 
   constructor(readonly result: ToolGatewayResult) {
     const structured = result.structuredContent as
-      | { error?: { code?: unknown; message?: unknown; retryable?: unknown } }
+      | {
+          error?: {
+            code?: unknown;
+            message?: unknown;
+            retryable?: unknown;
+            outcomeUnknown?: unknown;
+          };
+        }
       | undefined;
     super(
       typeof structured?.error?.message === "string"
@@ -87,6 +97,7 @@ export class OpenGeniToolCallError extends Error {
     this.name = "OpenGeniToolCallError";
     this.code = typeof structured?.error?.code === "string" ? structured.error.code : "tool_error";
     this.retryable = structured?.error?.retryable === true;
+    this.outcomeUnknown = structured?.error?.outcomeUnknown === true;
   }
 }
 

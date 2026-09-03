@@ -47,7 +47,9 @@ export type {
   OpenGeniSiteBridgeResponseMessage,
   OpenGeniSiteClient,
   OpenGeniSiteClientOptions,
+  OpenGeniSiteToolCatalog,
   OpenGeniSiteToolCallRequest,
+  OpenGeniSiteWorkspaceTools,
 } from "./site";
 export type {
   ToolGatewayCallRequest,

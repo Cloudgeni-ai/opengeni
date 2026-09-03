@@ -653,6 +653,8 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal credential lookup mode; preflight never refreshes or records usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /** Frozen provider authority generation captured by the calling integration/catalog. */
+  expectedAuthorityGeneration?: number;
 };
 
 export type ResolveConnectionCredentialResult =
@@ -5317,6 +5319,11 @@ function mcpContentAsResult(content: unknown): Record<string, unknown> {
   };
 }
 
+function boundedMcpToolResult(result: AttemptToolResultValue): AttemptToolResultValue {
+  assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+  return result;
+}
+
 function exactErrorMessage(error: unknown): string {
   try {
     return error instanceof Error ? error.message : String(error);
@@ -6491,7 +6498,6 @@ export class PrefixedMcpServer implements MCPServer {
         });
       }
       const result = await this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options);
-      assertMcpPayloadWithinBytes(result, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
       return result;
     });
   }
@@ -6549,6 +6555,7 @@ export class PrefixedMcpServer implements MCPServer {
         },
       });
       const result = AttemptToolResult.parse(output);
+      boundedMcpToolResult(result);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       return result;
     } catch (error) {
@@ -6558,10 +6565,18 @@ export class PrefixedMcpServer implements MCPServer {
       // error for required and best-effort servers alike.
       if (isToolOutcomeUncertainMcpError(error)) {
         recordOutcome("outcome_uncertain");
-        return {
+        return boundedMcpToolResult({
           isError: true,
           content: mcpToolOutcomeUncertainContent(error),
-        };
+          structuredContent: {
+            error: {
+              code: "tool_outcome_unknown",
+              message: MCP_TOOL_OUTCOME_UNCERTAIN_ERROR.message,
+              retryable: false,
+              outcomeUnknown: true,
+            },
+          },
+        });
       }
       // The connection broker's auth-needed short-circuit arrives as a thrown
       // JSON-RPC error because no provider result exists yet. Surface it to the
@@ -6571,10 +6586,10 @@ export class PrefixedMcpServer implements MCPServer {
       // re-links, so even a required tool degrades gracefully here.
       if (isAuthNeededMcpError(error)) {
         recordOutcome("auth_needed");
-        return {
+        return boundedMcpToolResult({
           isError: true,
           content: [{ type: "text", text: MCP_AUTH_NEEDED_ERROR.message }],
-        };
+        });
       }
       // A routed workspace mutation crossed provider admission but lost exact
       // settlement. Best-effort MCP isolation must not turn that uncertainty
@@ -6602,10 +6617,10 @@ export class PrefixedMcpServer implements MCPServer {
           "[mcp] best-effort server tool call failed; returning an unavailable result for this turn",
           mcpErrorFields(error, "mcp_tool_call_failed", this.registryId),
         );
-        return {
+        return boundedMcpToolResult({
           isError: true,
           content: mcpToolUnavailableContent(error),
-        };
+        });
       }
       throw error;
     } finally {

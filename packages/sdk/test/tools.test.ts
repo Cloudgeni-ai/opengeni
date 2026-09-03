@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniToolReapprovalRequiredError } from "../src/tools";
+import { OpenGeniToolCallError, OpenGeniToolReapprovalRequiredError } from "../src/tools";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -138,6 +138,42 @@ describe("OpenGeniClient tools", () => {
       .forWorkspace(workspaceId)
       .$call(catalog.entries[0]!.identity, { query: "opaque" });
     expect(result).toEqual({ content: [] });
+  });
+
+  test("preserves machine-readable uncertain provider outcomes", async () => {
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (_input, init) =>
+        init?.method === "POST"
+          ? response({
+              operationId: "33333333-3333-4333-8333-333333333333",
+              catalogDigest: catalog.digest,
+              result: {
+                isError: true,
+                content: [{ type: "text", text: "Verify provider state before retrying" }],
+                structuredContent: {
+                  error: {
+                    code: "tool_outcome_unknown",
+                    message: "Provider settlement is unknown",
+                    retryable: false,
+                    outcomeUnknown: true,
+                  },
+                },
+              },
+            })
+          : response(catalog)) as typeof fetch,
+    });
+
+    const call = client.tools
+      .forWorkspace(workspaceId)
+      .$call(catalog.entries[0]!.identity, { query: "uncertain" });
+    await expect(call).rejects.toBeInstanceOf(OpenGeniToolCallError);
+    await expect(call).rejects.toMatchObject({
+      code: "tool_outcome_unknown",
+      retryable: false,
+      outcomeUnknown: true,
+      message: "Provider settlement is unknown",
+    });
   });
 
   test("rejects an approved token after another operation refreshes the shared catalog", async () => {

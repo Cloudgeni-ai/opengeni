@@ -128,6 +128,7 @@ import {
   type ConnectorActionPolicyHooks,
   type RuntimeMetricsHooks,
 } from "../src/index";
+import { MCP_MAX_TOOL_RESULT_BYTES } from "../src/mcp-network";
 import { baseModelInputFilterForSettings } from "../src/model-input";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 import { McpResultCustomDataBridge } from "../src/mcp-result-custom-data";
@@ -6615,9 +6616,21 @@ describe("runtime event normalization", () => {
         undefined,
         true,
       );
+      const structuralResults: unknown[] = [];
       for (let index = 0; index < 9; index += 1) {
-        await structural.executeCatalogTool("inspect", {});
+        structuralResults.push(await structural.executeCatalogTool("inspect", {}));
       }
+
+      expect(structuralResults[2]).toMatchObject({
+        isError: true,
+        structuredContent: {
+          error: {
+            code: "tool_outcome_unknown",
+            retryable: false,
+            outcomeUnknown: true,
+          },
+        },
+      });
 
       expect(observations.map(({ outcome }) => outcome)).toEqual([
         "provider_declared_error",
@@ -6637,6 +6650,67 @@ describe("runtime event normalization", () => {
       await prepared.close();
       mcp.close();
     }
+  });
+
+  test("bounds direct gateway execution results before adapter projection", async () => {
+    const oversizedResult = new PrefixedMcpServer(
+      {
+        name: "oversized-direct-gateway-result",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async callToolResult() {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "x".repeat(MCP_MAX_TOOL_RESULT_BYTES + 1),
+              },
+            ],
+          };
+        },
+        async invalidateToolsCache() {},
+      },
+      "oversized-direct-gateway-result",
+    );
+
+    await expect(oversizedResult.executeCatalogTool("inspect", {})).rejects.toThrow(
+      "MCP tool result exceeds the 1048576-byte safety limit",
+    );
+
+    const oversizedUncertainOutcome = new PrefixedMcpServer(
+      {
+        name: "oversized-uncertain-gateway-result",
+        cacheToolsList: false,
+        async connect() {},
+        async close() {},
+        async listTools() {
+          return [];
+        },
+        async callTool() {
+          return [];
+        },
+        async callToolResult() {
+          throw Object.assign(new Error("outcome uncertain"), {
+            code: 40_102,
+            data: {
+              providerFailure: { body: "x".repeat(MCP_MAX_TOOL_RESULT_BYTES + 1) },
+            },
+          });
+        },
+        async invalidateToolsCache() {},
+      },
+      "oversized-uncertain-gateway-result",
+    );
+    await expect(oversizedUncertainOutcome.executeCatalogTool("inspect", {})).rejects.toThrow(
+      "MCP tool result exceeds the 1048576-byte safety limit",
+    );
   });
 
   test("MCP outcome metrics and projections cannot replace hostile source failures", async () => {
@@ -7727,6 +7801,15 @@ describe("runtime event normalization", () => {
         },
       );
       expect(result).toMatchObject({ isError: true });
+      expect(result.structuredContent).toEqual({
+        error: {
+          code: "tool_outcome_unknown",
+          message:
+            "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+          retryable: false,
+          outcomeUnknown: true,
+        },
+      });
       const text = JSON.stringify(result);
       expect(text).toMatch(/outcome uncertain/i);
       expect(text).toMatch(/did not replay/i);

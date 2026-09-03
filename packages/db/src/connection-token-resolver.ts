@@ -164,6 +164,8 @@ export type ResolveConnectionCredentialInput = {
   forceRefresh?: boolean;
   /** Internal lookup mode. Preflight must not refresh credentials or record provider usage. */
   credentialResolutionMode?: "execution" | "preflight";
+  /** Frozen provider authority generation captured by the calling integration/catalog. */
+  expectedAuthorityGeneration?: number;
   /** Exact immutable accepted-work authority; never credential-bearing. */
   connectionUseAuthority?: unknown;
   /** Exact accepted attempt plus one stable physical-provider request id. */
@@ -848,7 +850,7 @@ export function buildConnectionTokenResolver(
     let ref = input.connectionRef;
     let subjectId = input.subjectId;
     let credentialWorkspaceId = input.workspaceId;
-    let expectedAuthorityGeneration: number | undefined;
+    let expectedAuthorityGeneration = input.expectedAuthorityGeneration;
     let connectionUseAttribution: ConnectionUseAttribution | undefined;
     if (ref.authoritySource === "host") {
       return authNeeded(ref, "unsupported_auth", ref.connectionId);
@@ -888,6 +890,16 @@ export function buildConnectionTokenResolver(
           ref.connectionId,
         );
       }
+      if (
+        expectedAuthorityGeneration !== undefined &&
+        authorization.attribution.connectionGeneration !== expectedAuthorityGeneration
+      ) {
+        return authNeeded(
+          ref,
+          authorityReasonForScope(ref.subjectScope === "subject"),
+          ref.connectionId,
+        );
+      }
       connectionUseAttribution = authorization.attribution;
       expectedAuthorityGeneration = authorization.attribution.connectionGeneration;
       const expectedPersonal = authorization.attribution.scope !== "workspace";
@@ -923,6 +935,12 @@ export function buildConnectionTokenResolver(
           expectedPersonal ? "personal_authority_unavailable" : "missing_connection",
           authority.connectionId,
         );
+      }
+      if (
+        expectedAuthorityGeneration !== undefined &&
+        authority.connectionGeneration !== expectedAuthorityGeneration
+      ) {
+        return authNeeded(ref, authorityReasonForScope(expectedPersonal), authority.connectionId);
       }
       connectionUseAttribution = authorization.attribution;
       expectedAuthorityGeneration = authority.connectionGeneration;

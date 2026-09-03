@@ -1335,6 +1335,51 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.recordUsed).toBe(0);
   });
 
+  test("pins direct integration credential lookup to its frozen authority generation", async () => {
+    const { deps, counts } = resolverDeps({
+      loadCredential: async (_db, _settings, input) => {
+        counts.load += 1;
+        counts.loadInputs.push(input);
+        return brokerCredential({
+          id: authorityIds.connectionId,
+          accountId: authorityIds.organizationId,
+          workspaceId: authorityIds.workspaceId,
+          authorityGeneration: 8,
+        });
+      },
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: authorityIds.workspaceId,
+      serverId: "direct-api-integration",
+      destinationUrl: "https://api.example.com/v1/items",
+      connectionRef: {
+        connectionId: authorityIds.connectionId,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+      credentialTarget: "http_api",
+      expectedAuthorityGeneration: 7,
+    });
+
+    expect(counts.loadInputs).toEqual([
+      {
+        workspaceId: authorityIds.workspaceId,
+        providerDomain: "api.example.com",
+        allowSubjectOwned: false,
+        expectedAuthorityGeneration: 7,
+        connectionId: authorityIds.connectionId,
+        kind: "api_key",
+      },
+    ]);
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "missing_connection",
+      providerDomain: "api.example.com",
+    });
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("revalidates immutable connection authority before credential lookup", async () => {
     const { deps, counts } = resolverDeps({
       authorizeUse: async () => ({ status: "denied", reason: "connection_generation_changed" }),

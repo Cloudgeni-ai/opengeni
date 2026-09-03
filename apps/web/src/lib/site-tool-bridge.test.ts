@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import {
-  OpenGeniApiError,
-  type OpenGeniWorkspaceTools,
-  type ToolGatewayCallResponse,
-  type ToolGatewayCatalog,
+import type {
+  OpenGeniWorkspaceTools,
+  ToolGatewayCallResponse,
+  ToolGatewayCatalog,
 } from "@opengeni/sdk";
+
+import { ApiError } from "@/api";
 
 import { createSiteToolBridge } from "./site-tool-bridge";
 
@@ -40,8 +41,8 @@ function catalog(digestCharacter: string, includeTool = true): ToolGatewayCatalo
   };
 }
 
-function staleCatalogError(): OpenGeniApiError {
-  return new OpenGeniApiError(
+function staleCatalogError(): ApiError {
+  return new ApiError(
     409,
     JSON.stringify({
       error: {
@@ -52,7 +53,6 @@ function staleCatalogError(): OpenGeniApiError {
         details: { code: "catalog_stale" },
       },
     }),
-    { mutation: true },
   );
 }
 
@@ -80,6 +80,11 @@ describe("Site tool bridge direct calls", () => {
         } as ToolGatewayCallResponse;
       },
     });
+
+    const siteCatalog = await bridge.catalog({ signal });
+    expect(siteCatalog).not.toHaveProperty("accountId");
+    expect(siteCatalog).not.toHaveProperty("workspaceId");
+    expect(siteCatalog.entries).toHaveLength(1);
 
     await bridge.call(
       {

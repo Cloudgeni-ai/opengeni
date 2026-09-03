@@ -33,6 +33,11 @@ export type OpenGeniSiteToolCallRequest = Omit<
   "approvalToken" | "siteArtifactId" | "siteVersionId"
 >;
 
+/** Host-filtered catalog projection. Tenant routing context never enters Site code. */
+export type OpenGeniSiteToolCatalog = Omit<ToolGatewayCatalog, "accountId" | "workspaceId">;
+
+export type OpenGeniSiteWorkspaceTools = OpenGeniWorkspaceTools<OpenGeniSiteToolCatalog>;
+
 export type OpenGeniSiteBridgeRequestMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_REQUEST;
   version: typeof OPENGENI_SITE_BRIDGE_VERSION;
@@ -56,17 +61,22 @@ export type OpenGeniSiteBridgeResponseMessage = {
 } & (
   | {
       ok: true;
-      value: ToolGatewayCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse;
+      value: OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse;
     }
   | {
       ok: false;
-      error: { code: string; message: string; retryable: boolean };
+      error: {
+        code: string;
+        message: string;
+        retryable: boolean;
+        outcomeUnknown?: boolean;
+      };
     }
 );
 
 export type OpenGeniSiteClient = {
   /** Workspace-bound typed facade. The parent host owns workspace identity and credentials. */
-  readonly tools: OpenGeniWorkspaceTools;
+  readonly tools: OpenGeniSiteWorkspaceTools;
   close(): void;
 };
 
@@ -83,6 +93,7 @@ export class OpenGeniSiteBridgeError extends Error {
     readonly code: string,
     message: string,
     readonly retryable = false,
+    readonly outcomeUnknown = false,
   ) {
     super(message);
     this.name = "OpenGeniSiteBridgeError";
@@ -248,6 +259,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
             typeof error.code === "string" ? error.code : "bridge_error",
             typeof error.message === "string" ? error.message : "Site tool request failed",
             error.retryable === true,
+            error.outcomeUnknown === true,
           ),
         );
       };

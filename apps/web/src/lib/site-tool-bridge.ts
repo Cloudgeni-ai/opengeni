@@ -1,14 +1,14 @@
 import {
   OpenGeniApiError,
+  type OpenGeniSiteToolCatalog,
   type OpenGeniWorkspaceTools,
   type ToolGatewayCallRequest,
   type ToolGatewayCallResponse,
-  type ToolGatewayCatalog,
   type ToolGatewayIdentity,
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
 
-import { request } from "@/api";
+import { ApiError, request } from "@/api";
 
 type SiteToolCallRequest = ToolGatewayCallRequest & {
   siteArtifactId: string;
@@ -31,7 +31,7 @@ export function createSiteToolBridge(input: {
 }): PublishedHtmlArtifactToolBridge {
   const allowed = new Set(input.requestedTools.map(toolIdentityKey));
   const callTool = input.callTool ?? callWorkspaceTool;
-  let projectedCatalog: ToolGatewayCatalog | null = null;
+  let projectedCatalog: OpenGeniSiteToolCatalog | null = null;
 
   const loadCatalog = async ({
     signal,
@@ -39,21 +39,24 @@ export function createSiteToolBridge(input: {
   }: {
     signal: AbortSignal;
     refresh?: boolean;
-  }): Promise<ToolGatewayCatalog> => {
+  }): Promise<OpenGeniSiteToolCatalog> => {
     if (projectedCatalog && !refresh) return projectedCatalog;
     const current = await input.workspaceTools.$catalog({
       signal,
       ...(refresh ? { refresh } : {}),
     });
     projectedCatalog = {
-      ...current,
+      version: current.version,
+      generation: current.generation,
+      digest: current.digest,
+      createdAt: current.createdAt,
       entries: current.entries.filter((entry) => allowed.has(toolIdentityKey(entry.identity))),
     };
     return projectedCatalog;
   };
 
   const requireEnabledIdentity = (
-    catalog: ToolGatewayCatalog,
+    catalog: OpenGeniSiteToolCatalog,
     identity: ToolGatewayIdentity,
   ): void => {
     if (
@@ -99,9 +102,15 @@ export function createSiteToolBridge(input: {
 }
 
 export function isCatalogStaleApiError(error: unknown): boolean {
-  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
-  if (error.details?.code === "catalog_stale") return true;
-  return error.body.includes("catalog_stale") || error.message.includes("catalog_stale");
+  if (error instanceof OpenGeniApiError && error.status === 409) {
+    if (error.details?.code === "catalog_stale") return true;
+    return error.body.includes("catalog_stale") || error.message.includes("catalog_stale");
+  }
+  return (
+    error instanceof ApiError &&
+    error.status === 409 &&
+    (error.body.includes("catalog_stale") || error.message.includes("catalog_stale"))
+  );
 }
 
 function requireAllowedIdentity(allowed: ReadonlySet<string>, identity: ToolGatewayIdentity): void {

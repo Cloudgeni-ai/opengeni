@@ -32,6 +32,7 @@ function integration(): ApiIntegrationRuntime {
       scopes: ["inventory.read"],
       subjectScope: "workspace",
     },
+    connectionAuthorityGeneration: 7,
     allowedTools: ["list_items"],
     requireApproval: [],
     revision: {
@@ -79,6 +80,7 @@ describe("installed API Integration worker adapters", () => {
     const item = integration();
     const resolvedDestinations: string[] = [];
     const resolvedModes: Array<string | undefined> = [];
+    const resolvedGenerations: Array<number | undefined> = [];
     let providerAuthorizations = 0;
     let providerCalls = 0;
     const settings = testSettings({
@@ -99,6 +101,7 @@ describe("installed API Integration worker adapters", () => {
       resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
         resolvedDestinations.push(request.destinationUrl);
         resolvedModes.push(request.credentialResolutionMode);
+        resolvedGenerations.push(request.expectedAuthorityGeneration);
         return {
           status: "ok",
           connectionId: item.connectionRef!.connectionId!,
@@ -126,6 +129,7 @@ describe("installed API Integration worker adapters", () => {
     });
     expect(resolvedDestinations).toEqual(["https://127.0.0.1/v1/items"]);
     expect(resolvedModes).toEqual(["preflight"]);
+    expect(resolvedGenerations).toEqual([item.connectionAuthorityGeneration]);
     expect(providerAuthorizations).toBe(1);
     expect(providerCalls).toBe(0);
   });
@@ -136,6 +140,7 @@ describe("installed API Integration worker adapters", () => {
       credentialTarget: string | undefined;
       forceRefresh: boolean;
       credentialResolutionMode: string | undefined;
+      expectedAuthorityGeneration: number | undefined;
     }> = [];
     const requests: Array<{
       url: string;
@@ -167,6 +172,7 @@ describe("installed API Integration worker adapters", () => {
           credentialTarget: request.credentialTarget,
           forceRefresh: request.forceRefresh === true,
           credentialResolutionMode: request.credentialResolutionMode,
+          expectedAuthorityGeneration: request.expectedAuthorityGeneration,
         });
         return {
           status: "ok",
@@ -217,6 +223,7 @@ describe("installed API Integration worker adapters", () => {
           credentialTarget: "http_api",
           forceRefresh: false,
           credentialResolutionMode: "execution",
+          expectedAuthorityGeneration: item.connectionAuthorityGeneration,
         },
       ]);
       expect(requests).toEqual([

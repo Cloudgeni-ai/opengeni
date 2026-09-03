@@ -9,12 +9,10 @@ import {
   type OpenGeniSiteBridgeConnectMessage,
   type OpenGeniSiteBridgeRequestMessage,
 } from "../src/site";
-import type { ToolGatewayCatalog } from "../src/types";
+import type { OpenGeniSiteToolCatalog } from "../src/site";
 
-const catalog: ToolGatewayCatalog = {
+const catalog: OpenGeniSiteToolCatalog = {
   version: 1,
-  accountId: "00000000-0000-4000-8000-000000000001",
-  workspaceId: "00000000-0000-4000-8000-000000000002",
   generation: 1,
   digest: "a".repeat(64),
   createdAt: "2026-09-02T12:00:00.000Z",
@@ -103,6 +101,8 @@ describe("OpenGeni Site client", () => {
 
     expect((client.tools as unknown as { then?: unknown }).then).toBeUndefined();
     expect(await client.tools.$catalog()).toEqual(catalog);
+    expect(await client.tools.$catalog()).not.toHaveProperty("accountId");
+    expect(await client.tools.$catalog()).not.toHaveProperty("workspaceId");
     expect(await client.tools["docs"]!["search"]!({ query: "roadmap" })).toEqual({
       documents: [{ id: "document-1" }],
     });
@@ -127,6 +127,50 @@ describe("OpenGeni Site client", () => {
       client.tools.$approve(catalog.entries[0]!.identity, { query: "roadmap" }),
     ).rejects.toThrow("Unsupported Site bridge request");
 
+    client.close();
+    for (const port of hostPorts) port.close();
+  });
+
+  test("preserves uncertain mutation settlement from the host bridge", async () => {
+    const hostPorts: MessagePort[] = [];
+    const client = createOpenGeniSiteClient({
+      parentWindow: {
+        postMessage: (
+          _message: OpenGeniSiteBridgeConnectMessage,
+          _targetOrigin: string,
+          transfer: Transferable[],
+        ) => {
+          const port = transfer[0] as MessagePort;
+          hostPorts.push(port);
+          port.addEventListener("message", (event: MessageEvent<unknown>) => {
+            const request = event.data as OpenGeniSiteBridgeRequestMessage;
+            port.postMessage({
+              type: OPENGENI_SITE_BRIDGE_RESPONSE,
+              version: OPENGENI_SITE_BRIDGE_VERSION,
+              requestId: request.requestId,
+              ok: false,
+              error: {
+                code: "tool_outcome_unknown",
+                message: "Provider settlement is unknown",
+                retryable: false,
+                outcomeUnknown: true,
+              },
+            });
+          });
+          port.start();
+          port.postMessage({
+            type: OPENGENI_SITE_BRIDGE_READY,
+            version: OPENGENI_SITE_BRIDGE_VERSION,
+          });
+        },
+      } as unknown as Pick<Window, "postMessage">,
+    });
+
+    await expect(client.tools.$catalog()).rejects.toMatchObject({
+      code: "tool_outcome_unknown",
+      retryable: false,
+      outcomeUnknown: true,
+    });
     client.close();
     for (const port of hostPorts) port.close();
   });

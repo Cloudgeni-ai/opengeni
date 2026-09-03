@@ -5,9 +5,11 @@ import {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   signDelegatedAccessToken,
+  type AttemptToolCatalog,
   type FirstPartyMcpToolName,
   type Permission,
 } from "@opengeni/contracts";
+import { digestAttemptToolCatalog } from "@opengeni/codemode";
 import type { ApiRouteDeps, ObjectStorageDependency } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -15,6 +17,7 @@ import {
   createSession,
   createWorkspaceArtifact,
   deleteWorkspace,
+  persistAttemptToolCatalog,
   publishWorkspaceArtifactVersion,
   type DbClient,
 } from "@opengeni/db";
@@ -277,6 +280,51 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(replay.replayed).toBe(true);
     expect(replay.artifact.id).toBe(created.artifact.id);
     expect(objectPutCount).toBe(putsAfterCreate);
+
+    const createWithoutRequestedTools = { ...createBody, requestedTools: undefined };
+    const createAuthorityConflict = await request(grant, ["artifacts:publish"], base, {
+      method: "POST",
+      body: JSON.stringify(createWithoutRequestedTools),
+    });
+    expect(createAuthorityConflict.status).toBe(409);
+
+    const authoritySeedResponse = await request(grant, ["artifacts:publish"], base, {
+      method: "POST",
+      body: JSON.stringify({
+        ...createBody,
+        slug: "requested-tools-replay-authority",
+        idempotencyKey: "requested-tools-replay-authority-create",
+      }),
+    });
+    expect(authoritySeedResponse.status).toBe(201);
+    const authoritySeed = WorkspaceArtifactMutationResponse.parse(
+      await authoritySeedResponse.json(),
+    );
+    const authorityVersionPath = `${base}/${authoritySeed.artifact.id}/versions`;
+    const authorityPublishBody = {
+      html: "<!doctype html><h1>Explicit authority</h1>",
+      expectedCurrentVersionId: authoritySeed.version.id,
+      requestedTools: [{ serverId: "inventory", toolName: "lookup" }],
+      idempotencyKey: "requested-tools-replay-authority-publish",
+    };
+    const authorityPublishResponse = await request(
+      grant,
+      ["artifacts:publish"],
+      authorityVersionPath,
+      { method: "POST", body: JSON.stringify(authorityPublishBody) },
+    );
+    expect(authorityPublishResponse.status).toBe(200);
+    const publishWithoutRequestedTools = {
+      ...authorityPublishBody,
+      requestedTools: undefined,
+    };
+    const publishAuthorityConflict = await request(
+      grant,
+      ["artifacts:publish"],
+      authorityVersionPath,
+      { method: "POST", body: JSON.stringify(publishWithoutRequestedTools) },
+    );
+    expect(publishAuthorityConflict.status).toBe(409);
 
     const conflictSeed = await request(grant, ["artifacts:publish"], base, {
       method: "POST",
@@ -674,6 +722,198 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
+  test("prevents attempts from activating Site tools outside their immutable catalog", async () => {
+    const attempt = await seedAttempt(grant, {
+      permissions: ["artifacts:publish"],
+      tools: ["artifacts_create", "artifacts_publish", "artifacts_rollback", "artifacts_restore"],
+    });
+    await persistArtifactAttemptCatalog(grant, attempt, [{ serverId: "docs", toolName: "search" }]);
+    const server = buildOpenGeniMcpServer(
+      {
+        settings: testSettings(),
+        db: client.db,
+        objectStorage,
+        bus: new MemoryEventBus(),
+      } as ApiRouteDeps,
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: "worker:first-party-mcp",
+        permissions: ["artifacts:publish"],
+        principalKind: "agent_attempt",
+        metadata: {
+          sessionId: attempt.sessionId,
+          turnId: attempt.turnId,
+          attemptId: attempt.attemptId,
+          executionGeneration: attempt.executionGeneration,
+          firstPartyMcpTools: [
+            "artifacts_create",
+            "artifacts_publish",
+            "artifacts_rollback",
+            "artifacts_restore",
+          ],
+        },
+      },
+    );
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcp = new Client({ name: "workspace-artifact-tool-authority-test", version: "1" });
+    await server.connect(serverTransport);
+    await mcp.connect(clientTransport);
+    const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const suffix = crypto.randomUUID();
+    try {
+      const putsBeforeDeniedCreate = objectPutCount;
+      const deniedCreate = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Unauthorized Site tool",
+          html: "<!doctype html><main>Denied</main>",
+          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
+          idempotencyKey: `denied-create-${suffix}`,
+        },
+      });
+      expect(deniedCreate.isError).toBe(true);
+      expect(objectPutCount).toBe(putsBeforeDeniedCreate);
+
+      const allowedCreate = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Authorized Site tool",
+          html: "<!doctype html><main>Allowed</main>",
+          requestedTools: [{ serverId: "docs", toolName: "search" }],
+          idempotencyKey: `allowed-create-${suffix}`,
+        },
+      });
+      const allowedCreateText = allowedCreate.content.find((item) => item.type === "text");
+      if (!allowedCreateText || allowedCreateText.type !== "text") {
+        throw new Error("missing allowed create result");
+      }
+      if (allowedCreate.isError) throw new Error(allowedCreateText.text);
+      const allowed = WorkspaceArtifactMutationResponse.parse(JSON.parse(allowedCreateText.text));
+      expect(allowed.version.requestedTools).toEqual([{ serverId: "docs", toolName: "search" }]);
+
+      const putsBeforeDeniedPublish = objectPutCount;
+      const deniedPublish = await mcp.callTool({
+        name: "artifacts_publish",
+        arguments: {
+          artifactId: allowed.artifact.id,
+          expectedCurrentVersionId: allowed.version.id,
+          html: "<!doctype html><main>Denied publish</main>",
+          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
+          idempotencyKey: `denied-publish-${suffix}`,
+        },
+      });
+      expect(deniedPublish.isError).toBe(true);
+      expect(objectPutCount).toBe(putsBeforeDeniedPublish);
+
+      const rollbackSeedResponse = await request(grant, ["artifacts:publish"], base, {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Rollback authority seed",
+          html: "<!doctype html><main>Unsafe version</main>",
+          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
+          idempotencyKey: `rollback-seed-${suffix}`,
+        }),
+      });
+      expect(rollbackSeedResponse.status).toBe(201);
+      const rollbackSeed = WorkspaceArtifactMutationResponse.parse(
+        await rollbackSeedResponse.json(),
+      );
+      const putsBeforeInheritedPublish = objectPutCount;
+      const deniedInheritedPublish = await mcp.callTool({
+        name: "artifacts_publish",
+        arguments: {
+          artifactId: rollbackSeed.artifact.id,
+          expectedCurrentVersionId: rollbackSeed.version.id,
+          html: "<!doctype html><main>Inherited unsafe authority</main>",
+          idempotencyKey: `denied-inherited-publish-${suffix}`,
+        },
+      });
+      expect(deniedInheritedPublish.isError).toBe(true);
+      expect(objectPutCount).toBe(putsBeforeInheritedPublish);
+      const rollbackCurrentResponse = await request(
+        grant,
+        ["artifacts:publish"],
+        `${base}/${rollbackSeed.artifact.id}/versions`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            html: "<!doctype html><main>Safe current version</main>",
+            expectedCurrentVersionId: rollbackSeed.version.id,
+            requestedTools: [{ serverId: "docs", toolName: "search" }],
+            idempotencyKey: `rollback-current-${suffix}`,
+          }),
+        },
+      );
+      expect(rollbackCurrentResponse.status).toBe(200);
+      const rollbackCurrent = WorkspaceArtifactMutationResponse.parse(
+        await rollbackCurrentResponse.json(),
+      );
+      const deniedRollback = await mcp.callTool({
+        name: "artifacts_rollback",
+        arguments: {
+          artifactId: rollbackSeed.artifact.id,
+          versionId: rollbackSeed.version.id,
+          expectedCurrentVersionId: rollbackCurrent.version.id,
+          reason: "Attempt to reactivate unauthorized tools",
+          idempotencyKey: `denied-rollback-${suffix}`,
+        },
+      });
+      expect(deniedRollback.isError).toBe(true);
+      const rollbackDetail = WorkspaceArtifactDetailResponse.parse(
+        await (
+          await request(grant, ["artifacts:read"], `${base}/${rollbackSeed.artifact.id}`)
+        ).json(),
+      );
+      expect(rollbackDetail.artifact.currentVersion?.id).toBe(rollbackCurrent.version.id);
+
+      const restoreSeedResponse = await request(grant, ["artifacts:publish"], base, {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Restore authority seed",
+          html: "<!doctype html><main>Unsafe archived version</main>",
+          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
+          idempotencyKey: `restore-seed-${suffix}`,
+        }),
+      });
+      expect(restoreSeedResponse.status).toBe(201);
+      const restoreSeed = WorkspaceArtifactMutationResponse.parse(await restoreSeedResponse.json());
+      const archiveResponse = await request(
+        grant,
+        ["artifacts:publish"],
+        `${base}/${restoreSeed.artifact.id}/status`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            status: "archived",
+            expectedCurrentVersionId: restoreSeed.version.id,
+            reason: "Prepare unauthorized restore",
+            idempotencyKey: `restore-archive-${suffix}`,
+          }),
+        },
+      );
+      expect(archiveResponse.status).toBe(200);
+      const deniedRestore = await mcp.callTool({
+        name: "artifacts_restore",
+        arguments: {
+          artifactId: restoreSeed.artifact.id,
+          expectedCurrentVersionId: restoreSeed.version.id,
+          reason: "Attempt to restore unauthorized tools",
+          idempotencyKey: `denied-restore-${suffix}`,
+        },
+      });
+      expect(deniedRestore.isError).toBe(true);
+      const restoreDetail = WorkspaceArtifactDetailResponse.parse(
+        await (
+          await request(grant, ["artifacts:read"], `${base}/${restoreSeed.artifact.id}`)
+        ).json(),
+      );
+      expect(restoreDetail.artifact.status).toBe("archived");
+    } finally {
+      await Promise.all([mcp.close(), server.close()]);
+    }
+  }, 60_000);
+
   test("rejects signed attempt claims that lack durable tool or permission authority", async () => {
     const cases: Array<{
       name: string;
@@ -810,6 +1050,36 @@ async function seedAttempt(
       )`;
   });
   return { sessionId: session.id, turnId: turn!.id, attemptId, executionGeneration };
+}
+
+async function persistArtifactAttemptCatalog(
+  targetGrant: Grant,
+  attempt: Attempt,
+  identities: Array<{ serverId: string; toolName: string }>,
+): Promise<void> {
+  const unsigned: Omit<AttemptToolCatalog, "digest"> = {
+    version: 1,
+    accountId: targetGrant.accountId,
+    workspaceId: targetGrant.workspaceId,
+    sessionId: attempt.sessionId,
+    turnId: attempt.turnId,
+    attemptId: attempt.attemptId,
+    executionGeneration: attempt.executionGeneration,
+    generation: 1,
+    createdAt: new Date().toISOString(),
+    entries: identities.map((identity) => ({
+      identity,
+      modelName: `${identity.serverId}__${identity.toolName}`,
+      codemodePath: [identity.serverId, identity.toolName],
+      inputSchema: { type: "object" },
+      source: identity.serverId === "docs" ? "docs" : "mcp",
+      approval: "none",
+    })),
+  };
+  await persistAttemptToolCatalog(client.db, {
+    ...unsigned,
+    digest: digestAttemptToolCatalog(unsigned),
+  });
 }
 
 async function supersedeAttempt(attempt: Attempt): Promise<void> {

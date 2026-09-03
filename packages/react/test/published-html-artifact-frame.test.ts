@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SiteBridgeRequestRegistry } from "../src/components/artifacts/published-html-artifact-frame";
+import {
+  SiteBridgeRequestRegistry,
+  siteBridgeError,
+} from "../src/components/artifacts/published-html-artifact-frame";
 
 function port(): MessagePort & { closeCount: number } {
   return {
@@ -11,6 +14,23 @@ function port(): MessagePort & { closeCount: number } {
 }
 
 describe("Site bridge request ownership", () => {
+  test("preserves uncertain mutation settlement in bridge errors", () => {
+    expect(
+      siteBridgeError(
+        Object.assign(new Error("Provider settlement is unknown"), {
+          code: "tool_outcome_unknown",
+          retryable: false,
+          outcomeUnknown: true,
+        }),
+      ),
+    ).toEqual({
+      code: "tool_outcome_unknown",
+      message: "Provider settlement is unknown",
+      retryable: false,
+      outcomeUnknown: true,
+    });
+  });
+
   test("scopes request ids per port and aborts work when the port is replaced", () => {
     const registry = new SiteBridgeRequestRegistry();
     const firstPort = port();

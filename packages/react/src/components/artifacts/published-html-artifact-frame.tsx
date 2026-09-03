@@ -7,11 +7,11 @@ import {
   isOpenGeniSiteBridgeRequestMessage,
   sanitizeOpenGeniSiteToolCallRequest,
   type OpenGeniSiteBridgeResponseMessage,
+  type OpenGeniSiteToolCatalog,
 } from "@opengeni/sdk/site";
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
-  ToolGatewayCatalog,
   ToolGatewayDeclarationsResponse,
 } from "@opengeni/sdk";
 import { useEffect, useRef, type CSSProperties } from "react";
@@ -37,7 +37,7 @@ export type PublishedHtmlArtifactFrameProps = {
 };
 
 export type PublishedHtmlArtifactToolBridge = {
-  catalog: (options: { signal: AbortSignal }) => Promise<ToolGatewayCatalog>;
+  catalog: (options: { signal: AbortSignal }) => Promise<OpenGeniSiteToolCatalog>;
   call: (
     request: ToolGatewayCallRequest,
     options: { signal: AbortSignal },
@@ -208,7 +208,7 @@ async function handleSiteBridgeRequest(
     payload?: ToolGatewayCallRequest;
   },
   signal: AbortSignal,
-): Promise<ToolGatewayCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse> {
+): Promise<OpenGeniSiteToolCatalog | ToolGatewayCallResponse | ToolGatewayDeclarationsResponse> {
   if (!bridge) throw new Error("Site tool bridge is unavailable");
   if (message.method === "catalog") return await bridge.catalog({ signal });
   if (message.method === "declarations") {
@@ -218,12 +218,23 @@ async function handleSiteBridgeRequest(
   return await bridge.call(sanitizeOpenGeniSiteToolCallRequest(message.payload!), { signal });
 }
 
-function siteBridgeError(error: unknown): { code: string; message: string; retryable: boolean } {
-  const candidate = error as { code?: unknown; message?: unknown; retryable?: unknown };
+export function siteBridgeError(error: unknown): {
+  code: string;
+  message: string;
+  retryable: boolean;
+  outcomeUnknown: boolean;
+} {
+  const candidate = error as {
+    code?: unknown;
+    message?: unknown;
+    retryable?: unknown;
+    outcomeUnknown?: unknown;
+  };
   return {
     code: typeof candidate?.code === "string" ? candidate.code : "site_tool_call_failed",
     message:
       typeof candidate?.message === "string" ? candidate.message : "Site tool request failed",
     retryable: candidate?.retryable === true,
+    outcomeUnknown: candidate?.outcomeUnknown === true,
   };
 }
