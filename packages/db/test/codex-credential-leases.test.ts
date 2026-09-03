@@ -1626,7 +1626,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       from session_turns where id = ${turnId}`;
     expect(row).toEqual({
       id: turnId,
-      status: "recovering",
+      status: "running",
       trigger_event_id: originalTriggerEventId,
       failovers: 1,
     });
