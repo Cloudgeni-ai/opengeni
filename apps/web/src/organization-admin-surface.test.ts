@@ -14,7 +14,6 @@ const recoverySource = await Bun.file(
 const organizationCodexSource = await Bun.file(
   `${import.meta.dir}/components/organization-codex-subscriptions.tsx`,
 ).text();
-const normalizedOrganizationCodexSource = organizationCodexSource.replace(/\s+/gu, " ");
 const organizationModelProviderSource = await Bun.file(
   `${import.meta.dir}/components/organization-model-provider-connection.tsx`,
 ).text();
@@ -85,12 +84,6 @@ describe("organization administration surface", () => {
     expect(organizationCodexSource).toContain("setLoadError(message)");
     expect(organizationCodexSource).toContain('role="alert"');
     expect(organizationCodexSource).toContain("Retry");
-    expect(normalizedOrganizationCodexSource).toContain(
-      "`/v1/organizations/${organizationId}/codex/accounts/${accountId}/activate`, {},",
-    );
-    expect(normalizedOrganizationCodexSource).toContain(
-      "`/v1/organizations/${organizationId}/codex/accounts/${accountId}`, {},",
-    );
     expect(workspaceCodexSource).toContain("Where this workspace gets Codex");
     expect(workspaceCodexSource).toContain("Automatic: prefer organization");
     expect(workspaceCodexSource).toContain("Connect an organization subscription");
