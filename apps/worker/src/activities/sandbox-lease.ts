@@ -53,6 +53,7 @@ import {
   workspaceArchiveCaptureDeadlineElapsed,
   retainedProcessReconciliationProof,
   retainedProcessSettlementIdentity,
+  settleClaimedConnectedMachineBackgroundCommand,
   settleSandboxCheckpointArtifactGc,
   rlsContextForWorkspace,
   settleRetainedProcess,
@@ -66,8 +67,6 @@ import {
   claimConnectedMachineSessionBackgroundCommands,
   deferConnectedMachineBackgroundCommandReconciliation,
   recordConnectedMachineBackgroundCommandProof,
-  settleClaimedConnectedMachineBackgroundCommand,
-  settleSessionBackgroundCommandForRetainedProcess,
   type ConnectedMachineBackgroundCommandClaim,
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
@@ -727,6 +726,7 @@ export function createSandboxLeaseActivities(
         observability,
         probeRetainedProcess,
         options.inspectHistoricalModalSandbox ?? inspectModalSandboxLifecycle,
+        service.bus,
       );
 
       try {
@@ -1107,8 +1107,19 @@ async function reconcileConnectedMachineBackgroundCommands(
     }
 
     try {
-      if (!(await settleClaimedConnectedMachineBackgroundCommand(db, { claim }))) {
+      const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
+      if (!settlement.settled) {
         throw new Error("Connected command settlement lost its exact claim or proof");
+      }
+      if (settlement.events.length > 0) {
+        try {
+          await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
+        } catch (error) {
+          observability.warn("sandbox reaper: connected-command event fanout failed", {
+            commandId: claim.commandId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
       recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
@@ -1226,6 +1237,7 @@ async function reconcileTerminalRetainedProcesses(
   observability: ActivityServices["observability"],
   probe: RetainedProcessProbeFn,
   inspectHistoricalModalSandbox: HistoricalModalSandboxLifecycleProbeFn,
+  bus: ActivityServices["bus"],
 ): Promise<void> {
   const claimId = crypto.randomUUID();
   let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
@@ -1444,15 +1456,20 @@ async function reconcileTerminalRetainedProcesses(
       if (settlement.process.state === "active") {
         throw new Error("Retained-process reconciliation returned an active durable process");
       }
-      await settleSessionBackgroundCommandForRetainedProcess(db, {
-        accountId: process.accountId,
-        workspaceId: process.workspaceId,
-        sessionId: process.sessionId,
-        retainedProcessId: process.id,
-        outcome: settlement.process.state,
-        exitCode: settlement.process.exitCode,
-        reason: settlement.process.settlementReason ?? proof.reason,
-      });
+      if (settlement.backgroundCommandEvents.length > 0) {
+        try {
+          await bus.publish(
+            process.workspaceId,
+            process.sessionId,
+            settlement.backgroundCommandEvents,
+          );
+        } catch (error) {
+          observability.warn("sandbox reaper: retained-command event fanout failed", {
+            processId: process.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
       recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
     } catch (error) {
       recordRetainedProcessReconciliation(observability, "settlement_failed");

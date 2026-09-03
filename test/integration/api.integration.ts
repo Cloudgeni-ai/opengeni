@@ -887,7 +887,7 @@ describe("API component integration", () => {
     expect(await isSessionCompactionRequested(dbClient.db, workspaceId, session.id)).toBe(true);
   });
 
-  test("registers session-scoped goal MCP tools only for session-bound grants", async () => {
+  test("registers session lifecycle MCP tools only for session-bound grants", async () => {
     const settings = testSettings({ databaseUrl: services.databaseUrl });
     const baseGrant = await bootstrapMcpGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -934,7 +934,7 @@ describe("API component integration", () => {
       resumeBoxById: fakeResumeBoxById,
     };
 
-    // Without the worker-asserted sessionId claim, goal tools do not exist.
+    // Without the worker-asserted sessionId claim, lifecycle tools do not exist.
     const sessionlessMcp = buildOpenGeniMcpServer(mcpDeps, baseGrant);
     await expect(callMcpTool(sessionlessMcp, "goal_set", { text: "x" })).rejects.toThrow(
       "MCP tool not registered",
@@ -997,42 +997,40 @@ describe("API component integration", () => {
     });
     expect(progress.operationId).toBeTruthy();
 
-    // goal_wait: self-only, exact-attempt fenced, bounded deadline, and
-    // idempotent per (turn, exact arguments) without a caller key.
+    // wait_for_input: self-only, exact-attempt fenced, bounded relative timeout,
+    // and idempotent per (turn, exact arguments) without a caller key.
     const waitArgs = {
       reason: "two child sessions are still implementing their slices",
-      untilSeconds: 900,
+      timeoutSeconds: 900,
     };
     const held = await callMcpTool<{
       status: string;
-      goalId: string;
-      untilAt: string;
+      deadlineAt: string;
       operationId: string;
       replay: boolean;
       nextAction: string;
-    }>(mcp, "goal_wait", waitArgs);
-    expect(held).toMatchObject({ status: "held", replay: false });
-    expect(held.goalId).toBeTruthy();
-    expect(new Date(held.untilAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
+    }>(mcp, "wait_for_input", waitArgs);
+    expect(held).toMatchObject({ status: "waiting_for_input", replay: false });
+    expect(new Date(held.deadlineAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
     expect(held.nextAction).toContain("End your turn now");
-    const heldReplay = await callMcpTool<{ replay: boolean; untilAt: string }>(
+    const heldReplay = await callMcpTool<{ replay: boolean; deadlineAt: string }>(
       mcp,
-      "goal_wait",
+      "wait_for_input",
       waitArgs,
     );
-    expect(heldReplay).toMatchObject({ replay: true, untilAt: held.untilAt });
+    expect(heldReplay).toMatchObject({ replay: true, deadlineAt: held.deadlineAt });
     await expect(
-      callMcpTool(mcp, "goal_wait", { reason: "too short", untilSeconds: 5 }),
+      callMcpTool(mcp, "wait_for_input", { reason: "too short", timeoutSeconds: 5 }),
     ).rejects.toThrow();
-    const [heldGoalRow] = await dbClient.db.execute<{
-      continuation_hold_turn_id: string | null;
-      continuation_hold_until: string | Date | null;
+    const [waitRow] = await dbClient.db.execute<{
+      input_wait_turn_id: string | null;
+      input_wait_until: string | Date | null;
     }>(sql`
-      select continuation_hold_turn_id, continuation_hold_until
-      from session_goals
-      where workspace_id = ${grant.workspaceId} and session_id = ${session.id}`);
-    expect(heldGoalRow?.continuation_hold_turn_id).toBe(claimed.turn.id);
-    expect(new Date(heldGoalRow!.continuation_hold_until!).toISOString()).toBe(held.untilAt);
+      select input_wait_turn_id, input_wait_until
+      from sessions
+      where workspace_id = ${grant.workspaceId} and id = ${session.id}`);
+    expect(waitRow?.input_wait_turn_id).toBe(claimed.turn.id);
+    expect(new Date(waitRow!.input_wait_until!).toISOString()).toBe(held.deadlineAt);
 
     const pausedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_pause", {
       rationale: "waiting on upstream fix",
@@ -1097,7 +1095,6 @@ describe("API component integration", () => {
       "goal.set",
       "goal.updated",
       "goal.progress",
-      "goal.held",
       "goal.paused",
       "goal.updated",
       "goal.completed",

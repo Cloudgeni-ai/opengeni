@@ -279,7 +279,15 @@ drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
 a pre-0394 worker would treat the newly admitted activation mode as an ambient
 workspace Skill, so none may remain live or restart after the cutover. Postgres
-and Garage PVCs remain attached. Database migrations
+and Garage PVCs remain attached. Migration 0402 is another clean maintenance
+cutover: stop every API, control worker, and turn worker, provide the exact old
+and new runtime database login list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and select
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0402_session_input_wait_and_background_command_results`.
+It moves active long-wait state from `session_goals` to `sessions`, removes the
+old columns and `goal_wait` protocol, and activates terminal background-command
+agent input. After it commits, never restart a pre-0402 image. This forward-only
+cutover was documented on September 3, 2026. Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.
 

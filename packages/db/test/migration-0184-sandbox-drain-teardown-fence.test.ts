@@ -24,6 +24,7 @@ const withheldMigrationNames = [
   "0388_sandbox_provider_deadline_interactions.sql",
   "0391_sandbox_provider_deadline_interaction_followup.sql",
   "0397_sandbox_deadline_rotation_preemption.sql",
+  "0402_session_input_wait_and_background_command_results.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -102,8 +103,9 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // prefix with the session-tenancy fences. 0374 consumes the helper
       // created by 0345, 0388 drift-guards the reaper definition produced
       // there, 0391 extends that exact 0388 definition, and 0394 patches the
-      // resulting provider-deadline branch. All four must remain behind the
-      // same withheld boundary.
+      // resulting provider-deadline branch. The 0402 session-wait cutover also
+      // inventories the scheduled accepted-execution columns created by 0275,
+      // so it must remain behind the same withheld boundary.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;
