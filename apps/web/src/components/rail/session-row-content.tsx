@@ -1,9 +1,22 @@
-import { CalendarClockIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
+import {
+  BotIcon,
+  CalendarClockIcon,
+  Clock3Icon,
+  GitForkIcon,
+  Loader2Icon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { useId } from "react";
 
 import { CreatorMonogram } from "@/components/creator-monogram";
-import { type CreatorRef, creatorAnnouncement, creatorInitials } from "@/lib/creator-initials";
+import {
+  type CreatorRef,
+  creatorAnnouncement,
+  creatorInitials,
+  creatorLabel,
+} from "@/lib/creator-initials";
 import { formatWaitingSince } from "@/lib/format";
+import { sessionDescendantCountText } from "@/lib/session-tree-count";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
 
@@ -124,7 +137,7 @@ export function RailTrailingMetadata({
           className="size-3.5 shrink-0 text-fg-subtle"
         />
       ) : null}
-      {creator ? <CreatorMonogram createdBy={creator} /> : null}
+      {creator ? <CreatorMonogram createdBy={creator} showTitle={false} /> : null}
       {waitingFor ? (
         <span
           data-session-row-waiting
@@ -145,6 +158,74 @@ export function RailTrailingMetadata({
         </span>
       ) : null}
     </span>
+  );
+}
+
+/**
+ * Dense, non-redundant context for a session row hover. The row itself already
+ * carries lifecycle and access signals, so this surface spends its space on
+ * facts the narrow rail cannot show: the complete title, creator identity,
+ * session age, and server-authoritative sub-agent total.
+ */
+export function SessionRowHoverDetails({
+  title,
+  createdAt,
+  createdBy,
+  descendantCount,
+  descendantCountTruncated,
+}: {
+  title: string;
+  createdAt: string;
+  createdBy: CreatorRef;
+  descendantCount: number;
+  descendantCountTruncated: boolean;
+}) {
+  const age = formatWaitingSince(createdAt);
+  const creatorName =
+    createdBy.kind === "service" || creatorInitials(createdBy) !== null
+      ? creatorLabel(createdBy)
+      : null;
+  const descendantTotal = sessionDescendantCountText(descendantCount, descendantCountTruncated);
+  const descendantNoun =
+    descendantCount === 1 && !descendantCountTruncated ? "sub-agent" : "sub-agents";
+
+  return (
+    <div data-session-row-hover-details className="grid gap-2.5">
+      <div className="flex items-start gap-3">
+        <p className="min-w-0 flex-1 text-sm font-medium leading-snug text-fg">{title}</p>
+        {age ? (
+          <span
+            aria-label={`Created ${age} ago`}
+            className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-2xs tabular-nums text-fg-subtle"
+          >
+            <Clock3Icon aria-hidden="true" className="size-3" />
+            {age} ago
+          </span>
+        ) : null}
+      </div>
+      <div className="grid gap-1.5 text-xs text-fg-muted">
+        {creatorName ? (
+          <div className="flex min-w-0 items-center gap-2">
+            {createdBy.kind === "subject" ? (
+              <CreatorMonogram createdBy={createdBy} showTitle={false} />
+            ) : (
+              <span className="flex size-4 shrink-0 items-center justify-center">
+                <BotIcon aria-hidden="true" className="size-3.5" />
+              </span>
+            )}
+            <span className="min-w-0 truncate">Created by {creatorName}</span>
+          </div>
+        ) : null}
+        <div className="flex items-center gap-2">
+          <span className="flex size-4 shrink-0 items-center justify-center">
+            <GitForkIcon aria-hidden="true" className="size-3.5" />
+          </span>
+          <span>
+            {descendantTotal} {descendantNoun}
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 
