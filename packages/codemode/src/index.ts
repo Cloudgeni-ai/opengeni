@@ -292,15 +292,24 @@ export class CodemodeClient {
             continue;
           }
           if (options.signal?.aborted) throw error;
+          if (!canReconcileCodemodeSubmission(error)) throw error;
           // The POST may have committed before its response was lost, or an
           // attempt may have closed between submission and a wake retry. The
           // caller-owned id is the recovery handle: read before deciding that
           // another side effect is necessary.
+          let recovered: CodemodeOperationValue;
           try {
-            operation = await this.read(operationId, options.signal);
+            recovered = await this.read(operationId, options.signal);
           } catch {
             throw error;
           }
+          assertRecoveredCodemodeOperation(recovered, {
+            operationId,
+            catalog,
+            identity: entry.identity,
+            arguments: argumentsValue,
+          });
+          operation = recovered;
         }
       } else {
         operation = await this.read(operationId, options.signal);
@@ -426,6 +435,43 @@ export class CodemodeClient {
     }
     return response;
   }
+}
+
+function canReconcileCodemodeSubmission(error: unknown): boolean {
+  return !(error instanceof CodemodeTransportError) || error.outcomeUnknown === true;
+}
+
+function assertRecoveredCodemodeOperation(
+  operation: CodemodeOperationValue,
+  expected: {
+    operationId: string;
+    catalog: AttemptToolCatalogValue;
+    identity: AttemptToolIdentity;
+    arguments: Record<string, unknown>;
+  },
+): void {
+  const matches =
+    operation.operationId === expected.operationId &&
+    operation.accountId === expected.catalog.accountId &&
+    operation.workspaceId === expected.catalog.workspaceId &&
+    operation.sessionId === expected.catalog.sessionId &&
+    operation.turnId === expected.catalog.turnId &&
+    operation.attemptId === expected.catalog.attemptId &&
+    operation.executionGeneration === expected.catalog.executionGeneration &&
+    operation.catalogDigest === expected.catalog.digest &&
+    operation.identity.serverId === expected.identity.serverId &&
+    operation.identity.toolName === expected.identity.toolName &&
+    digestCanonicalJson(operation.arguments) === digestCanonicalJson(expected.arguments);
+  if (matches) return;
+  throw new CodemodeTransportError(
+    "Codemode operation id is already bound to a different request",
+    409,
+    {
+      code: "codemode_operation_conflict",
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  );
 }
 
 export function compileCodemodeTools(

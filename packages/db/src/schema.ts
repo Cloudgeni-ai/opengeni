@@ -3646,6 +3646,7 @@ export const toolGatewayApprovalCapabilities = pgTable(
     serverId: text("server_id").notNull(),
     toolName: text("tool_name").notNull(),
     argumentsDigest: text("arguments_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3676,6 +3677,10 @@ export const toolGatewayApprovalCapabilities = pgTable(
     argumentsDigestValid: check(
       "tool_gateway_approval_capabilities_arguments_digest_chk",
       sql`${table.argumentsDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    authorityDigestValid: check(
+      "tool_gateway_approval_capabilities_authority_digest_chk",
+      sql`${table.authorityDigest} ~ '^[0-9a-f]{64}$'`,
     ),
     subjectValid: check(
       "tool_gateway_approval_capabilities_subject_chk",

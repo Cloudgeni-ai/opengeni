@@ -53,6 +53,7 @@ describe("tool gateway approval capabilities", () => {
       catalogDigest: "b".repeat(64),
       identity,
       argumentsDigest: "c".repeat(64),
+      approvalAuthorityDigest: "d".repeat(64),
     };
     try {
       await issueToolGatewayApproval(client.db, {
@@ -64,16 +65,26 @@ describe("tool gateway approval capabilities", () => {
         tokenHash: "e".repeat(64),
         expiresAt: new Date(Date.now() + 5 * 60_000),
       });
-      const [stored] = await shared.admin<Array<{ token_hash: string; consumed_at: Date | null }>>`
-        select token_hash, consumed_at
+      const [stored] = await shared.admin<
+        Array<{ token_hash: string; authority_digest: string; consumed_at: Date | null }>
+      >`
+        select token_hash, authority_digest, consumed_at
         from tool_gateway_approval_capabilities
         where workspace_id = ${grant.workspaceId}
           and subject_id = ${grant.subjectId}
           and operation_id = ${operationId}`;
       expect(stored).toEqual({
         token_hash: "e".repeat(64),
+        authority_digest: "d".repeat(64),
         consumed_at: null,
       });
+      expect(
+        await consumeToolGatewayApproval(client.db, {
+          ...common,
+          tokenHash: "e".repeat(64),
+          approvalAuthorityDigest: "f".repeat(64),
+        }),
+      ).toBe(false);
       expect(
         await consumeToolGatewayApproval(client.db, { ...common, tokenHash: "e".repeat(64) }),
       ).toBe(true);

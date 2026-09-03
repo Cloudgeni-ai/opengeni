@@ -217,6 +217,22 @@ describe("durable attempt tool catalogs", () => {
     ).rejects.toBeInstanceOf(CodemodeOperationConflictError);
   });
 
+  test("serializes concurrent first submissions into one creation and one replay", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const call = codemodeCall(exactCatalog.digest, crypto.randomUUID());
+
+    const submissions = await Promise.all([
+      submitCodemodeOperation(client.db, { ...scope, call }),
+      submitCodemodeOperation(client.db, { ...scope, call }),
+    ]);
+
+    expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
+    expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
   test("claims once and records one durable result under the owning claim fence", async () => {
     if (!available) return;
     const scope = await fixture();

@@ -78,6 +78,7 @@ describe("installed API Integration worker adapters", () => {
   test("preflights exact credentials and provider authorization without provider I/O", async () => {
     const item = integration();
     const resolvedDestinations: string[] = [];
+    const resolvedModes: Array<string | undefined> = [];
     let providerAuthorizations = 0;
     let providerCalls = 0;
     const settings = testSettings({
@@ -97,6 +98,7 @@ describe("installed API Integration worker adapters", () => {
       authority,
       resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
         resolvedDestinations.push(request.destinationUrl);
+        resolvedModes.push(request.credentialResolutionMode);
         return {
           status: "ok",
           connectionId: item.connectionRef!.connectionId!,
@@ -115,7 +117,15 @@ describe("installed API Integration worker adapters", () => {
 
     await registration!.preflightCall!("list_items", {});
 
+    expect(registration!.approvalAuthority).toMatchObject({
+      kind: "api_integration",
+      instanceId: item.instanceId,
+      instanceVersion: item.instanceVersion,
+      revisionId: item.revision.id,
+      connectionRef: item.connectionRef,
+    });
     expect(resolvedDestinations).toEqual(["https://127.0.0.1/v1/items"]);
+    expect(resolvedModes).toEqual(["preflight"]);
     expect(providerAuthorizations).toBe(1);
     expect(providerCalls).toBe(0);
   });
@@ -125,6 +135,7 @@ describe("installed API Integration worker adapters", () => {
       destinationUrl: string;
       credentialTarget: string | undefined;
       forceRefresh: boolean;
+      credentialResolutionMode: string | undefined;
     }> = [];
     const requests: Array<{
       url: string;
@@ -155,6 +166,7 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: request.destinationUrl,
           credentialTarget: request.credentialTarget,
           forceRefresh: request.forceRefresh === true,
+          credentialResolutionMode: request.credentialResolutionMode,
         });
         return {
           status: "ok",
@@ -204,6 +216,7 @@ describe("installed API Integration worker adapters", () => {
           destinationUrl: "https://127.0.0.1/v1/items",
           credentialTarget: "http_api",
           forceRefresh: false,
+          credentialResolutionMode: "execution",
         },
       ]);
       expect(requests).toEqual([

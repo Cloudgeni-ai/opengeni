@@ -42,6 +42,10 @@ export type ToolGatewayCallContext = Pick<ToolGatewayExecutionContext, "transpor
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
+  /** Internal authority revision bound into human approval capabilities. */
+  approvalAuthorityDigest?: string;
+  /** Connection-backed calls must have a side-effect-free provider preflight before approval. */
+  requiresProviderPreflight?: boolean;
   /** In-process provider preflight; never enters the public catalog or its digest. */
   preflightCall?: (input: {
     call: ToolGatewayCall;
@@ -101,6 +105,7 @@ export type ModelToolGatewayCall = {
 type CompiledDefinition = {
   entry: ToolGatewayCatalogEntryValue;
   execute: ToolGatewayDefinition["execute"];
+  approvalAuthorityDigest: string | undefined;
   preflightCall: ToolGatewayDefinition["preflightCall"];
   lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
@@ -110,6 +115,7 @@ type CompiledDefinition = {
 export type PreparedToolGatewayCall = {
   readonly call: ToolGatewayCall;
   readonly entry: ToolGatewayCatalogEntryValue;
+  readonly approvalAuthorityDigest: string;
   execute: () => Promise<ToolGatewayResultValue>;
 };
 
@@ -215,6 +221,13 @@ export class ToolGateway {
     return {
       call,
       entry: definition.entry,
+      approvalAuthorityDigest:
+        definition.approvalAuthorityDigest ??
+        digestCanonicalJson({
+          version: 1,
+          catalogDigest: this.catalogDigest,
+          identity: definition.entry.identity,
+        }),
       execute: async () => {
         await lifecycle?.begin?.();
         let result: ToolGatewayResultValue;
@@ -274,7 +287,18 @@ export function prepareToolGatewayDefinitions(
   const paths = allocateToolPaths(definitions);
   const schemaValidators = createSchemaValidators();
   const compiled = definitions.map((definition, index): CompiledDefinition => {
-    const { execute, preflightCall, lifecycle, codemodePath: _path, ...entryInput } = definition;
+    const {
+      execute,
+      approvalAuthorityDigest,
+      requiresProviderPreflight: _requiresProviderPreflight,
+      preflightCall,
+      lifecycle,
+      codemodePath: _path,
+      ...entryInput
+    } = definition;
+    if (approvalAuthorityDigest !== undefined && !/^[0-9a-f]{64}$/u.test(approvalAuthorityDigest)) {
+      throw new Error("Tool gateway approval authority digest must be lowercase SHA-256 hex");
+    }
     const entry = ToolGatewayCatalogEntry.parse({
       ...entryInput,
       codemodePath: paths[index],
@@ -282,6 +306,7 @@ export function prepareToolGatewayDefinitions(
     return {
       entry,
       execute,
+      approvalAuthorityDigest,
       preflightCall,
       lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),

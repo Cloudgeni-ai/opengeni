@@ -139,6 +139,36 @@ describe("ToolGateway", () => {
     expect(phases).toEqual(["prepare:ordered", "begin", "execute", "complete:completed"]);
   });
 
+  test("keeps approval authority private while binding prepared calls to its exact revision", async () => {
+    const firstAuthority = "a".repeat(64);
+    const secondAuthority = "b".repeat(64);
+    const first = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      createdAt: new Date("2026-09-03T00:00:00.000Z"),
+      definitions: [{ ...definition, approval: "human", approvalAuthorityDigest: firstAuthority }],
+    });
+    const second = createWorkspaceToolGateway({
+      accountId: first.catalog.accountId,
+      workspaceId: first.catalog.workspaceId,
+      generation: first.catalog.generation,
+      createdAt: new Date(first.catalog.createdAt),
+      definitions: [{ ...definition, approval: "human", approvalAuthorityDigest: secondAuthority }],
+    });
+    expect(first.catalog.digest).toBe(second.catalog.digest);
+    expect(first.catalog.entries[0]).not.toHaveProperty("approvalAuthorityDigest");
+    const call = {
+      operationId: crypto.randomUUID(),
+      catalogDigest: first.catalog.digest,
+      identity: definition.identity,
+      arguments: { query: "authority" },
+      caller: { kind: "http" as const, subjectId: "human:test" },
+    };
+    expect((await first.gateway.prepareCall(call)).approvalAuthorityDigest).toBe(firstAuthority);
+    expect((await second.gateway.prepareCall(call)).approvalAuthorityDigest).toBe(secondAuthority);
+  });
+
   test("fails lifecycle preparation before begin or executor dispatch", async () => {
     const phases: string[] = [];
     const { catalog, gateway } = createWorkspaceToolGateway({

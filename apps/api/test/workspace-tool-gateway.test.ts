@@ -387,6 +387,7 @@ describe("workspace tool gateway adapters", () => {
       subjectId,
       operationId: response.operationId,
       identity: { serverId: "inventory", toolName: "lookup" },
+      approvalAuthorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
     });
     expect(order).toEqual(["authorize", "preflight", "issue"]);
   });
@@ -484,6 +485,9 @@ describe("workspace tool gateway adapters", () => {
 
     expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
     expect(consumed).toHaveLength(1);
+    expect(consumed[0]).toMatchObject({
+      approvalAuthorityDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
     expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "HUMAN-1" } }]);
     expect(order).toEqual([
       "authorize",
@@ -703,6 +707,29 @@ describe("workspace tool gateway adapters", () => {
         inputSchema: { type: "object" },
         source: "mcp",
         approval: "human",
+        execute: async () => ({ content: [] }),
+      }),
+    ).toBe(true);
+    expect(
+      workspaceToolGatewayDefinitionFilter({ allowedFirstPartyMcpTools: [] })({
+        identity: { serverId: "inventory", toolName: "write" },
+        modelName: "inventory__write",
+        inputSchema: { type: "object" },
+        source: "mcp",
+        approval: "human",
+        requiresProviderPreflight: true,
+        execute: async () => ({ content: [] }),
+      }),
+    ).toBe(false);
+    expect(
+      workspaceToolGatewayDefinitionFilter({ allowedFirstPartyMcpTools: [] })({
+        identity: { serverId: "inventory", toolName: "write" },
+        modelName: "inventory__write",
+        inputSchema: { type: "object" },
+        source: "mcp",
+        approval: "human",
+        requiresProviderPreflight: true,
+        preflightCall: async () => undefined,
         execute: async () => ({ content: [] }),
       }),
     ).toBe(true);

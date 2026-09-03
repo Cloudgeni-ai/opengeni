@@ -92,6 +92,14 @@ export async function submitCodemodeOperation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        // Serialize the caller-owned id before testing for an existing row.
+        // Without this fence, two first submissions can both observe absence
+        // and the later insert fails its unique constraint instead of replaying.
+        await tx.execute(sql`
+          select pg_advisory_xact_lock(
+            hashtextextended(${`codemode-operation:${input.workspaceId}:${call.operationId}`}, 0)
+          )
+        `);
         const [existing] = await tx
           .select()
           .from(schema.sessionAttemptCodemodeCalls)

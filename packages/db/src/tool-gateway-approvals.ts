@@ -21,6 +21,7 @@ export async function issueToolGatewayApproval(
     catalogDigest: string;
     identity: ToolGatewayIdentity;
     argumentsDigest: string;
+    approvalAuthorityDigest: string;
     expiresAt: Date;
   },
 ): Promise<void> {
@@ -72,6 +73,7 @@ export async function issueToolGatewayApproval(
       serverId: input.identity.serverId,
       toolName: input.identity.toolName,
       argumentsDigest: input.argumentsDigest,
+      authorityDigest: input.approvalAuthorityDigest,
       expiresAt: input.expiresAt,
     });
   });
@@ -88,6 +90,7 @@ export async function consumeToolGatewayApproval(
     catalogDigest: string;
     identity: ToolGatewayIdentity;
     argumentsDigest: string;
+    approvalAuthorityDigest: string;
   },
 ): Promise<boolean> {
   return await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
@@ -106,6 +109,7 @@ export async function consumeToolGatewayApproval(
           eq(schema.toolGatewayApprovalCapabilities.serverId, input.identity.serverId),
           eq(schema.toolGatewayApprovalCapabilities.toolName, input.identity.toolName),
           eq(schema.toolGatewayApprovalCapabilities.argumentsDigest, input.argumentsDigest),
+          eq(schema.toolGatewayApprovalCapabilities.authorityDigest, input.approvalAuthorityDigest),
           isNull(schema.toolGatewayApprovalCapabilities.consumedAt),
           gt(schema.toolGatewayApprovalCapabilities.expiresAt, new Date()),
         ),

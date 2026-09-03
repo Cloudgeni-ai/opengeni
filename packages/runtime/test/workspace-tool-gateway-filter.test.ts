@@ -149,4 +149,75 @@ describe("workspace tool gateway filtering", () => {
       await prepared.close();
     }
   });
+
+  test("changes private approval authority when a local integration revision changes", async () => {
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: "inventory",
+          url: "https://inventory.example.test/mcp",
+          cacheToolsList: true,
+          requireApproval: ["write_item"],
+          connectionRef: {
+            connectionId: "33333333-3333-4333-8333-333333333333",
+            providerDomain: "inventory.example.test",
+            kind: "oauth2",
+            subjectScope: "workspace",
+          },
+        },
+      ],
+    });
+    const prepare = async (instanceVersion: number) =>
+      await prepareAgentTools(settings, [{ kind: "mcp", id: "inventory" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        localMcpServers: [
+          {
+            id: "inventory",
+            approvalAuthority: { kind: "api_integration", instanceVersion },
+            preflightCall: async () => undefined,
+            server: {
+              name: `inventory-${instanceVersion}`,
+              cacheToolsList: true,
+              async connect() {},
+              async close() {},
+              async listTools() {
+                return [{ name: "write_item", inputSchema: { type: "object" } }];
+              },
+              async callTool() {
+                return { content: [{ type: "text", text: "ok" }] };
+              },
+              async invalidateToolsCache() {},
+            },
+          },
+        ],
+        workspaceToolGateway: {
+          createdAt: new Date("2026-09-03T00:00:00.000Z"),
+          requireApproval: (_entry, _caller, context) =>
+            context.transportMeta?.approvalConfirmed !== true,
+        },
+      });
+    const first = await prepare(1);
+    const second = await prepare(2);
+    try {
+      expect(first.toolGatewayCatalog!.digest).toBe(second.toolGatewayCatalog!.digest);
+      expect(first.toolGatewayCatalog!.entries[0]).not.toHaveProperty("approvalAuthorityDigest");
+      const input = {
+        operationId: "44444444-4444-4444-8444-444444444444",
+        catalogDigest: first.toolGatewayCatalog!.digest,
+        identity: { serverId: "inventory", toolName: "write_item" },
+        arguments: {},
+        caller: { kind: "http" as const, subjectId: "human:test" },
+      };
+      const firstCall = await first.toolGateway!.prepareCall(input, {
+        transportMeta: { approvalConfirmed: true },
+      });
+      const secondCall = await second.toolGateway!.prepareCall(input, {
+        transportMeta: { approvalConfirmed: true },
+      });
+      expect(firstCall.approvalAuthorityDigest).not.toBe(secondCall.approvalAuthorityDigest);
+    } finally {
+      await Promise.all([first.close(), second.close()]);
+    }
+  });
 });

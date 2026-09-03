@@ -49,30 +49,52 @@ export function buildApiIntegrationMcpServers(
         : {}),
     };
     const credentialResolver = integration.connectionRef
-      ? integrationCredentialResolver(input, integration)
+      ? integrationCredentialResolver(input, integration, "execution")
       : undefined;
-    const buildServer = (serverTransport: IntegrationTransport) =>
+    const buildServer = (
+      serverTransport: IntegrationTransport,
+      serverCredentialResolver = credentialResolver,
+    ) =>
       integration.revision.protocol === "openapi"
         ? createOpenApiMcpServer({
             revision: integration.revision,
             transport: serverTransport,
             authority,
-            ...(credentialResolver ? { credentialResolver } : {}),
+            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
           })
         : createGraphqlMcpServer({
             revision: integration.revision,
             endpoint: integration.baseUrl,
             transport: serverTransport,
             authority,
-            ...(credentialResolver ? { credentialResolver } : {}),
+            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
           });
     const server = buildServer(transport);
-    const preflightServer = credentialResolver
-      ? buildServer(providerBlockingPreflightTransport)
+    const preflightCredentialResolver = integration.connectionRef
+      ? integrationCredentialResolver(input, integration, "preflight")
+      : undefined;
+    const preflightServer = preflightCredentialResolver
+      ? buildServer(providerBlockingPreflightTransport, preflightCredentialResolver)
       : null;
     return {
       id: integration.serverId,
       server,
+      approvalAuthority: {
+        kind: "api_integration",
+        capabilityId: integration.capabilityId,
+        pluginKey: integration.pluginKey,
+        pluginInstallationId: integration.pluginInstallationId,
+        installationVersion: integration.installationVersion,
+        instanceId: integration.instanceId,
+        instanceKey: integration.instanceKey,
+        instanceVersion: integration.instanceVersion,
+        definitionId: integration.definitionId,
+        definitionProvenance: integration.definitionProvenance,
+        revisionId: integration.revision.id,
+        baseUrl: integration.baseUrl,
+        providerDomain: integration.providerDomain,
+        connectionRef: integration.connectionRef,
+      },
       ...(integration.connectionRef?.connectionId
         ? { resolvedConnectionId: integration.connectionRef.connectionId }
         : {}),
@@ -114,6 +136,7 @@ async function preflightApiIntegrationCall(
 function integrationCredentialResolver(
   input: BuildApiIntegrationServersInput,
   integration: ApiIntegrationRuntime,
+  credentialResolutionMode: "execution" | "preflight",
 ): IntegrationCredentialResolver {
   const connectionRef = integration.connectionRef;
   if (!connectionRef) throw new Error("Integration credential resolver requires a connection");
@@ -127,6 +150,7 @@ function integrationCredentialResolver(
         destinationUrl: request.destinationUrl,
         credentialTarget: "http_api",
         forceRefresh: request.forceRefresh === true,
+        credentialResolutionMode,
       });
       if (result.status === "auth_needed") {
         await publishAuthNeeded(

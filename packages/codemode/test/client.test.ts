@@ -210,6 +210,86 @@ describe("CodemodeClient", () => {
     expect(reads).toBe(1);
   });
 
+  test("does not adopt an existing operation after a deterministic submission conflict", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const operationId = "89898989-8989-4989-8989-898989898989";
+    let operationReads = 0;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        if (init?.method === "POST") {
+          return Response.json(
+            {
+              error: {
+                status: 409,
+                code: "conflict",
+                message: "Codemode operation id is already bound to a different request",
+                retryable: false,
+                outcomeUnknown: false,
+                details: { code: "codemode_operation_conflict" },
+              },
+            },
+            { status: 409 },
+          );
+        }
+        operationReads += 1;
+        return Response.json(operation(operationId, catalog.digest, "completed"));
+      }) as typeof fetch,
+    });
+
+    await expect(
+      client.call(definition.identity, { query: "hello" }, { operationId }),
+    ).rejects.toMatchObject({
+      name: "CodemodeTransportError",
+      status: 409,
+      remoteCode: "codemode_operation_conflict",
+      outcomeUnknown: false,
+    });
+    expect(operationReads).toBe(0);
+  });
+
+  test("rejects a mismatched operation recovered after an ambiguous POST failure", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const operationId = "90909090-9090-4090-8090-909090909090";
+    let operationReads = 0;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        if (init?.method === "POST") {
+          throw new TypeError("response connection lost after commit");
+        }
+        operationReads += 1;
+        return Response.json({
+          ...operation(operationId, catalog.digest, "completed"),
+          identity: { serverId: "docs", toolName: "different" },
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(
+      client.call(definition.identity, { query: "hello" }, { operationId }),
+    ).rejects.toMatchObject({
+      name: "CodemodeTransportError",
+      status: 409,
+      remoteCode: "codemode_operation_conflict",
+      retryable: false,
+      outcomeUnknown: false,
+    });
+    expect(operationReads).toBe(1);
+  });
+
   test("refreshes and re-resolves one stale path before operation creation", async () => {
     const originalDefinition = {
       ...definition,

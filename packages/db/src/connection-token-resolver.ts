@@ -162,6 +162,8 @@ export type ResolveConnectionCredentialInput = {
   /** Defaults to header-only MCP transport. */
   credentialTarget?: "mcp" | "http_api";
   forceRefresh?: boolean;
+  /** Internal lookup mode. Preflight must not refresh credentials or record provider usage. */
+  credentialResolutionMode?: "execution" | "preflight";
   /** Exact immutable accepted-work authority; never credential-bearing. */
   connectionUseAuthority?: unknown;
   /** Exact accepted attempt plus one stable physical-provider request id. */
@@ -721,6 +723,7 @@ export function buildConnectionTokenResolver(
     destinationUrl: string,
     inputCredentialTarget: "mcp" | "http_api",
     connectionUseAttribution?: ConnectionUseAttribution,
+    recordUsage = true,
   ): Promise<ResolveConnectionCredentialResult> => {
     if (cred.status !== "active") {
       return authNeededForStatus(cred, ref);
@@ -762,7 +765,9 @@ export function buildConnectionTokenResolver(
           : {}),
       };
     }
-    await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
+    if (recordUsage) {
+      await deps.recordUsed(db, cred.workspaceId, cred.id, cred.subjectId);
+    }
     return {
       status: "ok",
       headers: material.headers,
@@ -839,6 +844,7 @@ export function buildConnectionTokenResolver(
   };
 
   return async (input) => {
+    const credentialResolutionMode = input.credentialResolutionMode ?? "execution";
     let ref = input.connectionRef;
     let subjectId = input.subjectId;
     let credentialWorkspaceId = input.workspaceId;
@@ -962,7 +968,19 @@ export function buildConnectionTokenResolver(
     if (!connectionBindingMatches(cred, ref, input.destinationUrl)) {
       return authNeeded(ref, "missing_connection", cred.id);
     }
-    if (shouldRefresh(cred, input.forceRefresh === true, deps.now())) {
+    const now = deps.now();
+    if (
+      credentialResolutionMode === "preflight" &&
+      cred.kind === "oauth2" &&
+      (input.forceRefresh === true ||
+        (cred.expiresAt !== null && cred.expiresAt.getTime() <= now.getTime()))
+    ) {
+      return authNeeded(ref, "refresh_failed", cred.id);
+    }
+    if (
+      credentialResolutionMode === "execution" &&
+      shouldRefresh(cred, input.forceRefresh === true, now)
+    ) {
       try {
         cred = await refreshSingleFlight(cred, ref);
       } catch (error) {
@@ -1010,6 +1028,7 @@ export function buildConnectionTokenResolver(
       input.destinationUrl,
       input.credentialTarget ?? "mcp",
       connectionUseAttribution,
+      credentialResolutionMode === "execution",
     );
   };
 }

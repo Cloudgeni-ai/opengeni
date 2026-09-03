@@ -1092,8 +1092,12 @@ journal, sandbox delivery, and recovery semantics. Input and authorization
 preflight finish before its execution-start marker. The API exposes a stable
 pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
 and path/identity re-resolution without retrying an existing or ambiguous
-operation. Client abort is observer-only; server cancellation remains owned by
-the attempt/turn lifecycle. The current-human gateway
+operation. Deterministic submission conflicts are never reconciled to an
+existing row; ambiguous submission failures may adopt a row only after exact
+attempt scope, catalog, identity, and canonical-argument comparison. Concurrent
+first submissions serialize on the caller-owned operation id and converge to one
+creation plus one replay. Client abort is observer-only; server cancellation
+remains owned by the attempt/turn lifecycle. The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
@@ -1104,6 +1108,14 @@ active version and identity on every call. Sites do not use per-invocation
 approval prompts or approval capabilities; archived Sites receive no bridge.
 Provider construction is permission-filtered and resource-filtered before any
 connection or `tools/list` traffic.
+
+Current-human approval capabilities bind a private provider-authority digest in
+addition to the public catalog identity and arguments. Integration revision,
+instance, or connection changes therefore invalidate older approvals without
+changing the public catalog. Connection-backed approval issuance uses a
+credential preflight mode that never refreshes tokens or records provider usage;
+an approval-required provider adapter without that seam is omitted from the
+current-human catalog until it can fail safely before capability issuance.
 
 External MCP clients may use the opt-in OAuth authorization server. Its public
 metadata and dynamic registration lead to an authorization-code flow with

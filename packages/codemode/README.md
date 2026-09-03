@@ -34,8 +34,13 @@ When submission receives the structured `codemode_catalog_stale` response, the
 client refreshes the catalog once, re-resolves the requested identity or
 namespace path, and retries with the same caller-owned operation id. The API
 emits that code only before creating an operation. Ambiguous transport failures
-and any response after operation creation are reconciled by operation id and
-never trigger a catalog retry. Public `CodemodeTransportError` identity and its
+may be reconciled by operation id only when the recovered row exactly matches
+the requested attempt scope, catalog digest, tool identity, and canonical
+arguments. Deterministic HTTP conflicts are returned directly and never adopt an
+existing operation. The database serializes concurrent first submissions of one
+operation id, so identical races converge to one creation plus one replay rather
+than a unique-constraint failure. No response after operation creation triggers
+a catalog retry. Public `CodemodeTransportError` identity and its
 `codemode_transport_error` compatibility code remain unchanged; the stable API
 detail is exposed as `remoteCode`.
 

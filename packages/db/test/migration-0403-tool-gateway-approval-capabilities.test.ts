@@ -106,6 +106,7 @@ describe("migration 0403 tool gateway approval capabilities", () => {
     expect(source).not.toContain('"approval_token"');
     expect(source).toContain('"operation_id" uuid NOT NULL');
     expect(source).toContain('"arguments_digest" text NOT NULL');
+    expect(source).toContain('"authority_digest" text NOT NULL');
     expect(source).not.toContain('"site_version_id"');
     expect(source).toContain('length("tool_name") BETWEEN 1 AND 512');
     expect(source).toContain("interval '10 minutes'");
@@ -352,10 +353,10 @@ describe("migration 0403 tool gateway approval capabilities", () => {
       await transaction`
         insert into tool_gateway_approval_capabilities (
           token_hash, account_id, workspace_id, subject_id, operation_id,
-          catalog_digest, server_id, tool_name, arguments_digest, expires_at
+          catalog_digest, server_id, tool_name, arguments_digest, authority_digest, expires_at
         ) values (
           ${tokenHash}, ${accountId}, ${workspaceId}, ${subjectId}, ${crypto.randomUUID()},
-          ${"b".repeat(64)}, 'docs', 'search', ${"c".repeat(64)},
+          ${"b".repeat(64)}, 'docs', 'search', ${"c".repeat(64)}, ${"d".repeat(64)},
           clock_timestamp() + interval '5 minutes'
         )`;
       const consumed = await transaction<{ token_hash: string }[]>`

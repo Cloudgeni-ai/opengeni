@@ -71,6 +71,7 @@ CREATE TABLE "tool_gateway_approval_capabilities" (
   "server_id" text NOT NULL,
   "tool_name" text NOT NULL,
   "arguments_digest" text NOT NULL,
+  "authority_digest" text NOT NULL,
   "expires_at" timestamptz NOT NULL,
   "consumed_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
@@ -83,6 +84,8 @@ CREATE TABLE "tool_gateway_approval_capabilities" (
     CHECK ("catalog_digest" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "tool_gateway_approval_capabilities_arguments_digest_chk"
     CHECK ("arguments_digest" ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT "tool_gateway_approval_capabilities_authority_digest_chk"
+    CHECK ("authority_digest" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "tool_gateway_approval_capabilities_subject_chk"
     CHECK (length(btrim("subject_id")) BETWEEN 1 AND 1024),
   CONSTRAINT "tool_gateway_approval_capabilities_identity_chk"

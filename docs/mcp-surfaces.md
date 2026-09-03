@@ -23,7 +23,11 @@ RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope
 tokens. Consent requires the existing managed or local current-human session. OAuth
 tokens are accepted only by MCP routes and never become REST credentials.
 OAuth consent grants MCP access; it does not silently satisfy a tool's separate
-one-shot human-approval classification.
+one-shot human-approval classification. HTTP/SDK approval capabilities bind a
+private provider-authority revision as well as the public catalog identity and
+arguments. Their connection preflight never refreshes credentials or records
+provider usage, and an approval-required connection-backed adapter without that
+seam is omitted until it can fail before capability issuance.
 
 First-party OpenGeni MCP memory tools:
 

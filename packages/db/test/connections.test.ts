@@ -1548,6 +1548,72 @@ describe("buildConnectionTokenResolver", () => {
     expect(counts.loadInputs[0]).not.toHaveProperty("subjectId");
   });
 
+  test("preflights a still-valid OAuth credential without refreshing or recording usage", async () => {
+    const now = new Date("2026-09-03T12:00:00.000Z");
+    const credential = brokerCredential({
+      id: "conn_oauth",
+      providerDomain: "oauth.example.com",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(now.getTime() + 30_000),
+    });
+    const { deps, counts } = resolverDeps({
+      now: () => now,
+      loadCredential: async () => credential,
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+        credentialResolutionMode: "preflight",
+      }),
+    ).resolves.toMatchObject({
+      status: "ok",
+      headers: { authorization: "Bearer AC" },
+      connectionId: "conn_oauth",
+    });
+    expect(counts.refresh).toBe(0);
+    expect(counts.recordRefresh).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
+  test("fails expired OAuth preflight without contacting the token endpoint or recording usage", async () => {
+    const now = new Date("2026-09-03T12:00:00.000Z");
+    const credential = brokerCredential({
+      id: "conn_oauth",
+      providerDomain: "oauth.example.com",
+      kind: "oauth2",
+      credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
+      expiresAt: new Date(now.getTime() - 1),
+    });
+    const { deps, counts } = resolverDeps({
+      now: () => now,
+      loadCredential: async () => credential,
+    });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
+        connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
+        credentialResolutionMode: "preflight",
+      }),
+    ).resolves.toMatchObject({
+      status: "auth_needed",
+      reason: "refresh_failed",
+      connectionId: "conn_oauth",
+    });
+    expect(counts.refresh).toBe(0);
+    expect(counts.recordRefresh).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes bounded query/cookie API-key placements but never sends them to MCP", async () => {
     const credential = brokerCredential({
       credential: {

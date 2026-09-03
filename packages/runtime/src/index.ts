@@ -23,6 +23,7 @@ import {
 } from "@opengeni/codemode";
 import {
   createWorkspaceToolGateway,
+  digestCanonicalJson,
   type ToolGateway,
   type ToolGatewayAuthorization,
   type ToolGatewayCallLifecycle,
@@ -650,6 +651,8 @@ export type ResolveConnectionCredentialInput = {
   /** Exact MCP destination whose request would receive the resolved headers. */
   destinationUrl: string;
   forceRefresh?: boolean;
+  /** Internal credential lookup mode; preflight never refreshes or records usage. */
+  credentialResolutionMode?: "execution" | "preflight";
 };
 
 export type ResolveConnectionCredentialResult =
@@ -3426,6 +3429,8 @@ export type LocalMcpServerRegistration = {
   server: MCPServer;
   /** Exact connection identity frozen while constructing the local adapter. */
   resolvedConnectionId?: string;
+  /** Metadata-only authority revision bound into current-human approvals. */
+  approvalAuthority?: unknown;
   /** Provider-free argument/credential preflight for the current-human gateway. */
   preflightCall?: (
     toolName: string,
@@ -3833,6 +3838,7 @@ export async function prepareAgentTools(
               ),
               tool.eager !== true,
               local.preflightCall,
+              local.approvalAuthority,
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
@@ -4558,6 +4564,18 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
+          ...(config.connectionRef ? { requiresProviderPreflight: true } : {}),
+          ...(config.connectionRef || server.catalogApprovalAuthority() !== undefined
+            ? {
+                approvalAuthorityDigest: digestCanonicalJson({
+                  version: 1,
+                  serverId: server.registryId,
+                  toolName,
+                  connectionRef: config.connectionRef ?? null,
+                  authority: server.catalogApprovalAuthority() ?? null,
+                }),
+              }
+            : {}),
           ...(server.hasCatalogCallPreflight()
             ? {
                 preflightCall: async ({ call, context }) =>
@@ -6208,6 +6226,7 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly catalogCallPreflight?: NonNullable<
       LocalMcpServerRegistration["preflightCall"]
     >,
+    private readonly approvalAuthority?: unknown,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6362,6 +6381,10 @@ export class PrefixedMcpServer implements MCPServer {
 
   hasCatalogCallPreflight(): boolean {
     return this.catalogCallPreflight !== undefined;
+  }
+
+  catalogApprovalAuthority(): unknown {
+    return this.approvalAuthority;
   }
 
   async preflightCatalogTool(

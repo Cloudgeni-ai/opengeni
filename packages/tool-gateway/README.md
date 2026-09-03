@@ -42,15 +42,21 @@ const result = await gateway.call({
 ```
 
 Approval evidence is transport-owned. Current-human HTTP calls classified for
-human approval use a server-issued, hash-only, single-use capability. Agent
-attempts keep their existing durable approval and operation lifecycle. Sites do
-not use per-call approval: the active immutable version's requested identities
-are a host-filtered direct-call allowlist, and the API revalidates that version
-and the viewer's live authority before passing trusted transport metadata to the
-gateway. The external/current-human MCP adapter has no server-verifiable
-one-shot approval exchange, so it projects only entries whose classification is
-not `human`; a direct call to a hidden projected name is rejected instead of
-advertising a tool that can never execute.
+human approval use a server-issued, hash-only, single-use capability. The
+capability binds the public catalog identity and arguments plus a private
+provider-authority digest, so changing an Integration instance, revision, or
+connection invalidates an older approval without changing the public catalog.
+Connection-backed approval issuance first resolves credentials in a preflight
+mode that neither refreshes tokens nor records provider usage; a provider adapter
+without that side-effect-free preflight is omitted from the current-human
+catalog. Agent attempts keep their existing durable approval and operation
+lifecycle. Sites do not use per-call approval: the active immutable version's
+requested identities are a host-filtered direct-call allowlist, and the API
+revalidates that version and the viewer's live authority before passing trusted
+transport metadata to the gateway. The external/current-human MCP adapter has no
+server-verifiable one-shot approval exchange, so it projects only entries whose
+classification is not `human`; a direct call to a hidden projected name is
+rejected instead of advertising a tool that can never execute.
 
 `prepareCall` performs catalog, identity, approval, input-schema, and
 authorization checks without invoking the supplied executor. Attempt transports

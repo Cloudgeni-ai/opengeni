@@ -291,6 +291,13 @@ export function workspaceToolGatewayDefinitionFilter(
     ) {
       return false;
     }
+    if (
+      definition.approval === "human" &&
+      definition.requiresProviderPreflight === true &&
+      !definition.preflightCall
+    ) {
+      return false;
+    }
     return frozenIdentityKeys?.has(workspaceToolGatewayIdentityKey(definition.identity)) ?? true;
   };
 }
@@ -444,6 +451,7 @@ export async function callWorkspaceToolGateway(
         catalogDigest: request.catalogDigest,
         identity: request.identity,
         argumentsDigest: digestCanonicalJson(request.arguments),
+        approvalAuthorityDigest: preparedCall.approvalAuthorityDigest,
       });
     }
     if (approvalRequired && !approvalConfirmed) {
@@ -507,6 +515,7 @@ export async function approveWorkspaceToolGatewayCall(
       catalogDigest: request.catalogDigest,
       identity: request.identity,
       argumentsDigest: digestCanonicalJson(request.arguments),
+      approvalAuthorityDigest: preparedCall.approvalAuthorityDigest,
       expiresAt,
     });
   } catch (error) {
