@@ -12,7 +12,7 @@ import {
   selectCodexCredentialLeaseForTurn,
   type RotationDecision,
 } from "../../../apps/worker/src/activities/codex-rotation";
-import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/credential-leases";
+import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/claim";
 import * as schema from "../src/schema";
 import {
   acquireCodexCredentialLease,
@@ -1491,7 +1491,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     await connectCredential(ws!, "aba-after");
     const turnId = await seedTurn(ws!, 1);
     const firstFence = await attemptFenceForTurn(turnId);
-    const firstHolderId = codexCredentialLeaseHolderId(firstFence, "runAgentTurn", 100);
+    const firstHolderId = codexCredentialLeaseHolderId(firstFence, turnId);
     const first = await acquire(dbA, ws!, turnId, 300_000, firstHolderId);
 
     // Simulate worker death and expiry before the recovery workflow acquires
@@ -1503,7 +1503,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       where turn_id = ${turnId}`;
     await startRecoveryAttempt(ws!, turnId);
     const successorFence = await attemptFenceForTurn(turnId);
-    const successorHolderId = codexCredentialLeaseHolderId(successorFence, "runAgentTurn", 101);
+    const successorHolderId = codexCredentialLeaseHolderId(successorFence, turnId);
     const successor = await acquire(dbB, ws!, turnId, 300_000, successorHolderId);
 
     expect(first.generation).toBe(1);

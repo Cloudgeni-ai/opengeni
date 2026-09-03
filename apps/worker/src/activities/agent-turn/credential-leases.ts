@@ -4,7 +4,7 @@ import {
   heartbeatCodexCredentialLeaseUntil,
   heartbeatXaiCredentialLeaseUntil,
 } from "@opengeni/db";
-import type { RunAgentTurnInput, SharedActivityServices } from "../types";
+import type { SharedActivityServices } from "../types";
 import { codexCredentialLeaseDeadlineExpired } from "./codex";
 import { safeErrorDiagnostic } from "./errors";
 
@@ -28,34 +28,6 @@ export type TurnCredentialLeaseDeps = {
   codexWorkspaceKey: string;
   getTurnId: () => string | undefined;
 };
-
-/**
- * Build the durable Codex lease holder for one Temporal activity execution.
- *
- * `activityId`/`dispatchId` is intentionally only one component: Temporal can
- * reuse it after workflow restart or continue-as-new. The workflow run,
- * durable turn-attempt UUID, and server-assigned scheduled execution identity
- * make a worker-death redispatch or a later activity execution a different
- * holder even when the lease row was already reaped and its generation starts
- * again at 1.
- */
-export function codexCredentialLeaseHolderId(
-  input: Pick<RunAgentTurnInput, "workflowId" | "workflowRunId" | "attemptId">,
-  dispatchId: string,
-  activityExecutionId: string | number,
-): string {
-  const parts = [
-    input.workflowId,
-    input.workflowRunId,
-    input.attemptId,
-    dispatchId,
-    String(activityExecutionId),
-  ];
-  if (parts.some((part) => part.trim().length === 0)) {
-    throw new Error("Codex credential lease holder requires a complete activity identity");
-  }
-  return `codex-turn:${parts.map((part) => encodeURIComponent(part)).join(":")}`;
-}
 
 /**
  * The Codex credential holder for one running turn. The DB row is the
