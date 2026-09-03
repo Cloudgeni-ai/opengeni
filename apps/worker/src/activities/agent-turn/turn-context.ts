@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
+  CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -156,6 +157,8 @@ export type ProviderTurnState = {
   effectiveCodexCredentialVersion: number | null;
   /** Frozen alternate-account ceiling observed by the fenced allocator. */
   codexCredentialFailoverLimit: number;
+  /** Accepted Codex allocator policy captured with the first durable lease. */
+  codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -277,6 +280,7 @@ export function createTurnContext(input: {
       effectiveCodexCredentialId: null,
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
+      codexPolicySnapshot: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,

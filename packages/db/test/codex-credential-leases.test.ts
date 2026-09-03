@@ -6,6 +6,7 @@ import {
 } from "@opengeni/testing";
 import postgres from "postgres";
 import { sql } from "drizzle-orm";
+import { readCodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
 import {
   chooseRotationActive,
   selectCodexCredentialLeaseForTurn,
@@ -331,6 +332,121 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  test("persists the first accepted policy and reuses it after pin and rotation mutate", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const acceptedActive = await connectCredential(ws!, "accepted-active");
+    const laterPinned = await connectCredential(ws!, "later-pinned");
+    await setActiveCodexCredential(dbA, ws!.workspaceId, acceptedActive);
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+    const turnId = await seedTurn(ws!, 1);
+
+    const first = await acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(turnId)),
+        turnId,
+        holderId: "accepted-policy-first",
+        advanceActivePointer: true,
+      },
+      (context, sessionCodexState) =>
+        selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: "accepted-policy-session",
+          sessionPinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          sessionPinSource: sessionCodexState.pinSource,
+          sessionLastCredentialId: sessionCodexState.lastCredentialId,
+          now: new Date(),
+        }),
+    );
+    expect(first.credentialId).toBe(acceptedActive);
+    expect(first.codexPolicySnapshotReused).toBe(false);
+    const firstPolicySnapshot = first.codexPolicySnapshot;
+    expect(firstPolicySnapshot).toMatchObject({
+      activeCredentialId: acceptedActive,
+      rotationEnabled: false,
+      pinnedCredentialId: null,
+      pinSource: null,
+    });
+
+    const [storedTurn] = await admin<{ metadata: Record<string, unknown> | null }[]>`
+      select metadata from session_turns where id = ${turnId}`;
+    expect(readCodexCredentialPolicySnapshotV1(storedTurn?.metadata)).toEqual({
+      kind: "valid",
+      policy: firstPolicySnapshot!,
+    });
+
+    expect(
+      await releaseCodexCredentialLease(
+        dbA,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        first.holderId!,
+        first.generation!,
+      ),
+    ).toBe(true);
+    await setActiveCodexCredential(dbA, ws!.workspaceId, laterPinned);
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: true });
+    await withSessionCodexCapacityMutation(
+      dbA,
+      { workspaceId: ws!.workspaceId, reason: "test_policy_mutation" },
+      async (tx) => {
+        const changed = await setSessionCodexPinInTransaction(
+          tx,
+          ws!.workspaceId,
+          (await attemptFenceForTurn(turnId)).sessionId,
+          laterPinned,
+          "manual",
+        );
+        return { result: changed, changed };
+      },
+    );
+
+    const reacquired = await acquireCodexCredentialLease(
+      dbB,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(turnId)),
+        turnId,
+        holderId: "accepted-policy-reacquire",
+        advanceActivePointer: true,
+      },
+      (context, sessionCodexState) =>
+        selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: "accepted-policy-session",
+          sessionPinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          sessionPinSource: sessionCodexState.pinSource,
+          sessionLastCredentialId: sessionCodexState.lastCredentialId,
+          now: new Date(),
+        }),
+    );
+    expect(reacquired.credentialId).toBe(acceptedActive);
+    expect(reacquired.codexPolicySnapshotReused).toBe(true);
+    expect(reacquired.activeCredentialId).toBe(acceptedActive);
+    expect(reacquired.rotationEnabled).toBe(false);
+    expect(reacquired.sessionCodexState).toEqual({
+      pinnedCredentialId: null,
+      pinSource: null,
+      lastCredentialId: null,
+    });
+
+    expect(
+      await releaseCodexCredentialLease(
+        dbB,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        reacquired.holderId!,
+        reacquired.generation!,
+      ),
+    ).toBe(true);
+  }, 60_000);
+
   test("rotation defaults off while every selected turn still receives a durable lease", async () => {
     if (!available) return;
     const [ws] = await freshAccount();

@@ -182,6 +182,7 @@ export async function selectCodexTurnCapacity(
         );
       }
       const lockedSessionCodexState = leased.sessionCodexState;
+      providerTurn.codexPolicySnapshot = leased.codexPolicySnapshot;
       const sessionPin = lockedSessionCodexState.pinnedCredentialId;
       const sessionPinSource = lockedSessionCodexState.pinSource;
       const rotationDecision = leased.decision;
@@ -196,6 +197,7 @@ export async function selectCodexTurnCapacity(
       // movement for manual/policy homes; this write only records the NEXT turn's
       // policy home (or clears a policy pin whose strategy is no longer active).
       if (
+        !leased.codexPolicySnapshotReused &&
         selectedPinDisposition === "sharded" &&
         leased.credentialId !== null &&
         (sessionPinSource !== "policy" || sessionPin !== leased.credentialId)

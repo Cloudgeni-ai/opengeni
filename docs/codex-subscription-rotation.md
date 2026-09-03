@@ -43,10 +43,12 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    `codex_rotation_settings` for a workspace pool or
    `organization_codex_rotation_settings` for an organization pool. Concurrent
    replicas using the same pool wait; they do not `SKIP LOCKED`.
-2. Lock the durable turn for share and verify it belongs to the exact
+2. Lock the durable turn for update and verify it belongs to the exact
    account/workspace. If a downstream policy supplies an opaque accepted-turn
    scope resolver, resolve it from that locked turn metadata while the rotation
-   transaction remains held.
+   transaction remains held. A present
+   `codexCredentialPolicySnapshotV1` is the accepted allocator policy for this
+   logical turn; malformed present metadata fails closed.
 3. Reap expired leases for the target workspace and read every credential in
    the one effective pool. Organization decisions share the organization lock
    and cumulative selection cursor across workspaces.
@@ -58,6 +60,12 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    credential's server-held fairness cursor. The active pointer advances
    in the same transaction only when the selector allows it; manual pins and
    sharded policy homes explicitly veto pointer movement.
+6. On the first successful lease, write the bounded accepted allocator policy
+   snapshot to the locked turn row in the same transaction. Re-acquisition and
+   definitive-failure settlement reuse its active pointer, rotation state,
+   strategy, and session pin/last-used state while re-reading current account
+   health and cooldowns. Later workspace/session policy changes therefore do
+   not change the constraints of an already accepted logical turn.
 
 `most_remaining` ranks eligible credentials by:
 
@@ -217,6 +225,10 @@ still-current turn from its durable checkpoint or treats the activity as stale;
 it never falls through to an unfenced terminal write. Credential leases do not
 serialize inference: they are load signals used to spread concurrent turns, not
 exclusive locks on an account.
+Immediately before the first provider request, the worker also requires a held
+lease with a non-expired confirmed deadline. A missing or expired deadline is
+marked lost before provider I/O and enters that same lease-loss settlement path;
+it is never treated as a generic provider failure.
 
 ## Reset and failure semantics
 

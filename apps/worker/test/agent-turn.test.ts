@@ -142,6 +142,10 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
+import {
+  CodexCredentialLeaseLostError,
+  CodexTurnLease,
+} from "../src/activities/agent-turn/credential-leases";
 import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
   SandboxExecReadinessTimeoutError,
@@ -2928,6 +2932,11 @@ describe("lazy sandbox provisioner single-flight", () => {
       runStreamOnceAt,
     );
     const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const codexLeaseAssertionAt = source.indexOf("leases.codex.assertUsable()", runStreamOnceAt);
+    const providerInvocationAt = source.indexOf(
+      "eventing.stream = await withProviderRequestContext(runStreamOnce)",
+      runStreamOnceAt,
+    );
     const genericWireHookAt = source.indexOf(
       "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
       runtimeRunStreamAt,
@@ -2935,6 +2944,8 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(runStreamOnceAt).toBeGreaterThan(-1);
     expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeLessThan(providerInvocationAt);
     expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
     expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
   });
@@ -4295,6 +4306,28 @@ describe("settled run-credential finalization", () => {
 });
 
 describe("Codex credential lease deadline fence", () => {
+  test("an expired confirmed deadline marks the lease lost before dispatch", () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() - 1;
+
+    expect(() => lease.assertUsable()).toThrow(CodexCredentialLeaseLostError);
+    expect(lease.lost).toBe(true);
+    expect(lease.lossReason).toBe("deadline");
+  });
+
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
     expect(codexCredentialLeaseDeadlineExpired(null, now)).toBe(true);

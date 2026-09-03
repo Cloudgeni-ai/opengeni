@@ -10,6 +10,7 @@ import {
   codexDefinitiveFailureDisposition,
   settleTurnFailure,
 } from "../src/activities/agent-turn/failure-settlement";
+import { CodexCredentialLeaseLostError } from "../src/activities/agent-turn/credential-leases";
 
 const base = {
   rotationEnabled: true,
@@ -197,8 +198,18 @@ function databaseReadFailure(label: string): opengeniDb.SessionEventPersistenceE
 
 function codexFailureDeps(
   overrides: {
+    error?: unknown;
     settle?: (input: unknown) => Promise<boolean>;
     sessionId?: string;
+    codexPolicySnapshot?: {
+      schemaVersion: 1;
+      activeCredentialId: string | null;
+      rotationEnabled: boolean;
+      rotationStrategy: string;
+      pinnedCredentialId: string | null;
+      pinSource: "manual" | "policy" | null;
+      lastCredentialId: string | null;
+    };
   } = {},
 ) {
   const control = {
@@ -211,7 +222,7 @@ function codexFailureDeps(
   return {
     control,
     deps: {
-      error: codexAuthFailure(),
+      error: overrides.error ?? codexAuthFailure(),
       input: {
         accountId: "account-1",
         workspaceId: "workspace-1",
@@ -254,6 +265,15 @@ function codexFailureDeps(
         effectiveCodexCredentialId: "serving",
         effectiveCodexCredentialVersion: 1,
         codexCredentialFailoverLimit: 1,
+        codexPolicySnapshot: overrides.codexPolicySnapshot ?? {
+          schemaVersion: 1,
+          activeCredentialId: "serving",
+          rotationEnabled: false,
+          rotationStrategy: "sharded",
+          pinnedCredentialId: null,
+          pinSource: null,
+          lastCredentialId: "serving",
+        },
         latestCodexUsage: null,
       },
       leases: {
@@ -279,7 +299,115 @@ function codexFailureDeps(
 }
 
 describe("definitive Codex failure settlement", () => {
-  for (const failedRead of ["rotation", "accounts", "session", "goal"] as const) {
+  test("routes a typed pre-dispatch deadline loss through lease-loss recovery", async () => {
+    const leaseLoss = spyOn(opengeniDb, "settleCodexCredentialLeaseLoss").mockResolvedValue({
+      action: "recovering",
+      events: [],
+    });
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease");
+    const { deps, control } = codexFailureDeps({
+      error: new CodexCredentialLeaseLostError("deadline"),
+    });
+
+    try {
+      const result = await settleTurnFailure(deps as never);
+
+      expect(result).toEqual({ status: "recovering", turnId: "turn-1", attemptId: "attempt-1" });
+      expect(leaseLoss).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          checkpointDurable: true,
+          recoveryPayload: expect.objectContaining({ reason: "codex_lease_lost" }),
+        }),
+      );
+      expect(quarantine).not.toHaveBeenCalled();
+      expect(deps.leases.codex.held).toBe(false);
+      expect(control.activityStatus).toBe("recovering");
+    } finally {
+      leaseLoss.mockRestore();
+      quarantine.mockRestore();
+    }
+  });
+
+  test("keeps the accepted rotation-off policy when pin and rotation mutate after quarantine", async () => {
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses");
+    listAccounts
+      .mockResolvedValueOnce([codexAccount("serving")] as never)
+      .mockResolvedValueOnce([
+        codexAccount("serving", { status: "needs_relogin" }),
+        codexAccount("alternate"),
+      ] as never);
+    const getRotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
+      activeCredentialId: "alternate",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+    } as never);
+    const getSession = spyOn(opengeniDb, "getSessionCodexState").mockResolvedValue({
+      pinnedCredentialId: "alternate",
+      lastCredentialId: "alternate",
+      pinSource: "policy",
+    });
+    const getGoal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue(null);
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+    const failover = spyOn(opengeniDb, "settleCodexCredentialFailover");
+    const armWait = spyOn(opengeniDb, "armCodexCapacityWait").mockResolvedValue({
+      action: "waiting",
+      waiter: {
+        id: "waiter-1",
+        generation: 1,
+        nextCheckAt: new Date("2026-09-03T12:00:00.000Z"),
+        wakeRevision: 1,
+      },
+      events: [],
+    } as never);
+    const reconcileWait = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockResolvedValue({
+      action: "resumed",
+      waiter: { id: "waiter-1", generation: 1 },
+      events: [],
+    } as never);
+    const { deps } = codexFailureDeps({
+      codexPolicySnapshot: {
+        schemaVersion: 1,
+        activeCredentialId: "serving",
+        rotationEnabled: false,
+        rotationStrategy: "sharded",
+        pinnedCredentialId: null,
+        pinSource: null,
+        lastCredentialId: "serving",
+      },
+    });
+
+    try {
+      const result = await settleTurnFailure(deps as never);
+
+      expect(result).toEqual({ status: "recovering", turnId: "turn-1", attemptId: "attempt-1" });
+      expect(listAccounts).toHaveBeenCalledTimes(2);
+      expect(getRotation).not.toHaveBeenCalled();
+      expect(getSession).not.toHaveBeenCalled();
+      expect(failover).not.toHaveBeenCalled();
+      expect(armWait).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ resetKind: "mutation_only" }),
+      );
+      expect(reconcileWait).toHaveBeenCalledTimes(1);
+    } finally {
+      listAccounts.mockRestore();
+      getRotation.mockRestore();
+      getSession.mockRestore();
+      getGoal.mockRestore();
+      quarantine.mockRestore();
+      failover.mockRestore();
+      armWait.mockRestore();
+      reconcileWait.mockRestore();
+    }
+  });
+
+  for (const failedRead of ["accounts", "goal"] as const) {
     test(`recovers without choosing policy when the ${failedRead} metadata read fails`, async () => {
       const readFailure = databaseReadFailure(failedRead);
       let accountReads = 0;
@@ -290,20 +418,6 @@ describe("definitive Codex failure settlement", () => {
           return [codexAccount("serving"), codexAccount("alternate")] as never;
         },
       );
-      const getRotation = spyOn(opengeniDb, "getCodexRotationSettings").mockImplementation(
-        async () => {
-          if (failedRead === "rotation") throw readFailure;
-          return {
-            activeCredentialId: "serving",
-            rotationEnabled: failedRead !== "goal",
-            rotationStrategy: "most_remaining",
-          } as never;
-        },
-      );
-      const getSession = spyOn(opengeniDb, "getSessionCodexState").mockImplementation(async () => {
-        if (failedRead === "session") throw readFailure;
-        return { pinnedCredentialId: null, lastCredentialId: "serving", pinSource: null };
-      });
       const getGoal = spyOn(opengeniDb, "getSessionGoal").mockImplementation(async () => {
         if (failedRead === "goal") throw readFailure;
         return null;
@@ -350,8 +464,6 @@ describe("definitive Codex failure settlement", () => {
         expect(control.activityError).toBe(readFailure);
       } finally {
         listAccounts.mockRestore();
-        getRotation.mockRestore();
-        getSession.mockRestore();
         getGoal.mockRestore();
         quarantine.mockRestore();
         failover.mockRestore();
@@ -510,7 +622,19 @@ describe("definitive Codex failure settlement", () => {
       },
     );
     const settle = mock(async () => true);
-    const { deps, control } = codexFailureDeps({ settle, sessionId: "child-1" });
+    const { deps, control } = codexFailureDeps({
+      settle,
+      sessionId: "child-1",
+      codexPolicySnapshot: {
+        schemaVersion: 1,
+        activeCredentialId: "serving",
+        rotationEnabled: true,
+        rotationStrategy: "sharded",
+        pinnedCredentialId: null,
+        pinSource: null,
+        lastCredentialId: "serving",
+      },
+    });
 
     try {
       const result = await settleTurnFailure(deps as never);

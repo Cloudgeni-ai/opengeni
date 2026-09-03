@@ -11,6 +11,15 @@ import { safeErrorDiagnostic } from "./errors";
 export type LeaseRenewReason = "timer" | "runtime_event" | "model_usage";
 export type LeaseLossReason = "deadline" | "not_found";
 
+export class CodexCredentialLeaseLostError extends Error {
+  readonly code = "codex_credential_lease_lost";
+
+  constructor(readonly reason: LeaseLossReason) {
+    super("Codex credential lease is not usable for provider dispatch");
+    this.name = "CodexCredentialLeaseLostError";
+  }
+}
+
 export type TurnCredentialLeaseDeps = {
   db: SharedActivityServices["db"];
   observability: SharedActivityServices["observability"];
@@ -28,6 +37,7 @@ export type TurnCredentialLeaseDeps = {
 export class CodexTurnLease {
   held = false;
   lost = false;
+  lossReason: LeaseLossReason | null = null;
   holderId: string | null = null;
   generation: number | null = null;
   // Monotonic worker deadline, not a comparison between the Postgres and
@@ -43,6 +53,7 @@ export class CodexTurnLease {
   markLost = (reason: LeaseLossReason): void => {
     if (this.lost) return;
     this.lost = true;
+    this.lossReason = reason;
     this.deps.observability.incrementCounter({
       name: "opengeni_codex_lease_renewals_total",
       help: "Codex lease renewal checkpoints by outcome and reason.",
@@ -53,6 +64,22 @@ export class CodexTurnLease {
       turnId: this.deps.getTurnId(),
       reason,
     });
+  };
+
+  /** Fail closed at the last worker-confirmed lease deadline before dispatch. */
+  assertUsable = (): void => {
+    if (this.lost) {
+      throw new CodexCredentialLeaseLostError(this.lossReason ?? "not_found");
+    }
+    if (
+      !this.held ||
+      this.holderId === null ||
+      this.generation === null ||
+      codexCredentialLeaseDeadlineExpired(this.confirmedUntilMs)
+    ) {
+      this.markLost("deadline");
+      throw new CodexCredentialLeaseLostError("deadline");
+    }
   };
 
   renew = async (reason: LeaseRenewReason): Promise<void> => {

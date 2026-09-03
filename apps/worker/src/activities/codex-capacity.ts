@@ -117,8 +117,17 @@ export function codexCapacityDecision(
       },
     };
   }
-  const authoritativeReset = authoritativeCodexCapacityResetAt(context.accounts, now);
-  const hasReconcilableQuotaCooldown = context.accounts.some(
+  const policyCredentialId =
+    context.sessionPinSource === "manual" && context.sessionPinnedCredentialId
+      ? context.sessionPinnedCredentialId
+      : !context.rotationEnabled
+        ? context.activeCredentialId
+        : null;
+  const capacityAccounts = policyCredentialId
+    ? context.accounts.filter((account) => account.id === policyCredentialId)
+    : context.accounts;
+  const authoritativeReset = authoritativeCodexCapacityResetAt(capacityAccounts, now);
+  const hasReconcilableQuotaCooldown = capacityAccounts.some(
     (account) =>
       account.status === "active" &&
       account.allocatorEnabled &&
@@ -126,21 +135,13 @@ export function codexCapacityDecision(
       account.exhaustedUntil !== null &&
       account.exhaustedUntil > now,
   );
-  const policyCredentialId =
-    context.sessionPinSource === "manual" && context.sessionPinnedCredentialId
-      ? context.sessionPinnedCredentialId
-      : !context.rotationEnabled
-        ? context.activeCredentialId
-        : null;
-  const policyAccount = policyCredentialId
-    ? context.accounts.find((account) => account.id === policyCredentialId)
-    : null;
+  const policyAccount = capacityAccounts[0] ?? null;
   const mutationOnlyStatusBlock =
     (policyAccount != null &&
       (!policyAccount.allocatorEnabled || policyAccount.status !== "active")) ||
     (authoritativeReset === null &&
-      context.accounts.length > 0 &&
-      context.accounts.every(
+      capacityAccounts.length > 0 &&
+      capacityAccounts.every(
         (account) => !account.allocatorEnabled || account.status !== "active",
       ));
   return {

@@ -3,9 +3,7 @@ import {
   getSessionGoal,
   armXaiCapacityWait,
   reconcileXaiCapacityWait,
-  getCodexRotationSettings,
   listCodexAccountStatuses,
-  getSessionCodexState,
   quarantineCodexCredentialForLease,
   recordUsageEvent,
   getActiveSessionHistoryItemsPaged,
@@ -14,14 +12,15 @@ import {
   readLease,
   SandboxLeaseSupersededError,
   isSessionEventPersistenceError,
+  type CodexLeaseAccountStatus,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { maxTurnsExceededRunState } from "@opengeni/runtime";
 import { CancelledFailure } from "@temporalio/activity";
 import {
   authoritativeCodexCapacityResetAt,
-  chooseRotationActive,
   classifyCodexPin,
+  selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
 } from "../codex-rotation";
 import type { Settings } from "@opengeni/config";
@@ -38,7 +37,7 @@ import type {
   RunAgentTurnInput,
   RunAgentTurnResult,
 } from "../types";
-import { createTurnCredentialLeases } from "./credential-leases";
+import { CodexCredentialLeaseLostError, createTurnCredentialLeases } from "./credential-leases";
 import { createTurnHistorySink } from "./history-sink";
 
 import { BudgetExhaustedError } from "./admission";
@@ -73,6 +72,7 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import type { CodexCredentialPolicySnapshotV1 } from "@opengeni/contracts";
 import { armAndReconcileCodexCapacityWait } from "../codex-capacity";
 
 export type TurnFailureDeps = {
@@ -202,6 +202,26 @@ export function codexCapacityWaitFailurePayload(input: {
     detail: "the same accepted turn is waiting for the selected account to recover",
     retryable: false,
   };
+}
+
+function codexLeaseAccountsForSelection(
+  accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>,
+): CodexLeaseAccountStatus[] {
+  return accounts.map((account) => ({
+    ...account,
+    activeLeaseCount: 0,
+    selectionCount: 0,
+    lastSelectedAt: null,
+  }));
+}
+
+function acceptedCodexPolicySnapshot(
+  providerTurn: ProviderTurnState,
+): CodexCredentialPolicySnapshotV1 {
+  if (!providerTurn.codexPolicySnapshot) {
+    throw new Error("Codex accepted policy snapshot is missing after durable lease acquisition");
+  }
+  return providerTurn.codexPolicySnapshot;
 }
 
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
@@ -595,7 +615,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // recoverable, but a successor attempt or worker recovery makes this activity
   // stale and unable to clobber the shared turn/session.
   if (
-    leases.codex.lost &&
+    (leases.codex.lost || error instanceof CodexCredentialLeaseLostError) &&
     billingState.isCodexTurn &&
     eventing.publish &&
     attempt.turnId &&
@@ -857,22 +877,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         }
         throw new Error("Exhausted Codex failover receipt unexpectedly recovered");
       }
-      let rotation: Awaited<ReturnType<typeof getCodexRotationSettings>>;
       let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
-      let sessionCodex: Awaited<ReturnType<typeof getSessionCodexState>>;
       try {
-        [rotation, accounts, sessionCodex] = await Promise.all([
-          getCodexRotationSettings(db, input.workspaceId),
-          listCodexAccountStatuses(db, input.workspaceId),
-          getSessionCodexState(db, input.workspaceId, input.sessionId),
-        ]);
+        accounts = await listCodexAccountStatuses(db, input.workspaceId);
       } catch (metadataError) {
-        // Rotation policy, the eligible pool, and a manual session pin are all
-        // authority for the next action. Never replace a failed read with a
-        // permissive synthetic default: doing so can terminal-fail a recoverable
-        // turn or move a manual pin. Operational database failures re-enter the
-        // existing exact-attempt recovery lane after the serving credential was
-        // quarantined; permanent failures escape without making a policy choice.
+        // Current account health/cooldown metadata is still required after
+        // quarantine. Operational database failures re-enter the existing
+        // exact-attempt recovery lane; no policy choice is made from partial
+        // account state.
         const recoveryFailure = postClaimDatabaseRecoveryFailure({
           error: metadataError,
           turnId: attempt.turnId,
@@ -887,27 +899,38 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         }
         throw metadataError;
       }
-      const decision = rotation
-        ? chooseRotationActive({
-            rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
-            activeCredentialId: rotation.activeCredentialId,
-            priorCredentialId: providerTurn.effectiveCodexCredentialId,
-            accounts,
-            now: new Date(),
-          })
-        : ({ kind: "none" } as const);
+      const acceptedPolicy = acceptedCodexPolicySnapshot(providerTurn);
+      const selected = selectCodexCredentialLeaseForTurn({
+        context: {
+          accounts: codexLeaseAccountsForSelection(accounts),
+          activeCredentialId: acceptedPolicy.activeCredentialId,
+          rotationEnabled: acceptedPolicy.rotationEnabled,
+          rotationStrategy: acceptedPolicy.rotationStrategy,
+          existingCredentialId: null,
+          failedCredentialIds: [providerTurn.effectiveCodexCredentialId],
+          policyScope: null,
+          unavailableDiagnostics: [],
+        },
+        sessionId: input.sessionId,
+        sessionPinnedCredentialId: acceptedPolicy.pinnedCredentialId,
+        sessionPinSource: acceptedPolicy.pinSource,
+        sessionLastCredentialId: acceptedPolicy.lastCredentialId,
+        now,
+      });
+      const decisionKind =
+        selected.decision.kind === "allocatorDisabled" ? "allCapped" : selected.decision.kind;
       const pinDisposition = classifyCodexPin({
-        pinnedCredentialId: sessionCodex?.pinnedCredentialId ?? null,
-        pinSource: sessionCodex?.pinSource ?? null,
-        strategy: (rotation?.rotationStrategy ?? "sharded") as CodexRotationStrategy,
-        rotationEnabled: Boolean(rotation?.rotationEnabled),
+        pinnedCredentialId: acceptedPolicy.pinnedCredentialId,
+        pinSource: acceptedPolicy.pinSource,
+        strategy: acceptedPolicy.rotationStrategy as CodexRotationStrategy,
+        rotationEnabled: acceptedPolicy.rotationEnabled,
       });
       const failureDisposition = codexDefinitiveFailureDisposition({
         failureKind: codexCredentialFailure.kind,
-        rotationEnabled: Boolean(rotation?.rotationEnabled),
+        rotationEnabled: acceptedPolicy.rotationEnabled,
         pinDisposition,
-        decisionKind: decision.kind,
-        decisionCredentialId: decision.kind === "active" ? decision.credentialId : null,
+        decisionKind,
+        decisionCredentialId: selected.decision.kind === "active" ? selected.credentialId : null,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
       });
       const maxFailovers = providerTurn.codexCredentialFailoverLimit;
@@ -1034,13 +1057,22 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           codexCredentialFailure.cooldownSeconds !== null &&
           Number.isFinite(codexCredentialFailure.cooldownSeconds) &&
           codexCredentialFailure.cooldownSeconds > 0;
+        const policyCredentialId =
+          pinDisposition === "manual" && acceptedPolicy.pinnedCredentialId
+            ? acceptedPolicy.pinnedCredentialId
+            : !acceptedPolicy.rotationEnabled
+              ? acceptedPolicy.activeCredentialId
+              : null;
+        const capacityAccounts = policyCredentialId
+          ? accounts.filter((account) => account.id === policyCredentialId)
+          : accounts;
         const authoritativeResetAt = exactProviderReset
-          ? (authoritativeCodexCapacityResetAt(accounts, now) ?? cooldownUntil)
+          ? (authoritativeCodexCapacityResetAt(capacityAccounts, now) ?? cooldownUntil)
           : null;
         const allAccounts =
-          Boolean(rotation?.rotationEnabled) &&
+          acceptedPolicy.rotationEnabled &&
           pinDisposition !== "manual" &&
-          decision.kind === "allCapped";
+          decisionKind === "allCapped";
         const failurePayload = codexCapacityWaitFailurePayload({
           failureKind: codexCredentialFailure.kind,
           usageLimit,

@@ -235,6 +235,8 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   latencyModeForMetadata,
   metadataWithTurnExecutionPolicyV1,
+  metadataWithCodexCredentialPolicySnapshotV1,
+  readCodexCredentialPolicySnapshotV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceCodexCompactionDefault,
@@ -256,6 +258,7 @@ import {
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
@@ -23463,6 +23466,10 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   rotationStrategy: string;
   /** Session state from the row locked during this acquisition. */
   sessionCodexState: CodexCredentialLeaseSessionState;
+  /** Accepted allocator policy captured with the first durable lease. */
+  codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /** True when this acquisition reused a snapshot already present on the turn. */
+  codexPolicySnapshotReused: boolean;
   credentialId: string | null;
   reused: boolean;
   holderId: string | null;
@@ -23863,7 +23870,7 @@ export async function acquireCodexCredentialLease<
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
           and id = ${input.turnId}
-        for share
+        for update
       `);
       const attempts = await tx.execute(sql<{
         id: string;
@@ -23926,6 +23933,16 @@ export async function acquireCodexCredentialLease<
             : null,
         lastCredentialId: session.codex_last_credential_id,
       };
+      const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(turn.metadata);
+      const codexPolicySnapshot =
+        acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+      const acceptedSessionCodexState: CodexCredentialLeaseSessionState = codexPolicySnapshot
+        ? {
+            pinnedCredentialId: codexPolicySnapshot.pinnedCredentialId,
+            pinSource: codexPolicySnapshot.pinSource,
+            lastCredentialId: codexPolicySnapshot.lastCredentialId,
+          }
+        : sessionCodexState;
       const failoverMetadata = codexFailoverMetadata(turn.metadata);
       if (failoverMetadata.exhausted && failoverMetadata.maxFailovers !== null) {
         throw new CodexCredentialFailoverExhaustedError(
@@ -23934,9 +23951,15 @@ export async function acquireCodexCredentialLease<
         );
       }
       const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
-      const activeCredentialId = settingsRow.active_credential_id;
-      const rotationEnabled = settingsRow.rotation_enabled;
-      const rotationStrategy = settingsRow.rotation_strategy;
+      const activeCredentialId = codexPolicySnapshot
+        ? codexPolicySnapshot.activeCredentialId
+        : settingsRow.active_credential_id;
+      const rotationEnabled = codexPolicySnapshot
+        ? codexPolicySnapshot.rotationEnabled
+        : settingsRow.rotation_enabled;
+      const rotationStrategy = codexPolicySnapshot
+        ? codexPolicySnapshot.rotationStrategy
+        : settingsRow.rotation_strategy;
 
       await tx.execute(sql`
         delete from codex_credential_leases
@@ -23984,7 +24007,10 @@ export async function acquireCodexCredentialLease<
       let unavailableDiagnostics: readonly TUnavailableDiagnostic[] = [];
       let selected: CodexCredentialLeaseSelection<T> | undefined;
       if (sameTurnCredentialId !== null) {
-        const sameTurnSelection = select(selectionContext(allAccounts, []), sessionCodexState);
+        const sameTurnSelection = select(
+          selectionContext(allAccounts, []),
+          acceptedSessionCodexState,
+        );
         if (sameTurnSelection.credentialId === sameTurnCredentialId) {
           selected = sameTurnSelection;
         }
@@ -24001,7 +24027,10 @@ export async function acquireCodexCredentialLease<
         );
         accounts = filtered.accounts;
         unavailableDiagnostics = filtered.unavailableDiagnostics;
-        selected = select(selectionContext(accounts, unavailableDiagnostics), sessionCodexState);
+        selected = select(
+          selectionContext(accounts, unavailableDiagnostics),
+          acceptedSessionCodexState,
+        );
       }
       if (selected.credentialId === null) {
         if (existingCredentialId !== null) {
@@ -24016,7 +24045,9 @@ export async function acquireCodexCredentialLease<
           activeCredentialId,
           rotationEnabled,
           rotationStrategy,
-          sessionCodexState,
+          sessionCodexState: acceptedSessionCodexState,
+          codexPolicySnapshot,
+          codexPolicySnapshotReused: codexPolicySnapshot !== null,
           credentialId: null,
           reused: false,
           holderId: null,
@@ -24037,8 +24068,9 @@ export async function acquireCodexCredentialLease<
       }
 
       const advanceActivePointer =
+        codexPolicySnapshot === null &&
         input.advanceActivePointer &&
-        sessionCodexState.pinnedCredentialId === null &&
+        acceptedSessionCodexState.pinnedCredentialId === null &&
         selected.advanceActivePointer !== false;
 
       const reused = existingCredentialId === selected.credentialId;
@@ -24078,6 +24110,40 @@ export async function acquireCodexCredentialLease<
             and id = ${selected.credentialId}
         `);
       }
+      const acceptedSnapshot =
+        codexPolicySnapshot ??
+        CodexCredentialPolicySnapshotV1.parse({
+          schemaVersion: 1,
+          activeCredentialId: settingsRow.active_credential_id,
+          rotationEnabled: settingsRow.rotation_enabled,
+          rotationStrategy: settingsRow.rotation_strategy,
+          pinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          pinSource: sessionCodexState.pinSource,
+          lastCredentialId: sessionCodexState.lastCredentialId,
+        });
+      if (codexPolicySnapshot === null) {
+        const [snapshottedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, acceptedSnapshot),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.accountId, input.accountId),
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!snapshottedTurn) {
+          throw new CodexCredentialLeaseAttemptFencedError();
+        }
+      }
       if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
         if (organizationSource) {
           await tx.execute(sql`
@@ -24099,7 +24165,9 @@ export async function acquireCodexCredentialLease<
         activeCredentialId,
         rotationEnabled,
         rotationStrategy,
-        sessionCodexState,
+        sessionCodexState: acceptedSessionCodexState,
+        codexPolicySnapshot: acceptedSnapshot,
+        codexPolicySnapshotReused: codexPolicySnapshot !== null,
         credentialId: selected.credentialId,
         reused,
         holderId: leaseRows[0]?.holder_id ?? input.holderId,
@@ -25169,10 +25237,31 @@ export async function reconcileCodexCapacityWait<
           return { action: "superseded", ...superseded } as const;
         }
 
+        const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(blockedTurn.metadata);
+        const codexPolicySnapshot =
+          acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+        const activeCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.activeCredentialId
+          : rotation.activeCredentialId;
+        const rotationEnabled = codexPolicySnapshot
+          ? codexPolicySnapshot.rotationEnabled
+          : rotation.rotationEnabled;
+        const rotationStrategy = codexPolicySnapshot
+          ? codexPolicySnapshot.rotationStrategy
+          : rotation.rotationStrategy;
+        const sessionPinnedCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.pinnedCredentialId
+          : session.codexPinnedCredentialId;
+        const sessionPinSource = codexPolicySnapshot
+          ? codexPolicySnapshot.pinSource
+          : ((session.codexPinSource as CodexPinSource | null) ?? null);
+        const sessionLastCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.lastCredentialId
+          : session.codexLastCredentialId;
         const allAccounts = await listCodexLeaseCandidatesInTransaction(tx, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
-          activeCredentialId: rotation.activeCredentialId,
+          activeCredentialId,
           source: rotation.source,
           excludeTurnId: waiter.blockedTurnId,
         });
@@ -25184,16 +25273,16 @@ export async function reconcileCodexCapacityWait<
         );
         const decision = decide({
           accounts: filtered.accounts,
-          activeCredentialId: rotation.activeCredentialId,
-          rotationEnabled: rotation.rotationEnabled,
-          rotationStrategy: rotation.rotationStrategy,
+          activeCredentialId,
+          rotationEnabled,
+          rotationStrategy,
           existingCredentialId: null,
           policyScope,
           unavailableDiagnostics: filtered.unavailableDiagnostics,
           sessionId: session.id,
-          sessionPinnedCredentialId: session.codexPinnedCredentialId,
-          sessionPinSource: (session.codexPinSource as CodexPinSource | null) ?? null,
-          sessionLastCredentialId: session.codexLastCredentialId,
+          sessionPinnedCredentialId,
+          sessionPinSource,
+          sessionLastCredentialId,
           policyHash: waiter.policyHash,
         });
         if (decision.kind === "unavailable") {
