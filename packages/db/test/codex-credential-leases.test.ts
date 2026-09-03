@@ -8,6 +8,7 @@ import postgres from "postgres";
 import { sql } from "drizzle-orm";
 import {
   chooseRotationActive,
+  selectCodexCredentialLeaseForTurn,
   type RotationDecision,
 } from "../../../apps/worker/src/activities/codex-rotation";
 import * as schema from "../src/schema";
@@ -17,6 +18,7 @@ import {
   createDb,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  getSessionCodexState,
   heartbeatCodexCredentialLease,
   heartbeatCodexCredentialLeaseUntil,
   listCodexAccountStatuses,
@@ -32,12 +34,15 @@ import {
   setCodexCredentialStatus,
   setCodexCredentialStatusById,
   setActiveCodexCredential,
+  setSessionCodexPinInTransaction,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCredentialRefreshLock,
+  withSessionCodexCapacityMutation,
   withSessionActivityRlsContext,
   withRlsContext,
   workspaceCodexSubscriptionActive,
+  type CodexCredentialLeaseSessionState,
   type CodexCredentialLeaseSelectionContext,
   type Database,
   type DbClient,
@@ -352,6 +357,109 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(leased.holderId).not.toBeNull();
     expect(leased.generation).toBe(1);
   });
+
+  test("uses the session pin committed while acquisition waits on the allocator lock", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const pinnedCredentialId = await connectCredential(ws!, "pin-race-pinned");
+    const activeCredentialId = await connectCredential(ws!, "pin-race-active");
+    await setActiveCodexCredential(dbA, ws!.workspaceId, activeCredentialId);
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+    const turnId = await seedTurn(ws!, 1);
+    const fence = await attemptFenceForTurn(turnId);
+
+    // This is the stale read that used to feed the worker's selector. The
+    // manual mutation below commits after this read but before acquisition can
+    // obtain the allocator lock.
+    const beforePinChange = await getSessionCodexState(dbA, ws!.workspaceId, fence.sessionId);
+    expect(beforePinChange).toEqual({
+      pinnedCredentialId: null,
+      lastCredentialId: null,
+      pinSource: null,
+    });
+
+    let releaseManualMutation!: () => void;
+    const manualMutationMayContinue = new Promise<void>((resolve) => {
+      releaseManualMutation = resolve;
+    });
+    let manualMutationReady!: () => void;
+    const manualMutationHasLock = new Promise<void>((resolve) => {
+      manualMutationReady = resolve;
+    });
+    const manualPinMutation = withSessionCodexCapacityMutation(
+      dbB,
+      { workspaceId: ws!.workspaceId, reason: "codex_manual_session_pin_changed" },
+      async (tx) => {
+        manualMutationReady();
+        await manualMutationMayContinue;
+        const changed = await setSessionCodexPinInTransaction(
+          tx,
+          ws!.workspaceId,
+          fence.sessionId,
+          pinnedCredentialId,
+        );
+        return { result: changed, changed };
+      },
+    );
+    await manualMutationHasLock;
+
+    const lockedStates: CodexCredentialLeaseSessionState[] = [];
+    const acquisition = acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...fence,
+        turnId,
+        holderId: `pin-race:${turnId}`,
+        advanceActivePointer: true,
+      },
+      (context, lockedSessionCodexState) => {
+        lockedStates.push(lockedSessionCodexState);
+        return selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: fence.sessionId,
+          sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
+          sessionPinSource: lockedSessionCodexState.pinSource,
+          sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
+          now: new Date(),
+        });
+      },
+    );
+    releaseManualMutation();
+
+    const [manualMutation, leased] = await Promise.all([manualPinMutation, acquisition]);
+    expect(manualMutation.result).toBe(true);
+    const expectedLockedState: CodexCredentialLeaseSessionState = {
+      pinnedCredentialId,
+      lastCredentialId: null,
+      pinSource: "manual",
+    };
+    expect(lockedStates).toEqual([expectedLockedState]);
+    expect(leased.sessionCodexState).toEqual(expectedLockedState);
+    expect(leased.credentialId).toBe(pinnedCredentialId);
+    expect(leased.advanceActivePointer).toBe(false);
+
+    const [rotation] = await admin<{ active_credential_id: string | null }[]>`
+      select active_credential_id
+      from codex_rotation_settings
+      where workspace_id = ${ws!.workspaceId}`;
+    expect(rotation?.active_credential_id).toBe(activeCredentialId);
+    expect(await getSessionCodexState(dbA, ws!.workspaceId, fence.sessionId)).toMatchObject({
+      pinnedCredentialId,
+      pinSource: "manual",
+    });
+    expect(
+      await releaseCodexCredentialLease(
+        dbA,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        leased.holderId!,
+        leased.generation!,
+      ),
+    ).toBe(true);
+  }, 60_000);
 
   test("40 concurrent turns across two replica pools spread evenly over four credentials", async () => {
     if (!available) return;

@@ -23419,6 +23419,17 @@ export type CodexCredentialLeaseCandidateFilter<
   | readonly CodexLeaseAccountStatus[]
   | CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>;
 
+/**
+ * Codex session state read from the exact session row locked by credential
+ * acquisition. Selection and pointer movement must use this snapshot rather
+ * than an unlocked read taken before the allocator transaction.
+ */
+export type CodexCredentialLeaseSessionState = {
+  pinnedCredentialId: string | null;
+  pinSource: "manual" | "policy" | null;
+  lastCredentialId: string | null;
+};
+
 export type CodexCredentialLeaseSelectionContext<
   TPolicyScope = never,
   TUnavailableDiagnostic = never,
@@ -23450,6 +23461,8 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   activeCredentialId: string | null;
   rotationEnabled: boolean;
   rotationStrategy: string;
+  /** Session state from the row locked during this acquisition. */
+  sessionCodexState: CodexCredentialLeaseSessionState;
   credentialId: string | null;
   reused: boolean;
   holderId: string | null;
@@ -23744,6 +23757,7 @@ export async function acquireCodexCredentialLease<
   },
   select: (
     context: CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic>,
+    sessionCodexState: CodexCredentialLeaseSessionState,
   ) => CodexCredentialLeaseSelection<T>,
 ): Promise<CodexCredentialLeaseResult<T, TUnavailableDiagnostic>> {
   const leaseTtlMs = input.leaseTtlMs ?? CODEX_CREDENTIAL_LEASE_TTL_MS;
@@ -23824,8 +23838,13 @@ export async function acquireCodexCredentialLease<
         id: string;
         status: string;
         active_turn_id: string | null;
+        codex_pinned_credential_id: string | null;
+        codex_pin_source: string | null;
+        codex_last_credential_id: string | null;
       }>`
-        select id, status, active_turn_id from sessions
+        select id, status, active_turn_id,
+               codex_pinned_credential_id, codex_pin_source, codex_last_credential_id
+        from sessions
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
           and id = ${input.sessionId}
@@ -23899,6 +23918,14 @@ export async function acquireCodexCredentialLease<
       ) {
         throw new CodexCredentialLeaseAttemptFencedError();
       }
+      const sessionCodexState: CodexCredentialLeaseSessionState = {
+        pinnedCredentialId: session.codex_pinned_credential_id,
+        pinSource:
+          session.codex_pin_source === "manual" || session.codex_pin_source === "policy"
+            ? session.codex_pin_source
+            : null,
+        lastCredentialId: session.codex_last_credential_id,
+      };
       const failoverMetadata = codexFailoverMetadata(turn.metadata);
       if (failoverMetadata.exhausted && failoverMetadata.maxFailovers !== null) {
         throw new CodexCredentialFailoverExhaustedError(
@@ -23957,7 +23984,7 @@ export async function acquireCodexCredentialLease<
       let unavailableDiagnostics: readonly TUnavailableDiagnostic[] = [];
       let selected: CodexCredentialLeaseSelection<T> | undefined;
       if (sameTurnCredentialId !== null) {
-        const sameTurnSelection = select(selectionContext(allAccounts, []));
+        const sameTurnSelection = select(selectionContext(allAccounts, []), sessionCodexState);
         if (sameTurnSelection.credentialId === sameTurnCredentialId) {
           selected = sameTurnSelection;
         }
@@ -23974,7 +24001,7 @@ export async function acquireCodexCredentialLease<
         );
         accounts = filtered.accounts;
         unavailableDiagnostics = filtered.unavailableDiagnostics;
-        selected = select(selectionContext(accounts, unavailableDiagnostics));
+        selected = select(selectionContext(accounts, unavailableDiagnostics), sessionCodexState);
       }
       if (selected.credentialId === null) {
         if (existingCredentialId !== null) {
@@ -23989,6 +24016,7 @@ export async function acquireCodexCredentialLease<
           activeCredentialId,
           rotationEnabled,
           rotationStrategy,
+          sessionCodexState,
           credentialId: null,
           reused: false,
           holderId: null,
@@ -24009,7 +24037,9 @@ export async function acquireCodexCredentialLease<
       }
 
       const advanceActivePointer =
-        input.advanceActivePointer && selected.advanceActivePointer !== false;
+        input.advanceActivePointer &&
+        sessionCodexState.pinnedCredentialId === null &&
+        selected.advanceActivePointer !== false;
 
       const reused = existingCredentialId === selected.credentialId;
       const leaseRows = await tx.execute(
@@ -24069,6 +24099,7 @@ export async function acquireCodexCredentialLease<
         activeCredentialId,
         rotationEnabled,
         rotationStrategy,
+        sessionCodexState,
         credentialId: selected.credentialId,
         reused,
         holderId: leaseRows[0]?.holder_id ?? input.holderId,

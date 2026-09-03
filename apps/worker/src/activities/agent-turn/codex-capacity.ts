@@ -4,12 +4,12 @@ import {
   CodexCredentialLeaseAttemptFencedError,
   CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPinInTransaction,
   settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
   type CodexCredentialLeaseResult,
+  type CodexCredentialLeaseSessionState,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
@@ -122,16 +122,16 @@ export async function selectCodexTurnCapacity(
     const credentialSelectionStartedAt = performance.now();
     let credentialSelectionOutcome: "completed" | "failed" = "completed";
     try {
-      const sessionCodex = await getSessionCodexState(db, input.workspaceId, input.sessionId);
-      const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
-      const sessionPinSource = sessionCodex?.pinSource ?? null;
-      const selectForTurn = (context: CodexCredentialLeaseSelectionContext) =>
+      const selectForTurn = (
+        context: CodexCredentialLeaseSelectionContext,
+        lockedSessionCodexState: CodexCredentialLeaseSessionState,
+      ) =>
         selectCodexCredentialLeaseForTurn({
           context,
           sessionId: input.sessionId,
-          sessionPinnedCredentialId: sessionPin,
-          sessionPinSource,
-          sessionLastCredentialId: sessionCodex?.lastCredentialId ?? null,
+          sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
+          sessionPinSource: lockedSessionCodexState.pinSource,
+          sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
           now: new Date(),
         });
 
@@ -151,7 +151,7 @@ export async function selectCodexTurnCapacity(
             dispatchId,
             expectedRedispatches: attempt.redispatchesAtDispatch,
             holderId,
-            advanceActivePointer: sessionPin === null,
+            advanceActivePointer: true,
           },
           selectForTurn,
         );
@@ -176,11 +176,14 @@ export async function selectCodexTurnCapacity(
             dispatchId,
             expectedRedispatches: attempt.redispatchesAtDispatch,
             holderId,
-            advanceActivePointer: sessionPin === null,
+            advanceActivePointer: true,
           },
           selectForTurn,
         );
       }
+      const lockedSessionCodexState = leased.sessionCodexState;
+      const sessionPin = lockedSessionCodexState.pinnedCredentialId;
+      const sessionPinSource = lockedSessionCodexState.pinSource;
       const rotationDecision = leased.decision;
       const selectedPinDisposition = classifyCodexPin({
         pinnedCredentialId: sessionPin,
@@ -295,7 +298,7 @@ export async function selectCodexTurnCapacity(
           actualReason,
           affinityCredentialId: fencedInFlight
             ? providerTurn.effectiveCodexCredentialId
-            : (sessionPin ?? sessionCodex?.lastCredentialId ?? null),
+            : (sessionPin ?? lockedSessionCodexState.lastCredentialId ?? null),
           fencedInFlight,
           nearExhaustionPct: settings.codexRotationNearExhaustionPct,
           now: new Date(),
@@ -545,7 +548,7 @@ export async function selectCodexTurnCapacity(
         return { exit: claimedResult({ status: "cancelled" }) };
       }
       if (providerTurn.effectiveCodexCredentialId) {
-        const priorAccountId = sessionCodex?.lastCredentialId ?? null;
+        const priorAccountId = lockedSessionCodexState.lastCredentialId;
         if (priorAccountId !== providerTurn.effectiveCodexCredentialId) {
           await recordSessionActiveCodexCredential(
             db,
