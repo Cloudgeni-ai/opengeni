@@ -1922,6 +1922,68 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start reports an upstream protected-resource metadata denial", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    let origin = "";
+    const source = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/mcp") {
+          return new Response(null, {
+            status: 401,
+            headers: {
+              "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+            },
+          });
+        }
+        if (path === "/prm") {
+          return new Response("provider challenge", { status: 403 });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${source.port}`;
+    try {
+      const response = await app({ environment: "test" }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "denied.example.test",
+            mcpUrl: `${origin}/mcp`,
+          }),
+        },
+      );
+      const body = (await response.json()) as {
+        error: {
+          code: string;
+          message: string;
+          retryable: boolean;
+          details?: Record<string, string>;
+        };
+      };
+
+      expect(response.status).toBe(502);
+      expect(body.error).toMatchObject({
+        code: "upstream_unavailable",
+        message: "MCP provider returned HTTP 403 during protected-resource discovery.",
+        retryable: false,
+        details: {
+          oauthStage: "protected_resource_metadata",
+          oauthReason: "upstream_http_403",
+        },
+      });
+    } finally {
+      source.stop(true);
+    }
+  });
+
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
