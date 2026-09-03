@@ -574,8 +574,77 @@ configuration validation requires the provider key. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
-bearers are stable HMAC identities and the browser receives them only in the
-email URL fragment.
+bearers are stable HMAC identities. The repository-safe default,
+`OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=fragment`, preserves
+compatibility with pre-query web images. Query transport is a deliberate
+second-stage rollout because API and web replicas update independently:
+
+Apply rolling migration
+`0401_organization_user_setup_token_transport.sql` before deploying the API
+that freezes and recovers per-delivery transport. Old API replicas continue to
+use the v1 claim/prepare capabilities while the new API uses additive v2
+capabilities. Migration 0401 replaces the v1 claim with a compatibility fence:
+an old replica that reaches a query-frozen retry receives a clear database
+error, and its nested claim/attempt mutation rolls back so a v2 replica can
+service the row. Do not deploy the new API against a pre-0401 database.
+
+1. deploy the new chart/web and 0401-aware API image everywhere while the
+   setting remains
+   `fragment`; verify every public web replica returns the protected
+   `/setup-account` shell, its first inline head bootstrap executes before any
+   subresource, and the dedicated Ingress exists for every host that routes to
+   web. Confirm no pre-0401 API replica remains before enabling query mode;
+2. prove every controller and external edge suppresses or redacts query-bearing
+   request targets in access logs, traces, and error logs. Then set
+   `OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true`,
+   change the transport setting to `query`, and roll the API. Email links then
+   use a bounded query parameter so mail security gateways preserve it;
+3. before any rollback, restore `fragment` on every API replica. A rollback to
+   a pre-0401 API image additionally requires every retryable query-frozen
+   failed or `outcome_unknown` delivery to be drained through a v2 replica or
+   its invitation to be revoked and reissued; old replicas are deliberately
+   unable to claim those rows. Before rolling web back to an image that
+   predates query normalization, also wait until every previously sent query
+   link has expired or revoke/reissue those invitations. An emergency rollback
+   that skips either drain can strand live or retryable invitations.
+
+The production web handler serves the setup shell directly with no-store,
+no-referrer, and noindex protections and emits no redirect at all, preserving
+the no-downgrade and untrusted-Host boundary behind TLS termination. HTTP
+servers cannot inspect a URL fragment, so the first executable inline script in
+the HTML head counts canonical query and fragment candidates together, rejects
+ambiguity, and scrubs both with `history.replaceState` before the favicon,
+module graph, or API work. It hands one token to the SPA through short-lived
+process memory and never stores it. The same bootstrap works under Vite and
+generic static serving. A deployment Content Security Policy must authorize
+this exact inline bootstrap with its existing nonce/hash process; if it cannot,
+leave query transport disabled. This compatibility does not make rollback to
+an older SPA safe; follow the staged rollout above.
+
+The managed Helm chart renders a dedicated exact ingress-nginx location only
+for hosts that actually route to web and unconditionally disables both access
+logging and ingress-nginx OpenTelemetry tracing there. Keep those protections,
+and keep `ingress.setupAccountIngress.enabled=true` in query mode: chart
+rendering fails closed if query transport would fall through the normally
+logged/traced primary Ingress. This chart-owned route is required in addition
+to the separate controller/edge error-log proof,
+but do not treat them as query-log sanitization: ingress-nginx configures a
+controller-wide `error_log`, and NGINX upstream failures/timeouts can append the
+full request line, including `?token=...`. The chart and runtime therefore fail
+query mode closed until the separate confirmation flag above is true.
+
+For ingress-nginx, a location-scoped `error_log /dev/null;` supplied through
+`nginx.ingress.kubernetes.io/configuration-snippet` is one supported mitigation
+when the controller explicitly enables snippet annotations and admits their
+Critical risk level. Because many clusters correctly disable snippets, this is
+not a chart default or a portable guarantee. Verify the generated NGINX config
+and force both upstream connection failures and timeouts while checking every
+controller/sidecar sink before setting the confirmation flag. If snippets are
+forbidden, use a reviewed custom controller template or an upstream edge with a
+demonstrated request-target redaction policy; otherwise keep query transport
+disabled. External load balancers, CDNs, WAFs, service meshes, analytics SDKs,
+APM agents, non-NGINX ingresses, and other edges need the same access/trace/error
+proof. The database continues to retain only the bearer digest.
 
 The API records a durable attempt and `provider_started` marker before provider
 I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
@@ -591,6 +660,15 @@ the exact delivery id, provider scope/key, bearer digest, effective
 becomes `reconciliation_required`: inspect Resend/provider history and do not
 resend. A retry that fails before provider I/O cannot downgrade an older
 unresolved outcome to an ordinary failure.
+The delivery also freezes its setup-link transport at first preparation.
+Changing the deployment default later does not change retries. For rolling rows
+prepared by an older API, the new API derives both link forms and selects only
+the one whose rendered message matches the stored payload digest, then persists
+that recovered transport before provider I/O. Once a query transport has been
+frozen, pre-0401 replicas cannot retry it: the v1 claim fence rolls back without
+leaving a claim or attempt, while a v2 replica remains able to claim and prepare
+the exact frozen query payload. Drain those rows or revoke/reissue their
+invitations before a pre-0401 API rollback.
 After confirming provider state, revoke the old invitation before deliberately
 creating a new one if access is still required.
 

@@ -129,7 +129,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0400_session_attempt_model_context_snapshots.sql",
+      "0401_organization_user_setup_token_transport.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -153,6 +153,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "8960f9ef90364e93ee5fc741dcb2fdbc3ebc7231b5dfb8a3055d58bb216ba9a2",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0401_organization_user_setup_token_transport.sql",
+      ),
+    ).toMatchObject({
+      sha256: "63079d07154f2a25651fa041dc59c61b7a8e174ab4b08de8416ef3254e881163",
       deploymentMode: "rolling",
     });
   });
@@ -444,6 +452,15 @@ describe("release schema contract", () => {
     const sessionAttemptModelContextSnapshots = completeSourceContract.migrations.some(
       (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
     );
+    const organizationUserSetupTokenTransport = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0401_organization_user_setup_token_transport.sql",
+    );
+    if (organizationUserSetupTokenTransport) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0401_organization_user_setup_token_transport.sql",
+      };
+    }
 
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
@@ -604,22 +621,27 @@ describe("release schema contract", () => {
       ...(sessionAttemptModelContextSnapshots
         ? { latestMigration: "0400_session_attempt_model_context_snapshots.sql" }
         : {}),
+      ...(organizationUserSetupTokenTransport
+        ? { latestMigration: "0401_organization_user_setup_token_transport.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      sessionAttemptModelContextSnapshots
-        ? "0400_session_attempt_model_context_snapshots.sql"
-        : additionalManagedOrganizationCreation
-          ? "0399_additional_managed_organization_creation.sql"
-          : organizationWorkspaceManagementEntry
-            ? "0398_organization_workspace_management_entry.sql"
-            : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      organizationUserSetupTokenTransport
+        ? "0401_organization_user_setup_token_transport.sql"
+        : sessionAttemptModelContextSnapshots
+          ? "0400_session_attempt_model_context_snapshots.sql"
+          : additionalManagedOrganizationCreation
+            ? "0399_additional_managed_organization_creation.sql"
+            : organizationWorkspaceManagementEntry
+              ? "0398_organization_workspace_management_entry.sql"
+              : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
         ? "0393_workspace_memory_and_learning_defaults.sql"
         : contextCompactionPendingObservability
           ? "0392_context_compaction_pending_observability.sql"
-          : completeSourceContract.latestMigration,
+          : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithSessionSelectedSkillActivation.latestMigration).toBe(
       scheduledTaskUnclaimedOccurrenceInvalidation
@@ -841,6 +863,7 @@ describe("release schema contract", () => {
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0399_additional_managed_organization_creation.sql",
       "0400_session_attempt_model_context_snapshots.sql",
+      "0401_organization_user_setup_token_transport.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1012,6 +1035,9 @@ describe("release schema contract", () => {
     const sessionAttemptModelContextSnapshots = completeSourceContract.migrations.some(
       (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
     );
+    const organizationUserSetupTokenTransport = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0401_organization_user_setup_token_transport.sql",
+    );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -1036,8 +1062,15 @@ describe("release schema contract", () => {
         latestMigration: "0396_model_call_equivalent_credit_cost.sql",
       };
     }
+    if (organizationUserSetupTokenTransport) {
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0401_organization_user_setup_token_transport.sql",
+      };
+    }
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (organizationUserSetupTokenTransport ? 1 : 0) +
         (sessionAttemptModelContextSnapshots ? 1 : 0) +
         (additionalManagedOrganizationCreation ? 1 : 0) +
         (sessionSelectedSkillActivation ? 1 : 0) +
@@ -1201,15 +1234,20 @@ describe("release schema contract", () => {
       ...(modelCallEquivalentCreditCost
         ? { latestMigration: "0396_model_call_equivalent_credit_cost.sql" }
         : {}),
+      ...(organizationUserSetupTokenTransport
+        ? { latestMigration: "0401_organization_user_setup_token_transport.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      sessionAttemptModelContextSnapshots
-        ? "0400_session_attempt_model_context_snapshots.sql"
-        : additionalManagedOrganizationCreation
-          ? "0399_additional_managed_organization_creation.sql"
-          : organizationWorkspaceManagementEntry
-            ? "0398_organization_workspace_management_entry.sql"
-            : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      organizationUserSetupTokenTransport
+        ? "0401_organization_user_setup_token_transport.sql"
+        : sessionAttemptModelContextSnapshots
+          ? "0400_session_attempt_model_context_snapshots.sql"
+          : additionalManagedOrganizationCreation
+            ? "0399_additional_managed_organization_creation.sql"
+            : organizationWorkspaceManagementEntry
+              ? "0398_organization_workspace_management_entry.sql"
+              : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults

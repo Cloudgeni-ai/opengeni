@@ -397,6 +397,12 @@ const budgets = {
   // the policy-derived raw envelope to 2,228 KiB, retaining 1,967 bytes of
   // headroom; gzip, file count, initial, per-file, lazy, and CSS caps remain
   // fixed.
+  // Setup-account query compatibility adds the early browser scrub/handoff and
+  // canonical query fallback required for Vite/static serving. Rebasing onto
+  // the sidebar-density main graph measures 2,281,164 raw / 637,260 gzip bytes
+  // across 30 files on Linux/x64 Bun 1.3.14. The existing raw whole-KiB
+  // envelope retains 1,332 bytes of headroom; gzip, file count, initial,
+  // per-file, lazy, and CSS caps remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
