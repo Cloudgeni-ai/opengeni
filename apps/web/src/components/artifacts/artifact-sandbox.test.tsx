@@ -4,6 +4,7 @@ import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
   openGeniSiteBridgePortFromBootstrap,
+  publishedHtmlArtifactDocument,
 } from "@opengeni/react/artifacts";
 import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
@@ -47,5 +48,21 @@ describe("published HTML artifacts", () => {
     expect(openGeniSiteBridgePortFromBootstrap(connect, [port])).toBe(port);
     expect(openGeniSiteBridgePortFromBootstrap(connect, [])).toBeNull();
     expect(openGeniSiteBridgePortFromBootstrap(connect, [port, port])).toBeNull();
+  });
+
+  it("installs the document bootstrap receiver before Site application code", () => {
+    const html =
+      "<!doctype html><html><body><script>window.siteStarted = true</script></body></html>";
+    const bridged = publishedHtmlArtifactDocument(html, true);
+
+    expect(bridged.startsWith("<!doctype html><script>")).toBe(true);
+    expect(bridged.indexOf("__opengeniSiteBridgeBootstrapV2")).toBeLessThan(
+      bridged.indexOf("window.siteStarted"),
+    );
+    expect(publishedHtmlArtifactDocument(html, false)).toBe(html);
+    const doctypeLiteral = '<script>window.literal = "<!doctype html>"</script>';
+    expect(publishedHtmlArtifactDocument(doctypeLiteral, true).startsWith("<script>(()=>")).toBe(
+      true,
+    );
   });
 });

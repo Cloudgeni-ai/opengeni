@@ -19,6 +19,7 @@ export {
   PublishedHtmlArtifactFrame,
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   openGeniSiteBridgePortFromBootstrap,
+  publishedHtmlArtifactDocument,
   SpreadsheetArtifactSurface,
   SpreadsheetGrid,
   SpreadsheetProjectionGrid,

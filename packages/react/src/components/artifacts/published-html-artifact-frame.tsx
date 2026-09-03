@@ -1,4 +1,5 @@
 import {
+  OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
   OPENGENI_SITE_BRIDGE_READY,
   OPENGENI_SITE_BRIDGE_RESPONSE,
   OPENGENI_SITE_BRIDGE_VERSION,
@@ -44,6 +45,35 @@ export type PublishedHtmlArtifactToolBridge = {
   ) => Promise<ToolGatewayCallResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
 };
+
+const SITE_BRIDGE_BOOTSTRAP_SCRIPT = `<script>(()=>{const key=${JSON.stringify(
+  OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
+)};const parentWindow=window.parent;if(parentWindow===window)return;window.addEventListener("message",event=>{const data=event.data;if(event.source!==parentWindow||!data||data.type!==${JSON.stringify(
+  OPENGENI_SITE_BRIDGE_READY,
+)}||data.version!==${OPENGENI_SITE_BRIDGE_VERSION}||event.ports.length!==1)return;const port=event.ports[0];const previous=window[key]?.port;if(previous&&previous!==port)previous.close();Object.defineProperty(window,key,{configurable:true,value:{port}});port.start();});})();</script>`;
+
+export function publishedHtmlArtifactDocument(html: string, toolBridgeEnabled: boolean): string {
+  if (!toolBridgeEnabled) return html;
+  const doctypeEnd = leadingDoctypeEnd(html);
+  if (doctypeEnd >= 0) {
+    return `${html.slice(0, doctypeEnd + 1)}${SITE_BRIDGE_BOOTSTRAP_SCRIPT}${html.slice(doctypeEnd + 1)}`;
+  }
+  return `${SITE_BRIDGE_BOOTSTRAP_SCRIPT}${html}`;
+}
+
+function leadingDoctypeEnd(html: string): number {
+  const lower = html.toLowerCase();
+  let cursor = html.charCodeAt(0) === 0xfeff ? 1 : 0;
+  while (cursor < html.length) {
+    while (/\s/.test(html[cursor] ?? "")) cursor += 1;
+    if (!html.startsWith("<!--", cursor)) break;
+    const commentEnd = html.indexOf("-->", cursor + 4);
+    if (commentEnd < 0) return -1;
+    cursor = commentEnd + 3;
+  }
+  if (!lower.startsWith("<!doctype", cursor)) return -1;
+  return html.indexOf(">", cursor + 9);
+}
 
 /**
  * Render exact published HTML in an opaque-origin iframe. Artifact scripts,
@@ -144,7 +174,7 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       title={props.title}
       sandbox={PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
       referrerPolicy="no-referrer"
-      srcDoc={props.html}
+      srcDoc={publishedHtmlArtifactDocument(props.html, toolBridgeEnabled)}
       onLoad={() => {
         frameLoadPendingRef.current = true;
         onFrameLoadRef.current();

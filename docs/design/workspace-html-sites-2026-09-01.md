@@ -82,10 +82,12 @@ const client = createOpenGeniSiteClient();
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
-The host transfers exactly one `MessagePort` after verifying that the connect
-message came from the rendered iframe's exact `contentWindow`. The same lazy
-`client.tools` proxy is available to ordinary SDK/browser consumers through a
-workspace-bound HTTP adapter.
+The host injects a minimal receiver before Site application code and transfers
+exactly one bootstrap `MessagePort` to that document. The receiver retains the
+port so a client constructed after the iframe's `load` event can still connect;
+navigation creates a new document and revokes the old bootstrap plus every
+derived tool-call port. The same lazy `client.tools` proxy is available to
+ordinary SDK/browser consumers through a workspace-bound HTTP adapter.
 
 ### The agent should use OpenGeni's styled React UI by default
 
@@ -321,6 +323,9 @@ extraction and an additional public adapter, not a replacement tool platform.
    refuses delegated bearers the canonical managed-human stamp and personal-
    connection authority. No artifact-readable credential or Site-specific
    bearer is issued.
+   Publication that activates requested tools requires the provenance-stamped
+   canonical managed-cookie or local human authorization. A delegated bearer
+   cannot obtain it by choosing `principalKind: human_session` in its token.
 5. Keep generic direct-human approval and durable operation semantics for
    ordinary non-Site UI tool calls. Sites use their immutable requested-tool
    allowlist directly and do not enter that per-call approval flow.
@@ -359,8 +364,9 @@ catalog changed after the Site was built.
 
 ### When the Site opens
 
-1. The iframe opens one `MessageChannel` to its exact parent and receives no
-   token, API URL, workspace id, cookie, or DOM authority.
+1. The host transfers one bootstrap `MessagePort` to a receiver installed before
+   Site application code. The receiver retains it for late SDK construction;
+   the iframe receives no token, API URL, workspace id, cookie, or DOM authority.
 2. The parent loads the live workspace catalog and projects only identities
    retained by the current immutable Site version. Requested but disabled tools
    remain unavailable.
@@ -387,7 +393,8 @@ catalog changed after the Site was built.
   Codemode, current-human MCP, and HTTP/SDK adapters do not rediscover provider
   implementations independently.
 - `@opengeni/sdk` owns the augmentable lazy `client.tools` namespace;
-  `@opengeni/sdk/site` supplies the iframe transport over one `MessagePort`.
+  `@opengeni/sdk/site` supplies the iframe transport over one document-retained
+  bootstrap `MessagePort` and derived call ports that close on navigation.
 - Browser hosts use `/v1/workspaces/:id/tools/catalog`, `/calls`, and
   `/declarations`. External MCP clients use the aggregate
   `/v1/workspaces/:id/mcp` route and standard MCP OAuth.
@@ -403,7 +410,9 @@ catalog changed after the Site was built.
   exact attempt catalog in that allowlist; a current human must publish a
   version that activates another approval class.
 - Codemode keeps its exact-attempt durable operation journal and recovery
-  semantics. Direct current-human calls carry caller-generated operation ids;
+  semantics. An expired post-execution claim reaches `outcome_unknown` only in
+  the same transaction that appends its terminal tool-call output. Direct
+  current-human calls carry caller-generated operation ids;
   provider-specific idempotency/outcome handling remains in the canonical
   executor rather than a second Site journal.
 - Attempt-frozen connector Allow/Ask/Block policy and its durable request ledger

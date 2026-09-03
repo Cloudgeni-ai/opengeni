@@ -16,6 +16,7 @@ export const OPENGENI_SITE_BRIDGE_READY = "opengeni.site.ready" as const;
 export const OPENGENI_SITE_BRIDGE_REQUEST = "opengeni.site.request" as const;
 export const OPENGENI_SITE_BRIDGE_RESPONSE = "opengeni.site.response" as const;
 export const OPENGENI_SITE_BRIDGE_CANCEL = "opengeni.site.cancel" as const;
+export const OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL = "__opengeniSiteBridgeBootstrapV2" as const;
 
 export type OpenGeniSiteBridgeConnectMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CONNECT;
@@ -382,6 +383,13 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
       close: () => undefined,
     };
   }
+  const retainedPort = retainedSiteBridgeBootstrapPort(siteWindow);
+  if (retainedPort) {
+    return {
+      port: async () => retainedPort,
+      close: () => undefined,
+    };
+  }
   let settledPort: MessagePort | null = null;
   let rejectBootstrap: ((reason?: unknown) => void) | null = null;
   const onMessage = (event: MessageEvent<unknown>) => {
@@ -395,6 +403,7 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
     cleanup();
     settledPort = event.ports[0]!;
     settledPort.start();
+    retainSiteBridgeBootstrapPort(siteWindow, settledPort);
     resolveBootstrap?.(settledPort);
   };
   let resolveBootstrap: ((port: MessagePort) => void) | null = null;
@@ -409,12 +418,42 @@ function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBrid
     port: async () => await port,
     close: () => {
       cleanup();
-      settledPort?.close();
       rejectBootstrap?.(new OpenGeniSiteBridgeError("closed", "Site bridge is closed"));
       resolveBootstrap = null;
       rejectBootstrap = null;
     },
   };
+}
+
+function retainedSiteBridgeBootstrapPort(
+  siteWindow: OpenGeniSiteClientOptions["siteWindow"],
+): MessagePort | null {
+  const state = (siteWindow as unknown as Record<string, unknown>)[
+    OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL
+  ];
+  if (!isRecord(state)) return null;
+  const candidate = state.port as Partial<MessagePort> | undefined;
+  return candidate &&
+    typeof candidate.postMessage === "function" &&
+    typeof candidate.addEventListener === "function" &&
+    typeof candidate.start === "function"
+    ? (candidate as MessagePort)
+    : null;
+}
+
+function retainSiteBridgeBootstrapPort(
+  siteWindow: OpenGeniSiteClientOptions["siteWindow"],
+  port: MessagePort,
+): void {
+  try {
+    Object.defineProperty(siteWindow, OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL, {
+      configurable: true,
+      value: { port },
+    });
+  } catch {
+    // The bootstrap event still serves the current client when the embedding
+    // window refuses extension; only late construction loses this fallback.
+  }
 }
 
 function isOpenGeniSiteBridgeReadyMessage(value: unknown): value is OpenGeniSiteBridgeReadyMessage {

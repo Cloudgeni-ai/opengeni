@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL,
   OPENGENI_SITE_BRIDGE_READY,
   OPENGENI_SITE_BRIDGE_REQUEST,
   OPENGENI_SITE_BRIDGE_RESPONSE,
@@ -125,6 +126,49 @@ describe("OpenGeni Site client", () => {
 
     client.close();
     bootstrap.port1.close();
+    for (const port of hostPorts) port.close();
+  });
+
+  test("connects after load through the document-retained bootstrap port", async () => {
+    const bootstrap = new MessageChannel();
+    const hostPorts: MessagePort[] = [];
+    bootstrap.port1.addEventListener("message", (bootstrapEvent: MessageEvent<unknown>) => {
+      const port = bootstrapEvent.ports[0] as MessagePort;
+      hostPorts.push(port);
+      port.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const request = event.data as OpenGeniSiteBridgeRequestMessage;
+        port.postMessage({
+          type: OPENGENI_SITE_BRIDGE_RESPONSE,
+          version: OPENGENI_SITE_BRIDGE_VERSION,
+          requestId: request.requestId,
+          ok: true,
+          value: catalog,
+        });
+      });
+      port.start();
+      port.postMessage({
+        type: OPENGENI_SITE_BRIDGE_READY,
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      });
+    });
+    bootstrap.port1.start();
+    const parentWindow = {} as MessageEventSource;
+    const siteWindow = {
+      parent: parentWindow,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as Pick<Window, "parent" | "addEventListener" | "removeEventListener">;
+    Object.defineProperty(siteWindow, OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL, {
+      configurable: true,
+      value: { port: bootstrap.port2 },
+    });
+
+    const client = createOpenGeniSiteClient({ siteWindow, parentWindow });
+    expect(await client.tools.$catalog()).toEqual(catalog);
+
+    client.close();
+    bootstrap.port1.close();
+    bootstrap.port2.close();
     for (const port of hostPorts) port.close();
   });
 

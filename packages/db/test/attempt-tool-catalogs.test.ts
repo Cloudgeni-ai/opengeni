@@ -398,12 +398,20 @@ describe("durable attempt tool catalogs", () => {
       claimLeaseMs: 1_000,
     });
     expect(lostExecution).toMatchObject({
-      status: "terminal",
+      status: "execution_owner_lost",
+      claimId: executingClaimId,
       operation: {
-        state: "outcome_unknown",
-        errorCode: "worker_lost_during_execution",
+        state: "running",
       },
     });
+    expect(
+      await getCodemodeOperation(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+        operationId: afterBoundary.operationId,
+      }),
+    ).toMatchObject({ state: "running", claimId: executingClaimId });
   });
 
   test("rejects human-approval tools before reserving execution", async () => {

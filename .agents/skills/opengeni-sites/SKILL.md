@@ -78,8 +78,9 @@ identities. Friendly names are never authority.
    operations should publish `requestedTools: []`.
 4. Publishing the immutable version with those requested identities is the
    authorization for that version to call them directly. Site calls do not open
-   per-call approval dialogs, even when the same tool is approval-classified in
-   an ordinary human or agent surface.
+   per-call approval dialogs. Agent-authored versions may request only tools
+   classified `approval: none` in the exact attempt catalog; tell the user when
+   a current human must publish a version that activates another approval class.
 5. The parent still intersects the immutable requested set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal

@@ -9,6 +9,7 @@ import {
 import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
+  publishedHtmlArtifactDocument,
   type PublishedHtmlArtifactToolBridge,
 } from "@opengeni/react/artifacts";
 import { useState } from "react";
@@ -17,7 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX };
+export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument };
 
 export function ArtifactSandbox(props: {
   html: string;

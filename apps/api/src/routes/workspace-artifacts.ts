@@ -14,9 +14,11 @@ import {
 } from "@opengeni/contracts";
 import {
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -44,7 +46,7 @@ import {
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../workspace-artifact-provenance";
-import { prepareWorkspaceToolGatewayForGrant } from "../workspace-tool-gateway";
+import { prepareWorkspaceToolGateway } from "../workspace-tool-gateway";
 
 const ArtifactId = z.string().uuid();
 
@@ -118,16 +120,11 @@ function provenance(subjectId: string, idempotencyKey: string) {
 
 async function requireRequestedSiteToolAuthority(
   deps: ApiRouteDeps,
-  grant: AccessGrant,
+  authorization: AccessGrantAuthorization,
   requestedTools: readonly { serverId: string; toolName: string }[],
 ): Promise<void> {
   if (requestedTools.length === 0) return;
-  if (grant.principalKind !== "human_session") {
-    throw new HTTPException(403, {
-      message: "Requested Site tools require current-human publishing authority",
-    });
-  }
-  const prepared = await prepareWorkspaceToolGatewayForGrant(deps, grant);
+  const prepared = await prepareWorkspaceToolGateway(deps, authorization);
   try {
     const allowed = new Set(
       prepared.toolGatewayCatalog.entries.map((entry) =>
@@ -226,9 +223,15 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
     const request = await body(context, CreateWorkspaceArtifactRequest);
-    await requireRequestedSiteToolAuthority(deps, grant, request.requestedTools ?? []);
+    await requireRequestedSiteToolAuthority(deps, authorization, request.requestedTools ?? []);
     const id = crypto.randomUUID();
     const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
@@ -321,12 +324,18 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(`${base}/:artifactId/versions`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
     await requireRequestedSiteToolAuthority(
       deps,
-      grant,
+      authorization,
       request.requestedTools ??
         (await requestedToolsForArtifactVersion(
           deps,
@@ -364,12 +373,18 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(`${base}/:artifactId/rollback`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
     const request = await body(context, RollbackWorkspaceArtifactRequest);
     const id = artifactId(context);
     await requireRequestedSiteToolAuthority(
       deps,
-      grant,
+      authorization,
       await requestedToolsForArtifactVersion(deps, workspaceId, id, request.versionId),
     );
     try {
@@ -395,13 +410,19 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.patch(`${base}/:artifactId/status`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
+    const authorization = await requireAccessGrantAuthorization(
+      context,
+      deps,
+      workspaceId,
+      "artifacts:publish",
+    );
+    const grant = authorization.grant;
     const request = await body(context, SetWorkspaceArtifactStatusRequest);
     const id = artifactId(context);
     if (request.status === "active") {
       await requireRequestedSiteToolAuthority(
         deps,
-        grant,
+        authorization,
         await requestedToolsForArtifactVersion(
           deps,
           workspaceId,

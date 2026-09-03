@@ -1103,7 +1103,9 @@ the client returns a typed outcome-unknown error carrying the same operation id.
 While an admitted operation remains queued or running, the client periodically
 re-notifies the owning dispatcher with that same id. This does not replay the
 tool: a live claim answers already-running, an expired pre-execution claim may
-be reclaimed, and an expired post-execution claim settles outcome-unknown.
+be reclaimed, and an expired post-execution claim settles outcome-unknown with
+its visible `agent.toolCall.output` in the same PostgreSQL commit as the
+terminal journal state.
 Concurrent first submissions serialize on the caller-owned operation id and
 converge to one creation plus one replay. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
@@ -1116,7 +1118,12 @@ them with the current viewer's live gateway, and the API revalidates the exact
 active version and identity on every call. Sites do not use per-invocation
 approval prompts or approval capabilities. An agent-authored version may retain
 only identities classified `approval: none` in its exact attempt catalog; a
-current human must publish any version that activates another approval class.
+canonical managed-cookie or local human session must publish any version that
+activates another approval class. A delegated bearer cannot acquire that
+publisher authority by claiming `principalKind: human_session`. The host
+injects a pre-application bootstrap receiver into the exact iframe document so
+a Site client constructed after `load` can use the retained document port; the
+port and every derived tool-call port are revoked on navigation or replacement.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a

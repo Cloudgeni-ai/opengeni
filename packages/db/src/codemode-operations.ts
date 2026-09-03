@@ -222,6 +222,7 @@ export async function getCodemodeOperation(
 
 export type ClaimCodemodeOperationResult =
   | { status: "claimed"; operation: CodemodeOperationValue; claimId: string }
+  | { status: "execution_owner_lost"; operation: CodemodeOperationValue; claimId: string }
   | { status: "already_running" | "terminal"; operation: CodemodeOperationValue }
   | { status: "rejected"; operation: CodemodeOperationValue | null };
 
@@ -263,25 +264,14 @@ export async function claimCodemodeOperation(
             return { status: "already_running", operation: mapOperation(row) };
           }
           if (row.executionStartedAt) {
-            const [unknown] = await tx
-              .update(schema.sessionAttemptCodemodeCalls)
-              .set({
-                state: "outcome_unknown",
-                errorCode: "worker_lost_during_execution",
-                errorMessage:
-                  "The execution owner disappeared after the tool call began. Inspect actual state before retrying.",
-                completedAt: now,
-                updatedAt: now,
-              })
-              .where(
-                and(
-                  eq(schema.sessionAttemptCodemodeCalls.operationId, input.operationId),
-                  eq(schema.sessionAttemptCodemodeCalls.state, "running"),
-                  eq(schema.sessionAttemptCodemodeCalls.claimId, row.claimId!),
-                ),
-              )
-              .returning();
-            return { status: "terminal", operation: mapOperation(unknown ?? row) };
+            if (!row.claimId) {
+              throw new Error("Codemode running operation is missing its claim id");
+            }
+            return {
+              status: "execution_owner_lost",
+              operation: mapOperation(row),
+              claimId: row.claimId,
+            };
           }
           const [requeued] = await tx
             .update(schema.sessionAttemptCodemodeCalls)

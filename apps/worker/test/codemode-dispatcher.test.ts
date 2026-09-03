@@ -9,15 +9,18 @@ import {
 } from "@opengeni/codemode";
 import {
   bootstrapWorkspace,
+  claimCodemodeOperation,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   getCodemodeOperation,
   initializeSessionStartAtomically,
   listSessionEvents,
+  markCodemodeOperationExecutionStarted,
   persistAttemptToolCatalog,
   submitCodemodeOperation,
 } from "@opengeni/db";
+import { appendAndPublishTurnEventsFenced } from "@opengeni/events";
 import {
   MemoryEventBus,
   acquireSharedTestDatabase,
@@ -286,6 +289,114 @@ describe("CodemodeAttemptDispatcher", () => {
         },
       },
     });
+  });
+
+  test("closes the timeline when an expired post-execution claim loses its worker", async () => {
+    if (!available) return;
+    const { scope, environment } = await fixture(async () => "must not execute twice");
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: "already dispatched" },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const claimId = crypto.randomUUID();
+    const startedAt = new Date(Date.now() - 5_000);
+    expect(
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: environment.catalog.digest,
+        operationId,
+        claimId,
+        now: startedAt,
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", claimId });
+    const bus = new MemoryEventBus();
+    const created = await appendAndPublishTurnEventsFenced(
+      client.db,
+      bus,
+      scope.workspaceId,
+      scope.sessionId,
+      scope.turnId,
+      scope.executionGeneration,
+      scope.attemptId,
+      [
+        {
+          type: "agent.toolCall.created",
+          turnId: scope.turnId,
+          turnGeneration: scope.executionGeneration,
+          turnAttemptId: scope.attemptId,
+          producerId: "sandbox:test",
+          payload: {
+            id: operationId,
+            name: environment.catalog.entries[0]!.modelName,
+            arguments: { query: "already dispatched" },
+            origin: "codemode",
+            subjectId: "sandbox:test",
+          },
+        },
+      ],
+    );
+    expect(created.accepted).toBe(true);
+    expect(
+      await markCodemodeOperationExecutionStarted(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+        operationId,
+        claimId,
+        now: startedAt,
+        claimLeaseMs: 1_000,
+      }),
+    ).toBe(true);
+
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("terminal");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "outcome_unknown",
+        errorCode: "worker_lost_during_execution",
+      });
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+      expect(toolEvents[1]?.payload).toMatchObject({
+        id: operationId,
+        error: true,
+        output: {
+          isError: true,
+          _meta: {
+            codemodeState: "outcome_unknown",
+            errorCode: "worker_lost_during_execution",
+          },
+        },
+      });
+    } finally {
+      await dispatcher.close();
+    }
   });
 
   test("fails invalid arguments before crossing the execution boundary", async () => {

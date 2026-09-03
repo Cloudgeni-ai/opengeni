@@ -116,6 +116,19 @@ export class CodemodeAttemptDispatcher {
               status: "accepted",
             });
           }
+          if (claim.status === "execution_owner_lost") {
+            await this.settleWithOutput(claim.operation, claim.claimId, {
+              state: "outcome_unknown",
+              errorCode: "worker_lost_during_execution",
+              errorMessage:
+                "The execution owner disappeared after the tool call began. Inspect actual state before retrying.",
+            });
+            return encodeCodemodeDispatchAck({
+              version: 1,
+              operationId: request.operationId,
+              status: "terminal",
+            });
+          }
           return encodeCodemodeDispatchAck({
             version: 1,
             operationId: request.operationId,

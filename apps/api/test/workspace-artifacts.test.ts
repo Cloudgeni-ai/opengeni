@@ -54,13 +54,13 @@ beforeAll(async () => {
   client = createDb(shared.appUrl);
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
-    accountExternalSource: "artifact-test",
-    accountExternalId: `account-${suffix}`,
-    accountName: "Artifact test",
-    workspaceExternalSource: "artifact-test",
-    workspaceExternalId: `workspace-${suffix}`,
-    workspaceName: "Artifact test",
-    subjectId: `subject-${suffix}`,
+    accountExternalSource: "opengeni:local",
+    accountExternalId: "default",
+    accountName: "Local",
+    workspaceExternalSource: "opengeni:local",
+    workspaceExternalId: "default",
+    workspaceName: "Local",
+    subjectId: "dev",
   });
   grant = access.workspaceGrants[0]!;
   const other = await bootstrapWorkspace(client.db, {
@@ -94,7 +94,7 @@ beforeAll(async () => {
   app = new Hono();
   registerWorkspaceArtifactRoutes(app, {
     settings: testSettings({
-      productAccessMode: "managed",
+      productAccessMode: "local",
       delegationSecret: SIGNING_SECRET,
       mcpServers: [{ id: "docs", url: "https://docs.example.test/mcp", cacheToolsList: true }],
     }),
@@ -127,6 +127,15 @@ async function request(
   });
   const headers = new Headers(init.headers);
   headers.set("authorization", `Bearer ${bearer}`);
+  if (init.body) headers.set("content-type", "application/json");
+  return await app.request(`http://x${path}`, { ...init, headers });
+}
+
+async function requestAsCanonicalLocalHuman(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = new Headers(init.headers);
   if (init.body) headers.set("content-type", "application/json");
   return await app.request(`http://x${path}`, { ...init, headers });
 }
@@ -264,13 +273,13 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       idempotencyKey: "create-status-board",
     };
     const putsBeforeDeniedPublisher = objectPutCount;
-    const deniedPublisherResponse = await request(grant, ["artifacts:publish"], base, {
+    const deniedPublisherResponse = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
     expect(deniedPublisherResponse.status).toBe(403);
     expect(objectPutCount).toBe(putsBeforeDeniedPublisher);
-    const createdResponse = await request(grant, publishPermissions, base, {
+    const createdResponse = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
@@ -283,7 +292,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(created.version.sourceSha256).toHaveLength(64);
     const putsAfterCreate = objectPutCount;
 
-    const replayResponse = await request(grant, publishPermissions, base, {
+    const replayResponse = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
@@ -292,20 +301,20 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(replay.artifact.id).toBe(created.artifact.id);
     expect(objectPutCount).toBe(putsAfterCreate);
 
-    const changedCreateMetadata = await request(grant, publishPermissions, base, {
+    const changedCreateMetadata = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify({ ...createBody, title: "Changed status board" }),
     });
     expect(changedCreateMetadata.status).toBe(409);
 
     const createWithoutRequestedTools = { ...createBody, requestedTools: undefined };
-    const createAuthorityConflict = await request(grant, publishPermissions, base, {
+    const createAuthorityConflict = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify(createWithoutRequestedTools),
     });
     expect(createAuthorityConflict.status).toBe(409);
 
-    const authoritySeedResponse = await request(grant, publishPermissions, base, {
+    const authoritySeedResponse = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -324,14 +333,12 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       requestedTools: [{ serverId: "docs", toolName: "knowledge_search" }],
       idempotencyKey: "requested-tools-replay-authority-publish",
     };
-    const authorityPublishResponse = await request(
-      grant,
-      publishPermissions,
-      authorityVersionPath,
-      { method: "POST", body: JSON.stringify(authorityPublishBody) },
-    );
+    const authorityPublishResponse = await requestAsCanonicalLocalHuman(authorityVersionPath, {
+      method: "POST",
+      body: JSON.stringify(authorityPublishBody),
+    });
     expect(authorityPublishResponse.status).toBe(200);
-    const changedPublishMetadata = await request(grant, publishPermissions, authorityVersionPath, {
+    const changedPublishMetadata = await requestAsCanonicalLocalHuman(authorityVersionPath, {
       method: "POST",
       body: JSON.stringify({ ...authorityPublishBody, title: "Changed publication title" }),
     });
@@ -340,15 +347,13 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       ...authorityPublishBody,
       requestedTools: undefined,
     };
-    const publishAuthorityConflict = await request(
-      grant,
-      publishPermissions,
-      authorityVersionPath,
-      { method: "POST", body: JSON.stringify(publishWithoutRequestedTools) },
-    );
+    const publishAuthorityConflict = await requestAsCanonicalLocalHuman(authorityVersionPath, {
+      method: "POST",
+      body: JSON.stringify(publishWithoutRequestedTools),
+    });
     expect(publishAuthorityConflict.status).toBe(409);
 
-    const conflictSeed = await request(grant, publishPermissions, base, {
+    const conflictSeed = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -358,7 +363,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     });
     expect(conflictSeed.status).toBe(201);
     const keysBeforeConflict = [...objects.keys()].sort();
-    const conflict = await request(grant, publishPermissions, base, {
+    const conflict = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -371,14 +376,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect([...objects.keys()].sort()).toEqual(keysBeforeConflict);
 
     const concurrentCreate = await Promise.all([
-      request(grant, publishPermissions, base, {
+      requestAsCanonicalLocalHuman(base, {
         method: "POST",
         body: JSON.stringify({
           ...createBody,
           idempotencyKey: "concurrent-create",
         }),
       }),
-      request(grant, publishPermissions, base, {
+      requestAsCanonicalLocalHuman(base, {
         method: "POST",
         body: JSON.stringify({
           ...createBody,
@@ -431,7 +436,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
     const versionPath = `${base}/${created.artifact.id}/versions`;
     const publish = (html: string, key: string) =>
-      request(grant, publishPermissions, versionPath, {
+      requestAsCanonicalLocalHuman(versionPath, {
         method: "POST",
         body: JSON.stringify({
           html,
@@ -457,7 +462,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(stalePublish.status).toBe(409);
     expect(objectPutCount).toBe(putsBeforeStalePublish);
 
-    const reusedPublishKey = await request(grant, publishPermissions, versionPath, {
+    const reusedPublishKey = await requestAsCanonicalLocalHuman(versionPath, {
       method: "POST",
       body: JSON.stringify({
         html: createBody.html,
@@ -467,9 +472,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     });
     expect(reusedPublishKey.status).toBe(409);
 
-    const rollbackResponse = await request(
-      grant,
-      publishPermissions,
+    const rollbackResponse = await requestAsCanonicalLocalHuman(
       `${base}/${created.artifact.id}/rollback`,
       {
         method: "POST",
@@ -485,9 +488,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const rolledBack = WorkspaceArtifactMutationResponse.parse(await rollbackResponse.json());
     expect(rolledBack.artifact.currentVersion?.id).toBe(created.version.id);
 
-    const archivedResponse = await request(
-      grant,
-      publishPermissions,
+    const archivedResponse = await requestAsCanonicalLocalHuman(
       `${base}/${created.artifact.id}/status`,
       {
         method: "PATCH",
@@ -506,7 +507,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(archived.replayed).toBe(false);
     const archiveReplay = WorkspaceArtifactMutationResponse.parse(
       await (
-        await request(grant, publishPermissions, `${base}/${created.artifact.id}/status`, {
+        await requestAsCanonicalLocalHuman(`${base}/${created.artifact.id}/status`, {
           method: "PATCH",
           body: JSON.stringify({
             status: "archived",
@@ -519,7 +520,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     );
     expect(archiveReplay.replayed).toBe(true);
     const putsBeforeArchivedPublish = objectPutCount;
-    const archivedPublish = await request(grant, publishPermissions, versionPath, {
+    const archivedPublish = await requestAsCanonicalLocalHuman(versionPath, {
       method: "POST",
       body: JSON.stringify({
         html: "<!doctype html><h1>Archived write</h1>",
@@ -529,9 +530,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     });
     expect(archivedPublish.status).toBe(422);
     expect(objectPutCount).toBe(putsBeforeArchivedPublish);
-    const restoredResponse = await request(
-      grant,
-      publishPermissions,
+    const restoredResponse = await requestAsCanonicalLocalHuman(
       `${base}/${created.artifact.id}/status`,
       {
         method: "PATCH",
