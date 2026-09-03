@@ -502,10 +502,10 @@ try {
 
   // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
   // importing it. Pin the version @opengeni/react already typechecks.
-  const postcssOverride =
-    typeof reactSource.devDependencies?.postcss === "string"
-      ? { postcss: reactSource.devDependencies.postcss }
-      : {};
+  const postcssVersion = reactSource.devDependencies?.postcss;
+  if (typeof postcssVersion !== "string" || !/^\d+\.\d+\.\d+$/u.test(postcssVersion)) {
+    throw new Error("React package must pin an exact PostCSS version for clean consumers");
+  }
 
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
@@ -549,7 +549,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
 
@@ -958,7 +958,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1034,7 +1034,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1098,7 +1098,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([

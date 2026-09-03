@@ -46,6 +46,7 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import {
   RailTrailingMetadata,
+  SessionRowHoverDetails,
   SessionRowContent,
   sessionRowAccessibleName,
 } from "@/components/rail/session-row-content";
@@ -71,6 +72,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
@@ -3018,102 +3020,116 @@ function SessionRow(props: {
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
-        <div
-          title={`${title} — ${stateLabel} — ${props.aggregateStatus.label}`}
-          className={rowClassName}
-        >
+        <div className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
-          <Link
-            to="/workspaces/$workspaceId/sessions/$sessionId"
-            params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
-            data-session-index={props.index}
-            data-session-focus
-            data-session-row={props.session.id}
-            tabIndex={props.focused ? 0 : -1}
-            aria-current={props.active ? "page" : undefined}
-            aria-label={sessionRowAccessibleName({
-              title,
-              stateLabel,
-              pinned: Boolean(props.session.pinned),
-              statusLabel: props.aggregateStatus.label,
-              spawnedLabel: hasChildren ? childCountAria.replace("descendant", "spawned") : null,
-              creator,
-            })}
-            onFocus={props.onFocus}
-            onClick={(event) => {
-              if (isModifiedNavigationClick(event)) return;
-              if (
-                props.session.unread &&
-                !props.session.archived &&
-                document.visibilityState === "visible" &&
-                document.hasFocus()
-              ) {
-                const projection: SessionAttentionProjection = {
-                  id: props.session.id,
-                  workspaceId: props.session.workspaceId,
-                  unread: false,
-                  attentionVersion: props.session.attentionVersion,
-                  lastSequence: props.session.lastSequence,
-                };
-                // A rail click is already a foreground view. Commit its exact
-                // known frontier before route data loads so a fast second
-                // navigation cannot cancel the read.
-                notifySessionAttentionChanged(projection);
-                const acceptedTransition = context.captureWorkspaceInvocation(
-                  props.session.workspaceId,
-                );
-                if (acceptedTransition) {
-                  const acknowledge = (retry: boolean): void => {
-                    void context.client
-                      .updateSessionAttention(props.session.workspaceId, props.session.id, {
-                        unread: false,
-                        acknowledgedThroughSequence: props.session.lastSequence,
-                      })
-                      .then((updated) => {
-                        if (
-                          context.ownsWorkspaceInvocation(
-                            props.session.workspaceId,
-                            acceptedTransition,
-                          )
-                        ) {
-                          notifySessionAttentionChanged(updated);
-                        }
-                      })
-                      .catch(() => {
-                        if (
-                          retry &&
-                          context.ownsWorkspaceInvocation(
-                            props.session.workspaceId,
-                            acceptedTransition,
-                          )
-                        ) {
-                          acknowledge(false);
-                        }
-                      });
-                  };
-                  acknowledge(true);
+          <HoverCard openDelay={100} closeDelay={80}>
+            <HoverCardTrigger asChild>
+              <Link
+                to="/workspaces/$workspaceId/sessions/$sessionId"
+                params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
+                data-session-index={props.index}
+                data-session-focus
+                data-session-row={props.session.id}
+                tabIndex={props.focused ? 0 : -1}
+                aria-current={props.active ? "page" : undefined}
+                aria-label={sessionRowAccessibleName({
+                  title,
+                  stateLabel,
+                  pinned: Boolean(props.session.pinned),
+                  statusLabel: props.aggregateStatus.label,
+                  spawnedLabel: hasChildren
+                    ? childCountAria.replace("descendant", "spawned")
+                    : null,
+                  creator,
+                })}
+                onFocus={props.onFocus}
+                onClick={(event) => {
+                  if (isModifiedNavigationClick(event)) return;
+                  if (
+                    props.session.unread &&
+                    !props.session.archived &&
+                    document.visibilityState === "visible" &&
+                    document.hasFocus()
+                  ) {
+                    const projection: SessionAttentionProjection = {
+                      id: props.session.id,
+                      workspaceId: props.session.workspaceId,
+                      unread: false,
+                      attentionVersion: props.session.attentionVersion,
+                      lastSequence: props.session.lastSequence,
+                    };
+                    // A rail click is already a foreground view. Commit its exact
+                    // known frontier before route data loads so a fast second
+                    // navigation cannot cancel the read.
+                    notifySessionAttentionChanged(projection);
+                    const acceptedTransition = context.captureWorkspaceInvocation(
+                      props.session.workspaceId,
+                    );
+                    if (acceptedTransition) {
+                      const acknowledge = (retry: boolean): void => {
+                        void context.client
+                          .updateSessionAttention(props.session.workspaceId, props.session.id, {
+                            unread: false,
+                            acknowledgedThroughSequence: props.session.lastSequence,
+                          })
+                          .then((updated) => {
+                            if (
+                              context.ownsWorkspaceInvocation(
+                                props.session.workspaceId,
+                                acceptedTransition,
+                              )
+                            ) {
+                              notifySessionAttentionChanged(updated);
+                            }
+                          })
+                          .catch(() => {
+                            if (
+                              retry &&
+                              context.ownsWorkspaceInvocation(
+                                props.session.workspaceId,
+                                acceptedTransition,
+                              )
+                            ) {
+                              acknowledge(false);
+                            }
+                          });
+                      };
+                      acknowledge(true);
+                    }
+                  }
+                  if (!rail.isMobile) {
+                    requestSessionComposerFocus(rail.workspaceId, props.session.id);
+                  }
+                  rail.setDrawerOpen(false);
+                }}
+                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
+              >
+                <SessionRowContent
+                  title={title}
+                  stateLabel={stateLabel}
+                  depthLabel={depthLabel}
+                  descendantLabel={descendantLabel}
+                  mobile={rail.isMobile}
+                  summary={props.aggregateStatus}
+                  scheduled={Boolean(scheduledTaskIdOf(props.session))}
+                  relativeTime={rail.isMobile ? undefined : relativeTime}
+                  creator={creator}
+                />
+              </Link>
+            </HoverCardTrigger>
+            <HoverCardContent side="right" collisionPadding={8}>
+              <SessionRowHoverDetails
+                title={title}
+                createdAt={props.session.createdAt}
+                createdBy={props.session.createdBy}
+                descendantCount={props.session.treeStats?.totalDescendants ?? props.childCount}
+                descendantCountTruncated={
+                  props.session.treeStats?.truncated ?? props.childCountTruncated
                 }
-              }
-              if (!rail.isMobile) {
-                requestSessionComposerFocus(rail.workspaceId, props.session.id);
-              }
-              rail.setDrawerOpen(false);
-            }}
-            className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
-          >
-            <SessionRowContent
-              title={title}
-              stateLabel={stateLabel}
-              depthLabel={depthLabel}
-              descendantLabel={descendantLabel}
-              mobile={rail.isMobile}
-              summary={props.aggregateStatus}
-              scheduled={Boolean(scheduledTaskIdOf(props.session))}
-              relativeTime={rail.isMobile ? undefined : relativeTime}
-              creator={creator}
-            />
-          </Link>
+              />
+            </HoverCardContent>
+          </HoverCard>
           <RowActionsMenu
             session={props.session}
             onRename={rename.startEditing}

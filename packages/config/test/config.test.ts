@@ -556,6 +556,36 @@ describe("managed auth browser session-set rollout", () => {
   });
 });
 
+describe("organization setup email token transport rollout", () => {
+  test("defaults to fragment links and requires the explicit query edge-sanitization gate", () => {
+    expect(withEnv({}, () => getSettings()).organizationUserSetupEmailTokenTransport).toBe(
+      "fragment",
+    );
+    expect(
+      withEnv({}, () => getSettings()).organizationUserSetupQueryEdgeSanitizationConfirmed,
+    ).toBe(false);
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/QUERY_EDGE_SANITIZATION_CONFIRMED=true/);
+    expect(
+      withEnv(
+        {
+          OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query",
+          OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "true",
+        },
+        () => getSettings(),
+      ).organizationUserSetupEmailTokenTransport,
+    ).toBe("query");
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "enabled" }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
+  });
+});
+
 describe("managed auth social providers", () => {
   test("loads independently configured Google and GitHub login clients", () => {
     expect(

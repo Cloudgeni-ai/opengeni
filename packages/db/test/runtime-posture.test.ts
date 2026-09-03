@@ -1252,7 +1252,9 @@ describe("runtime database posture evaluator", () => {
     }
     for (const routine of [
       "claim_organization_user_setup_delivery(jsonb)",
+      "claim_organization_user_setup_delivery_v2(jsonb)",
       "prepare_organization_user_setup_delivery(jsonb)",
+      "prepare_organization_user_setup_delivery_v2(jsonb)",
       "settle_organization_user_setup_delivery(jsonb)",
       "preview_organization_user_setup(text)",
       "get_organization_invitation_for_administration(uuid, text, uuid)",

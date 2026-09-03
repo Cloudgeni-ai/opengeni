@@ -60,6 +60,21 @@ import {
 } from "@opengeni/contracts";
 
 describe("API helpers", () => {
+  test("rejects embedded query setup transport without the edge-sanitization proof", () => {
+    expect(() =>
+      createApp({
+        settings: testSettings({
+          organizationUserSetupEmailTokenTransport: "query",
+          organizationUserSetupQueryEdgeSanitizationConfirmed: false,
+        }),
+        db: {} as never,
+        bus: {} as never,
+        workflowClient: {} as never,
+        managedAuth: null,
+      }),
+    ).toThrow(/QUERY_EDGE_SANITIZATION_CONFIRMED=true/);
+  });
+
   test("appends response negotiation without duplicating Vary fields", () => {
     expect(appendVary(null, "Accept-Encoding")).toBe("Accept-Encoding");
     expect(appendVary("Origin", "Accept-Encoding")).toBe("Origin, Accept-Encoding");

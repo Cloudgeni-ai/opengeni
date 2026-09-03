@@ -300,8 +300,9 @@ function firstUrl(message: CapturedManagedEmail): string {
 
 function setupToken(message: CapturedManagedEmail): string {
   const url = new URL(firstUrl(message));
-  const token = new URLSearchParams(url.hash.slice(1)).get("token");
-  if (!token) throw new Error("organization setup URL did not contain a fragment token");
+  const token =
+    url.searchParams.get("token") ?? new URLSearchParams(url.hash.slice(1)).get("token");
+  if (!token) throw new Error("organization setup URL did not contain a token");
   return token;
 }
 
@@ -385,6 +386,8 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    organizationUserSetupEmailTokenTransport: "query",
+    organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
   });
   const api = createApp({
