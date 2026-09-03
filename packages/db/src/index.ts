@@ -35375,6 +35375,7 @@ export type SessionEventPage = {
 const POSTGRES_INT_MAX = 2_147_483_647;
 export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
 const SESSION_EVENT_DB_BATCH_SIZE = 64;
+const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
 type SessionEventProjectionRow = {
   id: string;
@@ -35433,9 +35434,17 @@ export async function listSessionEventPage(
     SESSION_EVENT_ENVELOPE_MAX_BYTES + 2,
     normalizeEventLimit(options.maxBytes, SESSION_EVENT_DB_PAGE_MAX_BYTES),
   );
+  // Interactive browser pages intentionally stop at 255 rows. Carry their
+  // one-row continuation lookahead in the same indexed query so latency is not
+  // multiplied by transaction-pool or cross-region round trips. Larger audit
+  // reads retain the smaller default batch to preserve their memory envelope.
+  const defaultBatchSize =
+    requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX
+      ? requestedLimit + 1
+      : SESSION_EVENT_DB_BATCH_SIZE;
   const batchSize = Math.max(
     1,
-    Math.min(256, normalizeEventLimit(options.batchSize, SESSION_EVENT_DB_BATCH_SIZE)),
+    Math.min(256, normalizeEventLimit(options.batchSize, defaultBatchSize)),
   );
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {

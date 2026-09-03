@@ -74,10 +74,14 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-const INITIAL_TAIL_PAGE_SIZE = 1000;
-const OLDER_PAGE_SIZE = 5000;
-const NEWER_PAGE_SIZE = 5000;
-const OLDEST_PAGE_SIZE = 1000;
+// Keep every browser history read inside one database batch, including the
+// server's one-row continuation lookahead. A large total session must never
+// turn one lazy page into dozens of sequential database round trips.
+const SESSION_HISTORY_PAGE_SIZE = 255;
+const INITIAL_TAIL_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
+const OLDER_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
+const NEWER_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
+const OLDEST_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
@@ -91,7 +95,7 @@ const BOUNDARY_PAGE_CAP = 4;
 // token-heavy single answer is not mistaken for hundreds of visible messages;
 // only a large/complex missed window reloads the latest tail.
 const FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES = 16;
-const FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES = 5_000;
+const FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES = SESSION_HISTORY_PAGE_SIZE;
 const FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS = 128;
 const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
 const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;

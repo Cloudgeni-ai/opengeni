@@ -17,6 +17,7 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const SESSION_HISTORY_PAGE_SIZE = 255;
 
 function event(
   sequence: number,
@@ -129,13 +130,18 @@ describe("useSessionEvents", () => {
     await flush(20);
 
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
-    expect(hook.result.current.events).toHaveLength(1000);
-    expect(hook.result.current.events[0]?.sequence).toBe(201);
+    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(946);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
-    expect(lengths.filter((length) => length === 1000)).toHaveLength(1);
+    expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
 
     await hook.unmount();
   });
@@ -227,7 +233,12 @@ describe("useSessionEvents", () => {
       durableHead = 4;
       await suspendAndResume();
       expect(listCalls).toEqual([
-        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+        {
+          before: Number.MAX_SAFE_INTEGER,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          payloadMode: "full",
+        },
       ]);
       expect(streamCalls).toEqual([2, 2]);
       expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 3, 4]);
@@ -258,7 +269,12 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
 
       expect(listCalls).toEqual([
-        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+        {
+          before: Number.MAX_SAFE_INTEGER,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          payloadMode: "full",
+        },
         {
           after: 4,
           limit: 196,
@@ -273,28 +289,33 @@ describe("useSessionEvents", () => {
           direction: "after",
           payloadMode: "full",
         },
-        { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+        {
+          before: Number.MAX_SAFE_INTEGER,
+          limit: SESSION_HISTORY_PAGE_SIZE,
+          compact: true,
+          payloadMode: "full",
+        },
       ]);
       expect(streamCalls).toEqual([2, 2, 200, 400]);
-      expect(hook.result.current.events).toHaveLength(400);
-      expect(hook.result.current.events[0]?.sequence).toBe(1);
+      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(146);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
 
-      // A gap beyond the bounded 5,000-sequence probe budget skips the forward
+      // A gap beyond the bounded one-page probe budget skips the forward
       // read entirely and goes straight to the latest compact tail.
       store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
       durableHead = 6_000;
       await suspendAndResume();
       expect(listCalls.at(-1)).toEqual({
         before: Number.MAX_SAFE_INTEGER,
-        limit: 1000,
+        limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
       expect(listCalls.some((call) => call.after === 400)).toBe(false);
       expect(streamCalls).toEqual([2, 2, 200, 400, 6_000]);
-      expect(hook.result.current.events).toHaveLength(1_000);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
+      expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // The head read is only an optimization. A transient failure falls back
@@ -305,7 +326,7 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       expect(listCalls.at(-1)).toEqual({
         before: Number.MAX_SAFE_INTEGER,
-        limit: 1000,
+        limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
       });
@@ -484,15 +505,17 @@ describe("useSessionEvents", () => {
   test("boundary snap trims a mid-turn window top to the oldest user message in the buffer", async () => {
     const store = [
       event(1, "session.created", {}),
-      event(2),
-      ...Array.from({ length: 5099 }, (_, index) =>
-        event(index + 3, "agent.message.delta", { text: "older" }),
+      ...Array.from({ length: 298 }, (_, index) =>
+        event(index + 2, "agent.message.delta", { text: "older" }),
       ),
-      event(5102),
-      ...Array.from({ length: 1000 }, (_, index) =>
-        event(index + 5103, "agent.message.delta", { text: "middle" }),
+      event(300),
+      ...Array.from({ length: 199 }, (_, index) =>
+        event(index + 301, "agent.message.delta", { text: "middle" }),
       ),
-      ...Array.from({ length: 1000 }, (_, index) => event(index + 6103)),
+      event(500),
+      ...Array.from({ length: 200 }, (_, index) =>
+        event(index + 501, "agent.message.delta", { text: "tail" }),
+      ),
     ];
     const { client, listCalls } = scriptedClient({ store });
     const hook = await renderHook(
@@ -506,10 +529,15 @@ describe("useSessionEvents", () => {
     // loadOlder's `before` cursor is the trimmed top, so the fragment is
     // refetched with its own turn.
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     expect(hook.result.current.events[0]?.type).toBe("user.message");
-    expect(hook.result.current.events[0]?.sequence).toBe(6103);
+    expect(hook.result.current.events[0]?.sequence).toBe(500);
     expect(hook.result.current.hasOlder).toBe(true);
 
     const more = await actRun(() => hook.result.current.loadOlder());
@@ -517,8 +545,18 @@ describe("useSessionEvents", () => {
     // The older window starts exactly below the kept window and reaches the log
     // start within the older two-fetch cap.
     expect(more).toBe(false);
-    expect(listCalls[1]).toEqual({ before: 6103, limit: 5000, compact: true, payloadMode: "full" });
-    expect(listCalls[2]).toEqual({ before: 1103, limit: 5000, compact: true, payloadMode: "full" });
+    expect(listCalls[1]).toEqual({
+      before: 500,
+      limit: SESSION_HISTORY_PAGE_SIZE,
+      compact: true,
+      payloadMode: "full",
+    });
+    expect(listCalls[2]).toEqual({
+      before: 245,
+      limit: SESSION_HISTORY_PAGE_SIZE,
+      compact: true,
+      payloadMode: "full",
+    });
     expect(hook.result.current.events[0]?.type).toBe("session.created");
     expect(hook.result.current.events[0]?.sequence).toBe(1);
     expect(hook.result.current.hasOlder).toBe(false);
@@ -534,13 +572,14 @@ describe("useSessionEvents", () => {
       event(1, "session.created", {}),
       ...Array.from({ length: 5999 }, (_, index) => event(index + 2)),
     ];
+    const initialOldest = store.length - SESSION_HISTORY_PAGE_SIZE + 1;
     let releaseOlder: () => void = () => {
       throw new Error("older page was not requested");
     };
     const { client, listCalls } = scriptedClient({
       store,
       listEvents: async (options) => {
-        if (options.before === 5001) {
+        if (options.before === initialOldest) {
           await new Promise<void>((resolve) => {
             releaseOlder = resolve;
           });
@@ -563,7 +602,7 @@ describe("useSessionEvents", () => {
       second = hook.result.current.loadOlder();
     });
     await flush();
-    expect(listCalls.filter((call) => call.before === 5001)).toHaveLength(1);
+    expect(listCalls.filter((call) => call.before === initialOldest)).toHaveLength(1);
     expect(receipt.committed).toBeFalse();
     const [firstResult, secondResult] = await actRun(async () => {
       releaseOlder();
@@ -574,10 +613,12 @@ describe("useSessionEvents", () => {
     expect(firstResult).toBe(true);
     expect(secondResult).toBe(false);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual(
-      store.slice(4_968).map((item) => item.sequence),
+      store.slice(initialOldest - 33).map((item) => item.sequence),
     );
-    expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(1_032);
-    expect(hook.result.current.events[0]?.sequence).toBe(4_969);
+    expect(new Set(hook.result.current.events.map((item) => item.sequence)).size).toBe(
+      SESSION_HISTORY_PAGE_SIZE + 32,
+    );
+    expect(hook.result.current.events[0]?.sequence).toBe(initialOldest - 32);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(receipt.committed).toBeTrue();
 
@@ -655,11 +696,16 @@ describe("useSessionEvents", () => {
     await flush(20);
 
     // First paint is exactly ONE fetch — deeper history is the sentinel's job.
-    expect(hook.result.current.events).toHaveLength(1000);
-    expect(hook.result.current.events[0]?.sequence).toBe(39_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(39_746);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
 
     await hook.unmount();
@@ -684,7 +730,12 @@ describe("useSessionEvents", () => {
     await flush(20);
 
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 10]);
     expect(streamCalls).toEqual([99]);
@@ -736,10 +787,15 @@ describe("useSessionEvents", () => {
 
     expect(more).toBe(false);
     expect(calls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
-      { before: 8, limit: 5000, compact: true, payloadMode: "full" },
-      { before: 6, limit: 5000, compact: true, payloadMode: "full" },
-      { before: 4, limit: 5000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      { before: 8, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
+      { before: 6, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
+      { before: 4, limit: SESSION_HISTORY_PAGE_SIZE, compact: true, payloadMode: "full" },
     ]);
     const agentText = hook.result.current.timeline
       .filter(
@@ -777,10 +833,15 @@ describe("useSessionEvents", () => {
     await flush(20);
 
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
-    expect(hook.result.current.events).toHaveLength(1000);
-    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
+    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_746);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
@@ -822,7 +883,12 @@ describe("useSessionEvents", () => {
     await flush(20);
     expect(more).toBeFalse();
     expect(listCalls).toEqual([
-      { before: oldFirst, limit: 5000, compact: true, payloadMode: "full" },
+      {
+        before: oldFirst,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
     ]);
     // The oldest-directed full window owns 1..10000. Reconnecting here would
     // immediately newest-bound it and evict the history the reader requested.
@@ -1104,7 +1170,14 @@ describe("useSessionEvents", () => {
     await flush(100);
 
     expect(more).toBeTrue();
-    expect(listCalls).toEqual([{ before: 52, limit: 5000, compact: true, payloadMode: "full" }]);
+    expect(listCalls).toEqual([
+      {
+        before: 52,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+    ]);
     // The backward page keeps the nearest 32 complete groups. Reopening live
     // SSE here would newest-bound the browser window and evict them again.
     expect(streamCalls).toEqual([0]);
@@ -1133,7 +1206,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
+    expect(hook.result.current.events[0]?.sequence).toBe(4_746);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([5_000]);
@@ -1143,8 +1216,19 @@ describe("useSessionEvents", () => {
 
     expect(jumped).toBe(true);
     expect(listCalls).toEqual([
-      { before: Number.MAX_SAFE_INTEGER, limit: 1000, compact: true, payloadMode: "full" },
-      { after: 0, limit: 1000, compact: true, direction: "after", payloadMode: "full" },
+      {
+        before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        after: 0,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        direction: "after",
+        payloadMode: "full",
+      },
     ]);
     expect(hook.result.current.events[0]?.sequence).toBe(1);
     expect(hook.result.current.events).toHaveLength(32);
