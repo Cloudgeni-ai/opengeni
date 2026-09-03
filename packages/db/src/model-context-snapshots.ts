@@ -1,4 +1,8 @@
-import { ModelContextSnapshot, SessionModelContextResponse } from "@opengeni/contracts";
+import {
+  MODEL_CONTEXT_SNAPSHOT_MAX_UTF8_BYTES,
+  ModelContextSnapshot,
+  SessionModelContextResponse,
+} from "@opengeni/contracts";
 import { and, desc, eq } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
@@ -26,6 +30,9 @@ export async function persistModelContextSnapshot(
   },
 ): Promise<void> {
   const snapshot = ModelContextSnapshot.parse(input.snapshot);
+  if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MODEL_CONTEXT_SNAPSHOT_MAX_UTF8_BYTES) {
+    throw new RangeError("Model context snapshot exceeds the 16 MiB persist limit");
+  }
   await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },

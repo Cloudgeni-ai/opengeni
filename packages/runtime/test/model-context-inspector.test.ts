@@ -59,6 +59,43 @@ describe("model context inspector", () => {
     expect(layers.at(-1)?.content).toContain("## Skills");
   });
 
+  test("keeps persistent layers when the SDK wraps them as Agent instructions", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      sessionInstructions: "Be terse.",
+    });
+    const captured = [
+      "You are operating inside an isolated sandbox workspace.",
+      "",
+      "# Agent instructions",
+      "",
+      inspection.composed,
+      "",
+      "# Sandbox capability instructions",
+      "",
+      "## Skills\n- pr-review",
+      "",
+      "# Filesystem",
+      "",
+      "You have access to a container with a filesystem.",
+    ].join("\n");
+    const layers = splitCapturedInstructions({
+      persistentLayers: inspection.layers,
+      capturedInstructions: `${captured} TITLE DIRECTIVE`,
+      genesisTitleDirective: "TITLE DIRECTIVE",
+    });
+    expect(layers.map((layer) => layer.id)).toEqual([
+      "sandbox_preamble",
+      "operational_contract",
+      "persona_and_core",
+      "session_instructions",
+      "sdk_capability_instructions",
+      "sandbox_filesystem",
+      "genesis_title",
+    ]);
+    expect(layers[0]?.content).toContain("isolated sandbox workspace");
+    expect(layers.find((layer) => layer.id === "session_instructions")?.content).toBe("Be terse.");
+  });
+
   test("parses preference descriptors from the governance prompt JSON", () => {
     const skills = skillsFromGovernanceLayer(
       `Workspace Skill descriptors (full instructions are on-demand):\n${JSON.stringify([

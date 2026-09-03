@@ -11,6 +11,7 @@ import {
 } from "@openai/agents";
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
+import { notifyModelRequestCapture } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -716,7 +717,9 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await this.inner.getResponse(prepareLazyToolRequest(request, this.runtime));
+    const prepared = prepareLazyToolRequest(request, this.runtime);
+    void notifyModelRequestCapture(prepared);
+    const response = await this.inner.getResponse(prepared);
     if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
@@ -726,9 +729,9 @@ class LazyToolModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    for await (const event of this.inner.getStreamedResponse(
-      prepareLazyToolRequest(request, this.runtime),
-    )) {
+    const prepared = prepareLazyToolRequest(request, this.runtime);
+    void notifyModelRequestCapture(prepared);
+    for await (const event of this.inner.getStreamedResponse(prepared)) {
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();

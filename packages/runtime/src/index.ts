@@ -276,11 +276,12 @@ export {
   type SessionSkillActivation,
 } from "./runtime-skills";
 import {
-  createModelVisibleContextCaptureFilter,
   joinPersistentAgentInstructionLayers,
+  buildModelContextSnapshotFromRequest,
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
+import { ModelRequestCaptureModel, withModelRequestCapture } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
@@ -391,6 +392,7 @@ export {
 } from "./workspace-governance";
 export {
   buildModelContextSnapshot,
+  buildModelContextSnapshotFromRequest,
   createModelVisibleContextCaptureFilter,
   joinPersistentAgentInstructionLayers,
   type PersistentAgentInstructionInspection,
@@ -6563,18 +6565,39 @@ function measuredModelInputFilter(
   };
 }
 
-function modelVisibleContextCaptureFilter(
+function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
-): CallModelInputFilter | undefined {
+): ((request: import("@openai/agents").ModelRequest) => Promise<void>) | undefined {
   if (!onCapture) return undefined;
-  return createModelVisibleContextCaptureFilter({
-    persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
-    genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
-    serializeVisibleTools: serializedToolsForRemoteCompaction,
-    skillSelectionsFor: effectiveSkillSelectionsForAgent,
-    onCapture,
-  });
+  let requestIndex = 0;
+  return async (request) => {
+    requestIndex += 1;
+    await onCapture(
+      buildModelContextSnapshotFromRequest({
+        request,
+        agent,
+        persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+        genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
+        requestIndex,
+        skillSelections: effectiveSkillSelectionsForAgent(agent),
+      }),
+    );
+  };
+}
+
+function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {
+  if (lazyToolRuntimeForAgent(agent)) return;
+  const model = agent.model as { getResponse?: unknown; getStreamedResponse?: unknown } | undefined;
+  if (
+    !model ||
+    typeof model !== "object" ||
+    typeof model.getResponse !== "function" ||
+    typeof model.getStreamedResponse !== "function"
+  ) {
+    return;
+  }
+  agent.model = new ModelRequestCaptureModel(model as import("@openai/agents").Model);
 }
 
 export async function runAgentStream(
@@ -6593,6 +6616,11 @@ export async function runAgentStream(
   const codemodeTokenFile = codemodeTokenFileForAgent(agent, environment);
   const codemodeUrl = environment.OPENGENI_CODEMODE_URL;
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
+  const modelRequestCapture = bindModelVisibleContextCapture(
+    agent,
+    overrides.onModelVisibleContext,
+  );
+  if (modelRequestCapture) installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
   }
@@ -6754,7 +6782,6 @@ export async function runAgentStream(
               : {}),
           }),
         ),
-        modelVisibleContextCaptureFilter(agent, overrides.onModelVisibleContext),
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -6772,18 +6799,20 @@ export async function runAgentStream(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-        recordModelPreparationManifestInventory(
-          "sandbox_agent_manifest_inventory",
-          (agent as { defaultManifest?: Manifest }).defaultManifest,
-        );
-        recordModelPreparationManifestInventory(
-          "sandbox_session_manifest_inventory",
-          (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-        );
-        return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
-      }),
+    return await withModelRequestCapture(modelRequestCapture, () =>
+      withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          recordModelPreparationManifestInventory(
+            "sandbox_session_manifest_inventory",
+            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+          );
+          return runScopedRunner(settings, agent).run(agent, prepared.input, ownedRunOptions);
+        }),
+      ),
     );
   }
 
@@ -6896,7 +6925,6 @@ export async function runAgentStream(
             : {}),
         }),
       ),
-      modelVisibleContextCaptureFilter(agent, overrides.onModelVisibleContext),
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -6919,14 +6947,16 @@ export async function runAgentStream(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-    withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-      recordModelPreparationManifestInventory(
-        "sandbox_agent_manifest_inventory",
-        (agent as { defaultManifest?: Manifest }).defaultManifest,
-      );
-      return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
-    }),
+  return await withModelRequestCapture(modelRequestCapture, () =>
+    withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
+      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
+        recordModelPreparationManifestInventory(
+          "sandbox_agent_manifest_inventory",
+          (agent as { defaultManifest?: Manifest }).defaultManifest,
+        );
+        return runScopedRunner(settings, agent).run(agent, prepared.input, runOptions);
+      }),
+    ),
   );
 }
 

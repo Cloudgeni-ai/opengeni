@@ -117,9 +117,34 @@ export function ModelContextInspectorPane(props: {
         </InspectorSection>
 
         <InspectorSection title="System instructions">
+          <p className="text-2xs text-fg-subtle">
+            Exact <code>systemInstructions</code> on the provider request after sandbox wrapping,
+            input filters, and the missing-title directive.
+          </p>
+          <pre className="max-h-96 max-w-full overflow-auto rounded-md border border-border bg-bg/35 p-2 text-2xs leading-5 whitespace-pre-wrap text-fg-muted">
+            {snapshot.instructions}
+          </pre>
+          <Button
+            type="button"
+            variant="ghost"
+            size="xs"
+            onClick={() => {
+              void navigator.clipboard.writeText(snapshot.instructions).then(
+                () => toast.success("Copied the sent system instructions"),
+                (caught) =>
+                  toast.error("Could not copy", {
+                    description: caught instanceof Error ? caught.message : String(caught),
+                  }),
+              );
+            }}
+          >
+            <CopyIcon className="size-3" />
+            Copy sent instructions
+          </Button>
+          <div className="text-xs font-medium">Split for reading</div>
           {snapshot.layers.map((layer) => (
             <Collapsible
-              key={layer.id}
+              key={`${layer.id}:${layer.title}:${layer.utf8Bytes}`}
               className="min-w-0 overflow-hidden rounded-md border border-border bg-bg/35"
             >
               <CollapsibleTrigger asChild>
@@ -140,24 +165,12 @@ export function ModelContextInspectorPane(props: {
               </CollapsibleContent>
             </Collapsible>
           ))}
-          <Button
-            type="button"
-            variant="ghost"
-            size="xs"
-            onClick={() => {
-              void navigator.clipboard.writeText(snapshot.instructions);
-              toast.success("Copied exact instructions");
-            }}
-          >
-            <CopyIcon className="size-3" />
-            Copy exact instructions
-          </Button>
         </InspectorSection>
 
         <InspectorSection title="Tools as the model sees them">
           <p className="text-2xs text-fg-subtle">
-            Eager tools are on the wire for this request. Searchable tools stay behind tool_search
-            until disclosed; their schemas are not in the tools array.
+            Eager tools are the <code>tools</code> array on that same provider request. Searchable
+            tools stay behind tool_search until disclosed and are not in that array.
           </p>
           {snapshot.tools.map((tool) => (
             <Collapsible

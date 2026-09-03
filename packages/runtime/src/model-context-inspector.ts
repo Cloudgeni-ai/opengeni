@@ -1,4 +1,4 @@
-import type { RunContext, SerializedTool, Tool } from "@openai/agents";
+import type { ModelRequest, RunContext, SerializedTool, Tool } from "@openai/agents";
 import type {
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
@@ -32,6 +32,9 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   git_bindings: "Git credential bindings",
   genesis_title: "Missing-title directive",
   sdk_capability_instructions: "SDK capability instructions",
+  sandbox_preamble: "Sandbox runtime preamble",
+  sandbox_filesystem: "Sandbox filesystem",
+  sent_system_instructions: "Sent system instructions",
 };
 
 export function joinPersistentAgentInstructionLayers(
@@ -70,32 +73,162 @@ export function splitCapturedInstructions(input: {
     .filter((layer) => layer.content.trim().length > 0)
     .map(countedInstructionLayer);
   const composed = joinPersistentAgentInstructionLayers(input.persistentLayers);
-  const layers = [...persistent];
-  let remainder = input.capturedInstructions;
-  if (composed.length > 0 && remainder.startsWith(composed)) {
-    remainder = remainder.slice(composed.length);
-  } else if (composed.length > 0 && remainder !== composed) {
-    return [
-      countedInstructionLayer({
-        id: "sdk_capability_instructions",
-        title: LAYER_TITLES.sdk_capability_instructions,
-        content: remainder,
-      }),
-    ];
+  return splitRawSystemInstructions(
+    input.capturedInstructions,
+    persistent,
+    composed,
+    input.genesisTitleDirective,
+  );
+}
+
+const AGENT_INSTRUCTIONS_HEADING = "# Agent instructions\n\n";
+const CAPABILITY_INSTRUCTIONS_HEADING = "# Sandbox capability instructions\n\n";
+const FILESYSTEM_HEADING = "# Filesystem\n";
+
+const SDK_SECTION_HEADINGS = [
+  "# Agent instructions\n",
+  "# Sandbox capability instructions\n",
+  "# Sandbox remote mount policy\n",
+  "# Filesystem\n",
+] as const;
+
+function nextSdkSectionIndex(text: string): number {
+  let found = -1;
+  for (const heading of SDK_SECTION_HEADINGS) {
+    const index = text.indexOf(`\n${heading}`);
+    if (index >= 0 && (found < 0 || index < found)) found = index;
   }
-  const genesis = input.genesisTitleDirective;
-  if (genesis && (remainder === ` ${genesis}` || remainder.endsWith(` ${genesis}`))) {
-    const withoutGenesis =
-      remainder === ` ${genesis}` ? "" : remainder.slice(0, remainder.length - genesis.length - 1);
-    if (withoutGenesis.trim().length > 0) {
+  return found;
+}
+
+function splitRawSystemInstructions(
+  captured: string,
+  persistent: ModelContextInstructionLayer[],
+  composed: string,
+  genesisTitleDirective: string,
+): ModelContextInstructionLayer[] {
+  let text = captured;
+  const layers: ModelContextInstructionLayer[] = [];
+  let genesis = genesisTitleDirective;
+  if (genesis && (text === ` ${genesis}` || text.endsWith(` ${genesis}`))) {
+    text = text === ` ${genesis}` ? "" : text.slice(0, text.length - genesis.length - 1);
+  } else {
+    genesis = "";
+  }
+
+  const agentHeadingAt = text.indexOf(AGENT_INSTRUCTIONS_HEADING);
+  if (agentHeadingAt >= 0) {
+    const preamble = text.slice(0, agentHeadingAt).trimEnd();
+    if (preamble) {
+      layers.push(
+        countedInstructionLayer({
+          id: "sandbox_preamble",
+          title: LAYER_TITLES.sandbox_preamble,
+          content: preamble,
+        }),
+      );
+    }
+    const afterHeading = text.slice(agentHeadingAt + AGENT_INSTRUCTIONS_HEADING.length);
+    const nextHeading = nextSdkSectionIndex(afterHeading);
+    const agentBody = (
+      nextHeading >= 0 ? afterHeading.slice(0, nextHeading) : afterHeading
+    ).trimEnd();
+    const rest = nextHeading >= 0 ? afterHeading.slice(nextHeading).replace(/^\n/, "") : "";
+    if (composed && (agentBody === composed || agentBody.startsWith(composed))) {
+      layers.push(...persistent);
+      const leftover = agentBody === composed ? "" : agentBody.slice(composed.length).trim();
+      if (leftover) {
+        layers.push(
+          countedInstructionLayer({
+            id: "sdk_capability_instructions",
+            title: LAYER_TITLES.sdk_capability_instructions,
+            content: leftover,
+          }),
+        );
+      }
+    } else if (agentBody) {
+      layers.push(
+        countedInstructionLayer({
+          id: "persona_and_core",
+          title: "Agent instructions",
+          content: agentBody,
+        }),
+      );
+    }
+    text = rest;
+  } else if (composed && text.startsWith(composed)) {
+    layers.push(...persistent);
+    text = text.slice(composed.length);
+  } else if (text.trim()) {
+    layers.push(
+      countedInstructionLayer({
+        id: "sent_system_instructions",
+        title: LAYER_TITLES.sent_system_instructions,
+        content: text,
+      }),
+    );
+    text = "";
+  }
+
+  const capabilityAt = text.indexOf(CAPABILITY_INSTRUCTIONS_HEADING);
+  if (capabilityAt >= 0) {
+    const before = text.slice(0, capabilityAt).trim();
+    if (before) {
       layers.push(
         countedInstructionLayer({
           id: "sdk_capability_instructions",
           title: LAYER_TITLES.sdk_capability_instructions,
-          content: withoutGenesis.replace(/^\s/, ""),
+          content: before,
         }),
       );
     }
+    const after = text.slice(capabilityAt + CAPABILITY_INSTRUCTIONS_HEADING.length);
+    const nextHeading = nextSdkSectionIndex(after);
+    const body = (nextHeading >= 0 ? after.slice(0, nextHeading) : after).trimEnd();
+    if (body) {
+      layers.push(
+        countedInstructionLayer({
+          id: "sdk_capability_instructions",
+          title: LAYER_TITLES.sdk_capability_instructions,
+          content: body,
+        }),
+      );
+    }
+    text = nextHeading >= 0 ? after.slice(nextHeading).replace(/^\n/, "") : "";
+  }
+
+  const filesystemAt = text.indexOf(FILESYSTEM_HEADING);
+  if (filesystemAt >= 0) {
+    const before = text.slice(0, filesystemAt).trim();
+    if (before) {
+      layers.push(
+        countedInstructionLayer({
+          id: "sdk_capability_instructions",
+          title: LAYER_TITLES.sdk_capability_instructions,
+          content: before,
+        }),
+      );
+    }
+    layers.push(
+      countedInstructionLayer({
+        id: "sandbox_filesystem",
+        title: LAYER_TITLES.sandbox_filesystem,
+        content: text.slice(filesystemAt).trimEnd(),
+      }),
+    );
+    text = "";
+  }
+
+  if (text.trim()) {
+    layers.push(
+      countedInstructionLayer({
+        id: "sdk_capability_instructions",
+        title: LAYER_TITLES.sdk_capability_instructions,
+        content: text.trim(),
+      }),
+    );
+  }
+  if (genesis) {
     layers.push(
       countedInstructionLayer({
         id: "genesis_title",
@@ -103,18 +236,16 @@ export function splitCapturedInstructions(input: {
         content: genesis,
       }),
     );
-    return layers;
   }
-  if (remainder.trim().length > 0) {
-    layers.push(
-      countedInstructionLayer({
-        id: "sdk_capability_instructions",
-        title: LAYER_TITLES.sdk_capability_instructions,
-        content: remainder.replace(/^\s/, ""),
-      }),
-    );
-  }
-  return layers;
+  return layers.length > 0
+    ? layers
+    : [
+        countedInstructionLayer({
+          id: "sent_system_instructions",
+          title: LAYER_TITLES.sent_system_instructions,
+          content: captured,
+        }),
+      ];
 }
 
 function countedTool(input: {
@@ -340,5 +471,68 @@ export function createModelVisibleContextCaptureFilter(input: {
       // Capture is observational. A failure must never change model execution.
     }
     return modelData;
+  };
+}
+
+export function buildModelContextSnapshotFromRequest(input: {
+  request: ModelRequest;
+  agent: object;
+  persistentLayers: readonly PersistentAgentInstructionLayerDraft[];
+  genesisTitleDirective: string;
+  requestIndex: number;
+  skillSelections: readonly EffectiveSkillSelection[];
+  now?: Date;
+}): ModelContextSnapshot {
+  const capturedInstructions =
+    typeof input.request.systemInstructions === "string" ? input.request.systemInstructions : "";
+  const layers = splitCapturedInstructions({
+    persistentLayers: input.persistentLayers,
+    capturedInstructions,
+    genesisTitleDirective: input.genesisTitleDirective,
+  });
+  const visibleTools = Array.isArray(input.request.tools) ? input.request.tools : [];
+  const visibleNames = new Set(
+    visibleTools.map((tool) => {
+      const name = (tool as { name?: string }).name;
+      return typeof name === "string" ? name : "";
+    }),
+  );
+  const tools: ModelContextTool[] = visibleTools.map((tool) =>
+    serializedToolToModelContextTool(tool, "eager"),
+  );
+  const runtime = lazyToolRuntimeForAgent(input.agent);
+  for (const searchable of runtime?.inspectSearchableTools() ?? []) {
+    if (visibleNames.has(searchable.name)) continue;
+    tools.push(
+      countedTool({
+        name: searchable.name,
+        type: "function",
+        visibility: "searchable",
+        description: searchable.description,
+        schema: searchable.parameters,
+      }),
+    );
+  }
+  const governance = layers.find((layer) => layer.id === "workspace_governance")?.content ?? "";
+  const skills = [
+    ...skillsFromGovernanceLayer(governance),
+    ...skillsFromSelections(input.skillSelections),
+  ];
+  const instructionsTokens = estimateTextTokens(capturedInstructions);
+  const toolsTokens = tools.reduce((total, tool) => total + tool.estimatedTokens, 0);
+  return {
+    version: MODEL_CONTEXT_SNAPSHOT_VERSION,
+    capturedAt: (input.now ?? new Date()).toISOString(),
+    source: "model_request",
+    requestIndex: input.requestIndex,
+    instructions: capturedInstructions,
+    layers,
+    tools,
+    skills,
+    tokens: {
+      instructions: instructionsTokens,
+      tools: toolsTokens,
+      prefix: instructionsTokens + toolsTokens,
+    },
   };
 }

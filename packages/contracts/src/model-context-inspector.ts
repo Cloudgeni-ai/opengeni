@@ -17,6 +17,9 @@ export const ModelContextInstructionLayerId = z.enum([
   "git_bindings",
   "genesis_title",
   "sdk_capability_instructions",
+  "sandbox_preamble",
+  "sandbox_filesystem",
+  "sent_system_instructions",
 ]);
 export type ModelContextInstructionLayerId = z.infer<typeof ModelContextInstructionLayerId>;
 
