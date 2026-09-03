@@ -98,7 +98,7 @@ describe("migration 0403 tool gateway approval capabilities", () => {
     expect(source).toContain("tool_gateway_approval_runtime_drain_before");
     expect(source).toContain("tool_gateway_approval_runtime_drain_after");
     expect(source).toContain("pg_stat_activity");
-    expect(source.match(/0402 tool gateway approval activation/g)).toHaveLength(5);
+    expect(source.match(/0403 tool gateway approval activation/g)).toHaveLength(5);
     expect(source).toContain("never restart a");
     expect(source).toContain("pre-0403 image after commit");
     expect(source).toContain('CREATE TABLE "tool_gateway_approval_capabilities"');

@@ -19,14 +19,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0401 MCP OAuth activation requires an explicit application database role list'
+      '0402 MCP OAuth activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0401 MCP OAuth activation received a malformed application database role list'
+      '0402 MCP OAuth activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -45,7 +45,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0401 MCP OAuth activation received an invalid application database role list'
+      '0402 MCP OAuth activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -57,7 +57,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0401 MCP OAuth activation requires all configured OpenGeni application database sessions to be stopped'
+      '0402 MCP OAuth activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -464,7 +464,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0401 MCP OAuth activation observed a configured OpenGeni application database session after schema installation'
+      '0402 MCP OAuth activation observed a configured OpenGeni application database session after schema installation'
       USING ERRCODE = '55000';
   END IF;
 END

@@ -72,7 +72,7 @@ describe("migration 0402 MCP OAuth authorization server", () => {
     expect(source).toContain("mcp_oauth_runtime_drain_before");
     expect(source).toContain("mcp_oauth_runtime_drain_after");
     expect(source).toContain("pg_stat_activity");
-    expect(source.match(/0401 MCP OAuth activation/g)).toHaveLength(5);
+    expect(source.match(/0402 MCP OAuth activation/g)).toHaveLength(5);
     expect(source).toContain("never restart a");
     expect(source).toContain("pre-0402 image after commit");
     expect(source).toContain("CREATE TABLE mcp_oauth_clients");
