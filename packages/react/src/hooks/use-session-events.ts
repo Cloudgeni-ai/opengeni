@@ -85,7 +85,10 @@ const NEWER_GROUP_TARGET = 32;
 const NEWER_FETCH_CAP = 2;
 const OLDEST_GROUP_TARGET = 32;
 const OLDEST_FETCH_CAP = 2;
-const BOUNDARY_PAGE_CAP = 4;
+// A tail page may land inside one unusually dense turn. Permit exactly one
+// additional bounded page to find its user/session boundary without turning a
+// fresh open into an unbounded history walk.
+const BOUNDARY_PAGE_CAP = 1;
 // Foreground reconciliation is intentionally semantic, not merely time-based:
 // tiny raw gaps can stay on SSE; medium raw gaps get one compact probe so a
 // token-heavy single answer is not mistaken for hundreds of visible messages;
@@ -387,19 +390,10 @@ export function useSessionEvents(
             }
           } else if (plan.kind === "reload") {
             // A large/complex missed window would make the foreground timeline
-            // and pinned camera chase many rapid commits. Clear once so the
-            // normal bottom-anchored bulk-load path can paint one latest tail.
-            eventWindowRef.current = EMPTY_EVENT_WINDOW;
-            oldestSequenceRef.current = null;
-            newestSequenceRef.current = null;
-            hasOlderRef.current = false;
-            hasNewerRef.current = false;
+            // and pinned camera chase many rapid commits. Keep the last known
+            // complete window visible until the bounded latest replacement is
+            // ready, then install that replacement atomically below.
             initialWindowLoadedRef.current = false;
-            streamResumeSequenceRef.current = after;
-            setEventWindow(EMPTY_EVENT_WINDOW);
-            setHasOlder(false);
-            setHasNewer(false);
-            setInitialLoading(true);
             setError(null);
           }
         }
@@ -413,6 +407,7 @@ export function useSessionEvents(
             pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
             maxFetches: INITIAL_FETCH_CAP,
+            boundaryPageCap: BOUNDARY_PAGE_CAP,
             signal: controller.signal,
           });
           if (!isCurrent()) {
@@ -1266,6 +1261,7 @@ async function loadEventWindow(
     pageSize: number;
     targetGroups: number;
     maxFetches: number;
+    boundaryPageCap?: number;
     signal?: AbortSignal;
   },
 ): Promise<LoadedEventWindow> {
@@ -1300,14 +1296,13 @@ async function loadEventWindow(
   // turn boundary already in the buffer — the dropped fragment is refetched by
   // the next loadOlder (everything below the new oldest sequence), whose own
   // window snaps the same way, so every seam lands on a turn start. Extra
-  // pages are fetched only when the buffer holds no boundary at all (one
-  // monster turn); past the cap a mid-turn top is accepted.
+  // page is fetched only when the buffer holds no boundary at all (one dense
+  // turn); past the cap the existing truncation/hasOlder signal remains true.
   let snapPages = 0;
   while (
     !reachedStart &&
     findBoundaryIndex(buffer) === -1 &&
-    snapPages < BOUNDARY_PAGE_CAP &&
-    fetches < options.maxFetches
+    snapPages < (options.boundaryPageCap ?? 0)
   ) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,

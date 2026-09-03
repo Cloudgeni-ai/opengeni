@@ -156,6 +156,7 @@ describe("useSessionEvents", () => {
     let store = [event(1), event(2)];
     let durableHead = 2;
     let failHeadRead = false;
+    let delayedTail: Promise<SessionEvent[]> | null = null;
     const headReadCalls: GetSessionOptions[] = [];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
@@ -167,6 +168,9 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
+        if (delayedTail && options.before === Number.MAX_SAFE_INTEGER) {
+          return await delayedTail;
+        }
         if (durableHead === 200 && options.after === 4) {
           return [
             event(5, "agent.message.delta", {
@@ -305,7 +309,22 @@ describe("useSessionEvents", () => {
       // read entirely and goes straight to the latest compact tail.
       store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
       durableHead = 6_000;
+      let releaseTail!: (events: SessionEvent[]) => void;
+      delayedTail = new Promise<SessionEvent[]>((resolve) => {
+        releaseTail = resolve;
+      });
       await suspendAndResume();
+      // A foreground replacement is atomic: the prior complete tip remains
+      // visible while the bounded latest page is still in flight.
+      expect(hook.result.current.events[0]?.sequence).toBe(146);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+      await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
+      delayedTail = null;
+      await actRun(async () => {
+        await Promise.resolve();
+        jest.advanceTimersByTime(20);
+        await Promise.resolve();
+      });
       expect(listCalls.at(-1)).toEqual({
         before: Number.MAX_SAFE_INTEGER,
         limit: SESSION_HISTORY_PAGE_SIZE,
@@ -684,7 +703,7 @@ describe("useSessionEvents", () => {
     await hook.unmount();
   });
 
-  test("the initial window is a single fetch regardless of log size", async () => {
+  test("the initial window uses at most one extra bounded page to find a turn boundary", async () => {
     const store = Array.from({ length: 40_000 }, (_, index) =>
       event(index + 1, "agent.message.delta", { text: "x" }),
     );
@@ -695,13 +714,20 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    // First paint is exactly ONE fetch — deeper history is the sentinel's job.
-    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(39_746);
+    // This synthetic log has no turn boundary in either page, so the initial
+    // read stops after one bounded boundary probe and remains explicitly older.
+    expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
+    expect(hook.result.current.events[0]?.sequence).toBe(39_491);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
         before: Number.MAX_SAFE_INTEGER,
+        limit: SESSION_HISTORY_PAGE_SIZE,
+        compact: true,
+        payloadMode: "full",
+      },
+      {
+        before: 39_746,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
@@ -773,19 +799,14 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([8]);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([6, 8]);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.lastSequence).toBe(9);
 
     const first = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
-    expect(first).toBe(true);
-    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([4, 6, 8]);
-
-    const more = await actRun(() => hook.result.current.loadOlder());
-    await flush(20);
-
-    expect(more).toBe(false);
+    expect(first).toBe(false);
+    expect(hook.result.current.events.map((item) => item.sequence)).toEqual([1, 2, 4, 6, 8]);
     expect(calls).toEqual([
       {
         before: Number.MAX_SAFE_INTEGER,
@@ -1283,7 +1304,7 @@ describe("useSessionEvents", () => {
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
         if (options.before === Number.MAX_SAFE_INTEGER) {
-          return [event(21, "agent.message.delta", { text: "ef", coalescedUntil: 30 })];
+          return [event(21, "user.message", { text: "tail boundary" })];
         }
         if (options.after === 0) {
           return [
