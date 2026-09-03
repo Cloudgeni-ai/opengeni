@@ -6,7 +6,7 @@ import {
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
-} from "./web-bundle-budget-policy";
+} from "./web-bundle-budget-unified-tool-gateway";
 
 type ManifestEntry = {
   file: string;

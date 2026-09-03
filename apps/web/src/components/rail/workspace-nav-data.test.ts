@@ -8,7 +8,9 @@ import {
 } from "./workspace-nav-data";
 
 const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
-const primaryNavSource = await Bun.file(`${import.meta.dir}/primary-nav.tsx`).text();
+const workspaceConfigLinkSource = await Bun.file(
+  `${import.meta.dir}/workspace-config-link.tsx`,
+).text();
 
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
@@ -48,8 +50,8 @@ describe("workspace rail destinations", () => {
   });
 
   test("nests recent individual Sites beneath the primary Sites destination", () => {
-    expect(primaryNavSource).toContain("import { RecentSitesNav }");
-    expect(primaryNavSource).toContain("<RecentSitesNav />");
-    expect(primaryNavSource).toContain('item.to === "/workspaces/$workspaceId/artifacts"');
+    expect(workspaceConfigLinkSource).toContain("import { RecentSitesNav }");
+    expect(workspaceConfigLinkSource).toContain("<RecentSitesNav />");
+    expect(workspaceConfigLinkSource).toContain('item.to === "/workspaces/$workspaceId/artifacts"');
   });
 });

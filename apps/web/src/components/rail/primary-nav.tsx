@@ -2,7 +2,6 @@ import { useRouterState } from "@tanstack/react-router";
 import { SquarePenIcon } from "lucide-react";
 
 import { ForYouLink } from "@/components/rail/for-you-link";
-import { RecentSitesNav } from "@/components/rail/recent-sites-nav";
 import { useRail } from "@/components/rail/rail-context";
 import { NewSessionLink } from "@/components/rail/session-list";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
@@ -41,17 +40,15 @@ export function PrimaryNav() {
       <ForYouLink embedded />
 
       {PRIMARY_WORKSPACE_ITEMS.map((item) => (
-        <div key={item.to}>
-          <WorkspaceConfigLink
-            item={item}
-            workspaceId={rail.workspaceId}
-            variant="rail"
-            collapsed={rail.collapsed}
-            active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-            onNavigate={() => rail.setDrawerOpen(false)}
-          />
-          {item.to === "/workspaces/$workspaceId/artifacts" ? <RecentSitesNav /> : null}
-        </div>
+        <WorkspaceConfigLink
+          key={item.to}
+          item={item}
+          workspaceId={rail.workspaceId}
+          variant="rail"
+          collapsed={rail.collapsed}
+          active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+          onNavigate={() => rail.setDrawerOpen(false)}
+        />
       ))}
     </div>
   );

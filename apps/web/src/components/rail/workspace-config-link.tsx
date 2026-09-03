@@ -20,6 +20,7 @@ import type {
   WorkspaceConfigIcon,
   WorkspaceConfigItem,
 } from "@/components/rail/workspace-nav-data";
+import { RecentSitesNav } from "@/components/rail/recent-sites-nav";
 import { cn } from "@/lib/utils";
 
 const WORKSPACE_CONFIG_ICONS = {
@@ -53,7 +54,7 @@ export function WorkspaceConfigLink(props: {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
 
   if (variant === "rail") {
-    return (
+    const link = (
       <Link
         to={item.to}
         params={{ workspaceId }}
@@ -76,6 +77,14 @@ export function WorkspaceConfigLink(props: {
         <WorkspaceConfigGlyph icon={item.icon} className="size-4 shrink-0" />
         {!collapsed ? <span className="min-w-0 truncate">{item.label}</span> : null}
       </Link>
+    );
+    return item.to === "/workspaces/$workspaceId/artifacts" ? (
+      <>
+        {link}
+        <RecentSitesNav />
+      </>
+    ) : (
+      link
     );
   }
 
