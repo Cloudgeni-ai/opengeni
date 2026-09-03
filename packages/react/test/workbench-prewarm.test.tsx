@@ -27,6 +27,7 @@ import {
 import { OpenGeniProvider } from "../src/provider";
 import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import type { MachinesResponse } from "../src/types/machines";
+import { DOCK_STATES, DockStateMockClient } from "../demo/workbench-dock-states";
 import {
   useSandboxWorkspaceTabs,
   initialWorkspaceTab,
@@ -357,6 +358,15 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("the dock fixture keeps viewer and capability lease epochs aligned", async () => {
+    const client = new DockStateMockClient(DOCK_STATES["warm-live"]!);
+    const capabilities = await client.getStreamCapabilities();
+    const holder = await client.attachViewer();
+
+    expect(holder.leaseEpoch).toBe(capabilities.leaseEpoch);
+    expect(holder.liveness).toBe(capabilities.liveness);
+  });
+
   test("workspace interaction lifecycle changes refresh the truthful machine liveness", async () => {
     let warm = false;
     let capabilityReads = 0;
