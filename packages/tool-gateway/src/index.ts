@@ -25,6 +25,7 @@ import {
   ToolGatewayCatalogStaleError,
   ToolGatewayInputValidationError,
   ToolGatewayOutputValidationError,
+  ToolGatewayPathCollisionError,
   ToolGatewayToolNotFoundError,
 } from "./errors";
 
@@ -72,6 +73,12 @@ type CompiledDefinition = {
   execute: ToolGatewayDefinition["execute"];
   validateInput: ValidateFunction<unknown>;
   validateOutput: ValidateFunction<unknown> | null;
+};
+
+export type PreparedToolGatewayCall = {
+  readonly call: ToolGatewayCall;
+  readonly entry: ToolGatewayCatalogEntryValue;
+  execute: () => Promise<ToolGatewayResultValue>;
 };
 
 export class PreparedToolGatewayDefinitions {
@@ -128,6 +135,16 @@ export class ToolGateway {
       signal?: AbortSignal;
     } = {},
   ): Promise<ToolGatewayResultValue> {
+    return await (await this.prepareCall(input, context)).execute();
+  }
+
+  async prepareCall(
+    input: ToolGatewayCall,
+    context: {
+      transportMeta?: Record<string, unknown> | null;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<PreparedToolGatewayCall> {
     const request = ToolGatewayCallRequest.parse({
       operationId: input.operationId,
       catalogDigest: input.catalogDigest,
@@ -157,23 +174,31 @@ export class ToolGateway {
       caller,
     } satisfies ToolGatewayCall;
     await this.authorize?.({ call, entry: definition.entry });
-    const result = ToolGatewayResult.parse(
-      await definition.execute(request.arguments, {
-        operationId,
-        caller,
-        ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      }),
-    );
-    if (!result.isError && definition.validateOutput) {
-      const outputMatchesSchema =
-        result.structuredContent !== undefined &&
-        definition.validateOutput(result.structuredContent);
-      if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-        throw new ToolGatewayOutputValidationError();
-      }
-    }
-    return result;
+    return {
+      call,
+      entry: definition.entry,
+      execute: async () => {
+        const result = ToolGatewayResult.parse(
+          await definition.execute(request.arguments, {
+            operationId,
+            caller,
+            ...(context.transportMeta === undefined
+              ? {}
+              : { transportMeta: context.transportMeta }),
+            ...(context.signal === undefined ? {} : { signal: context.signal }),
+          }),
+        );
+        if (!result.isError && definition.validateOutput) {
+          const outputMatchesSchema =
+            result.structuredContent !== undefined &&
+            definition.validateOutput(result.structuredContent);
+          if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
+            throw new ToolGatewayOutputValidationError();
+          }
+        }
+        return result;
+      },
+    };
   }
 
   async callModel(input: ModelToolGatewayCall): Promise<ToolGatewayResultValue> {
@@ -325,13 +350,52 @@ function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): strin
     const key = path.join("\u0000");
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  return bases.map((base, index) => {
+  const allocated = bases.map((base, index) => {
     const key = base.join("\u0000");
     if (counts.get(key) === 1) return base;
     const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
     const last = base.at(-1)!;
     return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
   });
+  assertNoToolPathCollisions(allocated);
+  return allocated;
+}
+
+type ToolPathNode = {
+  children: Map<string, ToolPathNode>;
+  leaf: boolean;
+};
+
+function assertNoToolPathCollisions(paths: readonly (readonly string[])[]): void {
+  const root: ToolPathNode = { children: new Map(), leaf: false };
+  const ordered = [...paths].sort(compareToolPaths);
+  for (const path of ordered) {
+    let node = root;
+    for (const [index, segment] of path.entries()) {
+      if (node.leaf) throw new ToolGatewayPathCollisionError(path, "extends_leaf");
+      let child = node.children.get(segment);
+      if (!child) {
+        child = { children: new Map(), leaf: false };
+        node.children.set(segment, child);
+      }
+      node = child;
+      if (index === path.length - 1) {
+        if (node.leaf || node.children.size > 0) {
+          throw new ToolGatewayPathCollisionError(path, "collision");
+        }
+        node.leaf = true;
+      }
+    }
+  }
+}
+
+function compareToolPaths(left: readonly string[], right: readonly string[]): number {
+  const length = Math.min(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const compared = left[index]!.localeCompare(right[index]!);
+    if (compared !== 0) return compared;
+  }
+  return left.length - right.length;
 }
 
 function safeNamespaceSegment(value: string): string {

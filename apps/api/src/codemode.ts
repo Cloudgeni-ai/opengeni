@@ -61,6 +61,15 @@ export class CodemodeCatalogNotReadyError extends Error {
   }
 }
 
+export class CodemodeCatalogStaleError extends Error {
+  readonly code = "codemode_catalog_stale";
+
+  constructor() {
+    super("Codemode tool catalog is stale for the active execution attempt");
+    this.name = "CodemodeCatalogStaleError";
+  }
+}
+
 export function codemodeAuthorityForGrant(grant: AccessGrant): CodemodeGrantAuthority | null {
   const metadata = grant.metadata;
   if (
@@ -153,6 +162,7 @@ export async function submitAndDispatchCodemodeCall(
 ): Promise<CodemodeCallSubmissionValue> {
   const request = CodemodeCallRequest.parse(rawRequest);
   const { authority, catalog } = await requireActiveCodemodeCatalog(deps, grant);
+  if (request.catalogDigest !== catalog.digest) throw new CodemodeCatalogStaleError();
   const submitted = await submitCodemodeOperation(deps.db, {
     ...authority,
     call: {

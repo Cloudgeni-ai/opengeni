@@ -3,6 +3,7 @@ import {
   ToolGatewayApprovalRequiredError,
   ToolGatewayCatalogIntegrityError,
   ToolGatewayInputValidationError,
+  ToolGatewayPathCollisionError,
   createWorkspaceToolGateway,
   parseVerifiedToolGatewayCatalog,
   type ToolGatewayDefinition,
@@ -118,5 +119,24 @@ describe("ToolGateway", () => {
         entries: [{ ...first.entries[0], description: "tampered" }],
       }),
     ).toThrow(ToolGatewayCatalogIntegrityError);
+  });
+
+  test("rejects namespace paths that use a tool leaf as a prefix", () => {
+    expect(() =>
+      createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          { ...definition, codemodePath: ["docs", "search"] },
+          {
+            ...definition,
+            identity: { serverId: "docs", toolName: "search_advanced" },
+            modelName: "docs__search_advanced",
+            codemodePath: ["docs", "search", "advanced"],
+          },
+        ],
+      }),
+    ).toThrow(ToolGatewayPathCollisionError);
   });
 });

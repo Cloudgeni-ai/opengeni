@@ -8613,6 +8613,114 @@ describe("runtime event normalization", () => {
     }
   });
 
+  test("binds published local model tools only to the final combined attempt environment", async () => {
+    let releaseDeferred!: () => void;
+    const deferredConnect = new Promise<void>((resolve) => {
+      releaseDeferred = resolve;
+    });
+    const deferred: MCPServer = {
+      name: "deferred-inner",
+      cacheToolsList: false,
+      async connect() {
+        await deferredConnect;
+      },
+      async close() {},
+      async listTools() {
+        return [
+          {
+            name: "lookup",
+            description: "Deferred lookup",
+            inputSchema: { type: "object" as const, additionalProperties: false },
+          },
+        ];
+      },
+      async callTool() {
+        return [{ type: "text", text: "deferred" }];
+      },
+      async callToolResult() {
+        return { content: [{ type: "text", text: "deferred" }] };
+      },
+      async invalidateToolsCache() {},
+    };
+    let localExecutions = 0;
+    const settings = testSettings({
+      sandboxBackend: "none",
+      mcpServers: [
+        {
+          id: "docs",
+          name: "Docs",
+          url: "https://docs.invalid/mcp",
+          cacheToolsList: false,
+        },
+      ],
+    });
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      sessionId: "33333333-3333-4333-8333-333333333333",
+      turnId: "44444444-4444-4444-8444-444444444444",
+      attemptId: "55555555-5555-4555-8555-555555555555",
+      executionGeneration: 3,
+      deferNonEagerUntilToolDemand: true,
+      localMcpServers: [{ id: "docs", server: deferred }],
+      attemptToolDefinitions: [
+        {
+          identity: { serverId: "interaction", toolName: "observe" },
+          modelName: "interaction__observe",
+          codemodePath: ["interaction", "observe"],
+          inputSchema: { type: "object", additionalProperties: false },
+          source: "interaction",
+          approval: "none",
+          execute: async () => {
+            localExecutions += 1;
+            return { content: [{ type: "text", text: "observed" }] };
+          },
+        },
+      ],
+    });
+    try {
+      const local = prepared.mcpServers.find(
+        (server) => server.name === "opengeni-attempt-local-tools",
+      );
+      expect(local).toBeDefined();
+      const modelCall = local!.callToolResult!("interaction__observe", {});
+      let modelCallSettled = false;
+      void modelCall.finally(() => {
+        modelCallSettled = true;
+      });
+      await Bun.sleep(10);
+      expect(modelCallSettled).toBe(false);
+      expect(localExecutions).toBe(0);
+
+      releaseDeferred();
+      expect(await modelCall).toMatchObject({
+        content: [{ type: "text", text: "observed" }],
+      });
+      const complete = await prepared.ready!;
+      expect(
+        complete.attemptToolEnvironment!.catalog.entries.map((entry) => entry.identity),
+      ).toEqual(
+        expect.arrayContaining([
+          { serverId: "docs", toolName: "lookup" },
+          { serverId: "interaction", toolName: "observe" },
+        ]),
+      );
+      expect(
+        await complete.attemptToolEnvironment!.call({
+          operationId: "66666666-6666-4666-8666-666666666666",
+          catalogDigest: complete.attemptToolEnvironment!.catalog.digest,
+          identity: { serverId: "interaction", toolName: "observe" },
+          arguments: {},
+          caller: { kind: "codemode", subjectId: "agent:test" },
+        }),
+      ).toMatchObject({ content: [{ type: "text", text: "observed" }] });
+      expect(localExecutions).toBe(2);
+    } finally {
+      releaseDeferred();
+      await prepared.close();
+    }
+  });
+
   test("keeps published local and eager servers live when deferred preparation fails", async () => {
     const deferredFailure = new Error("synthetic deferred MCP preparation failure");
     let rejectDeferred!: (error: Error) => void;

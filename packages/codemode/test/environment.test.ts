@@ -6,6 +6,7 @@ import {
   AttemptToolCatalogStaleError,
   AttemptToolInputValidationError,
   AttemptToolOutputValidationError,
+  AttemptToolPathCollisionError,
   createAttemptToolEnvironment,
   parseVerifiedAttemptToolCatalog,
 } from "../src";
@@ -95,6 +96,22 @@ describe("AttemptToolEnvironment", () => {
     expect(paths[1]![1]).toMatch(/^_1_search_[0-9a-f]{10}$/u);
     expect(paths[0]).not.toEqual(paths[1]);
     expect(paths[2]).toEqual(["_constructor", "___proto__"]);
+  });
+
+  test("rejects path-prefix collisions while allocating the canonical catalog", () => {
+    expect(() =>
+      createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [
+          { ...definition("docs", "search"), codemodePath: ["docs", "search"] },
+          {
+            ...definition("docs", "search_advanced"),
+            codemodePath: ["docs", "search", "advanced"],
+          },
+        ],
+      }),
+    ).toThrow(AttemptToolPathCollisionError);
   });
 
   test("routes model and Codemode calls through one opaque executor", async () => {

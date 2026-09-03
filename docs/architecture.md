@@ -1073,10 +1073,19 @@ one canonical provider set from enabled first-party and integration MCP servers;
 the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
 workspace HTTP/SDK adapter project that same catalog and invoke the same executor
 closures. Friendly model names and JavaScript paths are projections of the
-opaque `{serverId, toolName}` identity and never authority.
+opaque `{serverId, toolName}` identity and never authority. Canonical allocation
+disambiguates exact normalized path duplicates and rejects every namespace/tool
+prefix collision before a catalog can be published. In-process local model tools
+bind only to the final combined local-plus-MCP attempt environment used by
+Codemode, never to a provisional local-only gateway.
 
 Codemode adds only attempt scope, active-attempt fencing, its durable operation
-journal, sandbox delivery, and recovery semantics. The current-human gateway
+journal, sandbox delivery, and recovery semantics. Input and authorization
+preflight finish before its execution-start marker. The API exposes a stable
+pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
+and path/identity re-resolution without retrying an existing or ambiguous
+operation. Client abort is observer-only; server cancellation remains owned by
+the attempt/turn lifecycle. The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer

@@ -4,6 +4,7 @@ import {
   createAttemptToolEnvironment,
   decodeCodemodeDispatchAck,
   encodeCodemodeDispatchRequest,
+  type AttemptToolDefinition,
 } from "@opengeni/codemode";
 import {
   bootstrapWorkspace,
@@ -42,7 +43,10 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture(execute: (signal: AbortSignal | undefined) => Promise<string>) {
+async function fixture(
+  execute: (signal: AbortSignal | undefined) => Promise<string>,
+  inputSchema: AttemptToolDefinition["inputSchema"] = { type: "object" },
+) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "test",
@@ -98,7 +102,7 @@ async function fixture(execute: (signal: AbortSignal | undefined) => Promise<str
       {
         identity: { serverId: "docs", toolName: "search" },
         modelName: "docs__search",
-        inputSchema: { type: "object" },
+        inputSchema,
         source: "docs",
         approval: "none",
         execute: async (_arguments, context) => ({
@@ -279,6 +283,67 @@ describe("CodemodeAttemptDispatcher", () => {
         },
       },
     });
+  });
+
+  test("fails invalid arguments before crossing the execution boundary", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "unreachable";
+      },
+      {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: 42 },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "failed",
+        errorCode: "invalid_tool_arguments",
+        executionStartedAt: null,
+      });
+      expect(executions).toBe(0);
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+    } finally {
+      await dispatcher.close();
+    }
   });
 
   test("bounds concurrent execution without claiming work it cannot start", async () => {

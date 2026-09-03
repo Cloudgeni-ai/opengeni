@@ -3969,17 +3969,6 @@ export async function prepareAgentTools(
         options.subjectId ?? "worker:mcp-model",
       )
     : null;
-  const localScope = attemptToolScope(options);
-  if (localToolServer && localScope) {
-    localToolServer.bindAttemptToolEnvironment(
-      createAttemptToolEnvironment({
-        scope: localScope,
-        generation: options.attemptToolCatalogGeneration ?? 1,
-        definitions: [...attemptToolDefinitions],
-        ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
-      }),
-    );
-  }
   const exposesDeferredPreparation = deferNonEager && deferredEntries.length > 0;
   const closePublishedServers = async (): Promise<void> => {
     await localToolServer?.close().catch(() => undefined);
@@ -4009,6 +3998,9 @@ export async function prepareAgentTools(
         "attempt_catalog_build",
         async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
       );
+      if (attemptToolEnvironment && localToolServer) {
+        localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
+      }
       if (attemptToolEnvironment) {
         await measureToolPreparationPhase(options, "attempt_catalog_persist", async () => {
           await options.onAttemptToolCatalog?.(attemptToolEnvironment!.catalog);
@@ -4080,6 +4072,13 @@ export async function prepareAgentTools(
   // Non-eager connection/listing starts immediately but is not a first-request
   // dependency. Search and direct deferred invocation join this exact promise.
   const ready = completePreparation();
+  localToolServer?.bindAttemptToolEnvironmentProvider(async () => {
+    const prepared = await ready;
+    if (!prepared.attemptToolEnvironment) {
+      throw new Error("local model tool server has no exact attempt authority");
+    }
+    return prepared.attemptToolEnvironment;
+  });
   let preparationSettled = false;
   void ready.then(
     () => {
@@ -5800,6 +5799,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
   readonly name = "opengeni-attempt-local-tools";
   private readonly tools: RuntimeMcpTool[];
   private environment: AttemptToolEnvironment | null = null;
+  private environmentProvider: (() => Promise<AttemptToolEnvironment>) | null = null;
   private closed = false;
 
   constructor(
@@ -5831,6 +5831,13 @@ class AttemptDefinitionMcpServer implements MCPServer {
     this.environment = environment;
   }
 
+  bindAttemptToolEnvironmentProvider(provider: () => Promise<AttemptToolEnvironment>): void {
+    if (this.environmentProvider && this.environmentProvider !== provider) {
+      throw new Error("local model tool server already has an attempt catalog provider");
+    }
+    this.environmentProvider = provider;
+  }
+
   async connect(): Promise<void> {
     if (this.closed) throw new Error("local model tool server is closed");
   }
@@ -5839,6 +5846,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
     if (this.closed) return;
     this.closed = true;
     this.environment = null;
+    this.environmentProvider = null;
     this.aggregateToolBudget.remove(this.name);
   }
 
@@ -5863,11 +5871,9 @@ class AttemptDefinitionMcpServer implements MCPServer {
     options?: { signal?: AbortSignal },
   ): Promise<any> {
     if (this.closed) throw new Error("local model tool server is closed");
-    if (!this.environment) {
-      throw new Error("local model tool server has no exact attempt authority");
-    }
+    const environment = await this.requiredAttemptToolEnvironment();
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) =>
-      this.environment!.callModel({
+      environment.callModel({
         modelName: toolName,
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
@@ -5875,6 +5881,21 @@ class AttemptDefinitionMcpServer implements MCPServer {
         ...(options?.signal ? { signal: options.signal } : {}),
       }),
     );
+  }
+
+  private async requiredAttemptToolEnvironment(): Promise<AttemptToolEnvironment> {
+    if (this.closed) throw new Error("local model tool server is closed");
+    if (this.environmentProvider) {
+      const environment = await this.environmentProvider();
+      if (this.closed) throw new Error("local model tool server is closed");
+      if (this.environment && this.environment !== environment) {
+        throw new Error("local model tool server is already bound to another attempt catalog");
+      }
+      this.environment = environment;
+      return environment;
+    }
+    if (this.environment) return this.environment;
+    throw new Error("local model tool server has no exact attempt authority");
   }
 
   async invalidateToolsCache(): Promise<void> {
