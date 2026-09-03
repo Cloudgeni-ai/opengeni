@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 2.2.1
+
+### Patch Changes
+
+- 599a64e: Keep model-visible context capture idempotent when an agent is reused across retries or runs.
+
 ## 2.2.0
 
 ### Minor Changes
