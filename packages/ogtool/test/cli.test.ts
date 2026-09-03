@@ -134,7 +134,12 @@ function codemodeServer(
         if (options.loseFirstPostResponse && !lostPost) {
           lostPost = true;
           return Response.json(
-            { error: { message: "response lost after commit" } },
+            {
+              error: {
+                message: "response lost after commit",
+                outcomeUnknown: true,
+              },
+            },
             { status: 503 },
           );
         }
