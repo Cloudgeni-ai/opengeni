@@ -126,11 +126,32 @@ export function codexCapacityDecision(
       account.exhaustedUntil !== null &&
       account.exhaustedUntil > now,
   );
+  const policyCredentialId =
+    context.sessionPinSource === "manual" && context.sessionPinnedCredentialId
+      ? context.sessionPinnedCredentialId
+      : !context.rotationEnabled
+        ? context.activeCredentialId
+        : null;
+  const policyAccount = policyCredentialId
+    ? context.accounts.find((account) => account.id === policyCredentialId)
+    : null;
+  const mutationOnlyStatusBlock =
+    (policyAccount != null &&
+      (!policyAccount.allocatorEnabled || policyAccount.status !== "active")) ||
+    (authoritativeReset === null &&
+      context.accounts.length > 0 &&
+      context.accounts.every(
+        (account) => !account.allocatorEnabled || account.status !== "active",
+      ));
   return {
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      authoritativeReset && !hasReconcilableQuotaCooldown ? "authoritative" : "bounded_refresh",
+      selected.decision.kind === "allocatorDisabled" || mutationOnlyStatusBlock
+        ? "mutation_only"
+        : authoritativeReset && !hasReconcilableQuotaCooldown
+          ? "authoritative"
+          : "bounded_refresh",
     diagnostic: {
       connectedCount: context.accounts.length,
       allocatorEnabledCount: context.accounts.filter((account) => account.allocatorEnabled).length,
@@ -277,7 +298,9 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       return { action: "stale" };
     }
     const boundedRefreshAttempted =
-      input.cause === "timer" && current.nextCheckAt.getTime() <= Date.now();
+      current.resetKind === "bounded_refresh" &&
+      input.cause === "timer" &&
+      current.nextCheckAt.getTime() <= Date.now();
     if (boundedRefreshAttempted) {
       // This is a bounded secret-safe control-plane quota refresh. It creates no
       // turn, model call, user message, schedule, or entitlement action.

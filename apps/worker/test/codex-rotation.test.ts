@@ -924,6 +924,48 @@ describe("credential allocator pin and rotation policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
+  test("rotation skips credentials already consumed by this accepted turn", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([leasedAcct("a"), leasedAcct("b")], "a"),
+        failedCredentialIds: ["a"],
+      },
+      sessionId: "failed-account-fence",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "a",
+      now: NOW,
+    });
+    expect(selected.credentialId).toBe("b");
+  });
+
+  test("manual and rotation-off policy may retry their selected account after health recovers", () => {
+    const baseContext = {
+      ...context([leasedAcct("a"), leasedAcct("b")]),
+      failedCredentialIds: ["a"],
+    };
+    expect(
+      selectCodexCredentialLeaseForTurn({
+        context: baseContext,
+        sessionId: "manual-reconnect",
+        sessionPinSource: "manual",
+        sessionPinnedCredentialId: "a",
+        sessionLastCredentialId: "a",
+        now: NOW,
+      }).credentialId,
+    ).toBe("a");
+    expect(
+      selectCodexCredentialLeaseForTurn({
+        context: { ...baseContext, rotationEnabled: false },
+        sessionId: "rotation-off-reconnect",
+        sessionPinSource: null,
+        sessionPinnedCredentialId: null,
+        sessionLastCredentialId: "a",
+        now: NOW,
+      }).credentialId,
+    ).toBe("a");
+  });
+
   test("an allocator-disabled manual pin waits instead of becoming a relogin failure", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: context([leasedAcct("a", { allocatorEnabled: false }), leasedAcct("b")]),

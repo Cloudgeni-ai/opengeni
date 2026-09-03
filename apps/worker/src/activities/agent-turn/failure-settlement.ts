@@ -710,15 +710,26 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           }
         : null;
       const cooldownUntil = codexCredentialCooldownUntil(codexCredentialFailure, serving, now);
-      const statePersisted =
-        leases.codex.holderId && leases.codex.generation !== null
+      const quarantineResult =
+        leases.codex.holderId &&
+        leases.codex.generation !== null &&
+        providerTurn.effectiveCodexCredentialVersion !== null
           ? await quarantineCodexCredentialForLease(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
               turnId: attempt.turnId,
+              attemptId: input.attemptId,
+              executionGeneration: attempt.executionGeneration,
+              workflowId: input.workflowId,
+              workflowRunId: input.workflowRunId,
+              dispatchId: attempt.dispatchId,
+              expectedRedispatches: attempt.redispatchesAtDispatch,
               credentialId: providerTurn.effectiveCodexCredentialId,
+              credentialVersion: providerTurn.effectiveCodexCredentialVersion,
               holderId: leases.codex.holderId,
               generation: leases.codex.generation,
+              maxFailovers: providerTurn.codexCredentialFailoverLimit,
               quarantine:
                 codexCredentialFailure.kind === "auth"
                   ? {
@@ -738,7 +749,46 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
                         cooldownKind: codexCredentialFailure.kind,
                       },
             })
-          : false;
+          : null;
+      if (
+        quarantineResult?.action === "credential_changed" &&
+        leases.codex.holderId &&
+        leases.codex.generation !== null
+      ) {
+        const recovery = await settleCodexCredentialLeaseLoss(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          attemptId: input.attemptId,
+          holderId: leases.codex.holderId,
+          generation: leases.codex.generation,
+          expectedRedispatches: attempt.redispatchesAtDispatch,
+          checkpointDurable: true,
+          recoveryPayload: {
+            triggerEventId: attempt.triggerEventId!,
+            reason: "codex_credential_version_changed",
+          },
+          failedPayload: {},
+        });
+        if (recovery.action === "recovering") {
+          leases.codex.held = false;
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
+          );
+          control.activityStatus = "recovering";
+          control.turnMetricOutcome = "recovering";
+          return claimedResult({ status: "recovering" });
+        }
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return claimedResult({ status: "cancelled" });
+      }
+      const statePersisted = quarantineResult?.action === "recorded";
       if (!statePersisted && leases.codex.holderId && leases.codex.generation !== null) {
         leases.codex.lost = true;
         return await settleLostCodexAttempt(
@@ -747,6 +797,65 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           leases.codex.generation,
           true,
         );
+      }
+      if (
+        quarantineResult?.action === "recorded" &&
+        quarantineResult.exhausted &&
+        leases.codex.holderId &&
+        leases.codex.generation !== null
+      ) {
+        const settlement = await settleCodexCredentialFailover(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: attempt.turnId,
+          attemptId: input.attemptId,
+          holderId: leases.codex.holderId,
+          generation: leases.codex.generation,
+          expectedRedispatches: attempt.redispatchesAtDispatch,
+          maxFailovers: quarantineResult.maxFailovers,
+          recoveryPayload: {
+            triggerEventId: attempt.triggerEventId!,
+            reason: "codex_credential_failover",
+            credentialId: providerTurn.effectiveCodexCredentialId,
+            failureKind: codexCredentialFailure.kind,
+          },
+          failedPayload: {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            failoverCount: quarantineResult.failoverCount,
+            maxFailovers: quarantineResult.maxFailovers,
+          },
+        });
+        if (settlement.action === "limit_exceeded") {
+          leases.codex.held = false;
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settlement.events,
+          );
+          control.activityError = error;
+          control.activityStatus = "idle";
+          control.turnMetricOutcome = "failed";
+          await deliverFailedChildTurnToParent(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            attempt.turnId,
+          );
+          return claimedResult({ status: "idle" });
+        }
+        if (settlement.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          control.activityStatus = "cancelled";
+          control.turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
+        }
+        throw new Error("Exhausted Codex failover receipt unexpectedly recovered");
       }
       let rotation: Awaited<ReturnType<typeof getCodexRotationSettings>>;
       let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
@@ -801,10 +910,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         decisionCredentialId: decision.kind === "active" ? decision.credentialId : null,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
       });
-      const maxFailovers = codexCredentialFailoverLimit(
-        accounts,
-        providerTurn.effectiveCodexCredentialId,
-      );
+      const maxFailovers = providerTurn.codexCredentialFailoverLimit;
 
       if (
         statePersisted &&
@@ -828,6 +934,15 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             credentialId: providerTurn.effectiveCodexCredentialId,
             failureKind: codexCredentialFailure.kind,
             ...(cooldownUntil ? { cooldownUntil: cooldownUntil.toISOString() } : {}),
+          },
+          failedPayload: {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            failoverCount: quarantineResult.failoverCount,
+            maxFailovers: quarantineResult.maxFailovers,
           },
         });
         observability.incrementCounter({
@@ -870,29 +985,13 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           return claimedResult({ status: "cancelled" });
         }
         if (settlement.action === "limit_exceeded") {
-          const failurePayload = {
-            error:
-              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
-            code: "codex_credential_failover_exhausted",
-            retryable: false,
-            recovery: "user_message",
-            failoverCount: settlement.failoverCount,
-            maxFailovers: settlement.maxFailovers,
-          };
-          if (
-            !(await eventing.settle!({
-              events: [
-                { type: "turn.failed", payload: failurePayload },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              turnStatus: "failed",
-              sessionStatus: "idle",
-              activeTurnId: null,
-              suppressGoalContinuation: true,
-            }))
-          ) {
-            return claimedResult({ status: "cancelled" });
-          }
+          leases.codex.held = false;
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settlement.events,
+          );
           control.activityError = error;
           control.activityStatus = "idle";
           control.turnMetricOutcome = "failed";
@@ -966,7 +1065,12 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             goalId: activeGoal?.id ?? null,
             goalVersion: activeGoal?.version ?? null,
             earliestResetAt: authoritativeResetAt,
-            resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+            resetKind: authoritativeResetAt
+              ? "authoritative"
+              : codexCredentialFailure.kind === "auth" ||
+                  codexCredentialFailure.kind === "forbidden"
+                ? "mutation_only"
+                : "bounded_refresh",
             failurePayload,
             leaseFence: {
               holderId: leases.codex.holderId,

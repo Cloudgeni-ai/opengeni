@@ -1,15 +1,19 @@
 import {
   getSessionGoal,
   acquireCodexCredentialLease,
+  CodexCredentialLeaseAttemptFencedError,
+  CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPinInTransaction,
+  settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
   classifyCodexPin,
@@ -35,6 +39,7 @@ import type {
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
 
 import { refreshCappedCodexUsageRows } from "./codex";
@@ -92,6 +97,7 @@ export async function selectCodexTurnCapacity(
     observability,
     wakeSessionWorkflow,
     signalCodexCapacityWorkflow,
+    dispatchId,
     control,
     attempt,
     billingState,
@@ -136,7 +142,14 @@ export async function selectCodexTurnCapacity(
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
             turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            dispatchId,
+            expectedRedispatches: attempt.redispatchesAtDispatch,
             holderId,
             advanceActivePointer: sessionPin === null,
           },
@@ -154,7 +167,14 @@ export async function selectCodexTurnCapacity(
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
             turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            dispatchId,
+            expectedRedispatches: attempt.redispatchesAtDispatch,
             holderId,
             advanceActivePointer: sessionPin === null,
           },
@@ -234,6 +254,7 @@ export async function selectCodexTurnCapacity(
         );
       }
       providerTurn.effectiveCodexCredentialId = leased.credentialId;
+      providerTurn.codexCredentialFailoverLimit = leased.failoverLimit;
       leases.codex.generation = leased.generation;
       leases.codex.confirmedUntilMs =
         leased.leasedUntil && leaseAcquisitionStartedAtMs !== null
@@ -392,7 +413,7 @@ export async function selectCodexTurnCapacity(
             goalId: activeGoal?.id ?? null,
             goalVersion: activeGoal?.version ?? null,
             earliestResetAt: null,
-            resetKind: "bounded_refresh",
+            resetKind: "mutation_only",
             failurePayload: {
               error:
                 rotationDecision.kind === "allocatorDisabled"
@@ -577,6 +598,59 @@ export async function selectCodexTurnCapacity(
       }
     } catch (error) {
       credentialSelectionOutcome = "failed";
+      if (error instanceof CodexCredentialLeaseAttemptFencedError) {
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
+      if (error instanceof CodexCredentialFailoverExhaustedError) {
+        const settlement = await settleCodexCredentialFailover(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          holderId: null,
+          generation: null,
+          expectedRedispatches: attempt.redispatchesAtDispatch,
+          maxFailovers: error.maxFailovers,
+          recoveryPayload: {
+            triggerEventId: attempt.triggerEventId!,
+            reason: "codex_credential_failover_exhausted",
+          },
+          failedPayload: {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            failoverCount: error.failoverCount,
+            maxFailovers: error.maxFailovers,
+          },
+        });
+        if (settlement.action === "limit_exceeded") {
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settlement.events,
+          );
+          control.activityStatus = "idle";
+          control.turnMetricOutcome = "failed";
+          await deliverFailedChildTurnToParent(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            turnId,
+          );
+          return { exit: claimedResult({ status: "idle" }) };
+        }
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
       throw error;
     } finally {
       recordTurnStartupPhase(observability, {

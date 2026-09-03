@@ -95,6 +95,35 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("projects authoritative capacity arm and resume statuses from the live stream", async () => {
+    let resume: () => void = () => undefined;
+    const resumeGate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const client = fakeClient({
+      listEvents: async () => [event(1, "session.status.changed", { status: "running" })],
+      streamEvents: (_workspaceId, _sessionId, options = {}) =>
+        (async function* () {
+          options.onOpen?.();
+          yield event(2, "session.status.changed", { status: "waiting_capacity" });
+          await resumeGate;
+          yield event(3, "session.status.changed", { status: "recovering" });
+        })(),
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    expect(hook.result.current.sessionStatus).toBe("waiting_capacity");
+
+    resume();
+    await flush(20);
+    expect(hook.result.current.sessionStatus).toBe("recovering");
+
+    await hook.unmount();
+  });
+
   test("a failed initial tail request exits the loading gate with an error", async () => {
     const client = fakeClient({
       listEvents: async () => {

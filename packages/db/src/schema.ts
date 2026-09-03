@@ -7836,7 +7836,7 @@ export const codexCapacityWaiters = pgTable(
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
-    resetKind: text("reset_kind").notNull(), // authoritative | bounded_refresh
+    resetKind: text("reset_kind").notNull(), // authoritative | bounded_refresh | mutation_only
     refreshAttempt: integer("refresh_attempt").notNull().default(0),
     // Coalescing outbox generation. Every eligibility-affecting mutation bumps
     // wakeRevision. Duplicate/lost Temporal signals are harmless because only

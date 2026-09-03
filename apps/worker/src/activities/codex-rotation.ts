@@ -523,13 +523,18 @@ export function selectCodexCredentialLeaseForTurn(args: {
 }): CodexTurnLeaseSelection {
   const { accounts, activeCredentialId, rotationEnabled, rotationStrategy, existingCredentialId } =
     args.context;
+  const failedCredentialIds = new Set(args.context.failedCredentialIds ?? []);
   // Normalized: rotation-enabled always behaves as sharded (see
   // effectiveRotationStrategy); the stored value is only ever legacy residue.
   const strategy = effectiveRotationStrategy(rotationStrategy);
   const existing = existingCredentialId
     ? accounts.find((account) => account.id === existingCredentialId)
     : undefined;
-  if (existing && isCodexCredentialHealthy(existing, args.now)) {
+  if (
+    existing &&
+    !failedCredentialIds.has(existing.id) &&
+    isCodexCredentialHealthy(existing, args.now)
+  ) {
     return {
       credentialId: existing.id,
       advanceActivePointer: false,
@@ -585,13 +590,14 @@ export function selectCodexCredentialLeaseForTurn(args: {
   // primary/fallback pool before this ranker runs; accounts from different pools
   // are never union-ranked here.
   if (pinDisposition === "sharded") {
-    if (accounts.length === 0) {
+    const unattemptedAccounts = accounts.filter((account) => !failedCredentialIds.has(account.id));
+    if (unattemptedAccounts.length === 0) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
     }
     const shard = chooseShardedHome({
       sessionId: args.sessionId,
       currentPolicyPin: args.sessionPinSource === "policy" ? args.sessionPinnedCredentialId : null,
-      accounts,
+      accounts: unattemptedAccounts,
       now: args.now,
     });
     if (shard.kind === "allCapped") {
@@ -646,13 +652,14 @@ export function selectCodexCredentialLeaseForTurn(args: {
   }
 
   const priorId = args.sessionLastCredentialId ?? activeCredentialId;
+  const unattemptedAccounts = accounts.filter((account) => !failedCredentialIds.has(account.id));
   const decision = chooseRotationActive({
     rotationStrategy: strategy,
     activeCredentialId,
     // Per-session continuity is the round-robin/drain cursor. Falling back to
     // the workspace pointer is only correct when this session has never run.
     priorCredentialId: priorId,
-    accounts,
+    accounts: unattemptedAccounts,
     now: args.now,
   });
   return {

@@ -514,6 +514,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 input.workspaceId,
                 providerTurn.effectiveCodexCredentialId ?? "",
               );
+              const resolveTrackedToken = async (
+                resolve: () => ReturnType<typeof resolver.getToken>,
+              ) => {
+                const token = await resolve();
+                providerTurn.effectiveCodexCredentialVersion = token.credentialVersion;
+                return token;
+              };
               return {
                 clientVersion: CODEX_CLIENT_VERSION,
                 // Backend sticky cache-routing key — the SAME id as the body's
@@ -523,8 +530,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // (per-request shard lottery = prod's measured 48.6% on sol);
                 // with it, resends pin to the warm shard (Codex CLI parity).
                 sessionId: input.sessionId,
-                getToken: () => resolver.getToken(),
-                refresh: () => resolver.refresh(),
+                getToken: () => resolveTrackedToken(resolver.getToken),
+                refresh: () => resolveTrackedToken(resolver.refresh),
                 resolveModel: buildModelResolver(
                   CODEX_FALLBACK_MODEL_SLUGS,
                   CODEX_FALLBACK_MODEL_SLUGS[0],

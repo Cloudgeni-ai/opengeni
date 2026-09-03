@@ -39,6 +39,7 @@ describe("migration 0401 unconditional Codex credential leasing", () => {
       "LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE",
     );
     expect(source).toContain("LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE");
+    expect(source).toContain("LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain("LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain(
       "ALTER TABLE session_goals\n  ADD COLUMN IF NOT EXISTS continuation_suppressed_turn_id uuid",
@@ -50,6 +51,9 @@ describe("migration 0401 unconditional Codex credential leasing", () => {
       "ALTER TABLE codex_rotation_settings\n  DROP COLUMN IF EXISTS lease_rotation_enabled",
     );
     expect(source).not.toMatch(/DROP COLUMN IF EXISTS rotation_enabled/u);
+    expect(source).toContain(
+      "CHECK (reset_kind IN ('authoritative', 'bounded_refresh', 'mutation_only'))",
+    );
   });
 
   test("retains rotation policy while removing both allocator cutover bits", async () => {

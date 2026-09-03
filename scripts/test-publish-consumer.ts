@@ -487,17 +487,12 @@ try {
   const reactSource = JSON.parse(
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
-  const stablePostcssVersion = reactSource.devDependencies?.postcss;
-  if (!stablePostcssVersion || !/^\d+\.\d+\.\d+$/u.test(stablePostcssVersion)) {
-    throw new Error("React's clean-consumer PostCSS version must be exact");
-  }
-
   // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
   // importing it. Pin the version @opengeni/react already typechecks.
-  const postcssOverride =
-    typeof reactSource.devDependencies?.postcss === "string"
-      ? { postcss: reactSource.devDependencies.postcss }
-      : {};
+  const postcssVersion = reactSource.devDependencies?.postcss;
+  if (typeof postcssVersion !== "string" || !/^\d+\.\d+\.\d+$/u.test(postcssVersion)) {
+    throw new Error("React package must pin an exact PostCSS version for clean consumers");
+  }
 
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
@@ -535,18 +530,13 @@ try {
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
       typescript: rootManifest.devDependencies?.typescript,
       "@vitejs/plugin-react": reactSource.devDependencies?.["@vitejs/plugin-react"],
-      postcss: stablePostcssVersion,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
-      // Keep Vite's nested copy on the exact declaration version exercised by
-      // the React package. A newly published transitive PostCSS release must
-      // not make the supposedly frozen clean-consumer proof non-reproducible.
-      postcss: stablePostcssVersion,
       ...runtimeLocalDependencyFiles,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
 
@@ -948,7 +938,6 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      postcss: stablePostcssVersion,
       typescript: rootManifest.devDependencies?.typescript,
       vite: reactSource.devDependencies?.vite,
     },
@@ -956,7 +945,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1026,14 +1015,13 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      postcss: stablePostcssVersion,
       typescript: rootManifest.devDependencies?.typescript,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1091,14 +1079,13 @@ try {
       "@types/node": "^24.10.1",
       "@types/react": reactSource.devDependencies?.["@types/react"],
       "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
-      postcss: stablePostcssVersion,
       typescript: rootManifest.devDependencies?.typescript,
       vite: reactSource.devDependencies?.vite,
     },
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      ...postcssOverride,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([

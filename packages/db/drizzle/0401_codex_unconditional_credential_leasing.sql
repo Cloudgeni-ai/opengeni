@@ -63,6 +63,7 @@ $codex_unconditional_leasing_runtime_drain_before_lock$;
 
 LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE;
 
 DO $codex_unconditional_leasing_runtime_drain_after_lock$
@@ -96,3 +97,11 @@ ALTER TABLE organization_codex_rotation_settings
 
 ALTER TABLE codex_rotation_settings
   DROP COLUMN IF EXISTS lease_rotation_enabled;
+
+-- Policy/status waits are woken by allocator, connection, source, and pin
+-- mutations. They must not fan out provider quota reads on every waiter timer.
+ALTER TABLE codex_capacity_waiters
+  DROP CONSTRAINT IF EXISTS codex_capacity_waiters_reset_kind_check;
+ALTER TABLE codex_capacity_waiters
+  ADD CONSTRAINT codex_capacity_waiters_reset_kind_check
+  CHECK (reset_kind IN ('authoritative', 'bounded_refresh', 'mutation_only'));

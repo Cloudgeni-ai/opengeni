@@ -77,6 +77,7 @@ describe("migration 0053 (Codex credential leases)", () => {
 
       const sessionId = crypto.randomUUID();
       const turnId = crypto.randomUUID();
+      const triggerEventId = crypto.randomUUID();
       await admin`
         insert into sessions (
           id, account_id, workspace_id, initial_message, model,
@@ -91,7 +92,7 @@ describe("migration 0053 (Codex credential leases)", () => {
           temporal_workflow_id, status, position, prompt, model,
           reasoning_effort, sandbox_backend
         ) values (
-          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${crypto.randomUUID()},
+          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${triggerEventId},
           'lease-foundation-workflow', 'running', 1, 'legacy turn',
           'codex/gpt-5.6-sol', 'low', 'modal'
         )`;
@@ -132,6 +133,34 @@ describe("migration 0053 (Codex credential leases)", () => {
 
       await migrate(databaseUrl);
 
+      const attemptId = crypto.randomUUID();
+      const dispatchId = `migration-0053:${attemptId}`;
+      const workflowRunId = `run:${attemptId}`;
+      await admin.begin(async (transaction) => {
+        await transaction`set constraints all deferred`;
+        await transaction`
+          update session_turns
+          set status = 'running', execution_generation = 1,
+              active_attempt_id = ${attemptId},
+              metadata = jsonb_build_object(
+                'dispatchGeneration', 1,
+                'dispatchAttempt', jsonb_build_object(
+                  'id', ${dispatchId}, 'generation', 1, 'triggerEventId', ${triggerEventId}
+                )
+              )
+          where id = ${turnId}`;
+        await transaction`
+          insert into session_turn_attempts (
+            id, account_id, workspace_id, session_id, turn_id, execution_generation,
+            state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+            verified_control_revision, mcp_approval_policies
+          ) values (
+            ${attemptId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 1,
+            'running', 'lease-foundation-workflow', ${workflowRunId}, ${dispatchId}, 0,
+            '{}'::jsonb
+          )`;
+      });
+
       const retiredColumns = await admin<{ column_name: string }[]>`
         select column_name from information_schema.columns
         where table_schema = current_schema()
@@ -154,7 +183,14 @@ describe("migration 0053 (Codex credential leases)", () => {
         {
           accountId: account!.id,
           workspaceId: workspace!.id,
+          sessionId,
           turnId,
+          attemptId,
+          executionGeneration: 1,
+          workflowId: "lease-foundation-workflow",
+          workflowRunId,
+          dispatchId,
+          expectedRedispatches: 0,
           holderId: "migration-0053-unconditional-lease",
           advanceActivePointer: true,
         },

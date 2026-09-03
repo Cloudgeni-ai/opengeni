@@ -13,6 +13,7 @@ import {
 import * as schema from "../src/schema";
 import {
   acquireCodexCredentialLease,
+  CodexCredentialLeaseAttemptFencedError,
   createDb,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
@@ -97,6 +98,8 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
   const sessionId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const attemptId = crypto.randomUUID();
+  const triggerEventId = crypto.randomUUID();
+  const dispatchId = `activity:${attemptId}`;
   await withSessionActivityRlsContext(
     dbA,
     { accountId: ws.accountId, workspaceId: ws.workspaceId },
@@ -115,11 +118,16 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       insert into session_turns (
         id, account_id, workspace_id, session_id, trigger_event_id,
         temporal_workflow_id, status, position, prompt, model,
-        reasoning_effort, sandbox_backend, execution_generation, active_attempt_id
+        reasoning_effort, sandbox_backend, execution_generation, active_attempt_id, metadata
       ) values (
-        ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
+        ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${triggerEventId},
         'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', 1,
-        ${attemptId}
+        ${attemptId}, jsonb_build_object(
+          'dispatchGeneration', 1,
+          'dispatchAttempt', jsonb_build_object(
+            'id', ${dispatchId}, 'generation', 1, 'triggerEventId', ${triggerEventId}
+          )
+        )
       )
       `);
       await transaction.execute(
@@ -132,7 +140,7 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
           verified_control_revision, mcp_approval_policies
         ) values (
           ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 1,
-          'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
+          'running', 'wf', ${`run:${attemptId}`}, ${dispatchId}, 0,
           '{}'::jsonb
         )
       `);
@@ -149,8 +157,11 @@ async function activeAttemptIdForTurn(turnId: string): Promise<string> {
 }
 
 async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<string> {
-  const [turn] = await admin<{ session_id: string; execution_generation: number }[]>`
-    select session_id, execution_generation from session_turns where id = ${turnId}`;
+  const [turn] = await admin<
+    { session_id: string; trigger_event_id: string; execution_generation: number }[]
+  >`
+    select session_id, trigger_event_id, execution_generation
+    from session_turns where id = ${turnId}`;
   if (!turn) throw new Error(`Turn ${turnId} was not found`);
   const attemptId = crypto.randomUUID();
   const executionGeneration = turn.execution_generation + 1;
@@ -158,21 +169,32 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
     dbA,
     { accountId: ws.accountId, workspaceId: ws.workspaceId },
     async (transaction) => {
+      await transaction.execute(sql`set constraints all deferred`);
       await transaction.execute(sql`
-        insert into session_turn_attempts (
-          id, account_id, workspace_id, session_id, turn_id, execution_generation,
-          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-          verified_control_revision, mcp_approval_policies
-        ) values (
-          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${turn.session_id}, ${turnId},
-          ${executionGeneration}, 'running', 'wf', ${`run:${attemptId}`},
-          ${`activity:${attemptId}`}, 0, '{}'::jsonb
-        )
+        update session_turn_attempts
+        set state = 'closed', outcome = 'lease_lost_recoverable', closed_at = now(),
+            updated_at = now()
+        where account_id = ${ws.accountId}
+          and workspace_id = ${ws.workspaceId}
+          and turn_id = ${turnId}
+          and state in ('claimed', 'running')
       `);
       await transaction.execute(sql`
         update session_turns
         set status = 'running', execution_generation = ${executionGeneration},
-            active_attempt_id = ${attemptId}, updated_at = now()
+            active_attempt_id = ${attemptId},
+            metadata = jsonb_set(
+              jsonb_set(coalesce(metadata, '{}'::jsonb), '{dispatchGeneration}',
+                to_jsonb(${executionGeneration}::int), true),
+              '{dispatchAttempt}',
+              jsonb_build_object(
+                'id', ${`activity:${attemptId}`},
+                'generation', ${executionGeneration},
+                'triggerEventId', ${turn.trigger_event_id}
+              ),
+              true
+            ),
+            updated_at = now()
         where account_id = ${ws.accountId}
           and workspace_id = ${ws.workspaceId}
           and id = ${turnId}
@@ -183,6 +205,17 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
         where account_id = ${ws.accountId}
           and workspace_id = ${ws.workspaceId}
           and id = ${turn.session_id}
+      `);
+      await transaction.execute(sql`
+        insert into session_turn_attempts (
+          id, account_id, workspace_id, session_id, turn_id, execution_generation,
+          state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+          verified_control_revision, mcp_approval_policies
+        ) values (
+          ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${turn.session_id}, ${turnId},
+          ${executionGeneration}, 'running', 'wf', ${`run:${attemptId}`},
+          ${`activity:${attemptId}`}, 0, '{}'::jsonb
+        )
       `);
     },
   );
@@ -224,11 +257,13 @@ async function acquire(
   leaseTtlMs = 300_000,
   holderId = `holder:${turnId}`,
 ) {
+  const fence = await attemptFenceForTurn(turnId);
   return await acquireCodexCredentialLease(
     db,
     {
       accountId: ws.accountId,
       workspaceId: ws.workspaceId,
+      ...fence,
       turnId,
       holderId,
       advanceActivePointer: true,
@@ -236,6 +271,36 @@ async function acquire(
     },
     selector,
   );
+}
+
+async function attemptFenceForTurn(turnId: string) {
+  const [row] = await admin<
+    Array<{
+      session_id: string;
+      active_attempt_id: string;
+      execution_generation: number;
+      worker_death_redispatches: number;
+      temporal_workflow_id: string;
+      temporal_workflow_run_id: string;
+      temporal_activity_id: string;
+    }>
+  >`
+    select t.session_id, t.active_attempt_id, t.execution_generation,
+           coalesce((t.metadata->>'workerDeathRedispatches')::int, 0) as worker_death_redispatches,
+           a.temporal_workflow_id, a.temporal_workflow_run_id, a.temporal_activity_id
+    from session_turns t
+    join session_turn_attempts a on a.id = t.active_attempt_id
+    where t.id = ${turnId}`;
+  if (!row) throw new Error(`Turn ${turnId} has no exact active attempt fence`);
+  return {
+    sessionId: row.session_id,
+    attemptId: row.active_attempt_id,
+    executionGeneration: row.execution_generation,
+    workflowId: row.temporal_workflow_id,
+    workflowRunId: row.temporal_workflow_run_id,
+    dispatchId: row.temporal_activity_id,
+    expectedRedispatches: row.worker_death_redispatches,
+  };
 }
 
 beforeAll(async () => {
@@ -336,12 +401,15 @@ describe("credential allocator atomic Codex credential allocation", () => {
       ) values (${wsA!.accountId}, ${credential!.id}, true)`;
     const turnA = await seedTurn(wsA!, 1);
     const turnB = await seedTurn(wsB!, 1);
+    const fenceA = await attemptFenceForTurn(turnA);
+    const fenceB = await attemptFenceForTurn(turnB);
 
     await acquireCodexCredentialLease(
       dbA,
       {
         accountId: wsA!.accountId,
         workspaceId: wsA!.workspaceId,
+        ...fenceA,
         turnId: turnA,
         holderId: "organization-sibling-a",
         advanceActivePointer: false,
@@ -356,6 +424,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       {
         accountId: wsB!.accountId,
         workspaceId: wsB!.workspaceId,
+        ...fenceB,
         turnId: turnB,
         holderId: "organization-sibling-b",
         advanceActivePointer: false,
@@ -563,6 +632,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       {
         accountId: ws!.accountId,
         workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(inFlightTurn)),
         turnId: inFlightTurn,
         holderId: "temporary-disable-live-resume",
         advanceActivePointer: true,
@@ -629,6 +699,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       {
         accountId: ws!.accountId,
         workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(scopedTurn)),
         turnId: scopedTurn,
         holderId: "private-scope-new-acquisition",
         advanceActivePointer: true,
@@ -771,17 +842,20 @@ describe("credential allocator atomic Codex credential allocation", () => {
       await quarantineCodexCredentialForLease(dbB, {
         accountId: ws!.accountId,
         workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(turnId)),
         turnId,
         credentialId,
+        credentialVersion: loaded!.version,
         holderId: lease.holderId!,
         generation: lease.generation!,
+        maxFailovers: lease.failoverLimit,
         quarantine: {
           kind: "status",
           status: "error",
           lastError: "injected definitive refusal",
         },
       }),
-    ).toBe(true);
+    ).toMatchObject({ action: "recorded", failoverCount: 1 });
 
     // The provider refresh began from the previously-active snapshot. Its token
     // version still matches because health metadata intentionally does not rotate
@@ -833,6 +907,64 @@ describe("credential allocator atomic Codex credential allocation", () => {
         lease.generation!,
       ),
     ).toBe(true);
+  });
+
+  test("a reconnect version fences a stale provider refusal from poisoning the fresh token family", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credentialId = await connectCredential(ws!, "quarantine-version-race");
+    const turnId = await seedTurn(ws!, 1);
+    const lease = await acquire(dbA, ws!, turnId);
+    const requestCredential = await loadCodexCredentialForRun(
+      dbA,
+      settings,
+      ws!.workspaceId,
+      credentialId,
+    );
+    expect(requestCredential?.version).toBe(1);
+
+    expect(await connectCredential(ws!, "quarantine-version-race")).toBe(credentialId);
+    const reconnected = await loadCodexCredentialForRun(
+      dbB,
+      settings,
+      ws!.workspaceId,
+      credentialId,
+    );
+    expect(reconnected?.version).toBe(requestCredential!.version + 1);
+
+    const result = await quarantineCodexCredentialForLease(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...(await attemptFenceForTurn(turnId)),
+      turnId,
+      credentialId,
+      credentialVersion: requestCredential!.version,
+      holderId: lease.holderId!,
+      generation: lease.generation!,
+      maxFailovers: lease.failoverLimit,
+      quarantine: {
+        kind: "status",
+        status: "needs_relogin",
+        lastError: "stale token family must not win",
+      },
+    });
+    expect(result).toEqual({
+      action: "credential_changed",
+      failoverCount: 0,
+      maxFailovers: lease.failoverLimit,
+      currentCredentialVersion: reconnected!.version,
+    });
+    const [after] = await admin<{ status: string; version: number; failed_ids: unknown }[]>`
+      select credential.status, credential.version,
+             turn.metadata->'codexCredentialFailedIds' as failed_ids
+      from codex_subscription_credentials credential
+      cross join session_turns turn
+      where credential.id = ${credentialId} and turn.id = ${turnId}`;
+    expect(after).toEqual({
+      status: "active",
+      version: reconnected!.version,
+      failed_ids: null,
+    });
   });
 
   test("heartbeat extends the live holder; crash expiry is reclaimed; release is idempotent", async () => {
@@ -922,15 +1054,31 @@ describe("credential allocator atomic Codex credential allocation", () => {
     ).toBe(false);
   });
 
-  test("a successor attempt fences stale heartbeat and release for the same turn", async () => {
+  test("a successor attempt fences stale A-to-B-to-A reacquisition before provider I/O", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
     await connectCredential(ws!, "fenced-a");
     await connectCredential(ws!, "fenced-b");
     const turnId = await seedTurn(ws!, 1);
+    const staleFence = await attemptFenceForTurn(turnId);
     const first = await acquire(dbA, ws!, turnId, 300_000, "attempt-a");
+    await startRecoveryAttempt(ws!, turnId);
     const successor = await acquire(dbB, ws!, turnId, 300_000, "attempt-b");
     expect(successor.generation).toBe(first.generation! + 1);
+    await expect(
+      acquireCodexCredentialLease(
+        dbA,
+        {
+          accountId: ws!.accountId,
+          workspaceId: ws!.workspaceId,
+          ...staleFence,
+          turnId,
+          holderId: "attempt-a",
+          advanceActivePointer: true,
+        },
+        selector,
+      ),
+    ).rejects.toBeInstanceOf(CodexCredentialLeaseAttemptFencedError);
     expect(
       await heartbeatCodexCredentialLease(
         dbA,
@@ -965,17 +1113,25 @@ describe("credential allocator atomic Codex credential allocation", () => {
     const staleQuarantine = await quarantineCodexCredentialForLease(dbA, {
       accountId: ws!.accountId,
       workspaceId: ws!.workspaceId,
+      ...staleFence,
       turnId,
       credentialId: first.credentialId!,
+      credentialVersion: (await loadCodexCredentialForRun(
+        dbA,
+        settings,
+        ws!.workspaceId,
+        first.credentialId!,
+      ))!.version,
       holderId: first.holderId!,
       generation: first.generation!,
+      maxFailovers: first.failoverLimit,
       quarantine: {
         kind: "cooldown",
         until: new Date(Date.now() + 60_000),
         cooldownKind: "quota",
       },
     });
-    expect(staleQuarantine).toBe(false);
+    expect(staleQuarantine.action).toBe("stale");
     const [credentialAfterStaleAttempt] = await admin<
       { status: string; exhausted_until: Date | null }[]
     >`
@@ -1168,17 +1324,25 @@ describe("credential allocator atomic Codex credential allocation", () => {
       await quarantineCodexCredentialForLease(dbA, {
         accountId: ws!.accountId,
         workspaceId: ws!.workspaceId,
+        ...(await attemptFenceForTurn(turnId)),
         turnId,
         credentialId: first.credentialId!,
+        credentialVersion: (await loadCodexCredentialForRun(
+          dbA,
+          settings,
+          ws!.workspaceId,
+          first.credentialId!,
+        ))!.version,
         holderId: first.holderId!,
         generation: first.generation!,
+        maxFailovers: first.failoverLimit,
         quarantine: {
           kind: "cooldown",
           until: new Date(Date.now() + 60_000),
           cooldownKind: "quota",
         },
       }),
-    ).toBe(true);
+    ).toMatchObject({ action: "recorded", failoverCount: 1 });
     // Force the narrow race: the holder was live for quarantine, then crossed
     // expiry before the same-turn failover transaction acquired its locks.
     await admin`
@@ -1323,6 +1487,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     const foreignCredential = await connectCredential(wsA!, "foreign-a");
     await connectCredential(wsB!, "local-b");
     const turnB = await seedTurn(wsB!, 1);
+    const fenceB = await attemptFenceForTurn(turnB);
     let allocatorError: unknown;
     try {
       await acquireCodexCredentialLease(
@@ -1330,6 +1495,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
         {
           accountId: wsB!.accountId,
           workspaceId: wsB!.workspaceId,
+          ...fenceB,
           turnId: turnB,
           holderId: "foreign-selector-test",
           advanceActivePointer: true,
@@ -1487,6 +1653,110 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(preemptions?.count).toBe(1);
   });
 
+  test("a quarantined-attempt receipt survives database recovery and prevents A-to-B-to-A reuse", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "receipt-recovery-a");
+    await connectCredential(ws!, "receipt-recovery-b");
+    const turnId = await seedTurn(ws!, 1);
+    const first = await acquire(dbA, ws!, turnId, 300_000, `receipt-a:${turnId}`);
+    const firstFence = await attemptFenceForTurn(turnId);
+    const firstCredential = await loadCodexCredentialForRun(
+      dbA,
+      settings,
+      ws!.workspaceId,
+      first.credentialId!,
+    );
+    const firstReceipt = await quarantineCodexCredentialForLease(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...firstFence,
+      turnId,
+      credentialId: first.credentialId!,
+      credentialVersion: firstCredential!.version,
+      holderId: first.holderId!,
+      generation: first.generation!,
+      maxFailovers: first.failoverLimit,
+      quarantine: {
+        kind: "status",
+        status: "needs_relogin",
+        lastError: "first definitive refusal",
+      },
+    });
+    expect(firstReceipt).toEqual({
+      action: "recorded",
+      failoverCount: 1,
+      maxFailovers: 1,
+      exhausted: false,
+    });
+
+    const recovered = await settleCodexCredentialLeaseLoss(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: firstFence.sessionId,
+      turnId,
+      attemptId: firstFence.attemptId,
+      holderId: first.holderId!,
+      generation: first.generation!,
+      expectedRedispatches: 0,
+      checkpointDurable: true,
+      recoveryPayload: { reason: "post_quarantine_database_recovery" },
+      failedPayload: {},
+    });
+    expect(recovered.action).toBe("recovering");
+
+    await startRecoveryAttempt(ws!, turnId);
+    const second = await acquire(dbB, ws!, turnId, 300_000, `receipt-b:${turnId}`);
+    expect(second.credentialId).not.toBe(first.credentialId);
+    expect(second.failoverLimit).toBe(1);
+    const secondFence = await attemptFenceForTurn(turnId);
+    const secondCredential = await loadCodexCredentialForRun(
+      dbB,
+      settings,
+      ws!.workspaceId,
+      second.credentialId!,
+    );
+    const secondReceipt = await quarantineCodexCredentialForLease(dbB, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...secondFence,
+      turnId,
+      credentialId: second.credentialId!,
+      credentialVersion: secondCredential!.version,
+      holderId: second.holderId!,
+      generation: second.generation!,
+      maxFailovers: second.failoverLimit,
+      quarantine: {
+        kind: "status",
+        status: "needs_relogin",
+        lastError: "second definitive refusal",
+      },
+    });
+    expect(secondReceipt).toEqual({
+      action: "recorded",
+      failoverCount: 2,
+      maxFailovers: 1,
+      exhausted: true,
+    });
+    const terminal = await settleCodexCredentialFailover(dbB, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: secondFence.sessionId,
+      turnId,
+      attemptId: secondFence.attemptId,
+      holderId: second.holderId!,
+      generation: second.generation!,
+      expectedRedispatches: 0,
+      maxFailovers: second.failoverLimit,
+      recoveryPayload: { reason: "must-not-return-to-a" },
+    });
+    expect(terminal).toMatchObject({
+      action: "limit_exceeded",
+      failoverCount: 2,
+      maxFailovers: 1,
+    });
+  });
+
   test("freezes the initial failover ceiling across pool shrink and later growth", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
@@ -1580,26 +1850,28 @@ describe("credential allocator atomic Codex credential allocation", () => {
       where workspace_id = ${ws!.workspaceId} and id = ${first.credentialId!}`;
     await connectCredential(ws!, "frozen-failover-late-d");
 
-    expect(
-      await settleCodexCredentialFailover(dbA, {
-        accountId: ws!.accountId,
-        workspaceId: ws!.workspaceId,
-        sessionId: turn!.session_id,
-        turnId,
-        attemptId: thirdAttemptId,
-        holderId: third.holderId!,
-        generation: third.generation!,
-        expectedRedispatches: 0,
-        // Later pool growth must not add attempts to this accepted turn.
-        maxFailovers: 3,
-        recoveryPayload: { reason: "pool-grew-after-original-ceiling" },
-      }),
-    ).toEqual({
+    const exhausted = await settleCodexCredentialFailover(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: turn!.session_id,
+      turnId,
+      attemptId: thirdAttemptId,
+      holderId: third.holderId!,
+      generation: third.generation!,
+      expectedRedispatches: 0,
+      // Later pool growth must not add attempts to this accepted turn.
+      maxFailovers: 3,
+      recoveryPayload: { reason: "pool-grew-after-original-ceiling" },
+    });
+    expect(exhausted).toMatchObject({
       action: "limit_exceeded",
       failoverCount: 3,
       maxFailovers: 2,
-      events: [],
     });
+    expect(exhausted.events.map((event) => event.type)).toEqual([
+      "turn.failed",
+      "session.status.changed",
+    ]);
   });
 
   test("failover settlement stops when the persisted alternate budget is exhausted", async () => {
@@ -1628,26 +1900,39 @@ describe("credential allocator atomic Codex credential allocation", () => {
       maxFailovers: 1,
       recoveryPayload: { reason: "must-not-exceed-alternate-budget" },
     });
-    expect(settled).toEqual({
+    expect(settled).toMatchObject({
       action: "limit_exceeded",
       failoverCount: 2,
       maxFailovers: 1,
-      events: [],
     });
+    expect(settled.events.map((event) => event.type)).toEqual([
+      "turn.failed",
+      "session.status.changed",
+    ]);
 
-    const [unchanged] = await admin<
-      { turn_status: string; attempt_state: string; lease_count: number }[]
+    const [terminal] = await admin<
+      {
+        turn_status: string;
+        session_status: string;
+        active_attempt_id: string | null;
+        attempt_state: string;
+        lease_count: number;
+      }[]
     >`
-      select t.status as turn_status, a.state as attempt_state,
+      select t.status as turn_status, s.status as session_status,
+             t.active_attempt_id, a.state as attempt_state,
              (select count(*)::int from codex_credential_leases l
               where l.workspace_id = t.workspace_id and l.turn_id = t.id) as lease_count
       from session_turns t
-      join session_turn_attempts a on a.id = t.active_attempt_id
+      join sessions s on s.id = t.session_id
+      join session_turn_attempts a on a.id = ${attemptId}
       where t.id = ${turnId}`;
-    expect(unchanged).toEqual({
-      turn_status: "running",
-      attempt_state: "running",
-      lease_count: 1,
+    expect(terminal).toEqual({
+      turn_status: "failed",
+      session_status: "idle",
+      active_attempt_id: null,
+      attempt_state: "closed",
+      lease_count: 0,
     });
   });
 

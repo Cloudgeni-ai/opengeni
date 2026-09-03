@@ -189,6 +189,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   }
   const turn = claim.turn;
   attempt.turnId = turn.id;
+  attempt.dispatchId = dispatchId;
   attempt.executionGeneration = turn.executionGeneration;
   attempt.providerRecoveryCount = providerRecoveryCountFromMetadata(turn.metadata);
   attempt.triggerEventId = turn.triggerEventId;

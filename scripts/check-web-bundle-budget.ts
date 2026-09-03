@@ -391,6 +391,10 @@ const budgets = {
   // across 31 files. Advance only the raw whole-KiB envelope, retaining 1,778
   // bytes of headroom; gzip, file count, initial, per-file, lazy, and CSS caps
   // remain fixed.
+  // Authoritative Codex capacity status parsing and its visible wait reason,
+  // combined with current main, measure 2,279,737 raw bytes on Linux/x64 Bun
+  // 1.4. Advance only the policy-derived raw whole-KiB envelope, retaining
+  // 1,735 bytes of headroom; every compressed and unrelated cap stays fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,

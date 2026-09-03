@@ -23423,6 +23423,8 @@ export type CodexCredentialLeaseSelectionContext<
   rotationStrategy: string;
   /** A still-live idempotent lease for this SAME turn, if one exists. */
   existingCredentialId: string | null;
+  /** Credentials already consumed by a definitive refusal on this accepted turn. */
+  failedCredentialIds?: readonly string[];
   /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
   policyScope: TPolicyScope | null;
   /** Diagnostics produced while choosing one policy scope for this NEW allocation. */
@@ -23450,7 +23452,74 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   unavailableDiagnostics: readonly TUnavailableDiagnostic[];
   /** Final selector decision after input policy and manual/policy pin handling. */
   advanceActivePointer: boolean;
+  /** Frozen alternate-account budget observed before the first provider request. */
+  failoverLimit: number;
 };
+
+export class CodexCredentialLeaseAttemptFencedError extends Error {
+  readonly code = "codex_credential_lease_attempt_fenced";
+
+  constructor() {
+    super("Codex credential lease acquisition lost exact attempt ownership");
+    this.name = "CodexCredentialLeaseAttemptFencedError";
+  }
+}
+
+export class CodexCredentialFailoverExhaustedError extends Error {
+  readonly code = "codex_credential_failover_exhausted";
+
+  constructor(
+    readonly failoverCount: number,
+    readonly maxFailovers: number,
+  ) {
+    super("Codex credential failover budget was already exhausted");
+    this.name = "CodexCredentialFailoverExhaustedError";
+  }
+}
+
+function codexFailoverMetadata(metadata: Record<string, unknown> | null | undefined): {
+  failedCredentialIds: Set<string>;
+  failoverCount: number;
+  maxFailovers: number | null;
+  exhausted: boolean;
+} {
+  const failedCredentialIds = new Set(
+    Array.isArray(metadata?.codexCredentialFailedIds)
+      ? metadata.codexCredentialFailedIds.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        )
+      : [],
+  );
+  const rawCount = metadata?.codexCredentialFailovers;
+  const failoverCount =
+    typeof rawCount === "number" && Number.isSafeInteger(rawCount) && rawCount >= 0
+      ? rawCount
+      : failedCredentialIds.size;
+  const rawLimit = metadata?.codexCredentialFailoverLimit;
+  const maxFailovers =
+    typeof rawLimit === "number" && Number.isSafeInteger(rawLimit) && rawLimit >= 1
+      ? rawLimit
+      : null;
+  return {
+    failedCredentialIds,
+    failoverCount,
+    maxFailovers,
+    exhausted:
+      metadata?.codexCredentialFailoverExhausted === true ||
+      (maxFailovers !== null && failoverCount > maxFailovers),
+  };
+}
+
+function codexCredentialFailoverLimitForLease(
+  accounts: readonly CodexLeaseAccountStatus[],
+  servingCredentialId: string | null,
+): number {
+  const allocatableCount = accounts.filter((account) => account.allocatorEnabled).length;
+  const servingIsAllocatable = accounts.some(
+    (account) => account.id === servingCredentialId && account.allocatorEnabled,
+  );
+  return Math.max(1, allocatableCount - (servingIsAllocatable ? 1 : 0));
+}
 
 /**
  * Five minutes is deliberately much longer than the one-minute heartbeat and
@@ -23638,7 +23707,14 @@ export async function acquireCodexCredentialLease<
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    workflowId: string;
+    workflowRunId: string;
+    dispatchId: string;
+    expectedRedispatches: number;
     /** Unique Temporal/local activity execution id used as the zombie fence. */
     holderId: string;
     /** Pins must not move the workspace-global cursor. */
@@ -23671,7 +23747,13 @@ export async function acquireCodexCredentialLease<
   if (!input.holderId.trim()) {
     throw new Error("Codex credential lease holder id is required");
   }
-  return await withRlsContext(
+  if (!Number.isSafeInteger(input.executionGeneration) || input.executionGeneration < 1) {
+    throw new Error("Codex credential lease execution generation must be positive");
+  }
+  if (!Number.isSafeInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
+    throw new Error("Codex credential lease redispatch fence must be non-negative");
+  }
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
@@ -23722,25 +23804,103 @@ export async function acquireCodexCredentialLease<
       if (!settingsRow) {
         throw new Error(`Codex rotation settings not visible for workspace ${input.workspaceId}`);
       }
+      const workspaceControl = await lockWorkspaceInferenceControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        "share",
+      );
       // Rotation row -> durable turn is the common allocator/waiter lock order.
       // Fail closed before taking a credential: the turn and allocator must be
       // inside exactly the same RLS-scoped workspace/account. A downstream
       // accepted-turn policy is parsed from this locked metadata while the
       // rotation transaction is held.
+      const sessions = await tx.execute(sql<{
+        id: string;
+        status: string;
+        active_turn_id: string | null;
+      }>`
+        select id, status, active_turn_id from sessions
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and id = ${input.sessionId}
+        for share
+      `);
       const turns = await tx.execute(sql<{
         id: string;
+        session_id: string;
+        status: string;
+        active_attempt_id: string | null;
+        execution_generation: number;
         metadata: Record<string, unknown> | null;
       }>`
-        select id, metadata from session_turns
+        select id, session_id, status, active_attempt_id, execution_generation, metadata
+        from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
           and id = ${input.turnId}
         for share
       `);
-      if (!turns[0]) {
+      const attempts = await tx.execute(sql<{
+        id: string;
+        state: string;
+        execution_generation: number;
+        temporal_workflow_id: string;
+        temporal_workflow_run_id: string;
+        temporal_activity_id: string;
+      }>`
+        select id, state, execution_generation, temporal_workflow_id,
+               temporal_workflow_run_id, temporal_activity_id
+        from session_turn_attempts
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and session_id = ${input.sessionId}
+          and turn_id = ${input.turnId}
+          and id = ${input.attemptId}
+        for share
+      `);
+      const session = sessions[0];
+      const turn = turns[0];
+      const attempt = attempts[0];
+      if (!turn) {
         throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
       }
-      const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
+      const dispatch = readTurnDispatchMetadata(turn.metadata);
+      const currentRedispatches = Number(turn.metadata?.workerDeathRedispatches ?? 0);
+      const effectiveControl = await evaluateSessionControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        input.sessionId,
+        { workspaceControl },
+      );
+      if (
+        !session ||
+        !attempt ||
+        effectiveControl.state !== "active" ||
+        session.status !== "running" ||
+        session.active_turn_id !== input.turnId ||
+        turn.session_id !== input.sessionId ||
+        turn.status !== "running" ||
+        turn.active_attempt_id !== input.attemptId ||
+        Number(turn.execution_generation) !== input.executionGeneration ||
+        attempt.state !== "running" ||
+        Number(attempt.execution_generation) !== input.executionGeneration ||
+        attempt.temporal_workflow_id !== input.workflowId ||
+        attempt.temporal_workflow_run_id !== input.workflowRunId ||
+        attempt.temporal_activity_id !== input.dispatchId ||
+        dispatch.kind !== "valid" ||
+        dispatch.attempt?.id !== input.dispatchId ||
+        currentRedispatches !== input.expectedRedispatches
+      ) {
+        throw new CodexCredentialLeaseAttemptFencedError();
+      }
+      const failoverMetadata = codexFailoverMetadata(turn.metadata);
+      if (failoverMetadata.exhausted && failoverMetadata.maxFailovers !== null) {
+        throw new CodexCredentialFailoverExhaustedError(
+          failoverMetadata.failoverCount,
+          failoverMetadata.maxFailovers,
+        );
+      }
+      const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
       const activeCredentialId = settingsRow.active_credential_id;
       const rotationEnabled = settingsRow.rotation_enabled;
       const rotationStrategy = settingsRow.rotation_strategy;
@@ -23783,6 +23943,7 @@ export async function acquireCodexCredentialLease<
         rotationEnabled,
         rotationStrategy,
         existingCredentialId,
+        failedCredentialIds: [...failoverMetadata.failedCredentialIds],
         policyScope,
         unavailableDiagnostics,
       });
@@ -23829,6 +23990,8 @@ export async function acquireCodexCredentialLease<
           leasedUntil: null,
           unavailableDiagnostics,
           advanceActivePointer: false,
+          failoverLimit:
+            failoverMetadata.maxFailovers ?? codexCredentialFailoverLimitForLease(accounts, null),
         };
       }
       const selectedAccount = accounts.find((account) => account.id === selected.credentialId);
@@ -23907,6 +24070,9 @@ export async function acquireCodexCredentialLease<
         leasedUntil,
         unavailableDiagnostics,
         advanceActivePointer,
+        failoverLimit:
+          failoverMetadata.maxFailovers ??
+          codexCredentialFailoverLimitForLease(accounts, selected.credentialId),
       };
     },
   );
@@ -23917,7 +24083,7 @@ export async function acquireCodexCredentialLease<
 // ---------------------------------------------------------------------------
 
 export type CodexCapacityWaitStatus = "waiting" | "resumed" | "superseded";
-export type CodexCapacityResetKind = "authoritative" | "bounded_refresh";
+export type CodexCapacityResetKind = "authoritative" | "bounded_refresh" | "mutation_only";
 
 export type CodexCapacityWait = {
   id: string;
@@ -26443,28 +26609,112 @@ export type CodexCredentialLeaseQuarantine =
     }
   | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind };
 
+export type CodexCredentialLeaseQuarantineResult =
+  | {
+      action: "recorded";
+      failoverCount: number;
+      maxFailovers: number;
+      exhausted: boolean;
+    }
+  | {
+      action: "credential_changed";
+      failoverCount: number;
+      maxFailovers: number;
+      currentCredentialVersion: number;
+    }
+  | { action: "stale"; failoverCount: number; maxFailovers: number };
+
 /**
- * Quarantine the credential served by one exact live holder. The lease row is
- * locked and checked before the credential write, so a superseded/expired
- * activity cannot poison status or cooldown after a successor owns the turn.
+ * Quarantine the credential served by one exact live attempt and token family.
+ * The attempt, dispatch, lease, and credential version are checked before the
+ * write. The same transaction freezes the accepted turn's alternate budget and
+ * records the attempted credential, so waiter/database recovery cannot reset
+ * accounting or return to an already-consumed account under rotation policy.
  */
 export async function quarantineCodexCredentialForLease(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    workflowId: string;
+    workflowRunId: string;
+    dispatchId: string;
+    expectedRedispatches: number;
     credentialId: string;
+    credentialVersion: number;
     holderId: string;
     generation: number;
+    maxFailovers: number;
     quarantine: CodexCredentialLeaseQuarantine;
   },
-): Promise<boolean> {
-  return await withRlsContext(
+): Promise<CodexCredentialLeaseQuarantineResult> {
+  if (!Number.isSafeInteger(input.credentialVersion) || input.credentialVersion < 1) {
+    throw new Error("Codex quarantine credential version must be positive");
+  }
+  if (!Number.isSafeInteger(input.maxFailovers) || input.maxFailovers < 1) {
+    throw new Error("Codex quarantine failover bound must be positive");
+  }
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
+        const metadata = codexFailoverMetadata(turn?.metadata);
+        const maxFailovers = metadata.maxFailovers ?? input.maxFailovers;
+        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
+        const dispatch = readTurnDispatchMetadata(turn?.metadata);
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+          { workspaceControl: locks.control ?? undefined },
+        );
+        if (
+          !locks.workspace ||
+          !session ||
+          !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          session.activeTurnId !== input.turnId ||
+          session.status !== "running" ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          turn.status !== "running" ||
+          turn.activeAttemptId !== input.attemptId ||
+          turn.executionGeneration !== input.executionGeneration ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.state !== "running" ||
+          attempt.executionGeneration !== input.executionGeneration ||
+          attempt.temporalWorkflowId !== input.workflowId ||
+          attempt.temporalWorkflowRunId !== input.workflowRunId ||
+          attempt.temporalActivityId !== input.dispatchId ||
+          dispatch.kind !== "valid" ||
+          dispatch.attempt?.id !== input.dispatchId ||
+          currentRedispatches !== input.expectedRedispatches ||
+          effectiveControl.state !== "active"
+        ) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
         const leaseRows = await tx.execute(sql<{ id: string }>`
           select id from codex_credential_leases
           where account_id = ${input.accountId}
@@ -26477,10 +26727,47 @@ export async function quarantineCodexCredentialForLease(
           for update
         `);
         if (!leaseRows[0]) {
-          return false;
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
         }
         const pool = await effectiveCodexCredentialPoolCondition(tx, input.workspaceId);
-        if (!pool.condition) return false;
+        if (!pool.condition) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        const [credential] = await tx
+          .select({ version: schema.codexSubscriptionCredentials.version })
+          .from(schema.codexSubscriptionCredentials)
+          .where(
+            and(
+              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              pool.condition,
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!credential) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        if (credential.version !== input.credentialVersion) {
+          return {
+            action: "credential_changed",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+            currentCredentialVersion: credential.version,
+          } as const;
+        }
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
           .set(
@@ -26500,11 +26787,52 @@ export async function quarantineCodexCredentialForLease(
             and(
               eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
               eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              eq(schema.codexSubscriptionCredentials.version, input.credentialVersion),
               pool.condition,
             ),
           )
           .returning({ id: schema.codexSubscriptionCredentials.id });
-        return updated.length > 0;
+        if (updated.length === 0) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        const alreadyRecorded = metadata.failedCredentialIds.has(input.credentialId);
+        const failedCredentialIds = alreadyRecorded
+          ? [...metadata.failedCredentialIds]
+          : [...metadata.failedCredentialIds, input.credentialId];
+        const failoverCount = alreadyRecorded
+          ? metadata.failoverCount
+          : Math.max(metadata.failoverCount + 1, failedCredentialIds.length);
+        const exhausted = failoverCount > maxFailovers;
+        const [accountedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: {
+              ...turn.metadata,
+              codexCredentialFailureAccountingVersion: 1,
+              codexCredentialFailedIds: failedCredentialIds,
+              codexCredentialFailovers: failoverCount,
+              codexCredentialFailoverLimit: maxFailovers,
+              codexCredentialFailoverExhausted: exhausted,
+            },
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!accountedTurn) {
+          throw new Error("Codex quarantine lost its exact turn accounting fence");
+        }
+        return { action: "recorded", failoverCount, maxFailovers, exhausted } as const;
       }),
   );
 }
@@ -66932,7 +67260,7 @@ export type SettleCodexCredentialFailoverResult =
       action: "limit_exceeded";
       failoverCount: number;
       maxFailovers: number;
-      events: [];
+      events: SessionEvent[];
     };
 
 export type SettleCodexCredentialLeaseLossResult =
@@ -67210,11 +67538,13 @@ export async function settleCodexCredentialLeaseLoss(
 /**
  * Atomically settle a definitive Codex credential failover. Conversation
  * history/RunState is persisted by the caller first; this transaction then
- * fences the exact activity lease, increments the bounded same-turn counter,
- * appends both durable events, marks the same turn recoverable, updates the
- * session, and releases the lease together. The exact holder remains provable
- * if its row just expired or was reaped; a successor, redispatch, or closed
- * inference gate makes the caller stale without a second settlement path.
+ * fences the exact activity lease, consumes the quarantine transaction's
+ * bounded same-turn receipt, appends durable recovery or terminal events,
+ * updates the turn/session, and releases the lease together. Exhaustion also
+ * suppresses autonomous goal continuation and enqueues a failed-child notice in
+ * this transaction. The exact holder remains provable if its row just expired
+ * or was reaped; a successor, redispatch, or closed inference gate makes the
+ * caller stale without a second settlement path.
  */
 export async function settleCodexCredentialFailover(
   db: Database,
@@ -67224,11 +67554,12 @@ export async function settleCodexCredentialFailover(
     sessionId: string;
     turnId: string;
     attemptId: string;
-    holderId: string;
-    generation: number;
+    holderId?: string | null;
+    generation?: number | null;
     expectedRedispatches: number;
     maxFailovers: number;
     recoveryPayload: Record<string, unknown>;
+    failedPayload?: Record<string, unknown>;
   },
 ): Promise<SettleCodexCredentialFailoverResult> {
   if (!Number.isInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
@@ -67237,19 +67568,29 @@ export async function settleCodexCredentialFailover(
   if (!Number.isInteger(input.maxFailovers) || input.maxFailovers < 1) {
     throw new Error("Codex failover bound must be a positive integer");
   }
-  return await withSessionActivityRlsContext(
+  if ((input.holderId == null) !== (input.generation == null)) {
+    throw new Error("Codex failover lease fence must be fully present or absent");
+  }
+  return await retrySessionActivityRls(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+    input.workspaceId,
+    {
+      stage: "session_lifecycle_outbox.settle_codex_credential_failover",
+      eventTypes: ["turn.recovery.requested", "turn.failed", "session.status.changed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
-        });
-        const session = locks.sessions[0];
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            attemptId: input.attemptId,
+          },
+        );
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
@@ -67297,6 +67638,8 @@ export async function settleCodexCredentialFailover(
         const lease = leaseRows[0];
         if (
           lease &&
+          input.holderId != null &&
+          input.generation != null &&
           (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
         ) {
           return {
@@ -67316,13 +67659,195 @@ export async function settleCodexCredentialFailover(
           throw new Error("Persisted Codex failover bound must be a positive safe integer");
         }
         const maxFailovers = persistedMaxFailovers ?? input.maxFailovers;
-        const failoverCount = currentFailovers + 1;
+        const receiptRecorded = turn.metadata?.codexCredentialFailureAccountingVersion === 1;
+        const failoverCount = receiptRecorded ? currentFailovers : currentFailovers + 1;
         if (failoverCount > maxFailovers) {
+          const now = new Date();
+          await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
+            id: input.attemptId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            executionGeneration: turn.executionGeneration,
+            outcome: "failed",
+            closedAt: now,
+          });
+          await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          });
+          await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+          let sequence = session.lastSequence;
+          const closedTools = await closePendingSessionToolCallsInTransaction(
+            tx as unknown as Database,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "turn_failed",
+              sequence,
+              now,
+            },
+          );
+          sequence = closedTools.sequence;
+          const [waitingPrompt] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.status, "queued"),
+                inArray(schema.sessionTurns.source, ["user", "api"]),
+              ),
+            )
+            .limit(1);
+          const sessionStatus = waitingPrompt ? "queued" : "idle";
+          const failurePayload = {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            ...(input.failedPayload ?? {}),
+            failoverCount,
+            maxFailovers,
+          };
+          const inserted = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                [
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "turn.failed",
+                    payload: failurePayload,
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "session.status.changed",
+                    payload: { status: sessionStatus },
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                ],
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          const terminalEvent = inserted[0];
+          if (!terminalEvent) {
+            throw new Error("Codex failover exhaustion did not persist its terminal event");
+          }
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: "failed",
+            terminalEvent: {
+              id: terminalEvent.id,
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(
+                terminalEvent.payload,
+                terminalEvent.payloadCodecVersion,
+              ),
+            },
+            now,
+          });
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              status: "failed",
+              activeAttemptId: null,
+              metadata: {
+                ...turn.metadata,
+                codexCredentialFailovers: failoverCount,
+                codexCredentialFailoverLimit: maxFailovers,
+                codexCredentialFailoverExhausted: true,
+              },
+              version: turn.version + 1,
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          await enqueueFailedChildOutboxForTurnTx(
+            tx as unknown as Database,
+            input.workspaceId,
+            session,
+            turn,
+          );
+          await tx
+            .update(schema.sessions)
+            .set({
+              status: sessionStatus,
+              activeTurnId: null,
+              lastSequence: sequence,
+              queueVersion: session.queueVersion + 1,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            );
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationSuppressedTurnId: input.turnId, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, input.sessionId),
+                eq(schema.sessionGoals.status, "active"),
+              ),
+            );
+          await tx.execute(sql`
+            delete from codex_credential_leases
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and turn_id = ${input.turnId}
+              and (
+                ${input.holderId ?? null}::text is null
+                or (
+                  holder_id = ${input.holderId ?? null}
+                  and generation = ${input.generation ?? null}
+                )
+              )
+          `);
           return {
             action: "limit_exceeded",
             failoverCount,
             maxFailovers,
-            events: [],
+            events: [...closedTools.events, ...inserted.map(mapEvent)],
           } as const;
         }
         const now = new Date();
