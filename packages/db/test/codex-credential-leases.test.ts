@@ -593,7 +593,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     // exact live holder reuse is structurally resolved first.
     await admin`
       update session_turns
-      set metadata = jsonb_build_object(
+      set metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
         'codexCredentialPolicyHash', 'policy-v1',
         'privateAcceptedScope', jsonb_build_object(
           'primaryPoolId', 'pool-a',
@@ -678,7 +678,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     const scopedTurn = await seedTurn(ws!, 20);
     await admin`
       update session_turns
-      set metadata = jsonb_build_object(
+      set metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object(
         'codexCredentialPolicyHash', 'policy-v3',
         'privateAcceptedScope', jsonb_build_object(
           'primaryPoolId', 'pool-empty',
