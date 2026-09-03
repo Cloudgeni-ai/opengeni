@@ -171,6 +171,7 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
     { accountId: ws.accountId, workspaceId: ws.workspaceId },
     async (transaction) => {
       await transaction.execute(sql`set constraints all deferred`);
+      await transaction.execute(sql`set local opengeni.session_inference_claim = '1'`);
       await transaction.execute(sql`
         update session_turn_attempts
         set state = 'closed', outcome = 'lease_lost_recoverable', closed_at = now(),
@@ -189,7 +190,7 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
                 to_jsonb(${executionGeneration}::int), true),
               '{dispatchAttempt}',
               jsonb_build_object(
-                'id', ${`activity:${attemptId}`},
+                'id', ${`activity:${attemptId}`}::text,
                 'generation', ${executionGeneration},
                 'triggerEventId', ${turn.trigger_event_id}
               ),
@@ -1609,6 +1610,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     });
     expect(settled.action).toBe("recovering");
     if (settled.action !== "recovering") throw new Error("expected requeue");
+    await startRecoveryAttempt(ws!, turnId);
     const originalTriggerEventId = (
       await admin<{ trigger_event_id: string }[]>`
         select trigger_event_id from session_turns where id = ${turnId}`

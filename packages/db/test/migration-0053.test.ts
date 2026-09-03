@@ -12,8 +12,8 @@ import { migrate } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 
-async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
-  await sql.unsafe(await readFile(join(migrationsDir, file), "utf8"));
+async function applyFile(database: postgres.Sql, file: string): Promise<void> {
+  await database.unsafe(await readFile(join(migrationsDir, file), "utf8"));
 }
 
 let available = true;
