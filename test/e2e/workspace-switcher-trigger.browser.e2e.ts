@@ -100,7 +100,8 @@ describe("Workspace switcher trigger in Chromium", () => {
     });
     const trigger = page.locator('button[aria-label$="Switch workspace"]');
 
-    await trigger.click();
+    await trigger.focus();
+    await trigger.press("Enter");
     await page.getByRole("menuitem", { name: "New organization…", exact: true }).click();
     expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
 
@@ -108,8 +109,11 @@ describe("Workspace switcher trigger in Chromium", () => {
       name: "Organization settings",
       exact: true,
     });
-    await organizationSettings.focus();
-    await organizationSettings.press("Enter");
+    await page.keyboard.press("End");
+    expect(
+      await organizationSettings.evaluate((element) => document.activeElement === element),
+    ).toBe(true);
+    await page.keyboard.press("Enter");
     expect(await page.getByTestId("route-path").textContent()).toBe(
       "/workspaces/workspace-personal/organization",
     );
