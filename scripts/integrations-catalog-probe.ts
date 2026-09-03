@@ -3,9 +3,11 @@ import type {
   NormalizedCatalogSnapshot,
 } from "./import-integrations-catalog";
 import {
+  DestinationPolicyError,
   McpOAuthDiscoveryError,
   OAUTH_MAX_RESPONSE_BYTES,
   parseMcpOAuthChallenge,
+  pinnedFetch,
   readResponseJsonBounded,
   resolveMcpOAuthDiscovery,
   validateHttpUrl,
@@ -231,6 +233,16 @@ export async function probeMcpEndpoint(
       });
       return { ...outcome, oauthDiscovery: discovery.classification };
     } catch (error) {
+      if (controller.signal.aborted || isAbortError(error)) throw error;
+      if (!(error instanceof McpOAuthDiscoveryError)) {
+        if (error instanceof CatalogOAuthMetadataTransientError) throw error;
+        if (
+          !(error instanceof CatalogOAuthMetadataBrokenError) &&
+          !(error instanceof DestinationPolicyError)
+        ) {
+          throw error;
+        }
+      }
       return {
         ...outcome,
         oauthDiscovery:
@@ -238,8 +250,15 @@ export async function probeMcpEndpoint(
       };
     }
   } catch (error) {
-    if (isAbortError(error)) {
+    if (controller.signal.aborted || isAbortError(error)) {
       return { status: "unverified", reason: "timeout" };
+    }
+    if (error instanceof CatalogOAuthMetadataTransientError) {
+      return {
+        status: "unverified",
+        reason: "http_status",
+        httpStatus: error.httpStatus,
+      };
     }
     return {
       status: "junk",
@@ -313,28 +332,108 @@ async function fetchCatalogOAuthMetadata(
   fetchImpl: CatalogProbeFetch,
   signal: AbortSignal,
 ): Promise<McpOAuthMetadataFetchResult> {
-  const response = await fetchImpl(url, {
-    headers: { accept: "application/json" },
-    signal,
-  });
+  const response = await fetchCatalogOAuthResponse(url, fetchImpl, signal);
   if (response.status === 404 || response.status === 410) {
     await response.body?.cancel().catch(() => undefined);
     return { status: "absent", url, httpStatus: response.status };
   }
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
-    throw new Error(`OAuth metadata endpoint returned HTTP ${response.status}`);
+    const message = `OAuth metadata endpoint returned HTTP ${response.status}`;
+    if (response.status === 429 || response.status >= 500) {
+      throw new CatalogOAuthMetadataTransientError(message, response.status);
+    }
+    throw new CatalogOAuthMetadataBrokenError(message);
   }
-  const payload = await readResponseJsonBounded<unknown>(
-    response,
-    OAUTH_MAX_RESPONSE_BYTES,
-    "catalog OAuth metadata response",
-    { signal },
-  );
+  let payload: unknown;
+  try {
+    payload = await readResponseJsonBounded<unknown>(
+      response,
+      OAUTH_MAX_RESPONSE_BYTES,
+      "catalog OAuth metadata response",
+      { signal },
+    );
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) throw error;
+    throw new CatalogOAuthMetadataBrokenError("catalog OAuth metadata response was invalid", {
+      cause: error,
+    });
+  }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw new Error("catalog OAuth metadata response was not a JSON object");
+    throw new CatalogOAuthMetadataBrokenError(
+      "catalog OAuth metadata response was not a JSON object",
+    );
   }
   return { status: "present", url, document: payload as Record<string, unknown> };
+}
+
+async function fetchCatalogOAuthResponse(
+  rawUrl: string,
+  fetchImpl: CatalogProbeFetch,
+  signal: AbortSignal,
+  hop = 0,
+): Promise<Response> {
+  const url = validateHttpUrl(rawUrl, { label: "catalog OAuth metadata" });
+  const init: RequestInit = {
+    headers: { accept: "application/json" },
+    signal,
+    redirect: "manual",
+  };
+  const response =
+    fetchImpl === fetch
+      ? await pinnedFetch(
+          url,
+          init,
+          { environment: "production", integrationsAllowPrivateNetworkTargets: false },
+          {
+            label: "catalog OAuth metadata",
+            requireHttpsOutsideLocalTest: true,
+          },
+        )
+      : await fetchImpl(url, init);
+  if (response.status < 300 || response.status >= 400) return response;
+  if (hop >= 3) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CatalogOAuthMetadataBrokenError(
+      "catalog OAuth metadata exceeded maximum redirect hops",
+    );
+  }
+  const location = response.headers.get("location");
+  if (!location) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CatalogOAuthMetadataBrokenError(
+      "catalog OAuth metadata redirect was missing Location",
+    );
+  }
+  let nextUrl: string;
+  try {
+    nextUrl = new URL(location, url).toString();
+  } catch (error) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CatalogOAuthMetadataBrokenError(
+      "catalog OAuth metadata redirect Location was invalid",
+      { cause: error },
+    );
+  }
+  await response.body?.cancel().catch(() => undefined);
+  return await fetchCatalogOAuthResponse(nextUrl, fetchImpl, signal, hop + 1);
+}
+
+class CatalogOAuthMetadataBrokenError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CatalogOAuthMetadataBrokenError";
+  }
+}
+
+class CatalogOAuthMetadataTransientError extends Error {
+  constructor(
+    message: string,
+    readonly httpStatus: number,
+  ) {
+    super(message);
+    this.name = "CatalogOAuthMetadataTransientError";
+  }
 }
 
 function canonicalCatalogOAuthResource(rawResource: string): string {
