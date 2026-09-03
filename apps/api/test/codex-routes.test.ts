@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
 
@@ -12,6 +13,7 @@ const ACCOUNT = "00000000-0000-4000-8000-0000000000c3";
 const settings = testSettings({
   productAccessMode: "managed",
   delegationSecret: DELEGATION_SECRET,
+  environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
 });
 
 // db must never be touched on the paths under test (auth from token; start/poll
@@ -49,16 +51,23 @@ async function bearer(workspaceId: string, permissions: Permission[]): Promise<s
 }
 
 const realFetch = globalThis.fetch;
+const restores: Array<() => void> = [];
 afterEach(() => {
   globalThis.fetch = realFetch;
+  while (restores.length) restores.pop()!();
 });
 
-function mockDevice(handlers: { usercode?: () => Response; token?: () => Response }) {
+function mockDevice(handlers: {
+  usercode?: () => Response;
+  token?: () => Response;
+  exchange?: () => Response;
+}) {
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url =
       typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.includes("/deviceauth/usercode") && handlers.usercode) return handlers.usercode();
     if (url.includes("/deviceauth/token") && handlers.token) return handlers.token();
+    if (url.includes("/oauth/token") && handlers.exchange) return handlers.exchange();
     throw new Error(`unexpected fetch ${url}`);
   }) as typeof fetch;
 }
@@ -68,6 +77,11 @@ function json(body: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none", typ: "JWT" })}.${encode(payload)}.signature`;
 }
 
 async function start(
@@ -114,6 +128,50 @@ describe("codex connect routes", () => {
     });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: "pending" });
+  });
+
+  test("connect/poll maps an active source cutover fence to 409", async () => {
+    mockDevice({
+      usercode: () => json({ device_auth_id: "dev_1", user_code: "ABCD-1234", interval: "5" }),
+    });
+    const { body } = await start(WS_A);
+    mockDevice({
+      token: () => json({ authorization_code: "authorization-code", code_verifier: "verifier" }),
+      exchange: () =>
+        json({
+          id_token: jwt({
+            email: "connector@example.com",
+            "https://api.openai.com/auth": {
+              chatgpt_account_id: "provider-account",
+              chatgpt_plan_type: "pro",
+            },
+          }),
+          access_token: jwt({ exp: Math.floor(Date.now() / 1000) + 3600 }),
+          refresh_token: "refresh-token",
+        }),
+    });
+    const mutation = spyOn(opengeniDb, "withSessionCodexCapacityMutation").mockRejectedValue(
+      new Error("Codex subscription source cannot change while active turns are using it"),
+    );
+    restores.push(() => mutation.mockRestore());
+
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/connect/poll`, {
+      method: "POST",
+      headers: {
+        authorization: await bearer(WS_A, ["connections:write"]),
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ state: body.state }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        message: "Codex subscription source cannot change while active turns are using it",
+        status: 409,
+      },
+    });
   });
 
   test("connect/poll rejects a state minted for a different workspace", async () => {

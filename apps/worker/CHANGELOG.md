@@ -1,5 +1,32 @@
 # @opengeni/worker-bundle
 
+## 0.24.2
+
+### Patch Changes
+
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- 7c5897f: Preempt sandbox writers and persistent interaction holders at the provider-deadline rotation lead boundary so the zero-holder reaper can capture the exact workspace generation before provider destruction.
+- 9c45eae: Keep pending sessions distinguishable with a sensitive-safe opening-prompt preview or short session reference, and let bounded parallel semantic title generation finish after quick responses instead of cancelling it at turn settlement.
+- ae19409: Enforce idle-boundary admission for skip-overlap scheduled sessions.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [7c5897f]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+- Updated dependencies [ae19409]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/db@3.8.2
+  - @opengeni/config@0.23.2
+  - @opengeni/core@2.7.2
+  - @opengeni/runtime@2.1.2
+  - @opengeni/codemode@0.4.25
+  - @opengeni/documents@0.8.17
+  - @opengeni/events@0.4.15
+  - @opengeni/github@0.7.1
+  - @opengeni/observability@0.8.17
+  - @opengeni/storage@0.2.118
+
 ## 0.24.1
 
 ### Patch Changes

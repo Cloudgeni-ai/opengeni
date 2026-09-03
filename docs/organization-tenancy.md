@@ -493,8 +493,13 @@ The managed-human API surface is:
   organization-name-only setup. It creates exactly the owning human's active
   organization membership and canonical Personal workspace/control row—no
   shared workspace and no Personal `workspace_memberships` row;
+- `POST /v1/organizations/additional` lets an already-onboarded verified human
+  create another independent organization. It atomically creates that
+  organization's owner membership, canonical Personal workspace, and a named
+  first shared workspace with an explicit administrator grant for the creator;
 - `POST /v1/organizations/:organizationId/workspaces` idempotently creates a
-  shared workspace without implicitly granting the organization administrator
+  shared workspace and atomically gives that exact creator an explicit named
+  workspace-admin grant; unrelated organization administrators receive no
   operational access;
 - `GET /v1/organizations/:organizationId/members` and
   `PATCH /v1/organizations/:organizationId/members/:membershipId`; and
@@ -502,7 +507,11 @@ The managed-human API surface is:
   `/settings` route, `PUT
 /v1/organizations/:organizationId/workspaces/:workspaceId/members/:membershipId`
   for an idempotent named or custom grant, and the explicit `/revoke` command
-  below that member route for the shared-workspace control plane; and
+  below that member route for the shared-workspace control plane;
+- `DELETE /v1/organizations/:organizationId/workspaces/:workspaceId` for the
+  same quiescence-fenced deletion used by a direct workspace administrator,
+  after a transaction-scoped organization owner/admin check that excludes
+  Personal workspaces; and
 - `GET|PATCH /v1/organizations/:organizationId/retention-policy`.
 
 The organization overview, organization/shared-workspace metadata, member
@@ -598,6 +607,36 @@ deadlock migration 0299 fences. Adoption requires the account to carry **no**
 organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
+
+### Additional organization creation (0399)
+
+Migration `0399_additional_managed_organization_creation.sql` adds a separate
+managed-cookie-only lifecycle for a verified human who already has at least one
+active organization membership. It does not weaken or reuse first-sign-in
+setup: a human with no active membership must still pass through the 0348
+onboarding or invitation path, so invitation precedence and legacy-account
+adoption remain unchanged during a rolling deployment.
+
+One authentication account still represents one canonical human. Creating an
+additional organization does **not** create another Better Auth user or another
+canonical identity. It creates a distinct active owner membership for the same
+`user:<auth-user-id>`, with a new Personal workspace scoped to that membership.
+The organization also starts with one named shared workspace, where the creator
+receives an explicit `admin` workspace membership. No settings, sessions,
+credentials, connections, files, or other data are copied from the current
+organization.
+
+The database function creates the complete graph and an immutable,
+input-bound operation receipt in one transaction. Exact concurrent retries
+converge; changed operation-id reuse fails closed. A subject-scoped transaction
+lock atomically enforces a lifetime allowance of ten organizations created
+through this self-service lifecycle. Organizations joined by invitation do not
+consume that allowance, and exact retries still replay after it is full. Once
+the deployment has a session-tenancy activation witness, the same transaction
+validates the exact fresh graph and writes its activation, enabled
+private-session setting, event, and immutable evidence. The application role
+can execute only the public creation capability and has no direct DML on either
+receipt table or access to the owner-only activation helper.
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
@@ -801,7 +840,15 @@ mutation runs under an exact active owner/administrator organization membership
 and an organization-scoped transaction advisory fence. Missing,
 cross-organization, and Personal workspace ids are rejected through one
 non-enumerating result before mutation. The capability never creates an
-operational workspace grant for the organization administrator. The exception
+operational workspace grant merely because a person is an organization
+administrator. Migration 0398 adds the narrow exception for the exact person
+who creates a shared workspace: the create transaction materializes a named
+workspace-admin membership through a stable idempotent child operation. It
+also adds a content-blind, transaction-scoped authorization routine for shared
+workspace deletion. The browser uses the same
+`/workspaces/:workspaceId/settings` URL for ordinary and organization-only
+management; the latter exposes only General, Members, and Danger zone and does
+not mount operational workspace context. The exception
 to the durable last-workspace-admin removal guard requires a transaction-local
 capability opened by the direct organization route; merely holding an
 organization role through an ordinary or delegated workspace route does not

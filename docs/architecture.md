@@ -213,15 +213,16 @@ The similar-looking stores are not interchangeable:
 | Sandbox leases and envelopes | Provider identity, routing, recovery, and workspace-generation truth | Session conversation state |
 | Documents, Agent Knowledge, Memory, preferences, policies, and organization identity | Retrieval or governance authorities with their own scopes and lifecycle | One undifferentiated prompt-memory table |
 
-Workspace Memory is the autonomous agent-retention lane: when the workspace
-Memory toggle is enabled, exact live agent attempts save and correct active
+Workspace Memory is the autonomous agent-retention lane. It is enabled by
+default; an explicit workspace opt-out disables agent writes. When enabled,
+exact live agent attempts save and correct active
 facts, decisions, incidents, fixes, and outcomes without consulting Learning
 mode. It remains retrieval-only model context through `memory_search`; it is
 not a Skill, mandatory instruction, organization profile, or reviewed Knowledge
 claim.
 
 Organization identity has a separate organization-owner autonomy policy. Off
-rejects agent-authored identity changes before proposal creation, Review first
+rejects agent-authored identity changes before proposal creation, Require approval
 keeps the bound human-confirmation path, and Autonomous activates eligible
 proposals without another prompt. All three modes still require an exact live
 turn initiated by the active organization owner and use the existing
@@ -265,6 +266,13 @@ deployments additionally admit only the access resolver's canonical
 shared-workspace, retention, company-identity, and organization Codex controls.
 This is provenance-stamped authority, not a subject-name check; configured,
 delegated, API-key, service, and agent principals remain excluded.
+A shared-workspace creator receives one explicit named workspace-admin grant;
+organization authority by itself still grants no operational access. Owners
+and organization administrators can open the canonical
+`/workspaces/:workspaceId/settings` route in a restricted management mode for
+shared workspaces they cannot otherwise enter. That mode exposes identity,
+direct access, and deletion only; it never mounts the workspace provider or
+reveals sessions, files, credentials, integrations, or other workspace content.
 A shared workspace's Members page is deliberately narrower: a caller with
 `members:manage` may add an already-active human from the same organization and
 change or revoke access only in that workspace. Personal workspaces,
@@ -287,6 +295,17 @@ The managed personal-workspace owner receives a closed permission projection
 that includes `capabilities:manage`, so they can configure their own Plugins,
 Integrations, and Codex subscription without receiving the `workspace:admin`
 wildcard, member management, or API-key delegation.
+
+An already-onboarded verified managed human may create additional independent
+organizations from the organization switcher. The login and canonical human
+identity remain global; each organization gets a separate owner membership and
+Personal workspace. The creation lifecycle also creates one first shared
+workspace with an explicit administrator grant, refreshes authoritative access
+before navigation, and copies no tenant data from the current organization. A
+subject-scoped database fence limits this self-service lifecycle to ten
+additional organizations per human; invitation memberships do not consume it.
+First-sign-in onboarding and invitation precedence remain a separate one-shot
+path.
 
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
@@ -356,8 +375,11 @@ parent-tree projections to mistake for live work.
 Child workers keep the ordinary low-friction rule: omitting placement shares
 the creator's box. Because a Connected Machine pointer is session-local, that
 default copies the trusted parent's exact active machine and working directory
-before the child's first turn. A selfhosted-only child with no inherited or
-explicit machine fails at create rather than reaching an unbound runtime.
+before the child's first turn. This includes a `backend:none` parent that has
+attached a Connected Machine: the child keeps the shared backend-none home and
+group while inheriting the exact active route. A selfhosted-only child with no
+inherited or explicit machine fails at create rather than reaching an unbound
+runtime.
 
 A machine-home session does not pre-provision a hidden managed box. When the
 deployment has a managed sandbox backend, its fleet nevertheless exposes the
@@ -619,10 +641,12 @@ Automatic semantic naming is an attempt-owned auxiliary branch, not part of the
 main model/tool loop. When the durable title is still pending and exact session
 tool policy permits naming, the production runtime starts one bounded tool-less
 title request in parallel with the ordinary stream, meters it independently,
-and aborts/joins it before atomic turn settlement. The title write uses the
-generic session-title lifecycle and still loses to a human rename. Custom
-runtimes without the optional auxiliary seam retain the serialized
-`set_session_title` compatibility path.
+and joins it before atomic turn settlement. A normal fast response waits for the
+already-running bounded title request instead of cancelling it; exceptional or
+cancelled exits abort and join it. The title write uses the generic session-title
+lifecycle and still loses to a human rename. Custom runtimes without the
+optional auxiliary seam retain the serialized `set_session_title` compatibility
+path.
 
 ### 5.2 Lifecycle overview
 
@@ -725,6 +749,26 @@ service as initiator, retains its causal-human and personal-connection authority
 snapshots, and remains a scheduled run in audit and settlement. Scheduled
 occurrences attached to an existing human/API turn, and all other machine-input
 batches, keep the internal `system`-role envelope.
+
+For `skip`, a scheduled occurrence targeting an existing or reusable session is
+admitted only when that session's locked status is exactly `idle`. The status
+check, optional reusable-goal reset, run settlement, and pending-update append
+share the ordinary session event transaction, so concurrent occurrences cannot
+both cross the same idle boundary and a skipped occurrence cannot mutate the
+goal. An admitted occurrence persists `queued` to consume that boundary even
+when a pause or active realtime lease withholds its workflow wake. A newly
+generated session still admits the occurrence that creates it.
+
+Pausing or soft-deleting a scheduled task is a durable first-claim cutoff. The
+task lifecycle transaction locks each nonterminal agent run and marks it
+skipped only when no scheduler-owned turn exists. A concurrent deposit
+therefore either commits first and is invalidated, or observes the terminal run
+and cannot publish; a concurrent claim either creates its turn first and
+remains recoverable, or observes the skipped run and cancels the pending update
+without starting model, tool, or sandbox work. Resuming the task never revives
+those pre-pause deposits. A database delivery fence rejects `pending` to
+`delivered` transitions for terminal scheduled runs, so a rolling old worker
+cannot bypass the cutoff before the new claim logic is fully deployed.
 
 None of them creates a parallel agent engine. They differ in admission and
 provenance, then use the same logical turn, attempt, event, recovery, and usage
@@ -843,6 +887,9 @@ billing path and any validated Gateway endpoint provider so the additive
 Insights fact can be repaired exactly after a soft writer failure; repair
 prefers those authorities over the logical Gateway provider and legacy
 inference from `usage_events.model.tokens` and `usage_events.model.cost` rows.
+Each new fact also freezes provider cost and equivalent OpenGeni credit price as
+separate nullable comparisons, while `priced_cost_micros` remains the actual
+credits-path price and is zero for externally billed calls.
 
 Managed billing is an API concern over the shared usage and entitlement
 boundaries. Provider subscription pools such as Codex or SuperGrok add their
@@ -1077,8 +1124,28 @@ proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
+The built-in `opengeni-product-integration` Pack is an opt-in implementation
+aid for those standalone integrations. Installing it adds no executable tools,
+credentials, compute, or customer-facing agent behavior. Its Skill teaches an
+implementation agent to derive the workspace isolation unit, UI surface, data
+tool boundary, runtime profile, and delivery workflow from the host product.
+The Skill uses the existing `capability_facets.activation_mode` authority as
+`session_selected`: ordinary workspace Skill resolution excludes it, and an
+explicit create-time `installedSkillIds` selection freezes the verified
+artifact into exactly one session. The web Pack action carries that immutable
+capability ID into the new-session composer; Pack installation alone cannot add
+the guidance to customer-facing chats. The activation value enters storage at
+maintenance migration 0394; old workers must be fully drained because they do
+not filter this mode. A dedicated implementation workspace
+remains an optional additional operational boundary, not a prerequisite for
+this activation guarantee. The Pack lives in
+`packages/core/src/domain/product-integration-pack.ts`, while the exact customer
+integration contract remains
+[`product-integration.md`](product-integration.md).
+
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
 [`../packages/react/README.md`](../packages/react/README.md),
+[`product-integration.md`](product-integration.md),
 [`embedding-workbench.md`](embedding-workbench.md), and
 [`embedding.md`](embedding.md).
 
@@ -1124,29 +1191,37 @@ can race the snapshot. A failed or unverifiable capture cannot be treated as an
 empty successful snapshot, and teardown must not destroy the only recoverable
 workspace state.
 
-When provider-deadline rotation aborts an Agents SDK run, the SDK closes the
-readable stream before its completion promise rejects. Iterator EOF is therefore
-not terminal success authority: the worker must await SDK completion and route
-its rejection through `sandbox_deadline_rotation` recovery before settling
-`turn.completed`.
+Provider-deadline rotation is an explicit preemption boundary. Once the durable
+lead-time request fences new mutations, each live turn aborts immediately rather
+than waiting for a turn-side snapshot that can be blocked by that turn's own
+mutation admission or an earlier provider capture. The attempt finalizer drains
+every tool and credential writer before releasing its holder; only the resulting
+zero-holder reaper may take over an in-flight same-request capture, publish the
+exact workspace generation, and terminate the old provider. When this abort
+reaches an Agents SDK run, the SDK closes the readable stream before its
+completion promise rejects. Iterator EOF is therefore not terminal success
+authority: the worker must await SDK completion and route its rejection through
+`sandbox_deadline_rotation` recovery before settling `turn.completed`.
 
 BrowserSession and ComputerSession interaction holders are durable placement
 authority, not UI-presence leases, so an active controller never expires merely
-because its heartbeat timestamp is old. A requested finite-lifetime Modal lease
-that has reached its absolute provider deadline is the narrow exception: the
-global lifecycle reaper marks each exact controller resource `lost`, settles a
-prepared operation as a deterministic deadline failure or a dispatched operation
-as `outcome_unknown`, preserves the controller binding for cleanup evidence, and
-then lets the ordinary holder/orphan and lease-drain transaction rotate the box.
-The deadline batch admits only leases that still carry interaction holders, so
-unrelated overdue turn/direct/process-held leases cannot starve it, and includes
-an exact lease that entered `draining` before the deadline. The same global
+because its heartbeat timestamp is old. A requested finite-lifetime Modal
+rotation is the narrow exception: at the lead-time rotation boundary, the global
+lifecycle reaper marks each exact controller resource `lost`, settles a prepared
+operation as a deterministic rotation failure or a dispatched operation as
+`outcome_unknown`, preserves the controller binding for cleanup evidence, and
+then lets the ordinary holder/orphan and lease-drain transaction rotate the box
+while capture headroom remains. The deadline batch admits only leases that still
+carry interaction holders, so unrelated overdue turn/direct/process-held leases
+cannot starve it, and includes an exact lease that entered `draining` before the
+deadline. The same global
 reaper inventories due lease-free Connected Machine and attached-device
 transitions under its owner-only FORCE-RLS capability, acquires every affected
 workspace advisory fence in canonical UUID order, and only then opens mutation
-visibility. This deadline override remains batch-bounded and does not impose a
-maximum duration on healthy interaction sessions before the provider identity
-itself expires.
+visibility. This rotation override remains batch-bounded and imposes no
+independent age limit on healthy interaction sessions; it interrupts only when
+the underlying finite provider identity has entered its mandatory handoff
+window.
 
 Repeated retained-process Modal binding-missing or binding-mismatch observations
 may be quarantined for a 24-hour recheck after five claimed probes, but the
@@ -1339,7 +1414,7 @@ This index intentionally routes at subsystem granularity. Use
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |
 | Stock web console | `apps/web/src/` | [`command-palette.md`](command-palette.md) for command behavior |
-| Standalone product integration | `packages/sdk/`, `packages/react/` | [`embedding-workbench.md`](embedding-workbench.md) |
+| Standalone product integration and implementation Pack | `packages/sdk/`, `packages/react/`, `packages/core/src/domain/product-integration-pack.ts` | [`product-integration.md`](product-integration.md), [`packs.md`](packs.md), and [`embedding-workbench.md`](embedding-workbench.md) |
 | Advanced in-process embedding | `packages/core/`, `apps/api/`, `apps/worker/` | [`embedding.md`](embedding.md) |
 
 ### Operations

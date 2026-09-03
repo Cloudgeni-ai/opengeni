@@ -3156,6 +3156,24 @@ async function lockBackgroundCommandWorkspaceLifecycle(
   }
 }
 
+async function authorizeOrganizationWorkspaceDeletion(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+  },
+): Promise<void> {
+  await setSubjectRlsContext(tx, input.subjectId);
+  await tx.execute(sql`
+    select authorize_organization_shared_workspace_administration(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.subjectId}
+    )
+  `);
+}
+
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
  *
@@ -3167,10 +3185,33 @@ async function lockBackgroundCommandWorkspaceLifecycle(
  */
 export async function deleteWorkspaceIfQuiescent(
   db: Database,
-  input: { accountId: string; workspaceId: string; observer?: WorkspaceDeleteObserver },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    observer?: WorkspaceDeleteObserver;
+    organizationAdministratorSubjectId?: string;
+  },
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
   try {
+    if (input.organizationAdministratorSubjectId) {
+      // Reject a clearly unauthorized caller before it can acquire or wait on
+      // the exclusive workspace lifecycle lock. This preflight is deliberately
+      // not the mutation authority: the deletion transaction repeats the same
+      // check after taking the lifecycle lock so a concurrent demotion still
+      // fails closed without reintroducing the account/lifecycle lock cycle.
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await authorizeOrganizationWorkspaceDeletion(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.organizationAdministratorSubjectId!,
+          }),
+      );
+    }
+
     const result = await withRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -3180,7 +3221,10 @@ export async function deleteWorkspaceIfQuiescent(
           // Adoption takes the matching shared prefix before its canonical
           // session/attempt or retained-process locks. Taking the exclusive
           // prefix first prevents parent-FK deletion from deadlocking with an
-          // already-started cross-workspace adoption.
+          // already-started cross-workspace adoption. It must also precede the
+          // organization-administration seam: that seam takes the account row
+          // FOR KEY SHARE, while ordinary deletion takes this lifecycle lock
+          // before upgrading the account row to FOR UPDATE.
           const lifecycleLockStartedAt = performance.now();
           await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
           observeWorkspaceDeletePhase(input.observer, {
@@ -3188,6 +3232,14 @@ export async function deleteWorkspaceIfQuiescent(
             outcome: "ok",
             durationSeconds: workspaceDeletePhaseDuration(lifecycleLockStartedAt),
           });
+
+          if (input.organizationAdministratorSubjectId) {
+            await authorizeOrganizationWorkspaceDeletion(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.organizationAdministratorSubjectId,
+            });
+          }
 
           const accountWorkspaceLockStartedAt = performance.now();
           const [account] = await tx
@@ -4637,6 +4689,7 @@ export type ModelCallFact = {
   totalTokens: number | null;
   pricedCostMicros: number;
   estimatedProviderCostMicros: number | null;
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   contextContributions: readonly ModelContextContributionSummary[] | null;
   occurredAt: Date;
@@ -4672,6 +4725,7 @@ function mapModelCallFact(row: typeof schema.modelCallFacts.$inferSelect): Model
     totalTokens: row.totalTokens,
     pricedCostMicros: row.pricedCostMicros,
     estimatedProviderCostMicros: row.estimatedProviderCostMicros,
+    equivalentCreditCostMicros: row.equivalentCreditCostMicros,
     pricingSource:
       row.pricingSource === "configured_list_price" || row.pricingSource === "gateway_reported"
         ? row.pricingSource
@@ -4738,6 +4792,7 @@ export async function recordModelCallFact(
     billingPath: ModelCallBillingPath;
     pricedCostMicros: number;
     estimatedProviderCostMicros?: number | null;
+    equivalentCreditCostMicros?: number | null;
     pricingSource?: "configured_list_price" | "gateway_reported" | null;
     contextContributions?: readonly ModelContextContributionSummary[] | null;
     inputTokens?: number | null;
@@ -4759,6 +4814,20 @@ export async function recordModelCallFact(
   ) {
     throw new Error(
       "recordModelCallFact: estimatedProviderCostMicros must be null or a non-negative safe integer",
+    );
+  }
+  if (
+    input.equivalentCreditCostMicros != null &&
+    (input.equivalentCreditCostMicros < 0 ||
+      !Number.isSafeInteger(input.equivalentCreditCostMicros))
+  ) {
+    throw new Error(
+      "recordModelCallFact: equivalentCreditCostMicros must be null or a non-negative safe integer",
+    );
+  }
+  if (input.equivalentCreditCostMicros != null && input.estimatedProviderCostMicros == null) {
+    throw new Error(
+      "recordModelCallFact: equivalentCreditCostMicros requires estimatedProviderCostMicros",
     );
   }
   if ((input.estimatedProviderCostMicros == null) !== (input.pricingSource == null)) {
@@ -4822,6 +4891,7 @@ export async function recordModelCallFact(
           totalTokens: input.totalTokens ?? null,
           pricedCostMicros: input.pricedCostMicros,
           estimatedProviderCostMicros: input.estimatedProviderCostMicros ?? null,
+          equivalentCreditCostMicros: input.equivalentCreditCostMicros ?? null,
           pricingSource: input.pricingSource ?? null,
           contextContributions,
           occurredAt,
@@ -4839,6 +4909,7 @@ export async function recordModelCallFact(
             initiatorSubjectId: sql`coalesce(${schema.modelCallFacts.initiatorSubjectId}, excluded.initiator_subject_id)`,
             turnSource: sql`coalesce(${schema.modelCallFacts.turnSource}, excluded.turn_source)`,
             estimatedProviderCostMicros: sql`coalesce(${schema.modelCallFacts.estimatedProviderCostMicros}, excluded.estimated_provider_cost_micros)`,
+            equivalentCreditCostMicros: sql`coalesce(${schema.modelCallFacts.equivalentCreditCostMicros}, excluded.equivalent_credit_cost_micros)`,
             pricingSource: sql`coalesce(${schema.modelCallFacts.pricingSource}, excluded.pricing_source)`,
             contextContributions: sql`coalesce(${schema.modelCallFacts.contextContributions}, excluded.context_contributions)`,
           },
@@ -5819,6 +5890,7 @@ export type InstallPortableSkillInput = {
   sourcePath: string;
   name: string;
   description: string;
+  activationMode?: "workspace_managed" | "session_selected";
   category?: string;
   tags?: string[];
   provenance?: "platform" | "deployment" | "registry" | "workspace";
@@ -5859,6 +5931,7 @@ export type PortableSkillRuntime = {
   version: string;
   name: string;
   description: string;
+  activationMode: "workspace_managed" | "session_selected";
   sourceUrl: string;
   sourceCommit: string;
   sourcePath: string;
@@ -8295,6 +8368,7 @@ export async function installPortableSkill(
         }
         if (!pluginVersion) throw new Error("Failed to create portable Skill plugin version");
 
+        const activationMode = input.activationMode ?? "workspace_managed";
         let [facet] = await tx
           .select()
           .from(schema.capabilityFacets)
@@ -8312,12 +8386,17 @@ export async function installPortableSkill(
               pluginVersionId: pluginVersion.id,
               facetKey: "skill",
               kind: "skill",
-              activationMode: "workspace_managed",
+              activationMode,
               required: true,
             })
             .returning();
         }
         if (!facet) throw new Error("Failed to create portable Skill facet");
+        if (facet.activationMode !== activationMode) {
+          throw new Error(
+            `Portable Skill ${input.capabilityId} activation mode conflicts with immutable stored content`,
+          );
+        }
 
         const [existingSkill] = await tx
           .select()
@@ -8521,16 +8600,22 @@ export async function installPortableSkill(
   );
 }
 
-/** Return exact text artifacts for active authoritative Skill installations. */
+/**
+ * Return exact text artifacts for active authoritative Skill installations.
+ * Session-selected Skills are excluded from ambient runtime resolution unless
+ * the caller is explicitly materializing one during session admission.
+ */
 export async function listInstalledPortableSkills(
   db: Database,
   workspaceId: string,
+  options: { includeSessionSelected?: boolean } = {},
 ): Promise<PortableSkillRuntime[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
         facetId: schema.capabilitySkillFacets.facetId,
+        activationMode: schema.capabilityFacets.activationMode,
         manifest: schema.capabilityPluginVersions.manifest,
         version: schema.capabilityPluginVersions.version,
         name: schema.capabilitySkillFacets.name,
@@ -8558,6 +8643,10 @@ export async function listInstalledPortableSkills(
         ),
       )
       .innerJoin(
+        schema.capabilityFacets,
+        eq(schema.capabilityFacets.id, schema.capabilityFacetInstallations.facetId),
+      )
+      .innerJoin(
         schema.capabilitySkillFacets,
         eq(schema.capabilitySkillFacets.facetId, schema.capabilityFacetInstallations.facetId),
       )
@@ -8581,6 +8670,14 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
+      if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
+        throw new Error(
+          `Installed Skill ${row.capabilityId} has invalid activation mode ${row.activationMode}`,
+        );
+      }
+      if (row.activationMode === "session_selected" && !options.includeSessionSelected) {
+        continue;
+      }
       const source = skillSourceFromManifest(row.manifest, row.capabilityId);
       const existing = skills.get(row.facetId);
       if (existing) {
@@ -8593,6 +8690,7 @@ export async function listInstalledPortableSkills(
         version: row.version,
         name: row.name,
         description: row.description,
+        activationMode: row.activationMode,
         sourceUrl: row.sourceUrl,
         sourceCommit: row.sourceCommit,
         sourcePath: row.sourcePath,
@@ -17443,17 +17541,10 @@ async function validateScheduledTargetExecutionAtClaim(
     runId: string;
   },
 ): Promise<string | null> {
-  const [liveAuthority] = await rawRows<{ denial: string | null }>(
-    tx,
-    sql`select validate_scheduled_agent_run_live_authority(
-      ${input.accountId}::uuid,
-      ${input.workspaceId}::uuid,
-      ${input.runId}::uuid
-    ) as denial`,
-  );
-  if (liveAuthority?.denial) return liveAuthority.denial;
   const [run] = await tx
     .select({
+      status: schema.scheduledTaskRuns.status,
+      error: schema.scheduledTaskRuns.error,
       acceptedExecutionSnapshot: schema.scheduledTaskRuns.acceptedExecutionSnapshot,
     })
     .from(schema.scheduledTaskRuns)
@@ -17468,6 +17559,22 @@ async function validateScheduledTargetExecutionAtClaim(
     .limit(1)
     .for("update");
   if (!run?.acceptedExecutionSnapshot) return "scheduled_authority_snapshot_missing";
+  if (run.status !== "dispatched") {
+    return run.status === "skipped" &&
+      (run.error === "scheduled_task_paused_before_claim" ||
+        run.error === "scheduled_task_deleted_before_claim")
+      ? "scheduled_task_inactive_before_claim"
+      : "scheduled_run_terminal_before_claim";
+  }
+  const [liveAuthority] = await rawRows<{ denial: string | null }>(
+    tx,
+    sql`select validate_scheduled_agent_run_live_authority(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.runId}::uuid
+    ) as denial`,
+  );
+  if (liveAuthority?.denial) return liveAuthority.denial;
   const accepted = ScheduledTaskRunAcceptedExecution.parse(run.acceptedExecutionSnapshot);
   const target = accepted.targetSessionExecution;
   if (!target) return null;
@@ -21799,6 +21906,8 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     workspaceId: string;
     subjectId: string | null;
     mode: WorkspaceCodexSubscriptionMode;
+    /** Effective source captured under the source lock before caller-owned credential writes. */
+    effectiveSourceBeforeMutation?: EffectiveCodexSubscriptionSource;
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
   await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
@@ -21809,48 +21918,55 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
   if (current.workspaceKind === "personal" && input.mode !== "automatic") {
     throw new Error("personal workspaces always use workspace Codex subscriptions");
   }
-  if (current.mode === input.mode) return current;
-  const [activeCodexTurn] = await scopedDb
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-        sql`${schema.sessionTurns.model} like 'codex/%'`,
-      ),
-    )
-    .limit(1);
-  const [liveLease] = await scopedDb
-    .select({ id: schema.codexCredentialLeases.id })
-    .from(schema.codexCredentialLeases)
-    .where(
-      and(
-        eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-        gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-      ),
-    )
-    .limit(1);
-  if (activeCodexTurn || liveLease) {
-    throw new Error("Codex subscription source cannot change while active turns are using it");
-  }
-  await scopedDb
-    .insert(schema.workspaceCodexSubscriptionPreferences)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      mode: input.mode,
-      updatedBySubjectId: input.subjectId,
-    })
-    .onConflictDoUpdate({
-      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-      set: {
+  const effectiveSourceBeforeMutation =
+    input.effectiveSourceBeforeMutation ?? current.effectiveSource;
+  let next = current;
+  if (current.mode !== input.mode) {
+    await scopedDb
+      .insert(schema.workspaceCodexSubscriptionPreferences)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
         mode: input.mode,
         updatedBySubjectId: input.subjectId,
-        updatedAt: new Date(),
-      },
-    });
-  return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+      })
+      .onConflictDoUpdate({
+        target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+        set: {
+          mode: input.mode,
+          updatedBySubjectId: input.subjectId,
+          updatedAt: new Date(),
+        },
+      });
+    next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  }
+  if (next.effectiveSource !== effectiveSourceBeforeMutation) {
+    const [activeCodexTurn] = await scopedDb
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+          sql`${schema.sessionTurns.model} like 'codex/%'`,
+        ),
+      )
+      .limit(1);
+    const [liveLease] = await scopedDb
+      .select({ id: schema.codexCredentialLeases.id })
+      .from(schema.codexCredentialLeases)
+      .where(
+        and(
+          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+        ),
+      )
+      .limit(1);
+    if (activeCodexTurn || liveLease) {
+      throw new Error("Codex subscription source cannot change while active turns are using it");
+    }
+  }
+  return next;
 }
 
 export async function setWorkspaceCodexSubscriptionMode(
@@ -29870,6 +29986,8 @@ export type SessionCreateInput = {
   policyRole?: string | null;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
+  /** Exact explicit installed-Skill selection used for keyed-create replay. */
+  selectedInstalledSkillIds?: string[];
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -30161,8 +30279,36 @@ type SessionCreateReplayIdentity = {
   requestedSessionId?: string;
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
+  selectedInstalledSkillIds: string[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
 };
+
+// Session metadata is immutable after creation and already participates in
+// every historical schema fixture. Keep this reserved request-identity fact
+// there instead of making current code require a post-fixture sessions column.
+// Create admission always replaces a caller-supplied value for this key.
+const SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY =
+  "_opengeni_session_create_selected_installed_skill_ids_v1";
+
+function metadataWithSelectedInstalledSkillCreateIdentity(
+  metadata: Record<string, unknown>,
+  selectedInstalledSkillIds: string[],
+): Record<string, unknown> {
+  const next = { ...metadata };
+  delete next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY];
+  if (selectedInstalledSkillIds.length > 0) {
+    next[SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY] = [...selectedInstalledSkillIds];
+  }
+  return next;
+}
+
+function selectedInstalledSkillCreateIdentity(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+  const value = (metadata as Record<string, unknown>)[
+    SESSION_CREATE_SELECTED_INSTALLED_SKILL_IDS_METADATA_KEY
+  ];
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : [];
+}
 
 function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
@@ -30178,6 +30324,12 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (stableJson(existing.variableSetIds ?? []) !== stableJson(input.variableSetIds)) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  if (
+    stableJson(selectedInstalledSkillCreateIdentity(existing.metadata)) !==
+    stableJson(input.selectedInstalledSkillIds)
+  ) {
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
@@ -30274,6 +30426,11 @@ async function createSessionInTransaction(
 ): Promise<SessionCreateResult> {
   const variableSetIds = input.variableSetIds ?? (input.variableSetId ? [input.variableSetId] : []);
   const variableSetId = variableSetIds.at(-1) ?? null;
+  const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
+  const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
+    input.metadata,
+    selectedInstalledSkillIds,
+  );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private") {
@@ -30324,6 +30481,7 @@ async function createSessionInTransaction(
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
         visibility: createRequestedVisibility,
         variableSetIds,
+        selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
       });
@@ -30451,7 +30609,7 @@ async function createSessionInTransaction(
               mode: "explicit",
               inheritedFromSessionId: input.parentSessionId ?? null,
             },
-            metadata: input.metadata,
+            metadata: sessionMetadata,
             ...creatorColumns(frozenCreator),
             ...(privateCreateOwnerMembershipId
               ? {
@@ -30529,6 +30687,7 @@ async function createSessionInTransaction(
           ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
           visibility: createRequestedVisibility,
           variableSetIds,
+          selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
         });
@@ -30719,6 +30878,7 @@ export async function getInitializedSessionCreateReplay(
     requestedSessionId?: string;
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
+    selectedInstalledSkillIds: string[];
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },
@@ -60948,6 +61108,7 @@ export async function claimSessionWorkForAttempt(
           }
           const validUpdates: typeof updates = [];
           const cancelledUpdateIds: string[] = [];
+          const scheduledTaskInactiveUpdateIds: string[] = [];
           const authorityRejectedUpdateIds: string[] = [];
           const unrecognizedUpdateIds: string[] = [];
           // Retained so later consumers of the delivered batch (the child
@@ -60983,17 +61144,28 @@ export async function claimSessionWorkForAttempt(
                 })
               : null;
             if (update.scheduledTaskRunId && scheduledAuthorityDenial) {
-              await markScheduledTaskRunAuthorityRejectedInTransaction(tx as unknown as Database, {
-                workspaceId,
-                sessionId,
-                runId: update.scheduledTaskRunId,
-                error: scheduledAuthorityDenial,
-              });
+              const scheduledTaskInactive =
+                scheduledAuthorityDenial === "scheduled_task_inactive_before_claim";
+              if (!scheduledTaskInactive) {
+                await markScheduledTaskRunAuthorityRejectedInTransaction(
+                  tx as unknown as Database,
+                  {
+                    workspaceId,
+                    sessionId,
+                    runId: update.scheduledTaskRunId,
+                    error: scheduledAuthorityDenial,
+                  },
+                );
+              }
               await tx
                 .update(schema.sessionSystemUpdates)
-                .set({ state: "failed" })
+                .set({ state: scheduledTaskInactive ? "cancelled" : "failed" })
                 .where(eq(schema.sessionSystemUpdates.id, update.id));
-              authorityRejectedUpdateIds.push(update.id);
+              if (scheduledTaskInactive) {
+                scheduledTaskInactiveUpdateIds.push(update.id);
+              } else {
+                authorityRejectedUpdateIds.push(update.id);
+              }
               continue;
             }
             if (input.validatePendingSystemUpdateAuthority) {
@@ -61099,6 +61271,25 @@ export async function claimSessionWorkForAttempt(
                   updateIds: cancelledUpdateIds,
                   count: cancelledUpdateIds.length,
                   reason: "stale_goal_continuation",
+                },
+                occurredAt,
+              });
+            }
+            if (scheduledTaskInactiveUpdateIds.length > 0) {
+              cancellationEvents.push({
+                accountId,
+                workspaceId,
+                sessionId,
+                turnId: null,
+                turnGeneration: null,
+                turnAttemptId: null,
+                turnAssociation: null,
+                sequence: ++sequence,
+                type: "system.update.cancelled" as const,
+                payload: {
+                  updateIds: scheduledTaskInactiveUpdateIds,
+                  count: scheduledTaskInactiveUpdateIds.length,
+                  reason: "scheduled_task_inactive",
                 },
                 occurredAt,
               });
@@ -61237,6 +61428,25 @@ export async function claimSessionWorkForAttempt(
                 updateIds: cancelledUpdateIds,
                 count: cancelledUpdateIds.length,
                 reason: "stale_goal_continuation",
+              },
+              occurredAt,
+            });
+          }
+          if (scheduledTaskInactiveUpdateIds.length > 0) {
+            events.push({
+              accountId,
+              workspaceId,
+              sessionId,
+              turnId,
+              turnGeneration,
+              turnAttemptId: input.attemptId,
+              turnAssociation: "current",
+              sequence: ++sequence,
+              type: "system.update.cancelled",
+              payload: {
+                updateIds: scheduledTaskInactiveUpdateIds,
+                count: scheduledTaskInactiveUpdateIds.length,
+                reason: "scheduled_task_inactive",
               },
               occurredAt,
             });
@@ -69663,8 +69873,9 @@ export type AddSessionSystemUpdateInput = {
   scheduledTaskRunId?: string | null;
 } & SessionSystemUpdateInputVariant;
 
-export type AddSessionSystemUpdateResult =
+export type AddSessionSystemUpdateResult<RequireIdleSession extends boolean = boolean> =
   | { added: false; reason: "session_cancelled" }
+  | (RequireIdleSession extends true ? { added: false; reason: "session_not_idle" } : never)
   | {
       added: boolean;
       reason: "added" | "duplicate";
@@ -69679,12 +69890,14 @@ export type AddSessionSystemUpdateResult =
 export type PrepareSessionSystemUpdateSourceResult = {
   /** Private, bounded, content-free source authority appended before insert. */
   lineage?: Record<string, unknown>;
+  /** Source-owned events appended before the pending-update event. */
+  events?: SessionEvent[];
 };
 
 export async function addSessionSystemUpdate(
   db: Database,
   input: AddSessionSystemUpdateInput,
-): Promise<AddSessionSystemUpdateResult> {
+): Promise<AddSessionSystemUpdateResult<false>> {
   if (input.payload.type !== input.kind) {
     throw new Error(`Internal update payload discriminator must equal kind ${input.kind}`);
   }
@@ -69695,29 +69908,34 @@ export async function addSessionSystemUpdate(
  * Persist one internal update without fabricating a user prompt or queue row.
  * Dedupe and any producer/outbox mutation commit in the same transaction.
  */
-export async function addSessionSystemUpdateWithSourceMutation(
+export async function addSessionSystemUpdateWithSourceMutation<
+  RequireIdleSession extends boolean = false,
+>(
   db: Database,
   input: AddSessionSystemUpdateInput,
   mutateSource: (
     tx: Database,
     wakeEventId: string | null,
     updateId: string | null,
+    rejectionReason: "session_cancelled" | "session_not_idle" | null,
   ) => Promise<void>,
   options: {
+    /** Admit only when the already-locked session is at its idle boundary. */
+    requireIdleSession?: RequireIdleSession;
     /** Runs under the locked session/source transaction before any update/event insert. */
     prepareSource?: (
       tx: Database,
       sessionId: string,
     ) => Promise<PrepareSessionSystemUpdateSourceResult | void>;
   } = {},
-): Promise<AddSessionSystemUpdateResult> {
+): Promise<AddSessionSystemUpdateResult<RequireIdleSession>> {
   if (Buffer.byteLength(JSON.stringify(input.payload)) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update payload exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
   }
   if (Buffer.byteLength(input.summary) > MAX_INTERNAL_UPDATE_BYTES) {
     throw new Error(`Internal update summary exceeds ${MAX_INTERNAL_UPDATE_BYTES} bytes`);
   }
-  return await withSessionActivityRlsContext(
+  return (await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
@@ -69727,8 +69945,9 @@ export async function addSessionSystemUpdateWithSourceMutation(
           controlLock: "share",
           sessionIds: [input.sessionId],
         });
-        const session = locks.sessions[0];
+        let session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const temporalWorkflowId = session.temporalWorkflowId;
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
@@ -69736,10 +69955,71 @@ export async function addSessionSystemUpdateWithSourceMutation(
           { workspaceControl: locks.control ?? undefined },
         );
         if (session.status === "cancelled") {
-          await mutateSource(tx as unknown as Database, null, null);
+          await mutateSource(tx as unknown as Database, null, null, "session_cancelled");
           return { added: false, reason: "session_cancelled" } as const;
         }
+        const replayExistingUpdate = async (events: SessionEvent[]) => {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.dedupeKey, input.dedupeKey),
+              ),
+            )
+            .limit(1);
+          if (!existing) return null;
+          const [pendingEvent] = await tx
+            .select({ id: schema.sessionEvents.id })
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.type, "system.update.pending"),
+                sql`${schema.sessionEvents.payload} ->> 'updateId' = ${existing.id}`,
+              ),
+            )
+            .limit(1);
+          if (!pendingEvent) throw new Error("System-update pending event disappeared");
+          await mutateSource(tx as unknown as Database, pendingEvent.id, existing.id, null);
+          return {
+            added: false,
+            reason: "duplicate",
+            update: mapSessionSystemUpdate(existing),
+            shouldWake: false,
+            workflowWakeRevision: null,
+            wakeEventId: pendingEvent.id,
+            temporalWorkflowId,
+            events,
+          } as const;
+        };
+
+        if (options.requireIdleSession && session.status !== "idle") {
+          const replayed = await replayExistingUpdate([]);
+          if (replayed) {
+            return replayed;
+          }
+          await mutateSource(tx as unknown as Database, null, null, "session_not_idle");
+          return { added: false, reason: "session_not_idle" } as const;
+        }
         const prepared = await options.prepareSource?.(tx as unknown as Database, input.sessionId);
+        if ((prepared?.events?.length ?? 0) > 0) {
+          const [refreshedSession] = await tx
+            .select()
+            .from(schema.sessions)
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            )
+            .limit(1);
+          if (!refreshedSession) throw new Error(`Session not found: ${input.sessionId}`);
+          session = refreshedSession;
+        }
         const lineage = {
           ...(input.lineage ?? {}),
           ...(prepared?.lineage ?? {}),
@@ -69784,42 +70064,9 @@ export async function addSessionSystemUpdateWithSourceMutation(
           })
           .returning();
         if (!inserted) {
-          const [existing] = await tx
-            .select()
-            .from(schema.sessionSystemUpdates)
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                eq(schema.sessionSystemUpdates.dedupeKey, input.dedupeKey),
-              ),
-            )
-            .limit(1);
-          if (!existing) throw new Error("System-update dedupe row disappeared");
-          const [pendingEvent] = await tx
-            .select({ id: schema.sessionEvents.id })
-            .from(schema.sessionEvents)
-            .where(
-              and(
-                eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                eq(schema.sessionEvents.sessionId, input.sessionId),
-                eq(schema.sessionEvents.type, "system.update.pending"),
-                sql`${schema.sessionEvents.payload} ->> 'updateId' = ${existing.id}`,
-              ),
-            )
-            .limit(1);
-          if (!pendingEvent) throw new Error("System-update pending event disappeared");
-          await mutateSource(tx as unknown as Database, pendingEvent.id, existing.id);
-          return {
-            added: false,
-            reason: "duplicate",
-            update: mapSessionSystemUpdate(existing),
-            shouldWake: false,
-            workflowWakeRevision: null,
-            wakeEventId: pendingEvent.id,
-            temporalWorkflowId: session.temporalWorkflowId,
-            events: [],
-          };
+          const replayed = await replayExistingUpdate(prepared?.events ?? []);
+          if (!replayed) throw new Error("System-update dedupe row disappeared");
+          return replayed;
         }
 
         const now = new Date();
@@ -69851,7 +70098,7 @@ export async function addSessionSystemUpdateWithSourceMutation(
           )
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
-        await mutateSource(tx as unknown as Database, event.id, inserted.id);
+        await mutateSource(tx as unknown as Database, event.id, inserted.id, null);
         // Producer-side supersession of this child's now-stale pending notices
         // on the parent: a newer child_progress replaces an older one, and a
         // resolution supersedes the child_requires_action of the same exact
@@ -69995,11 +70242,16 @@ export async function addSessionSystemUpdateWithSourceMutation(
               temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
             })
           : null;
+        // An idle-gated admission consumes that boundary even when control or
+        // realtime ownership withholds the workflow wake. Persisting `queued`
+        // reserves the accepted work so a later distinct skip occurrence
+        // cannot cross the same idle boundary while this update is pending.
+        const shouldQueue = shouldWake || options.requireIdleSession === true;
         await tx
           .update(schema.sessions)
           .set({
             lastSequence: session.lastSequence + appendedSequences,
-            ...(shouldWake ? { status: "queued" as const } : {}),
+            ...(shouldQueue ? { status: "queued" as const } : {}),
             updatedAt: now,
           })
           .where(eq(schema.sessions.id, session.id));
@@ -70012,13 +70264,14 @@ export async function addSessionSystemUpdateWithSourceMutation(
           wakeEventId: event.id,
           temporalWorkflowId: session.temporalWorkflowId,
           events: [
+            ...(prepared?.events ?? []),
             mapEvent(event),
             ...(supersededEvent ? [mapEvent(supersededEvent)] : []),
             ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
           ],
         };
       }),
-  );
+  )) as AddSessionSystemUpdateResult<RequireIdleSession>;
 }
 
 /**

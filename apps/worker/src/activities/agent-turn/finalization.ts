@@ -152,6 +152,23 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     cancellationSignal,
     control.activityStatus,
   );
+  const drainInFlightWarmSnapshot = async (): Promise<void> => {
+    const snapshot = sandboxState.snapshotInFlight;
+    if (!snapshot) return;
+    // This is physical quiescence, not optional turn-end persistence. The
+    // provider capture SDK is not cancellable, so an aborted finalizer signal
+    // must not detach this wait and release the holder while the continuation
+    // is still reading or publishing the exact workspace generation.
+    await snapshot.catch((error) => {
+      console.error(
+        "in-flight workspace snapshot settlement failed (turn outcome unaffected)",
+        safeErrorDiagnostic(error),
+      );
+    });
+    if (sandboxState.snapshotInFlight === snapshot) {
+      sandboxState.snapshotInFlight = null;
+    }
+  };
   try {
     const toolCancellationFence = eventing.toolCancellationFenceRef.current;
     // Every renewal controller is an attempt-owned sandbox writer. Capture
@@ -468,6 +485,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     const runTurnEndPersistence = shouldRunTurnEndWorkspacePersistence({
       activityStatus: control.activityStatus,
       cancellationRequested: finalizerSignal?.aborted === true,
+      deadlineRotationRequested: sandboxState.deadlineRotationRequested,
     });
     if (
       runTurnEndPersistence &&
@@ -565,11 +583,13 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     if (sandboxState.leaseHeartbeatTimer) {
       stopLeaseHeartbeat();
     }
-    if (sandboxState.rotationInFlight) {
-      await waitForTurnFinalizerStep(sandboxState.rotationInFlight, finalizerSignal).catch(
-        () => undefined,
-      );
+    if (sandboxState.rotationPreemptionInFlight) {
+      await sandboxState.rotationPreemptionInFlight.catch(() => undefined);
     }
+    // No heartbeat can register another capture after this point. Join the
+    // actual provider continuation before either starting a turn-end capture
+    // or entering the proof-bearing holder release.
+    await drainInFlightWarmSnapshot();
     if (sandboxState.resolvedSandbox) {
       // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
       // turn's finished /workspace onto the lease before releasing the holder,
@@ -585,19 +605,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
         sandboxState.sandboxGroupId &&
         settledTurnId
       ) {
-        // Single-flight vs the heartbeat capture: the timer is already cleared
-        // above, but a capture it launched may still be in flight — and that
-        // capture predates the turn's final writes. Wait for it, but only up
-        // to the snapshot timeout: release must never depend on an unbounded
-        // provider capture.
-        if (sandboxState.snapshotInFlight) {
-          await waitForWarmSnapshot(
-            sandboxState.snapshotInFlight,
-            settings.sandboxSnapshotTimeoutMs,
-            finalizerSignal,
-          );
-        }
-        const persisted = await maybePersistWarmWorkspaceSnapshot(
+        const snapshot = maybePersistWarmWorkspaceSnapshot(
           { db, settings, objectStorage },
           {
             accountId: input.accountId,
@@ -611,6 +619,8 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
           sandboxState.resolvedSandbox.leaseEpoch,
           finalizerSignal,
         );
+        sandboxState.snapshotInFlight = snapshot.settled;
+        const persisted = await snapshot;
         if (persisted && eventing.publish) {
           await eventing
             .publish([
@@ -641,6 +651,10 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
     // Temporal cancellation: the eager listener may already have dropped
     // the holder, and this idempotent proof-bearing pass still must run.
     stopLeaseHeartbeat();
+    if (sandboxState.rotationPreemptionInFlight) {
+      await sandboxState.rotationPreemptionInFlight.catch(() => undefined);
+    }
+    await drainInFlightWarmSnapshot();
     const sandboxReleaseTargets = new Set(sandboxState.lateSandboxesAwaitingWriterDrain);
     sandboxState.lateSandboxesAwaitingWriterDrain.clear();
     if (sandboxState.resolvedSandbox) {

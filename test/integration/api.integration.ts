@@ -6649,12 +6649,13 @@ describe("API component integration", () => {
     });
     expect(badSearch.status).toBe(400);
 
-    // Settings default off, PATCH round-trips + preserves unknown keys.
+    // Workspace Memory defaults on; explicit opt-out and re-enable round-trip
+    // while preserving unknown settings keys.
     const beforeSettings = await app.request(workspacePath(workspaceId, ""));
     const workspaceBefore = (await beforeSettings.json()) as {
       settings: Record<string, unknown>;
     };
-    expect(workspaceBefore.settings.memoryEnabled ?? false).toBe(false);
+    expect(workspaceBefore.settings.memoryEnabled).toBe(true);
 
     const seedUnknown = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
@@ -6662,6 +6663,17 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
     });
     expect(seedUnknown.status).toBe(200);
+    const disableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
+      method: "PATCH",
+      body: JSON.stringify({ memoryEnabled: false }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(disableResponse.status).toBe(200);
+    const disabled = (await disableResponse.json()) as {
+      settings: Record<string, unknown>;
+    };
+    expect(disabled.settings.memoryEnabled).toBe(false);
+    expect(disabled.settings.someFutureKey).toBe("keep-me");
     const enableResponse = await app.request(workspacePath(workspaceId, "/settings"), {
       method: "PATCH",
       body: JSON.stringify({ memoryEnabled: true }),
@@ -7676,6 +7688,7 @@ describe("API component integration", () => {
       const grant = await bootstrapMcpGrant(dbClient.db);
       const workspaceId = grant.workspaceId;
       const accountId = grant.accountId;
+      await updateWorkspaceSettings(dbClient.db, workspaceId, { memoryEnabled: false });
       const session = await createSession(dbClient.db, {
         accountId,
         workspaceId,
@@ -10154,13 +10167,11 @@ describe("API component integration", () => {
     const plain = await requireSession(dbClient.db, grant.workspaceId, plainReceipt.resource.id);
     expect(plain.sandboxBackend).toBe("none");
 
-    // The fix: targetSandboxId is now declared on the session_create inputSchema,
-    // so the MCP SDK no longer strips it before the handler runs — it reaches
-    // createSessionForRequest's seedTargetSandbox path. With backend:"none" the
-    // seed guard rejects (you cannot pin a machine for a sandbox-less session),
-    // which PROVES the value flowed end-to-end. Before the fix the unknown key
-    // was dropped and this create would have succeeded, silently swallowing the
-    // agent's machine-targeting request.
+    // targetSandboxId is declared on the session_create inputSchema, so the MCP
+    // SDK does not strip it before the handler runs. The synthetic unknown id
+    // reaches createSessionForRequest's ordinary workspace-scoped route
+    // validator, which proves the value flowed end-to-end. A backend:"none"
+    // home does not bypass target ownership or liveness checks.
     await expectMcpOrchestrationFailure(
       mcp,
       "session_create",
@@ -10171,7 +10182,7 @@ describe("API component integration", () => {
         machineTarget: { targetSandboxId: crypto.randomUUID() },
       },
       "session_create_rejected",
-      "cannot target a machine for a session with no sandbox",
+      "not found in this workspace",
     );
   });
 

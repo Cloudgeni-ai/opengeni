@@ -861,6 +861,9 @@ function SessionsIndexRouteContent({
                   workingDir: submission.options.workingDir,
                   channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
+                  installedSkillIds: launch.skillCapabilityId
+                    ? [launch.skillCapabilityId]
+                    : undefined,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   visibility: newSessionCreateVisibility(
@@ -912,6 +915,9 @@ function SessionsIndexRouteContent({
                 workingDir: submission.options.workingDir,
                 channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
+                installedSkillIds: launch.skillCapabilityId
+                  ? [launch.skillCapabilityId]
+                  : undefined,
                 expectedNewSessionDraftRevision: flushed.revision,
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
@@ -971,6 +977,7 @@ function SessionsIndexRouteContent({
   const launchEffort = launch.effort;
   const launchLatency = launch.latency;
   const launchRealtime = launch.realtime;
+  const launchSkillCapabilityId = launch.skillCapabilityId;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -984,7 +991,10 @@ function SessionsIndexRouteContent({
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId },
-        search: launch.channelId ? { channelId: launch.channelId } : {},
+        search: {
+          ...(launch.channelId ? { channelId: launch.channelId } : {}),
+          ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+        },
         replace: true,
       });
       return;
@@ -1015,6 +1025,7 @@ function SessionsIndexRouteContent({
     launchLatency,
     launchModel,
     launchRealtime,
+    launchSkillCapabilityId,
     launchKey,
     launch.channelId,
     navigate,
@@ -1122,6 +1133,15 @@ function SessionsIndexRouteContent({
             What should the agent do?
           </h1>
         </section>
+
+        {launchSkillCapabilityId ? (
+          <div className="mt-6">
+            <Notice tone="info" title="Implementation guidance selected">
+              This installed Skill will be frozen onto this session only. Other workspace sessions
+              will not receive it.
+            </Notice>
+          </div>
+        ) : null}
 
         <div ref={composerRegionRef} className="mt-8">
           <ConsoleComposer

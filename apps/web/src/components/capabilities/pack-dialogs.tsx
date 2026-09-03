@@ -20,6 +20,7 @@ import {
   RefreshCwIcon,
   ServerCogIcon,
   Share2Icon,
+  SparklesIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -156,6 +157,7 @@ export function PackDetailDialog(props: {
   onPreviewUninstall: () => Promise<PackUninstallPreview | null>;
   onUninstall: (preview: PackUninstallPreview, idempotencyKey: string) => Promise<boolean>;
   onUnregister: () => Promise<boolean>;
+  onStartSession: (skillCapabilityId: string) => void;
   restoreFocusRef?: RefObject<HTMLElement | null>;
 }) {
   const { pack, installation } = props;
@@ -278,6 +280,7 @@ export function PackDetailDialog(props: {
         onInstall={() => void installReviewedPack()}
         onUninstall={() => void openUninstall()}
         onUnregister={() => setConfirmUnregister(true)}
+        onStartSession={props.onStartSession}
       />
 
       <ConfirmDialog
@@ -343,12 +346,18 @@ function PackInstallationDialog(props: {
   onInstall: () => void;
   onUninstall: () => void;
   onUnregister: () => void;
+  onStartSession: (skillCapabilityId: string) => void;
 }) {
   const { pack, preview, selection } = props;
   const showsRig = Boolean(pack.rig || pack.sandboxImage);
   const hardcodedRigId = pack.rig?.rigId;
   const selectedRig = props.rigs.find((rig) => rig.id === selection.rigId);
   const [contentsOpen, setContentsOpen] = useState(false);
+  const sessionSelectedSkillId = sessionSelectedPackSkillIdForLaunch(
+    pack,
+    props.installation,
+    preview,
+  );
 
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -479,16 +488,59 @@ function PackInstallationDialog(props: {
             hasPreview={preview !== null}
             installReady={props.installReady}
             installLabel={props.installLabel}
+            canStartSession={sessionSelectedSkillId !== null}
             onCancel={() => props.onOpenChange(false)}
             onReview={props.onReview}
             onInstall={props.onInstall}
             onUninstall={props.onUninstall}
             onUnregister={props.onUnregister}
+            onStartSession={() => props.onStartSession(sessionSelectedSkillId!)}
           />
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Return the sole installed session-selected Skill this exact Pack version may
+ * launch with. Preview uses a future capability id for a missing inline Skill;
+ * only a UUID `resolvedId` is an existing facet installation. The create still
+ * revalidates installation and activation mode, so UI state never grants access.
+ */
+export function sessionSelectedPackSkillIdForLaunch(
+  pack: CapabilityPack,
+  installation: PackInstallation | null,
+  preview: PackInstallationPreview | null,
+): string | null {
+  if (
+    !installation ||
+    installation.status !== "active" ||
+    !preview ||
+    preview.packId !== pack.id ||
+    preview.packVersion !== pack.version ||
+    preview.manifestDigest !== installation.manifestDigest ||
+    preview.installationVersion !== installation.version
+  ) {
+    return null;
+  }
+  const sessionSelectedSkillNames = new Set(
+    pack.skills
+      .filter((skill) => skill.activationMode === "session_selected")
+      .map((skill) => skill.name.toLowerCase()),
+  );
+  const launchable = preview.components.filter(
+    (component) =>
+      component.kind === "inline_skill" &&
+      component.status === "ready" &&
+      component.actualDigest === component.expectedDigest &&
+      component.resolvedId !== null &&
+      UUID_PATTERN.test(component.resolvedId) &&
+      sessionSelectedSkillNames.has(component.label.toLowerCase()),
+  );
+  return launchable.length === 1 ? launchable[0]!.capabilityId : null;
 }
 
 /**
@@ -546,20 +598,40 @@ export function PackDetailActions(props: {
   hasPreview: boolean;
   installReady: boolean;
   installLabel: string;
+  canStartSession?: boolean;
   onCancel: () => void;
   onReview: () => void;
   onInstall: () => void;
   onUninstall: () => void;
   onUnregister: () => void;
+  onStartSession?: () => void;
 }) {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
         {props.installed ? (
-          <Button type="button" variant="outline" disabled={props.busy} onClick={props.onUninstall}>
-            <Trash2Icon />
-            Uninstall
-          </Button>
+          <>
+            {props.canStartSession ? (
+              <Button
+                type="button"
+                variant="outline"
+                disabled={props.busy}
+                onClick={props.onStartSession}
+              >
+                <SparklesIcon />
+                Start with Pack
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="outline"
+              disabled={props.busy}
+              onClick={props.onUninstall}
+            >
+              <Trash2Icon />
+              Uninstall
+            </Button>
+          </>
         ) : null}
         <Button
           type="button"
@@ -627,9 +699,9 @@ export function PackInstallationPlan({ preview }: { preview: PackInstallationPre
       )}
 
       {preview.legacyInlineSkillCount > 0 || preview.legacySandboxImage ? (
-        <Notice tone="info" title="Legacy fields will be migrated">
+        <Notice tone="info" title="Installation details">
           {preview.legacyInlineSkillCount > 0
-            ? `${preview.legacyInlineSkillCount} inline Skill${preview.legacyInlineSkillCount === 1 ? "" : "s"} become ordinary immutable Skill components. `
+            ? `${preview.legacyInlineSkillCount} Pack Skill${preview.legacyInlineSkillCount === 1 ? "" : "s"} become ordinary immutable Skill components. `
             : ""}
           {preview.legacySandboxImage
             ? "The previous sandbox image is checked against the selected compute environment; it will not replace workspace defaults."
@@ -828,14 +900,17 @@ export function PackContents({ pack }: { pack: CapabilityPack }) {
         )}
       </PackSection>
 
-      <PackSection title="Legacy inline Skills">
+      <PackSection title="Skills">
         {pack.skills.length > 0 ? (
           <div className="grid gap-1.5">
             {pack.skills.map((skill) => (
               <div key={skill.name} className="min-w-0">
                 <div className="truncate text-xs font-medium">{skill.name}</div>
                 <div className="text-2xs text-fg-subtle">
-                  Migrates to an immutable Skill · {skill.files.length} file
+                  {skill.activationMode === "session_selected"
+                    ? "Installed, then selected per session"
+                    : "Installs as an immutable Skill"}{" "}
+                  · {skill.files.length} included file
                   {skill.files.length === 1 ? "" : "s"}
                 </div>
               </div>

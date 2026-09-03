@@ -21,10 +21,12 @@ import {
   createDb,
   createFileUpload,
   createScheduledTask,
+  deleteScheduledTask,
   createSession,
   createSessionGoal,
   createVariableSet,
   dbSql,
+  setSessionGoalStatusWithEvent,
   encryptEnvironmentValue,
   enablePackInstallation,
   loadVariableSetForRun,
@@ -3573,6 +3575,463 @@ describe("worker activities integration", () => {
     const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
     expect(runs).toHaveLength(2);
     expect(runs.every((run) => run.status === "dispatched")).toBe(true);
+  });
+
+  test("invalidates unclaimed scheduled occurrences across pause, resume, and deletion", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-unclaimed-lifecycle",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "do not claim after lifecycle cutoff",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "must not run" }]),
+      }),
+    });
+
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (first.action !== "start") throw new Error("pause fixture did not create its session");
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "paused" });
+    const [pausedRun] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(pausedRun).toMatchObject({
+      status: "skipped",
+      error: "scheduled_task_paused_before_claim",
+    });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({
+        status: "skipped",
+        error: "scheduled_task_paused_before_claim",
+      }),
+    ]);
+
+    await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "active" });
+    await expect(
+      withWorkspaceRls(
+        dbClient.db,
+        grant.workspaceId,
+        async (scopedDb) =>
+          await scopedDb.execute(dbSql`
+          update session_system_updates
+          set state = 'delivered'
+          where workspace_id = ${grant.workspaceId}
+            and scheduled_task_run_id = ${pausedRun!.id}
+            and state = 'pending'
+        `),
+      ),
+    ).rejects.toMatchObject({ cause: { code: "42501" } });
+    const pausedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: first.sessionId,
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `paused-claim-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(pausedClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(0);
+    expect(
+      await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
+    ).toHaveLength(0);
+    expect(
+      (await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 50)).some(
+        (event) =>
+          event.type === "system.update.cancelled" &&
+          event.payload.reason === "scheduled_task_inactive",
+      ),
+    ).toBe(true);
+
+    const second = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    expect(second).toMatchObject({ action: "signal", sessionId: first.sessionId });
+    await deleteScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    const deletedClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: first.sessionId,
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `deleted-claim-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(deletedClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "skipped",
+          error: "scheduled_task_paused_before_claim",
+        }),
+        expect.objectContaining({
+          status: "skipped",
+          error: "scheduled_task_deleted_before_claim",
+        }),
+      ]),
+    );
+    expect(
+      await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
+    ).toHaveLength(0);
+  });
+
+  test("preserves a claimed scheduled turn and its recovery after task deletion", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-claimed-lifecycle",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "preserve claimed recovery",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "recovered" }]),
+      }),
+    });
+    const dispatched = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (dispatched.action !== "start") throw new Error("claim fixture did not create its session");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `claimed-before-delete-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error(`scheduled turn was not claimed`);
+
+    await deleteScheduledTask(dbClient.db, grant.workspaceId, task.id);
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+    expect(
+      await requestSessionTurnRecovery(dbClient.db, grant.workspaceId, {
+        sessionId: dispatched.sessionId,
+        turnId: claimed.turn.id,
+        triggerEventId: claimed.turn.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      }),
+    ).toMatchObject({ action: "recovering" });
+    const recoveredAttemptId = crypto.randomUUID();
+    const recovered = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: recoveredAttemptId,
+      dispatchId: `recovered-after-delete-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(recovered).toMatchObject({
+      action: "claimed",
+      turn: {
+        id: claimed.turn.id,
+        activeAttemptId: recoveredAttemptId,
+        executionGeneration: claimed.turn.executionGeneration + 1,
+      },
+    });
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+  });
+
+  test("linearizes a concurrent scheduled claim ahead of task pause", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-claim-pause-race",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: {
+        prompt: "claim before pause",
+        resources: [],
+        tools: [],
+        metadata: {},
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "claimed" }]),
+      }),
+    });
+    const dispatched = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    if (dispatched.action !== "start") throw new Error("race fixture did not create its session");
+    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    if (!run) throw new Error("race fixture did not create its run");
+
+    const blockerDb = createDb(services.databaseUrl);
+    let releaseRunLock = () => undefined;
+    const runLockReleased = new Promise<void>((resolve) => {
+      releaseRunLock = resolve;
+    });
+    let announceRunLock = () => undefined;
+    const runLocked = new Promise<void>((resolve) => {
+      announceRunLock = resolve;
+    });
+    const blocker = withWorkspaceRls(
+      blockerDb.db,
+      grant.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          await tx.execute(dbSql`
+          select id from scheduled_task_runs
+          where workspace_id = ${grant.workspaceId} and id = ${run.id}
+          for update
+        `);
+          announceRunLock();
+          await runLockReleased;
+        }),
+    );
+    await runLocked;
+
+    const attemptId = crypto.randomUUID();
+    const claim = claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: dispatched.sessionId,
+      workflowId: dispatched.workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `claim-pause-race-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    let pause: ReturnType<typeof updateScheduledTask> | null = null;
+    try {
+      expect(
+        await Promise.race([
+          claim.then(() => "settled" as const),
+          Bun.sleep(100).then(() => "waiting" as const),
+        ]),
+      ).toBe("waiting");
+      pause = updateScheduledTask(dbClient.db, grant.workspaceId, task.id, { status: "paused" });
+      expect(
+        await Promise.race([
+          pause.then(() => "settled" as const),
+          Bun.sleep(100).then(() => "waiting" as const),
+        ]),
+      ).toBe("waiting");
+    } finally {
+      releaseRunLock();
+      await blocker;
+      await blockerDb.close();
+    }
+    const [claimed, paused] = await Promise.all([claim, pause!]);
+    expect(claimed).toMatchObject({
+      action: "claimed",
+      turn: { activeAttemptId: attemptId },
+    });
+    expect(paused.status).toBe("paused");
+    expect(await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).toEqual([
+      expect.objectContaining({ status: "dispatched", error: null }),
+    ]);
+  });
+
+  test("skips reusable scheduled occurrences until the session returns idle", async () => {
+    const grant = await testGrant(dbClient.db);
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "scheduled-reusable-skip",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "reusable_session",
+      overlapPolicy: "skip",
+      agentConfig: {
+        prompt: "maintain the reusable session",
+        resources: [],
+        tools: [],
+        metadata: {},
+        goal: {
+          text: "Keep the reusable session healthy",
+          successCriteria: "The scheduled maintenance turn completes",
+        },
+      },
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "maintenance complete" }]),
+      }),
+    });
+
+    const producerKey = `worker-activity-${crypto.randomUUID()}`;
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    if (first.action !== "start") {
+      throw new Error(`first reusable occurrence was not admitted: ${first.action}`);
+    }
+    const goalAfterFirst = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    if (!goalAfterFirst) throw new Error("reusable scheduled goal was not created");
+
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    expect(retry).toMatchObject({
+      sessionId: first.sessionId,
+      triggerEventId: first.triggerEventId,
+    });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: goalAfterFirst.status,
+      version: goalAfterFirst.version,
+      objectiveRevision: goalAfterFirst.objectiveRevision,
+      updatedAt: goalAfterFirst.updatedAt,
+    });
+    const runsAfterSkip = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runsAfterSkip).toHaveLength(2);
+    expect(runsAfterSkip).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ status: "dispatched" }),
+        expect.objectContaining({ status: "skipped", error: "scheduled_session_not_idle" }),
+      ]),
+    );
+
+    await setSessionGoalStatusWithEvent(dbClient.db, grant.workspaceId, first.sessionId, {
+      status: "completed",
+      evidence: "scheduled maintenance fixture completed",
+      event: {
+        type: "goal.completed",
+        evidence: "scheduled maintenance fixture completed",
+      },
+    });
+    const turn = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: first.sessionId,
+      trigger: { kind: "next" },
+      workflowId: first.workflowId,
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(turn.status).toBe("idle");
+
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "verify scheduled idle reservation",
+          operationKey: `pause:${crypto.randomUUID()}`,
+          expectedRevision: 0,
+        }),
+      ),
+    );
+    const third = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey: `worker-activity-${crypto.randomUUID()}`,
+    });
+    expect(third).toMatchObject({
+      action: "signal",
+      sessionId: first.sessionId,
+      workflowWakeRevision: null,
+    });
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "queued",
+      effectiveControl: { state: "paused" },
+    });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterFirst.id,
+      status: "active",
+      version: expect.any(Number),
+    });
+    const goalAfterThird = await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId);
+    expect(goalAfterThird!.version).toBeGreaterThan(goalAfterFirst.version);
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `worker-activity-${crypto.randomUUID()}`,
+      }),
+    ).resolves.toEqual({ action: "blocked", reason: "scheduled_run_terminal" });
+    expect(await getSessionGoal(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      id: goalAfterThird!.id,
+      status: goalAfterThird!.status,
+      version: goalAfterThird!.version,
+      objectiveRevision: goalAfterThird!.objectiveRevision,
+      updatedAt: goalAfterThird!.updatedAt,
+    });
+    expect(
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+    ).toHaveLength(1);
+    expect(
+      (await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id)).filter(
+        (run) => run.status === "skipped" && run.error === "scheduled_session_not_idle",
+      ),
+    ).toHaveLength(2);
   });
 
   test("dispatches existing-session tasks to the exact target without replacing its goal", async () => {

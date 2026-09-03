@@ -83,6 +83,7 @@ describe("OpenGeniClient", () => {
     await client.updateOrganizationWorkspaceSettings(organizationId, WORKSPACE_ID, {
       memoryEnabled: true,
     });
+    await client.deleteOrganizationWorkspace(organizationId, WORKSPACE_ID);
     await client.putOrganizationWorkspaceMember(organizationId, WORKSPACE_ID, membershipId, {
       role: "member",
       expectedUpdatedAt: null,
@@ -104,6 +105,7 @@ describe("OpenGeniClient", () => {
         `POST /v1/organizations/${organizationId}/workspaces`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
         `PATCH /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/settings`,
+        `DELETE /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}`,
         `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
         `PUT /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}`,
         `POST /v1/organizations/${organizationId}/workspaces/${WORKSPACE_ID}/members/${membershipId}/revoke`,
@@ -113,7 +115,7 @@ describe("OpenGeniClient", () => {
       name: "Product systems",
       operationId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
-    expect(JSON.parse(requests[3]!.body!)).toEqual({
+    expect(JSON.parse(requests[4]!.body!)).toEqual({
       role: "member",
       expectedUpdatedAt: null,
       operationId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",

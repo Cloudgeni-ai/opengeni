@@ -207,13 +207,13 @@ describe("curated AI Gateway catalogue", () => {
       inputMicrosPerMillionTokens: 140_000,
       cachedInputMicrosPerMillionTokens: 28_000,
       outputMicrosPerMillionTokens: 280_000,
-      marginBps: 2_500,
+      marginBps: 500,
     });
     expect(configuredModelPricing(settings)[kimi.id]).toEqual({
       inputMicrosPerMillionTokens: 3_000_000,
       cachedInputMicrosPerMillionTokens: 300_000,
       outputMicrosPerMillionTokens: 15_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     });
   });
 
@@ -414,7 +414,7 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 1_000_000,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(385_000);
+    ).toBe(323_400);
   });
 
   test("managed debit fallback applies normal Kimi cache-read pricing", () => {
@@ -429,7 +429,7 @@ describe("curated AI Gateway catalogue", () => {
         outputTokens: 0,
         inputTokensDetails: { cached_tokens: 1_000_000 },
       }),
-    ).toBe(375_000);
+    ).toBe(315_000);
   });
 
   test("managed debit converts exact Gateway cost before applying margin", () => {
@@ -445,14 +445,14 @@ describe("curated AI Gateway catalogue", () => {
         "0.00000325",
         { inputTokens: 9 },
       ),
-    ).toBe(5);
+    ).toBe(4);
     expect(
       calculateGatewayReportedCostMicros(
         settings,
         OPENGENI_GATEWAY_MODELS.deepseek.productId,
         "1.23456789",
       ),
-    ).toBe(1_543_210);
+    ).toBe(1_296_297);
     expect(() =>
       calculateGatewayReportedCostMicros(
         settings,
@@ -1891,40 +1891,76 @@ describe("configuredModelPricing", () => {
         inputMicrosPerMillionTokens: 1_400_000,
         cachedInputMicrosPerMillionTokens: 140_000,
         outputMicrosPerMillionTokens: 4_400_000,
-        marginBps: 2_500,
+        marginBps: 500,
       },
     });
   });
 
   test("keeps current GPT-5.6 OpenAI list rates and long-context tiers", () => {
+    expect(defaultModelPricing["gpt-5.6-sol"]).toEqual({
+      default: {
+        inputMicrosPerMillionTokens: 4_000_000,
+        cachedInputMicrosPerMillionTokens: 400_000,
+        cacheWriteMicrosPerMillionTokens: 5_000_000,
+        outputMicrosPerMillionTokens: 20_000_000,
+        marginBps: 500,
+      },
+      inputTokenTiers: [
+        {
+          minimumInputTokens: 272_001,
+          pricing: {
+            inputMicrosPerMillionTokens: 8_000_000,
+            cachedInputMicrosPerMillionTokens: 800_000,
+            cacheWriteMicrosPerMillionTokens: 10_000_000,
+            outputMicrosPerMillionTokens: 30_000_000,
+            marginBps: 500,
+          },
+        },
+      ],
+    });
     expect(defaultModelPricing["gpt-5.6-terra"]?.default).toEqual({
       inputMicrosPerMillionTokens: 2_000_000,
       cachedInputMicrosPerMillionTokens: 200_000,
+      cacheWriteMicrosPerMillionTokens: 2_500_000,
       outputMicrosPerMillionTokens: 12_000_000,
-      marginBps: 2_500,
+      marginBps: 500,
     });
     expect(defaultModelPricing["gpt-5.6-luna"]?.default).toEqual({
       inputMicrosPerMillionTokens: 200_000,
       cachedInputMicrosPerMillionTokens: 20_000,
+      cacheWriteMicrosPerMillionTokens: 250_000,
       outputMicrosPerMillionTokens: 1_200_000,
-      marginBps: 2_500,
+      marginBps: 500,
     });
     expect(defaultModelPricing["gpt-5.4"]).toBeUndefined();
     expect(defaultModelPricing["gpt-5"]).toBeUndefined();
 
     const settings = withEnv({ OPENGENI_OPENAI_API_KEY: "sk-test" }, () => getSettings());
-    // 100k input @ $0.20/M = 20_000 micros, then +25% margin → 25_000
+    // 100k input @ $0.20/M = 20_000 micros, then +5% margin -> 21_000
     expect(
       calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {
         inputTokens: 100_000,
       }),
-    ).toBe(25_000);
-    // >272K uses long-context luna ($0.40/M input): ceil(272001*400000/1e6)=108801, +25% → 136002
+    ).toBe(21_000);
+    expect(
+      calculateModelUsageCostBreakdown(settings, "gpt-5.6-luna", {
+        inputTokens: 100_000,
+        inputTokensDetails: {
+          cached_tokens: 20_000,
+          cache_write_tokens: 40_000,
+        },
+      }),
+    ).toEqual({
+      // 40k uncached input + 20k cache reads + 40k cache writes.
+      providerCostMicros: 18_400,
+      creditCostMicros: 19_320,
+    });
+    // >272K uses long-context luna ($0.40/M input): ceil(272001*400000/1e6)=108801, +5% -> 114242
     expect(
       calculateModelUsageCostMicros(settings, "gpt-5.6-luna", {
         inputTokens: 272_001,
       }),
-    ).toBe(136_002);
+    ).toBe(114_242);
     expect(
       calculateModelUsageCostMicros(
         settings,
@@ -1932,7 +1968,7 @@ describe("configuredModelPricing", () => {
         { inputTokens: 100_000 },
         { latencyMode: "fast" },
       ),
-    ).toBe(50_000);
+    ).toBe(42_000);
     expect(
       calculateModelUsageCostBreakdown(
         settings,
@@ -1942,7 +1978,7 @@ describe("configuredModelPricing", () => {
       ),
     ).toEqual({
       providerCostMicros: 40_000,
-      creditCostMicros: 50_000,
+      creditCostMicros: 42_000,
     });
     expect(
       calculateModelUsageCostBreakdown(settings, "gpt-5.6-luna", {
@@ -1956,7 +1992,7 @@ describe("configuredModelPricing", () => {
     ).toEqual({
       // Each provider request stays below the long-context threshold.
       providerCostMicros: 60_000,
-      creditCostMicros: 75_000,
+      creditCostMicros: 63_000,
     });
   });
 
@@ -2037,6 +2073,39 @@ describe("configuredModelPricing", () => {
     });
     // an untouched default stays intact (flat projection = schedule.default).
     expect(pricing["gpt-5.6-sol"]).toEqual(defaultModelPricing["gpt-5.6-sol"]!.default);
+  });
+
+  test("accepts a complete tiered schedule in explicit pricing JSON", () => {
+    const schedule = {
+      default: {
+        inputMicrosPerMillionTokens: 220_000,
+        cachedInputMicrosPerMillionTokens: 22_000,
+        cacheWriteMicrosPerMillionTokens: 275_000,
+        outputMicrosPerMillionTokens: 1_320_000,
+        marginBps: 500,
+      },
+      inputTokenTiers: [
+        {
+          minimumInputTokens: 272_001,
+          pricing: {
+            inputMicrosPerMillionTokens: 440_000,
+            cachedInputMicrosPerMillionTokens: 44_000,
+            cacheWriteMicrosPerMillionTokens: 550_000,
+            outputMicrosPerMillionTokens: 1_980_000,
+            marginBps: 500,
+          },
+        },
+      ],
+    };
+    const settings = withEnv(
+      {
+        OPENGENI_OPENAI_API_KEY: "sk-test",
+        OPENGENI_MODEL_PRICING_JSON: JSON.stringify({ "gpt-5.6-luna": schedule }),
+      },
+      () => getSettings(),
+    );
+
+    expect(configuredModelPricingSchedules(settings)["gpt-5.6-luna"]).toEqual(schedule);
   });
 });
 

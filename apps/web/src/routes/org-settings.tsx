@@ -70,7 +70,7 @@ const COMPANY_PROFILE_AGENT_MODE_COPY: Record<
     description: "Agents cannot stage or activate organization identity changes.",
   },
   suggest: {
-    label: "Review first",
+    label: "Require approval",
     description: "Agents prepare a proposal and the initiating owner approves each change.",
   },
   automatic: {
@@ -125,7 +125,7 @@ function OrganizationCompanyProfileAgentPolicy({ workspaceId }: { workspaceId: s
         value.mode === "automatic"
           ? "Autonomous organization identity updates are enabled."
           : value.mode === "suggest"
-            ? "Organization identity changes require owner review."
+            ? "Organization identity changes require owner approval."
             : "Agent-authored organization identity changes are off.",
       );
     } catch (saveError) {
@@ -583,6 +583,7 @@ export function OrgSettingsRoute({
                     name,
                     operationId,
                   });
+                  await context.revalidatePrincipalAccess();
                 }
               }}
             />

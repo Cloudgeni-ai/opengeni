@@ -142,6 +142,7 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
+import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
   SandboxExecReadinessTimeoutError,
   SandboxProvisionStageError,
@@ -253,6 +254,7 @@ describe("periodic workspace snapshot admission", () => {
     firstProviderRequestStarted: true,
     snapshotInFlight: false,
     turnEndCaptureInProgress: false,
+    deadlineRotationRequested: false,
   };
 
   test("keeps checkpoint maintenance off the first-request critical path", () => {
@@ -267,6 +269,9 @@ describe("periodic workspace snapshot admission", () => {
     expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, turnEndCaptureInProgress: true })).toBe(
       false,
     );
+    expect(
+      shouldStartPeriodicWorkspaceSnapshot({ ...ready, deadlineRotationRequested: true }),
+    ).toBe(false);
   });
 });
 
@@ -3791,6 +3796,64 @@ describe("worker shutdown preemption", () => {
         cancellationRequested: false,
       }),
     ).toBe(true);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: false,
+        deadlineRotationRequested: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("provider-deadline rotation preempts immediately without waiting for a snapshot", async () => {
+    const controller = new AbortController();
+    const sandboxState = { deadlineRotationRequested: false };
+
+    expect(
+      preemptSandboxTurnForDeadlineRotation({
+        controller,
+        sandboxState,
+        sandboxGroupId: "group-deadline",
+        leaseEpoch: 17,
+      }),
+    ).toBe(true);
+    expect(sandboxState.deadlineRotationRequested).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toMatchObject({
+      name: "SandboxDeadlineRotationError",
+      sandboxGroupId: "group-deadline",
+      leaseEpoch: 17,
+    });
+
+    const runtimeSource = await Bun.file(
+      new URL("../src/activities/agent-turn/sandbox-runtime.ts", import.meta.url),
+    ).text();
+    const rotationStart = runtimeSource.indexOf("const beginRotationPreemption");
+    const rotationEnd = runtimeSource.indexOf("const startLeaseHeartbeat", rotationStart);
+    const rotationSource = runtimeSource.slice(rotationStart, rotationEnd);
+    expect(rotationSource).toContain("preemptSandboxTurnForDeadlineRotation");
+    expect(rotationSource.indexOf("stopLeaseHeartbeat();")).toBeLessThan(
+      rotationSource.indexOf("preemptSandboxTurnForDeadlineRotation"),
+    );
+    expect(rotationSource).not.toContain("snapshotInFlight");
+    expect(rotationSource).not.toContain("persistSandboxDeadlineRotationCheckpoint");
+  });
+
+  test("joins a periodic provider capture before every proof-bearing holder release", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const finalReleaseStart = source.lastIndexOf("} finally {");
+    const finalReleaseSource = source.slice(finalReleaseStart);
+    const stopHeartbeatAt = finalReleaseSource.indexOf("stopLeaseHeartbeat();");
+    const rotationJoinAt = finalReleaseSource.indexOf("rotationPreemptionInFlight.catch");
+    const snapshotJoinAt = finalReleaseSource.indexOf("await drainInFlightWarmSnapshot();");
+    const proofReleaseAt = finalReleaseSource.indexOf("releaseTurnSandboxAfterWriterDrain");
+
+    expect(stopHeartbeatAt).toBeGreaterThan(-1);
+    expect(rotationJoinAt).toBeGreaterThan(stopHeartbeatAt);
+    expect(snapshotJoinAt).toBeGreaterThan(rotationJoinAt);
+    expect(proofReleaseAt).toBeGreaterThan(snapshotJoinAt);
   });
 
   test("turns an unconfirmed physical tool fence into a hard failure", () => {

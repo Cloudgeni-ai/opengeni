@@ -166,7 +166,27 @@ describe("startParallelSessionTitleGeneration", () => {
     });
   });
 
-  test("finish aborts and joins a title request that is still pending", async () => {
+  test("finish waits for a title request that is still pending", async () => {
+    let observedSignal: AbortSignal | null = null;
+    let completeGeneration!: (value: { title: string; usage: null }) => void;
+    const task = startParallelSessionTitleGeneration({
+      generate: async (signal) => {
+        observedSignal = signal;
+        return await new Promise<{ title: string; usage: null }>((resolve) => {
+          completeGeneration = resolve;
+        });
+      },
+    });
+
+    await Promise.resolve();
+    const finished = task.finish();
+    expect(observedSignal?.aborted).toBe(false);
+    completeGeneration({ title: "Quick response title", usage: null });
+    expect(await finished).toEqual({ title: "Quick response title", usage: null });
+    expect(observedSignal?.aborted).toBe(false);
+  });
+
+  test("cancel aborts and joins a title request that is still pending", async () => {
     let observedSignal: AbortSignal | null = null;
     const task = startParallelSessionTitleGeneration({
       generate: async (signal) => {
@@ -177,7 +197,7 @@ describe("startParallelSessionTitleGeneration", () => {
     });
 
     await Promise.resolve();
-    expect(await task.finish()).toBeNull();
+    await task.cancel();
     expect(observedSignal?.aborted).toBe(true);
   });
 });

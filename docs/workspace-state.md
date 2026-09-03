@@ -29,7 +29,7 @@ The small always-on organization identity and mission are administered from
 **Organization settings → Knowledge**. Products, customers, goals, constraints,
 and other company facts live in company-scoped Documents on that same surface
 and are retrieved when relevant. Learning mode is administered from **Workspace
-settings → General → Learning & autonomy**. Neither is a workspace instruction
+settings → General → Workspace instruction & Skill autonomy**. Neither is a workspace instruction
 or Skill.
 
 ## Authority boundaries

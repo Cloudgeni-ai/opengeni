@@ -35,7 +35,7 @@ describe("workspace learning SDK", () => {
       targetRevisionId: previousRevisionId,
       expectedCurrentRevisionId: revisionId,
       expectedActivationVersion: 3,
-      reason: "Restore review-first learning",
+      reason: "Restore approval-required learning",
     });
     await client.undoGovernedLearningActivation(workspaceId, activationId, {
       operationId: crypto.randomUUID(),

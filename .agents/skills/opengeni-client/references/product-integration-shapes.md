@@ -18,7 +18,7 @@ customer browser / mobile app
             v
 customer backend / tenant boundary
   - stores one organization API key
-  - maps product tenant -> organization workspace (wire kind "shared")
+  - maps the chosen product sharing boundary -> organization workspace
   - stores/version-controls product Skills
             |
             | @opengeni/sdk, server-held OpenGeni credential
@@ -40,6 +40,28 @@ The external product is the runtime Skill source of truth. There is no
 organization-wide Skill registry or Skill inheritance in the product
 integration contract; selected Skills are sent inline for each product-created
 session.
+
+## Choose The Isolation Unit
+
+One workspace per product tenant is correct only when that tenant may share
+workspace-scoped agent authority and resources. Default to:
+
+| Sharing requirement | Workspace mapping |
+| --- | --- |
+| Tenant/team chats may collaborate | Per tenant/team |
+| Chats are private between end users | Per end user |
+| Every chat is a hard boundary, including within one user | Per chat |
+| Data is shared but chats are private | Per user/chat, with equivalent scoped data access |
+
+A live agent with the relevant first-party session tools can reach unrelated
+sessions in the same workspace. Turning workspace Memory off does not change
+that. Removing all unnecessary cross-session and workspace-wide tools is useful
+defense in depth for an explicitly softer design, but a hard requirement needs
+separate workspaces.
+
+An organization API key creates workspace-visible top-level sessions. It does
+not impersonate the customer's end user as an OpenGeni managed human and cannot
+use Only-me visibility as a substitute for the mapping above.
 
 ## Decision Matrix
 
@@ -69,6 +91,9 @@ mounting the stock OpenGeni application.
   idempotent replay.
 - Loads product-owned Skills and passes the selected definitions inline in
   `CreateSessionRequest.skills` for each product-created session.
+- Sends explicit minimal `tools` and `firstPartyMcpTools` selections. Omission
+  inherits workspace/deployment defaults; an explicit empty array suppresses
+  that category.
 - Calls `OpenGeniClient` and returns product-shaped responses.
 - Re-streams session SSE with `proxySessionEventStream` when the browser needs a
   live timeline.
@@ -137,9 +162,9 @@ persist its own link before the first OpenGeni turn can run. The ID is
 correlation, not authorization.
 
 `modelContext` is ordinary user-role model content, not a system instruction or secret. It is a snapshot, not a substitute for tools. If the agent needs
-current product state or must mutate product data, expose a tenant-scoped MCP
-server. Keep tool outputs machine-useful; the product may render a separate,
-more concise user-facing projection.
+current product state or must mutate product data, expose a tenant-scoped
+OpenAPI/GraphQL Integration or MCP server. Keep tool outputs machine-useful;
+the product may render a separate, more concise user-facing projection.
 
 ## Ownership Of Product Data
 
@@ -175,19 +200,33 @@ They do not change the product integration boundary. A customer product should
 only expose machine selection/enrollment when its users need to run on their own
 computers; ordinary embedded agents should use the deployment default.
 
+## Delivery Autonomy
+
+Infer the delivery workflow from the user's request, repository guidance, CI,
+and environment documentation. Implement and test when asked to implement, but
+do not treat available repository or cloud credentials as authorization to
+push, open a pull request, merge, deploy, or mutate production. Perform a named
+external step when it was authorized clearly. Otherwise finish the safe work
+and ask at the actual boundary, naming the target and impact, or provide the
+customer-owned runbook when they retain deployment authority.
+
 ## Delivery Checklist
 
 Before calling an integration complete, verify:
 
 1. Credentials never reach browser bundles, logs, prompts, or generated skills.
-2. Product authorization is checked before every workspace/session proxy call.
-3. Session creation retries reuse one idempotency key.
-4. SSE reconnect resumes by sequence and does not duplicate timeline effects.
-5. Unknown additive event types do not crash the client.
-6. File upload works from every intended browser origin, including signed PUT
+2. The selected tenant/user/chat sharing boundary maps to distinct or shared
+   workspaces exactly as intended.
+3. Product authorization is checked before every workspace/session proxy call.
+4. The effective first-party and external tool allowlists contain only required
+   capabilities.
+5. Session creation retries reuse one idempotency key.
+6. SSE reconnect resumes by sequence and does not duplicate timeline effects.
+7. Unknown additive event types do not crash the client.
+8. File upload works from every intended browser origin, including signed PUT
    CORS and completion.
-7. Prompt scopes are used correctly; visible text is not carrying hidden policy.
-8. MCP tools enforce the same tenant/user boundary as the product API.
-9. Narrow and wide layouts work without host CSS reaching into SDK internals.
-10. The integration pins compatible SDK/server major versions and checks the
+9. Prompt scopes are used correctly; visible text is not carrying hidden policy.
+10. API/MCP tools enforce the same tenant/user boundary as the product API.
+11. Narrow and wide layouts work without host CSS reaching into SDK internals.
+12. The integration pins compatible SDK/server major versions and checks the
     live client config rather than hard-coding volatile catalogs.

@@ -24,6 +24,8 @@ const sandboxProviderDeadlineInteractionMigrationName =
   "0388_sandbox_provider_deadline_interactions.sql";
 const sandboxProviderDeadlineInteractionFollowupMigrationName =
   "0391_sandbox_provider_deadline_interaction_followup.sql";
+const sandboxDeadlineRotationPreemptionMigrationName =
+  "0397_sandbox_deadline_rotation_preemption.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -186,7 +188,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${sessionEventCursorMigrationName}),
           (${sessionEventRawLaneActivationMigrationName}),
           (${sandboxProviderDeadlineInteractionMigrationName}),
-          (${sandboxProviderDeadlineInteractionFollowupMigrationName})
+          (${sandboxProviderDeadlineInteractionFollowupMigrationName}),
+          (${sandboxDeadlineRotationPreemptionMigrationName})
       `;
       await migrate(databaseUrl);
       await sql`
@@ -204,7 +207,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sessionEventCursorMigrationName},
           ${sessionEventRawLaneActivationMigrationName},
           ${sandboxProviderDeadlineInteractionMigrationName},
-          ${sandboxProviderDeadlineInteractionFollowupMigrationName}
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName},
+          ${sandboxDeadlineRotationPreemptionMigrationName}
         )
       `;
 
@@ -249,7 +253,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sessionEventCursorMigrationName},
           ${sessionEventRawLaneActivationMigrationName},
           ${sandboxProviderDeadlineInteractionMigrationName},
-          ${sandboxProviderDeadlineInteractionFollowupMigrationName}
+          ${sandboxProviderDeadlineInteractionFollowupMigrationName},
+          ${sandboxDeadlineRotationPreemptionMigrationName}
         )
         order by name
       `;
@@ -267,6 +272,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         sessionEventRawLaneActivationMigrationName,
         sandboxProviderDeadlineInteractionMigrationName,
         sandboxProviderDeadlineInteractionFollowupMigrationName,
+        sandboxDeadlineRotationPreemptionMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

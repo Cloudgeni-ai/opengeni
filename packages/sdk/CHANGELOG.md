@@ -1,5 +1,20 @@
 # @opengeni/sdk
 
+## 3.5.1
+
+### Patch Changes
+
+- 8b42f58: Add the managed-human API, SDK, and atomic tenant lifecycle for creating additional organizations with an isolated Personal workspace and a first shared team workspace.
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- e2a668b: Add the built-in, instruction-only OpenGeni Product Integration Pack for adaptive, tenant-safe customer integrations, with explicit per-session activation that prevents its implementation guidance from entering ordinary customer chats.
+- 9c45eae: Keep pending sessions distinguishable with a sensitive-safe opening-prompt preview or short session reference, and let bounded parallel semantic title generation finish after quick responses instead of cancelling it at turn settlement.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+
 ## 3.5.0
 
 ### Minor Changes

@@ -2106,7 +2106,7 @@ export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_
 export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
@@ -2143,10 +2143,12 @@ export const WorkspaceSettingsSchema = z
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 
-// Resolve the effective memoryEnabled flag from a raw settings bag (default off).
-export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? parsed.data.memoryEnabled === true : false;
+// Resolve the effective memoryEnabled flag from a raw settings bag. Omission
+// defaults on; malformed settings still fail closed so invalid state cannot
+// unexpectedly enable durable retention.
+export function resolveWorkspaceMemoryEnabled(settings?: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings === undefined ? {} : settings);
+  return parsed.success ? parsed.data.memoryEnabled !== false : false;
 }
 
 /** Explicit defaults for new chats/schedules, or null for deployment defaults. */
@@ -3373,6 +3375,9 @@ export const InsightsModelUsageRow = z.object({
   /** Hypothetical provider-rate USD; never an OpenGeni charge. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** OpenGeni credit price at the captured rate, whether or not credits paid for the call. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
 });
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
@@ -3383,6 +3388,9 @@ export const InsightsSeriesPoint = z.object({
   /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** UTC hour/day-bucketed equivalent OpenGeni credit price for calls with captured pricing. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
@@ -3417,6 +3425,8 @@ export const InsightsSpendDriver = z.object({
   creditUsd: z.number().nonnegative(),
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
@@ -3469,6 +3479,8 @@ export const InsightsScheduleRow = z.object({
   creditUsd: z.number().nonnegative().nullable(),
   estimatedProviderUsd: z.number().nonnegative().nullable(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative().nullable(),
   tokens: z.number().nonnegative().nullable(),
   cacheHitPct: z.number().int().min(0).max(100).nullable(),
   billing: InsightsBillingPath.nullable(),
@@ -3496,6 +3508,8 @@ export const InsightsModelCallRow = z.object({
   creditUsd: z.number().nonnegative(),
   /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
   estimatedProviderUsd: z.number().nonnegative().nullable(),
+  /** Equivalent OpenGeni credit price; null when historical pricing is unavailable. */
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
   pricingSource: InsightsPricingSource.nullable(),
 });
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
@@ -3544,6 +3558,11 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorEstimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** Equivalent OpenGeni credit price across calls whose historical price was captured. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  priorEquivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+  priorEquivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
@@ -9708,6 +9727,12 @@ export const CapabilityPackSkill = z
         message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
       }),
     description: z.string().min(1).max(2048).optional(),
+    // Workspace-managed Skills are available to every session in the
+    // workspace. Session-selected Skills remain installed and inspectable, but
+    // enter model context only when their immutable definition is attached to
+    // a session explicitly. This is the hard contamination boundary for Packs
+    // that guide implementation agents rather than customer-facing agents.
+    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
     files: z.array(CapabilityPackSkillFile).min(1).max(64),
   })
   .superRefine((skill, ctx) => {
@@ -9735,8 +9760,11 @@ export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 // Inline skill content fixed onto one session at creation. It intentionally
 // uses the exact same validated directory shape as a pack skill, but has a
 // different semantic owner and lifecycle. Session readers can inspect it; it
-// is configuration, never a secret store.
-export const SessionSkill = CapabilityPackSkill;
+// is configuration, never a secret store. Pack activation policy is consumed
+// at admission and cannot become part of the session-owned artifact.
+export const SessionSkill = CapabilityPackSkill.transform(
+  ({ activationMode: _activationMode, ...skill }) => skill,
+);
 export type SessionSkill = z.infer<typeof SessionSkill>;
 
 export const SessionSkills = z
@@ -14383,6 +14411,17 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // Inline skills are fixed onto the session. Child omission inherits the
     // trusted parent's selection; an explicit array, including [], wins.
     skills: SessionSkills.default([]),
+    // Immutable workspace Skill identities to copy onto this session at
+    // creation. This is the explicit opt-in path for session-selected Pack
+    // Skills: installation alone never exposes them to model context. Child
+    // omission still inherits the parent's already-materialized session Skills.
+    installedSkillIds: z
+      .array(z.string().min(1).max(512))
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "installed Skill identities must be unique",
+      })
+      .optional(),
     // The same child omission rule applies to selected MCP tool refs. Top-level
     // omission still applies workspace-default capability MCP tools; explicit []
     // suppresses those defaults (the first-party OpenGeni server remains added).
@@ -15953,6 +15992,7 @@ export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     inputMicrosPerMillionTokens: z.number().int().nonnegative(),
     cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    cacheWriteMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
     outputMicrosPerMillionTokens: z.number().int().nonnegative(),
     marginBps: z.number().int().min(0).max(100_000).optional(),
   }),
