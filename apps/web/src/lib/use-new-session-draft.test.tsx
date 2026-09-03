@@ -20,6 +20,7 @@ registerDom();
 
 const WORKSPACE_A = "00000000-0000-4000-8000-0000000000a1";
 const WORKSPACE_B = "00000000-0000-4000-8000-0000000000b2";
+const PROJECT_A = "00000000-0000-4000-8000-0000000000c3";
 
 function editable(overrides: Partial<NewSessionDraftEditable> = {}): NewSessionDraftEditable {
   return {
@@ -179,6 +180,35 @@ describe("useNewSessionDraft", () => {
 
     expect(hook.result.current.value.toolsProvided).toBe(true);
     expect(hook.result.current.value.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    expect(Object.hasOwn(hook.result.current.value, "selectedProjectChannelId")).toBe(false);
+    await hook.unmount();
+  });
+
+  test("hydrates and serializes explicit project provenance including Default", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        getNewSessionDraft: async () => remote(3, { selectedProjectChannelId: PROJECT_A }),
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+
+    expect(hook.result.current.value.selectedProjectChannelId).toBe(PROJECT_A);
+    await actRun(() =>
+      hook.result.current.setValue({
+        ...hook.result.current.value,
+        selectedProjectChannelId: null,
+      }),
+    );
+    await flush(550);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.selectedProjectChannelId).toBeNull();
+    expect(Object.hasOwn(requests[0]!, "selectedProjectChannelId")).toBe(true);
     await hook.unmount();
   });
 

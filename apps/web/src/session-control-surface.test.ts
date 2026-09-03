@@ -142,6 +142,17 @@ describe("session control surface architecture", () => {
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
   });
 
+  test("hydrates durable project provenance before normal and realtime create", async () => {
+    const route = await source("routes/sessions-index.tsx");
+
+    expect(route).toContain("selectedProjectChannelId: selectedChannelId,");
+    expect(route).toContain("channelId: remote.selectedProjectChannelId,");
+    expect(route.match(/const submission = submissionFromSessionDraft\(/g)).toHaveLength(2);
+    expect(route.match(/targetSandboxId: submission\.options\.targetSandboxId/g)).toHaveLength(2);
+    expect(route.match(/workingDir: submission\.options\.workingDir/g)).toHaveLength(2);
+    expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
+  });
+
   test("keeps Variable Sets editable at create time and beside an established composer", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),

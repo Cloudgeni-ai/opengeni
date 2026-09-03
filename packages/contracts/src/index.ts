@@ -7255,6 +7255,8 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /** Absent on legacy drafts; null is explicit provenance for the Default project. */
+  selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
   selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
   updatedAt: z.string().nullable(),
@@ -7269,6 +7271,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;

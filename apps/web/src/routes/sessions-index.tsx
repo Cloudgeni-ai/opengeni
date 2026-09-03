@@ -652,6 +652,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
+      selectedProjectChannelId: selectedChannelId,
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
@@ -669,6 +670,7 @@ function SessionsIndexRouteContent({
       message,
       personalWorkspace,
       persistedToolPolicy,
+      selectedChannelId,
     ],
   );
   useEffect(() => {
@@ -720,9 +722,10 @@ function SessionsIndexRouteContent({
       const projectSelection = newSessionProjectSelection(
         history,
         channelId,
-        // The durable draft does not identify which project its compute/path
-        // came from. Do not assign the launch target as invented provenance.
-        { channelId: undefined, compute: restored.compute },
+        {
+          channelId: remote.selectedProjectChannelId,
+          compute: restored.compute,
+        },
         defaultSandboxBackend,
       );
       setSelectionHistory(history);

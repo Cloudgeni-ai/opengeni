@@ -11,6 +11,7 @@ import {
   getSandbox,
   getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   newSessionSelectionHistory,
   publicNewSessionDraftOptions,
@@ -41,6 +42,7 @@ function mapNewSessionDraft(
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
 ): NewSessionDraftValue | null {
   if (!row) return null;
+  const selectedProjectChannelId = newSessionDraftSelectedProjectChannelId(row);
   return NewSessionDraft.parse({
     revision: row.revision,
     text: row.text,
@@ -50,6 +52,7 @@ function mapNewSessionDraft(
     model: row.model,
     reasoningEffort: row.reasoningEffort,
     latencyMode: row.latencyMode,
+    ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
     options: publicNewSessionDraftOptions(row),
     selectionHistory: newSessionSelectionHistory(row),
     updatedAt: row.updatedAt.toISOString(),
@@ -264,6 +267,9 @@ export async function saveActorNewSessionDraft(
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           latencyMode: input.latencyMode,
+          ...(input.selectedProjectChannelId !== undefined
+            ? { selectedProjectChannelId: input.selectedProjectChannelId }
+            : {}),
           options: input.options,
           // Only managed people are removed through removeWorkspaceMember().
           // API keys and delegated service actors (for example the first-party

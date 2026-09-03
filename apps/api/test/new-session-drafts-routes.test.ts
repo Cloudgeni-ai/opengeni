@@ -83,6 +83,7 @@ mock.module("@opengeni/core", () => ({
       model: string;
       reasoningEffort: "high";
       latencyMode: "priority";
+      selectedProjectChannelId?: string | null;
       options: {};
     };
     return {
@@ -94,6 +95,9 @@ mock.module("@opengeni/core", () => ({
       model: request.model,
       reasoningEffort: request.reasoningEffort,
       latencyMode: request.latencyMode,
+      ...(request.selectedProjectChannelId !== undefined
+        ? { selectedProjectChannelId: request.selectedProjectChannelId }
+        : {}),
       options: request.options,
       updatedAt: "2026-07-20T00:00:00.000Z",
     };
@@ -185,14 +189,20 @@ describe("new-session draft routes", () => {
           model: "gpt-5.6-sol",
           reasoningEffort: "high",
           latencyMode: "priority",
+          selectedProjectChannelId: null,
           options: {},
         }),
       },
     );
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ revision: 1, text: "private draft" });
+    expect(await response.json()).toMatchObject({
+      revision: 1,
+      text: "private draft",
+      selectedProjectChannelId: null,
+    });
     expect(lastSaveGrant?.subjectId).toBe(subjectId);
     expect(lastSaveInput).not.toHaveProperty("subjectId");
+    expect(lastSaveInput).toHaveProperty("selectedProjectChannelId", null);
 
     const forbidden = await app().request(
       `http://x/v1/workspaces/${workspaceId}/new-session-draft`,

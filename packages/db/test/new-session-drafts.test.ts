@@ -17,6 +17,7 @@ import {
   initializeSessionStartAtomically,
   NewSessionDraftAccessError,
   NewSessionDraftConflictError,
+  newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
@@ -65,6 +66,7 @@ function draftInput(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: "standard" | "priority" | "fast";
+    selectedProjectChannelId: string | null;
     options: NewSessionDraftOptions;
   }> = {},
 ) {
@@ -80,6 +82,9 @@ function draftInput(
     model: overrides.model ?? "scripted-model",
     reasoningEffort: overrides.reasoningEffort ?? ("low" as const),
     latencyMode: overrides.latencyMode ?? ("standard" as const),
+    ...(Object.hasOwn(overrides, "selectedProjectChannelId")
+      ? { selectedProjectChannelId: overrides.selectedProjectChannelId }
+      : {}),
     options: overrides.options ?? {},
   };
 }
@@ -144,6 +149,22 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
+  test("stores legacy, Default, and named-project provenance distinctly", async () => {
+    const context = await fixture();
+    const legacy = await saveDraft(context, 0);
+    expect(newSessionDraftSelectedProjectChannelId(legacy)).toBeUndefined();
+    expect(Object.hasOwn(legacy.sessionOptions, "selectedProjectChannelId")).toBe(false);
+
+    const explicitDefault = await saveDraft(context, 1, { selectedProjectChannelId: null });
+    expect(newSessionDraftSelectedProjectChannelId(explicitDefault)).toBeNull();
+    expect(explicitDefault.sessionOptions).toMatchObject({ selectedProjectChannelId: null });
+
+    const projectId = crypto.randomUUID();
+    const namedProject = await saveDraft(context, 2, { selectedProjectChannelId: projectId });
+    expect(newSessionDraftSelectedProjectChannelId(namedProject)).toBe(projectId);
+    expect(namedProject.sessionOptions).toMatchObject({ selectedProjectChannelId: projectId });
+  });
+
   test("markerless legacy rows preserve narrowed and empty tool intent through seeding", async () => {
     for (const tools of [[{ kind: "mcp", id: "docs" }], []] as ToolRef[][]) {
       const context = await fixture();
@@ -368,6 +389,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(exact, 0, {
       text: "private prompt",
+      selectedProjectChannelId: channelId,
       resources: [
         {
           kind: "repository",
@@ -430,6 +452,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       variableSetIds,
       variableSetId: variableSetIds[1],
       rigId: expect.any(String),
+      selectedProjectChannelId: channelId,
       toolsProvided: true,
       selectionHistory: {
         projects: [
@@ -510,7 +533,10 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
     const workingDir = "/workspace/realtime";
-    await saveDraft(context, 0, { text: "keep for a later text session" });
+    await saveDraft(context, 0, {
+      text: "keep for a later text session",
+      selectedProjectChannelId: channelId,
+    });
     const session = await createUninitializedSession(context);
 
     await initializeSessionStartAtomically(client.db, {
@@ -530,6 +556,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       revision: 1,
       text: "keep for a later text session",
       sessionOptions: {
+        selectedProjectChannelId: channelId,
         selectionHistory: {
           projects: [
             {

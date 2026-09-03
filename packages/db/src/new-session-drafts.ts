@@ -38,6 +38,9 @@ export type NewSessionDraftSnapshot = {
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
   options: NewSessionDraftOptionsValue;
+  // Project provenance is hydration metadata rather than a create option. Its
+  // save still advances the revision fence, while omitting it here keeps old
+  // clients compatible with a new server's exact create comparison.
 };
 
 export class NewSessionDraftConflictError extends Error {
@@ -61,16 +64,26 @@ type StoredNewSessionDraftOptions = NewSessionDraftOptionsValue & {
   toolsProvided?: boolean;
   /** Successful-create preference state, separate from transient draft edits. */
   selectionHistory?: NewSessionSelectionHistory;
+  /** Absent is legacy/unknown; null is explicit provenance for the Default project. */
+  selectedProjectChannelId?: string | null;
 };
 
 const REMEMBERED_WORKING_DIR_MAX_LENGTH = 4096;
+const PROJECT_CHANNEL_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function storedOptions(
   options: NewSessionDraftOptionsValue,
   toolsProvided: boolean,
   selectionHistory: NewSessionSelectionHistory = { projects: [] },
+  selectedProjectChannelId?: string | null,
 ): StoredNewSessionDraftOptions {
-  return { ...options, toolsProvided, selectionHistory };
+  return {
+    ...options,
+    toolsProvided,
+    selectionHistory,
+    ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
+  };
 }
 
 export function newSessionSelectionHistory(row: NewSessionDraftRow): NewSessionSelectionHistory {
@@ -119,10 +132,23 @@ export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
   return options.toolsProvided === true || !Object.hasOwn(options, "toolsProvided");
 }
 
+export function newSessionDraftSelectedProjectChannelId(
+  row: NewSessionDraftRow,
+): string | null | undefined {
+  const options = row.sessionOptions as StoredNewSessionDraftOptions;
+  if (!Object.hasOwn(options, "selectedProjectChannelId")) return undefined;
+  if (options.selectedProjectChannelId === null) return null;
+  return typeof options.selectedProjectChannelId === "string" &&
+    PROJECT_CHANNEL_ID_PATTERN.test(options.selectedProjectChannelId)
+    ? options.selectedProjectChannelId
+    : undefined;
+}
+
 export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptionsValue {
   const options = { ...(row.sessionOptions as StoredNewSessionDraftOptions) };
   delete options.toolsProvided;
   delete options.selectionHistory;
+  delete options.selectedProjectChannelId;
   return options;
 }
 
@@ -158,6 +184,7 @@ export async function saveNewSessionDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: LatencyMode;
+    selectedProjectChannelId?: string | null;
     options: NewSessionDraftOptionsValue;
     /** API-key and delegated service subjects have no workspace-membership row. */
     requireWorkspaceMembership?: boolean;
@@ -238,6 +265,7 @@ export async function saveNewSessionDraftInTransaction(
       input.options,
       input.toolsProvided,
       current ? newSessionSelectionHistory(current) : { projects: [] },
+      input.selectedProjectChannelId,
     ),
     updatedAt: new Date(),
   };
@@ -350,6 +378,7 @@ export async function rememberNewSessionSelectionInTransaction(
         publicNewSessionDraftOptions(current),
         newSessionDraftToolsProvided(current),
         rememberNewSessionSelection(newSessionSelectionHistory(current), input.acceptedSelection),
+        input.acceptedSelection.channelId,
       ),
     })
     .where(eq(schema.newSessionDrafts.id, current.id))
@@ -457,6 +486,9 @@ export async function seedNewSessionDraftInTransaction(
   const options = parsedOptions.success ? parsedOptions.data : {};
   const targetSandboxId =
     typeof options.targetSandboxId === "string" ? options.targetSandboxId : undefined;
+  const selectedProjectChannelId = input.acceptedSelection
+    ? input.acceptedSelection.channelId
+    : newSessionDraftSelectedProjectChannelId(current);
   const safeOptions: NewSessionDraftOptionsValue = {
     ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
     ...(targetSandboxId ? { targetSandboxId } : {}),
@@ -498,6 +530,7 @@ export async function seedNewSessionDraftInTransaction(
               input.acceptedSelection,
             )
           : newSessionSelectionHistory(current),
+        selectedProjectChannelId,
       ),
       updatedAt: new Date(),
     })

@@ -485,7 +485,28 @@ describe("successful-create selection history", () => {
     });
   });
 
-  test("resets hydrated compute with unknown or different project provenance", () => {
+  test("preserves persisted machine placement for the same project without history", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const selection = newSessionProjectSelection({ projects: [] }, project, {
+      channelId: project,
+      compute: hydratedCompute,
+    });
+
+    expect(selection).toEqual({ channelId: project, compute: hydratedCompute });
+    expect(
+      submissionFromSessionDraft({ ...emptySessionDraft(), compute: selection.compute }).options,
+    ).toEqual({
+      targetSandboxId: machineB,
+      workingDir: "/workspace/project-a",
+      visibility: "workspace",
+    });
+  });
+
+  test("resets persisted compute for a different explicit launch target", () => {
     const hydratedCompute = {
       kind: "machine" as const,
       sandboxId: machineB,
@@ -499,12 +520,12 @@ describe("successful-create selection history", () => {
     };
 
     expect(
-      newSessionProjectSelection(historyWithoutTargets, null, {
-        channelId: undefined,
+      newSessionProjectSelection(historyWithoutTargets, projectB, {
+        channelId: project,
         compute: hydratedCompute,
       }),
     ).toEqual({
-      channelId: null,
+      channelId: projectB,
       compute: { kind: "sandbox", backend: "" },
     });
     expect(
@@ -516,6 +537,26 @@ describe("successful-create selection history", () => {
       ),
     ).toEqual({
       channelId: projectB,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("resets legacy hydrated compute with missing project provenance", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/legacy" },
+    };
+
+    expect(
+      newSessionProjectSelection(
+        { projects: [] },
+        project,
+        { channelId: undefined, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: project,
       compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
     });
   });
@@ -556,6 +597,30 @@ describe("successful-create selection history", () => {
     expect(
       newSessionProjectSelection(historyWithoutDefault, null, explicitDefaultSelection),
     ).toEqual(explicitDefaultSelection);
+  });
+
+  test("treats null as explicit Default-project provenance", () => {
+    const defaultCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/default-draft" },
+    };
+
+    expect(
+      newSessionProjectSelection({ projects: [] }, null, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({ channelId: null, compute: defaultCompute });
+    expect(
+      newSessionProjectSelection({ projects: [] }, project, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "sandbox", backend: "" },
+    });
   });
 });
 
