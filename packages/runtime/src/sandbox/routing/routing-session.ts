@@ -30,7 +30,11 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { CAPABILITY_DESCRIPTORS, type SandboxBackend } from "@opengeni/contracts";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
-import { connectedMachineWorkspaceRootsEqual } from "../selfhosted/workspace-path";
+import {
+  connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
+  resolveConnectedMachinePath,
+} from "../selfhosted/workspace-path";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
 import {
   ChannelAPartialMutationError,
@@ -166,6 +170,10 @@ export interface RoutingSandboxSessionDeps {
    * seeding it here is byte-identical to what the first `resolve()` would produce.
    */
   defaultResolved?: ResolvedActiveBackend;
+  /** API-direct requests resolve one active route and retain it for the complete
+   * request. Worker turns omit this so an explicit mid-turn swap remains visible
+   * to the next tool call. */
+  bindActiveRouteOnFirstResolve?: boolean;
   /** Re-read the per-session active pointer. Called on EVERY op (the per-call
    *  re-resolve that makes a mid-turn swap visible to the next tool call). */
   readPointer(): Promise<ActivePointer>;
@@ -366,6 +374,21 @@ export class RoutingWorkspaceRootChangedError extends Error {
     super(
       `Active sandbox workspace root changed from "${expectedWorkspaceRoot}" to "${actualWorkspaceRoot}"; continue in a fresh attempt`,
     );
+  }
+}
+
+/** One API-direct request was bound to an active route, then the pointer moved
+ * before a later provider dispatch. The caller must refresh route capabilities
+ * rather than letting a canonical path land on a different backend. */
+export class RoutingActiveRouteChangedError extends Error {
+  readonly name = "RoutingActiveRouteChangedError";
+  readonly retryable = true;
+
+  constructor(
+    public readonly expected: ActivePointer,
+    public readonly actual: ActivePointer,
+  ) {
+    super("Active sandbox route changed during the request; refresh capabilities and retry");
   }
 }
 
@@ -627,7 +650,8 @@ function structuredExecResultFromBanner(result: string): {
 export class RoutingSandboxSession implements RoutableBackendSession {
   private readonly deps: RoutingSandboxSessionDeps;
   private readonly maxFenceRetries: number;
-  private readonly boundWorkspaceRoot: string | null;
+  private boundWorkspaceRoot: string | null;
+  private boundActiveRoute: ActivePointer | null = null;
   // The resolved-backend cache. Keyed by the FULL pointer tuple
   // `(activeEpoch, activeSandboxId)` — NOT the epoch alone. A swap bumps the epoch,
   // but a pointer can also change its target id WITHOUT an epoch bump: the
@@ -658,7 +682,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   constructor(deps: RoutingSandboxSessionDeps) {
     this.deps = deps;
     this.maxFenceRetries = deps.maxFenceRetries ?? 3;
-    this.boundWorkspaceRoot = workspaceRootForBackend(deps.defaultResolved?.session);
+    this.boundWorkspaceRoot = deps.bindActiveRouteOnFirstResolve
+      ? null
+      : workspaceRootForBackend(deps.defaultResolved?.session);
     this.rememberOpStreamBackend(deps.defaultResolved?.session);
   }
 
@@ -719,6 +745,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   private async resolve(): Promise<ResolvedActiveBackend> {
     const pointer = await this.deps.readPointer();
     if (
+      this.boundActiveRoute &&
+      (this.boundActiveRoute.activeEpoch !== pointer.activeEpoch ||
+        this.boundActiveRoute.activeSandboxId !== pointer.activeSandboxId)
+    ) {
+      throw new RoutingActiveRouteChangedError(this.boundActiveRoute, pointer);
+    }
+    if (
       this.cachedEpoch === pointer.activeEpoch &&
       this.cachedSandboxId === pointer.activeSandboxId &&
       this.cached
@@ -741,7 +774,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       ...resolved,
       activeEpoch: pointer.activeEpoch,
     };
+    if (this.deps.bindActiveRouteOnFirstResolve) {
+      if (
+        this.boundActiveRoute &&
+        (this.boundActiveRoute.activeEpoch !== pointer.activeEpoch ||
+          this.boundActiveRoute.activeSandboxId !== pointer.activeSandboxId)
+      ) {
+        throw new RoutingActiveRouteChangedError(this.boundActiveRoute, pointer);
+      }
+      this.boundActiveRoute ??= { ...pointer };
+    }
     const resolvedWorkspaceRoot = workspaceRootForBackend(routed.session);
+    if (this.deps.bindActiveRouteOnFirstResolve && this.boundWorkspaceRoot === null) {
+      this.boundWorkspaceRoot = resolvedWorkspaceRoot;
+    }
     if (
       this.boundWorkspaceRoot !== null &&
       resolvedWorkspaceRoot !== null &&
@@ -1620,16 +1666,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   /** Resolve the FileSystem root from the exact backend selected for this call.
    * Channel A uses this authority to validate canonical absolute paths without
    * teaching the renderer or host about provider-specific filesystem layouts. */
-  async fileSystemRoot(): Promise<string> {
+  async fileSystemAuthority(): Promise<{
+    root: string;
+    activeEpoch: number;
+    backendKind: string;
+  }> {
     const backend = await this.resolve();
-    // Channel A speaks workspace-relative paths. The SelfhostedSession resolves
-    // those against its exact host-native root, which also keeps the dock's
-    // portable path validation independent of Windows drive/UNC syntax.
-    if (backend.kind === "selfhosted") return ".";
     const state = backend.session.state as { manifest?: { root?: unknown } } | undefined;
     const manifestRoot = state?.manifest?.root;
-    if (typeof manifestRoot === "string" && manifestRoot.startsWith("/")) {
-      return manifestRoot === "/" ? "/" : manifestRoot.replace(/\/+$/, "");
+    if (typeof manifestRoot === "string" && isConnectedMachineAbsolutePath(manifestRoot)) {
+      return {
+        root: resolveConnectedMachinePath(manifestRoot, undefined),
+        activeEpoch: backend.activeEpoch ?? 0,
+        backendKind: backend.kind,
+      };
     }
     const descriptor =
       CAPABILITY_DESCRIPTORS[backend.kind as SandboxBackend] ??
@@ -1639,7 +1689,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (!descriptor) {
       throw new RoutingUnsupportedError("fileSystemRoot", backend.kind);
     }
-    return descriptor.workspaceRoot;
+    return {
+      root: descriptor.workspaceRoot,
+      activeEpoch: backend.activeEpoch ?? 0,
+      backendKind: backend.kind,
+    };
+  }
+
+  async fileSystemRoot(): Promise<string> {
+    return (await this.fileSystemAuthority()).root;
   }
 
   async writeFile(args: unknown): Promise<unknown> {
@@ -1705,10 +1763,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async importWorkspaceFileOnResolvedBackend(
     input: ChannelARoutedWorkspaceImportRequest,
   ): Promise<WorkspaceFileImportReceipt> {
-    return await this.dispatch("importWorkspaceFile", true, async (session) => {
+    return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
         session: session as ChannelASession,
         workspaceRoot: input.workspaceRoot,
+        ...(backend.kind === "selfhosted"
+          ? { providerPathMode: "workspace-relative" as const }
+          : {}),
         revision: input.revision,
         ...(input.runAs ? { runAs: input.runAs } : {}),
       });
@@ -1723,10 +1784,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async importWorkspaceFilesOnResolvedBackend(
     input: ChannelARoutedWorkspaceImportBatchRequest,
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
-    return await this.dispatch("importWorkspaceFiles", true, async (session) => {
+    return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
         session: session as ChannelASession,
         workspaceRoot: input.workspaceRoot,
+        ...(backend.kind === "selfhosted"
+          ? { providerPathMode: "workspace-relative" as const }
+          : {}),
         revision: input.revision,
         ...(input.runAs ? { runAs: input.runAs } : {}),
       });
@@ -1739,10 +1803,13 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async inspectWorkspaceFilesOnResolvedBackend(
     input: ChannelARoutedWorkspaceImportBatchRequest,
   ): Promise<readonly WorkspaceFileImportReceipt[] | null> {
-    return await this.dispatch("inspectWorkspaceFiles", false, async (session) => {
+    return await this.dispatch("inspectWorkspaceFiles", false, async (session, backend) => {
       const channel = new SandboxChannelAService({
         session: session as ChannelASession,
         workspaceRoot: input.workspaceRoot,
+        ...(backend.kind === "selfhosted"
+          ? { providerPathMode: "workspace-relative" as const }
+          : {}),
         revision: input.revision,
         ...(input.runAs ? { runAs: input.runAs } : {}),
       });

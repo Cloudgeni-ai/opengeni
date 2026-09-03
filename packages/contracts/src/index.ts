@@ -12789,6 +12789,16 @@ export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 // --- A2 FileSystem request/response (NOT events; returned inline) ------------
 export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
 export type FsNodeType = z.infer<typeof FsNodeType>;
+/** Optional identity copied from one stream-capabilities response. File callers
+ * use it to fail with a retryable route conflict instead of reinterpreting a
+ * canonical path after the selected sandbox or effective root changes. */
+export const FileSystemRouteIdentity = z
+  .object({
+    epoch: z.number().int().nonnegative(),
+    root: z.string().min(1).max(4_096),
+  })
+  .strict();
+export type FileSystemRouteIdentity = z.infer<typeof FileSystemRouteIdentity>;
 // The Pierre-tree node. `children` is present only when the dir was listed with
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
@@ -12823,6 +12833,7 @@ export const FsListRequest = z.object({
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsListRequest = z.infer<typeof FsListRequest>;
 export const FsListResponse = z.object({
@@ -12855,6 +12866,7 @@ export const FsReadRequest = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(5 * 1024 * 1024),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
 export const FsReadResponse = z.object({
@@ -12874,6 +12886,7 @@ export const FsWriteRequest = z.object({
   content: z.string(),
   overwrite: z.boolean().default(true), // false + existing path => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
 export const FsWriteResponse = z.object({
@@ -12886,6 +12899,7 @@ export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
 export const FsDeleteRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(false), // required true to delete a non-empty dir
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
 export const FsDeleteResponse = z.object({
@@ -12898,6 +12912,7 @@ export const FsMoveRequest = z.object({
   newPath: z.string(),
   overwrite: z.boolean().default(false), // false + existing destination => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
 export const FsMoveResponse = z.object({
@@ -12910,6 +12925,7 @@ export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
 export const FsMkdirRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(true), // false + existing path => 400
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
 export const FsMkdirResponse = z.object({

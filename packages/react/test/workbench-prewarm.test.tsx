@@ -991,6 +991,72 @@ describe("capture-driven default tab (Refinement 2)", () => {
     await hook.unmount();
   });
 
+  test("a Connected Machine canonical link lists its exact capability root with a route fence", async () => {
+    const requests: Array<{ path?: string; route?: { epoch: number; root: string } }> = [];
+    const root = "C:/work/repo";
+    const capabilities = fakeCapabilities({
+      backend: "selfhosted",
+      os: "windows",
+      leaseEpoch: 12,
+      FileSystem: {
+        available: true,
+        readOnly: false,
+        root,
+        pathSep: "\\",
+        treeMode: "lazy",
+        reason: null,
+      },
+      Git: { available: true, repos: [], reason: null },
+    });
+    const { client } = coldClient({
+      getStreamCapabilities: async () => capabilities,
+      getWorkspaceCapture: async () => ({ available: false }),
+      attachViewer: async () => fakeAttachResponse({ leaseEpoch: 12 }),
+      fsList: async (_workspaceId, _sessionId, request) => {
+        requests.push(request ?? {});
+        return {
+          root: {
+            name: "repo",
+            path: request?.path ?? "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [],
+          },
+          revision: 1,
+          truncated: false,
+        };
+      },
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+    });
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      initialTab: WORKBENCH_TAB_FILES,
+      requestedFilePath: "C:/work/repo/src/app.ts",
+      requestedFileRequestId: 73,
+    });
+    await flush(60);
+
+    expect(requests[0]).toMatchObject({
+      path: root,
+      route: { epoch: 12, root },
+    });
+    expect(requests.some((request) => request.path === "/")).toBe(false);
+    await hook.unmount();
+  });
+
   test("a cold-start turn defers automatic Files reads until the turn settles", async () => {
     let fileReads = 0;
     const { client } = coldClient({
