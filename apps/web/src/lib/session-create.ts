@@ -64,6 +64,12 @@ export type ConnectedMachineTarget = {
 
 export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
 
+function defaultComputeTarget(defaultSandboxBackend?: SandboxBackend): ComputeTarget {
+  return defaultSandboxBackend === "selfhosted"
+    ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+    : { kind: "sandbox", backend: "" };
+}
+
 export function rememberedProjectCompute(
   history: NewSessionSelectionHistory,
   channelId: string | null,
@@ -90,12 +96,16 @@ export function rememberedProjectCompute(
 export function newSessionProjectSelection(
   history: NewSessionSelectionHistory,
   channelId: string | null,
-  currentCompute: ComputeTarget,
+  currentSelection: { channelId: string | null; compute: ComputeTarget },
   defaultSandboxBackend?: SandboxBackend,
 ): { channelId: string | null; compute: ComputeTarget } {
   return {
     channelId,
-    compute: rememberedProjectCompute(history, channelId, defaultSandboxBackend) ?? currentCompute,
+    compute:
+      rememberedProjectCompute(history, channelId, defaultSandboxBackend) ??
+      (currentSelection.channelId === channelId
+        ? currentSelection.compute
+        : defaultComputeTarget(defaultSandboxBackend)),
   };
 }
 
@@ -137,10 +147,7 @@ export function emptySessionDraft(
 ): SessionDraft {
   return {
     visibility: "workspace",
-    compute:
-      defaultSandboxBackend === "selfhosted"
-        ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
-        : { kind: "sandbox", backend: "" },
+    compute: defaultComputeTarget(defaultSandboxBackend),
     variableSetIds: [],
     variableSetId: "",
     rigId: "",

@@ -442,7 +442,10 @@ describe("successful-create selection history", () => {
       folder: { kind: "path" as const, path: "/workspace/other-project" },
     };
 
-    const firstDefault = newSessionProjectSelection(defaultHistory, null, staleProjectCompute);
+    const firstDefault = newSessionProjectSelection(defaultHistory, null, {
+      channelId: project,
+      compute: staleProjectCompute,
+    });
     expect(firstDefault).toEqual({
       channelId: null,
       compute: {
@@ -452,17 +455,52 @@ describe("successful-create selection history", () => {
       },
     });
 
-    const locallyChanged = newSessionProjectSelection(
-      defaultHistory,
-      project,
-      firstDefault.compute,
-    );
-    const repeatedDefault = newSessionProjectSelection(
-      defaultHistory,
-      null,
-      locallyChanged.compute,
-    );
+    const locallyChanged = newSessionProjectSelection(defaultHistory, project, firstDefault);
+    const repeatedDefault = newSessionProjectSelection(defaultHistory, null, locallyChanged);
     expect(repeatedDefault).toEqual(firstDefault);
+  });
+
+  test("resets stale compute when the selected project has no history", () => {
+    const staleProjectSelection = {
+      channelId: project,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineA,
+        folder: { kind: "path" as const, path: "/workspace/other-project" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection)).toEqual({
+      channelId: null,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection, "selfhosted"),
+    ).toEqual({
+      channelId: null,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("preserves explicit compute intent within a project that has no history", () => {
+    const explicitDefaultSelection = {
+      channelId: null,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineB,
+        folder: { kind: "path" as const, path: "/workspace/explicit-default" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, explicitDefaultSelection),
+    ).toEqual(explicitDefaultSelection);
   });
 });
 

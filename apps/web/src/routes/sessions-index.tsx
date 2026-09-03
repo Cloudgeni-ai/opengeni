@@ -563,7 +563,7 @@ function SessionsIndexRouteContent({
         const selection = newSessionProjectSelection(
           selectionHistory,
           channelId,
-          current.compute,
+          { channelId: selectedChannelId, compute: current.compute },
           defaultSandboxBackend,
         );
         return selection.compute === current.compute
@@ -571,7 +571,7 @@ function SessionsIndexRouteContent({
           : { ...current, compute: selection.compute };
       });
     },
-    [defaultSandboxBackend, selectionHistory],
+    [defaultSandboxBackend, selectedChannelId, selectionHistory],
   );
 
   useEffect(() => {
@@ -583,9 +583,7 @@ function SessionsIndexRouteContent({
   // local so choosing a folder does not turn the composer URL into application
   // state.
   useEffect(() => {
-    selectProject(
-      resolveComposerLaunchChannelId(launchChannelId, recentChannelId),
-    );
+    selectProject(resolveComposerLaunchChannelId(launchChannelId, recentChannelId));
   }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
@@ -614,9 +612,7 @@ function SessionsIndexRouteContent({
     const onRequest = (event: Event) => {
       const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
         ?.channelId;
-      selectProject(
-        resolveComposerLaunchChannelId(requestedChannelId, recentChannelId),
-      );
+      selectProject(resolveComposerLaunchChannelId(requestedChannelId, recentChannelId));
       setCreateComposerFocusGen((current) => current + 1);
     };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
@@ -721,7 +717,7 @@ function SessionsIndexRouteContent({
       const projectSelection = newSessionProjectSelection(
         history,
         channelId,
-        restored.compute,
+        { channelId, compute: restored.compute },
         defaultSandboxBackend,
       );
       setSelectionHistory(history);
