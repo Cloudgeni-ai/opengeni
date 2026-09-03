@@ -1,4 +1,12 @@
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PauseIcon, PlusIcon } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import {
+  BuildingIcon,
+  CheckIcon,
+  ChevronsUpDownIcon,
+  PauseIcon,
+  PlusIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { forwardRef, useState, type ButtonHTMLAttributes, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -101,6 +109,7 @@ export function WorkspaceSwitcherMenu(props: {
         onSelect={props.onSelect}
         onCreate={() => setCreateOpen(true)}
         onCreateOrganization={props.onCreateOrganization}
+        workspaceId={props.workspaceId}
         managedSelfContext={context.managedSelfContext}
         align={props.align}
       >
@@ -204,6 +213,7 @@ export function WorkspaceMenu(props: {
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
   onCreateOrganization?: () => void;
+  workspaceId?: string;
   managedSelfContext: ManagedSelfContext | null;
   align: "start" | "end";
   children: ReactNode;
@@ -272,6 +282,17 @@ export function WorkspaceMenu(props: {
           >
             <BuildingIcon className="size-4" />
             New organization…
+          </DropdownMenuItem>
+        ) : null}
+        {props.workspaceId ? (
+          <DropdownMenuItem asChild>
+            <Link
+              to="/workspaces/$workspaceId/organization"
+              params={{ workspaceId: props.workspaceId }}
+            >
+              <SettingsIcon className="size-4" />
+              Organization settings
+            </Link>
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
