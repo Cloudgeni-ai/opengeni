@@ -63,8 +63,8 @@ $codex_unconditional_leasing_runtime_drain_before_lock$;
 
 LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE;
-LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE;
 
 DO $codex_unconditional_leasing_runtime_drain_after_lock$
 DECLARE

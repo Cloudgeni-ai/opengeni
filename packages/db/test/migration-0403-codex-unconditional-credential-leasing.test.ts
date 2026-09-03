@@ -42,6 +42,12 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
     expect(source).toContain("LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain("LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE");
     expect(source).toContain(
+      "LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE;\n" +
+        "LOCK TABLE codex_rotation_settings IN ACCESS EXCLUSIVE MODE;\n" +
+        "LOCK TABLE session_goals IN ACCESS EXCLUSIVE MODE;\n" +
+        "LOCK TABLE codex_capacity_waiters IN ACCESS EXCLUSIVE MODE;",
+    );
+    expect(source).toContain(
       "ALTER TABLE session_goals\n  ADD COLUMN IF NOT EXISTS continuation_suppressed_turn_id uuid",
     );
     expect(source).toContain(
