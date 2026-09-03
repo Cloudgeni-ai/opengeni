@@ -43,6 +43,18 @@ const modernAs = {
 };
 
 describe("MCP OAuth discovery", () => {
+  test("parses parameterless challenges and stops before the next auth scheme", () => {
+    expect(parseMcpOAuthChallenge('Bearer, Basic scope="must-not-leak"')).toEqual({
+      scheme: "bearer",
+      scope: [],
+    });
+    expect(
+      parseMcpOAuthChallenge(
+        'Basic realm="mcp", OAuth scope="documents:read", Basic scope="must-not-leak"',
+      ),
+    ).toEqual({ scheme: "oauth", scope: ["documents:read"] });
+  });
+
   test("prefers RFC 9728 protected resource metadata and binds provenance", async () => {
     const result = await resolveMcpOAuthDiscovery({
       resourceUrl,

@@ -179,10 +179,10 @@ export async function resolveMcpOAuthDiscovery(
 
 export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge {
   if (!header) return { scheme: null, scope: [] };
-  const schemeMatch = /(?:^|,)\s*(Bearer|OAuth)(?:\s+|$)/i.exec(header);
+  const schemeMatch = /(?:^|,)\s*(Bearer|OAuth)(?=\s|,|$)/i.exec(header);
   if (!schemeMatch) return { scheme: null, scope: [] };
   const scheme = schemeMatch[1]!.toLowerCase() as "bearer" | "oauth";
-  const paramsText = header.slice(schemeMatch.index + schemeMatch[0].length);
+  const paramsText = challengeParametersText(header, schemeMatch.index + schemeMatch[0].length);
   const params: Record<string, string> = {};
   const re = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|[^,\s]+)/g;
   let match: RegExpExecArray | null;
@@ -198,6 +198,40 @@ export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge
     ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata } : {}),
     ...(params.error ? { error: params.error } : {}),
   };
+}
+
+function challengeParametersText(header: string, start: number): string {
+  let quoted = false;
+  let escaped = false;
+  for (let index = start; index < header.length; index += 1) {
+    const character = header[index]!;
+    if (quoted) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        quoted = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      quoted = true;
+      continue;
+    }
+    if (character !== ",") continue;
+
+    let cursor = index + 1;
+    while (/\s/.test(header[cursor] ?? "")) cursor += 1;
+    const token = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/.exec(header.slice(cursor))?.[0];
+    if (!token) continue;
+    cursor += token.length;
+    while (/\s/.test(header[cursor] ?? "")) cursor += 1;
+    if (header[cursor] !== "=") {
+      return header.slice(start, index);
+    }
+  }
+  return header.slice(start);
 }
 
 export function protectedResourceMetadataCandidates(
