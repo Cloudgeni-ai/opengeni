@@ -120,6 +120,7 @@ import {
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
+  CodemodeCatalogStaleError,
   isCodemodeGrant,
   readCodemodeOperation,
   requireActiveCodemodeCatalog,
@@ -1418,6 +1419,15 @@ function codemodeHttpError(error: unknown): HTTPException {
     });
   }
   if (error instanceof CodemodeCatalogNotReadyError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  if (error instanceof CodemodeCatalogStaleError) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: error.message,

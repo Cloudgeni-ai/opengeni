@@ -8,7 +8,9 @@ Site adapters one canonical identity and execution path.
 The package owns:
 
 - deterministic catalog digests that exclude non-authoritative timestamps;
-- exact `{ serverId, toolName }` identities and collision-safe projected names;
+- exact `{ serverId, toolName }` identities, normalized exact-name
+  disambiguation, and catalog-time rejection of namespace/tool prefix
+  collisions;
 - bounded catalog, JSON Schema input/output validation, and generated SDK
   declarations;
 - caller-aware authorization and approval classification; and
@@ -49,3 +51,9 @@ gateway. The external/current-human MCP adapter has no server-verifiable
 one-shot approval exchange, so it projects only entries whose classification is
 not `human`; a direct call to a hidden projected name is rejected instead of
 advertising a tool that can never execute.
+
+`prepareCall` performs catalog, identity, approval, input-schema, and
+authorization checks without invoking the supplied executor. Attempt transports
+use that seam before crossing their durable side-effect marker, then invoke the
+returned execution closure. Ordinary `call` remains the compatible
+combined preflight-plus-execution API.

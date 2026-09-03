@@ -29,9 +29,11 @@ import {
   ToolGatewayCatalogTooLargeError as AttemptToolCatalogTooLargeError,
   ToolGatewayInputValidationError as AttemptToolInputValidationError,
   ToolGatewayOutputValidationError as AttemptToolOutputValidationError,
+  ToolGatewayPathCollisionError as AttemptToolPathCollisionError,
   ToolGatewayToolNotFoundError as AttemptToolNotFoundError,
   digestCanonicalJson,
   prepareToolGatewayDefinitions,
+  type PreparedToolGatewayCall,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
@@ -89,17 +91,32 @@ export {
   AttemptToolCatalogTooLargeError,
   AttemptToolInputValidationError,
   AttemptToolOutputValidationError,
+  AttemptToolPathCollisionError,
 };
 
 export class CodemodeTransportError extends Error {
   readonly code = "codemode_transport_error";
+  readonly remoteCode: string | null;
+  readonly retryable: boolean | null;
+  readonly outcomeUnknown: boolean | null;
+  readonly details: Readonly<Record<string, unknown>> | null;
 
   constructor(
     message: string,
     readonly status: number | null = null,
+    options: {
+      code?: string;
+      retryable?: boolean;
+      outcomeUnknown?: boolean;
+      details?: Readonly<Record<string, unknown>>;
+    } = {},
   ) {
     super(message);
     this.name = "CodemodeTransportError";
+    this.remoteCode = options.code ?? null;
+    this.retryable = options.retryable ?? null;
+    this.outcomeUnknown = options.outcomeUnknown ?? null;
+    this.details = options.details ?? null;
   }
 }
 
@@ -126,6 +143,7 @@ export type CodemodeClientOptions = {
 
 export type CodemodeCallOptions = {
   operationId?: string;
+  /** Stops client observation only; it never cancels an already-created server operation. */
   signal?: AbortSignal;
   timeoutMs?: number;
 };
@@ -203,20 +221,33 @@ export class CodemodeClient {
     argumentsValue: Record<string, unknown> = {},
     options: CodemodeCallOptions = {},
   ): Promise<AttemptToolResultValue> {
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    if (
-      !catalog.entries.some(
-        (entry) =>
-          entry.identity.serverId === identity.serverId &&
-          entry.identity.toolName === identity.toolName,
+    return (
+      await this.callResolved(
+        (catalog) =>
+          catalog.entries.find(
+            (entry) =>
+              entry.identity.serverId === identity.serverId &&
+              entry.identity.toolName === identity.toolName,
+          ) ?? null,
+        argumentsValue,
+        options,
       )
-    ) {
-      throw new AttemptToolNotFoundError();
-    }
+    ).result;
+  }
+
+  private async callResolved(
+    resolveEntry: (catalog: AttemptToolCatalogValue) => AttemptToolCatalogEntryValue | null,
+    argumentsValue: Record<string, unknown>,
+    options: CodemodeCallOptions,
+  ): Promise<{ result: AttemptToolResultValue; entry: AttemptToolCatalogEntryValue }> {
+    let catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
+    let entry = resolveEntry(catalog);
+    if (!entry) throw new AttemptToolNotFoundError();
     const operationId = options.operationId ?? randomUUID();
     const deadline =
       Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
     let submitted = false;
+    let staleRefreshAttempted = false;
     let operation: CodemodeOperationValue | null = null;
     let nextNotifyAt = 0;
     while (true) {
@@ -235,11 +266,29 @@ export class CodemodeClient {
           operation = await this.submit(
             operationId,
             catalog.digest,
-            identity,
+            entry.identity,
             argumentsValue,
             options.signal,
           );
         } catch (error) {
+          if (
+            operation === null &&
+            !staleRefreshAttempted &&
+            error instanceof CodemodeTransportError &&
+            error.remoteCode === "codemode_catalog_stale"
+          ) {
+            staleRefreshAttempted = true;
+            catalog = await this.catalog({
+              refresh: true,
+              ...(options.signal ? { signal: options.signal } : {}),
+            });
+            entry = resolveEntry(catalog);
+            if (!entry) throw new AttemptToolNotFoundError();
+            submitted = false;
+            nextNotifyAt = 0;
+            continue;
+          }
+          if (options.signal?.aborted) throw error;
           // The POST may have committed before its response was lost, or an
           // attempt may have closed between submission and a wake retry. The
           // caller-owned id is the recovery handle: read before deciding that
@@ -253,7 +302,9 @@ export class CodemodeClient {
       } else {
         operation = await this.read(operationId, options.signal);
       }
-      if (operation.state === "completed") return AttemptToolResult.parse(operation.result);
+      if (operation.state === "completed") {
+        return { result: AttemptToolResult.parse(operation.result), entry };
+      }
       if (["failed", "outcome_unknown", "cancelled"].includes(operation.state)) {
         throw new CodemodeOperationError(
           operation,
@@ -273,14 +324,13 @@ export class CodemodeClient {
     if (path.length < 2 || path.some((segment) => segment.length === 0)) {
       throw new AttemptToolNotFoundError();
     }
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    const matches = catalog.entries.filter(
-      (entry) =>
-        entry.codemodePath.length === path.length &&
-        entry.codemodePath.every((segment, index) => segment === path[index]),
-    );
-    if (matches.length !== 1) throw new AttemptToolNotFoundError();
-    return await this.call(matches[0]!.identity, argumentsValue, options);
+    return (
+      await this.callResolved(
+        (catalog) => catalogEntryForPath(catalog, path),
+        argumentsValue,
+        options,
+      )
+    ).result;
   }
 
   /** Return structured content when the catalog declares it; otherwise retain the full MCP result. */
@@ -292,15 +342,11 @@ export class CodemodeClient {
     if (path.length < 2 || path.some((segment) => segment.length === 0)) {
       throw new AttemptToolNotFoundError();
     }
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    const matches = catalog.entries.filter(
-      (entry) =>
-        entry.codemodePath.length === path.length &&
-        entry.codemodePath.every((segment, index) => segment === path[index]),
+    const { result, entry } = await this.callResolved(
+      (catalog) => catalogEntryForPath(catalog, path),
+      argumentsValue,
+      options,
     );
-    if (matches.length !== 1) throw new AttemptToolNotFoundError();
-    const entry = matches[0]!;
-    const result = await this.call(entry.identity, argumentsValue, options);
     if (!entry.outputSchema) return result;
     if (result.isError) throw new CodemodeToolCallError(result);
     if (!result.structuredContent) {
@@ -353,15 +399,27 @@ export class CodemodeClient {
     });
     if (!response.ok) {
       let message = `Codemode request failed with HTTP ${response.status}`;
+      let errorOptions: {
+        code?: string;
+        retryable?: boolean;
+        outcomeUnknown?: boolean;
+        details?: Readonly<Record<string, unknown>>;
+      } = {};
       try {
-        const payload = (await response.json()) as {
-          error?: { message?: unknown };
-        };
-        if (typeof payload.error?.message === "string") message = payload.error.message;
+        const error = parseCodemodeApiError(await response.json());
+        if (error?.message) message = error.message;
+        if (error) {
+          errorOptions = {
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
+            ...(error.outcomeUnknown === undefined ? {} : { outcomeUnknown: error.outcomeUnknown }),
+            ...(error.details ? { details: error.details } : {}),
+          };
+        }
       } catch {
         // The status is sufficient; never echo an unbounded provider body.
       }
-      throw new CodemodeTransportError(message, response.status);
+      throw new CodemodeTransportError(message, response.status, errorOptions);
     }
     return response;
   }
@@ -406,8 +464,18 @@ export class AttemptToolEnvironment {
       signal?: AbortSignal;
     } = {},
   ): Promise<AttemptToolResultValue> {
+    return await (await this.prepareCall(input, context)).execute();
+  }
+
+  async prepareCall(
+    input: AttemptToolCallValue,
+    context: {
+      transportMeta?: Record<string, unknown> | null;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<PreparedToolGatewayCall> {
     const call = AttemptToolCall.parse(input);
-    return await this.gateway.call(call, context);
+    return await this.gateway.prepareCall(call, context);
   }
 
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
@@ -538,6 +606,55 @@ function structuredToolError(result: AttemptToolResultValue): {
     message: typeof error?.message === "string" ? error.message : "Codemode tool failed",
     retryable: error?.retryable === true,
   };
+}
+
+function catalogEntryForPath(
+  catalog: AttemptToolCatalogValue,
+  path: readonly string[],
+): AttemptToolCatalogEntryValue | null {
+  const matches = catalog.entries.filter(
+    (entry) =>
+      entry.codemodePath.length === path.length &&
+      entry.codemodePath.every((segment, index) => segment === path[index]),
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function parseCodemodeApiError(input: unknown): {
+  message?: string;
+  code?: string;
+  retryable?: boolean;
+  outcomeUnknown?: boolean;
+  details?: Readonly<Record<string, unknown>>;
+} | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const root = input as Record<string, unknown>;
+  const nested =
+    root.error && typeof root.error === "object" && !Array.isArray(root.error)
+      ? (root.error as Record<string, unknown>)
+      : root;
+  const details =
+    nested.details && typeof nested.details === "object" && !Array.isArray(nested.details)
+      ? (nested.details as Readonly<Record<string, unknown>>)
+      : undefined;
+  const detailCode = details?.code;
+  const code =
+    typeof detailCode === "string" && /^[a-z0-9_]{1,128}$/u.test(detailCode)
+      ? detailCode
+      : undefined;
+  const message = typeof nested.message === "string" ? nested.message : undefined;
+  const retryable = typeof nested.retryable === "boolean" ? nested.retryable : undefined;
+  const outcomeUnknown =
+    typeof nested.outcomeUnknown === "boolean" ? nested.outcomeUnknown : undefined;
+  return message || code || retryable !== undefined || outcomeUnknown !== undefined || details
+    ? {
+        ...(message ? { message } : {}),
+        ...(code ? { code } : {}),
+        ...(retryable === undefined ? {} : { retryable }),
+        ...(outcomeUnknown === undefined ? {} : { outcomeUnknown }),
+        ...(details ? { details } : {}),
+      }
+    : null;
 }
 
 async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {

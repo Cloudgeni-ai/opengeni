@@ -1,5 +1,6 @@
 import type { ToolGatewayCatalogEntry } from "@opengeni/contracts";
 import { parseVerifiedToolGatewayCatalog } from "./catalog";
+import { ToolGatewayPathCollisionError } from "./errors";
 
 export type GenerateToolGatewayDeclarationsOptions = {
   moduleSpecifier?: string;
@@ -72,7 +73,7 @@ function insertEntry(root: NamespaceNode, entry: ToolGatewayCatalogEntry): void 
   let node = root;
   for (const [index, segment] of entry.codemodePath.entries()) {
     if (node.entry) {
-      throw new Error(`Tool path ${entry.codemodePath.join(".")} extends a tool leaf`);
+      throw new ToolGatewayPathCollisionError(entry.codemodePath, "extends_leaf");
     }
     let child = node.children.get(segment);
     if (!child) {
@@ -82,7 +83,7 @@ function insertEntry(root: NamespaceNode, entry: ToolGatewayCatalogEntry): void 
     node = child;
     if (index === entry.codemodePath.length - 1) {
       if (node.entry || node.children.size > 0) {
-        throw new Error(`Tool path ${entry.codemodePath.join(".")} collides`);
+        throw new ToolGatewayPathCollisionError(entry.codemodePath, "collision");
       }
       node.entry = entry;
     }

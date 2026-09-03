@@ -3,6 +3,7 @@ import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/contracts";
 import {
   CodemodeClient,
   CodemodeOperationError,
+  CodemodeTransportError,
   CodemodeToolCallError,
   createCodemodeTools,
   createAttemptToolEnvironment,
@@ -207,6 +208,169 @@ describe("CodemodeClient", () => {
     });
     expect(posts).toBe(1);
     expect(reads).toBe(1);
+  });
+
+  test("refreshes and re-resolves one stale path before operation creation", async () => {
+    const originalDefinition = {
+      ...definition,
+      codemodePath: ["docs", "search"],
+    };
+    const currentDefinition = {
+      ...definition,
+      identity: { serverId: "docs", toolName: "search_v2" },
+      modelName: "docs__search_v2",
+      codemodePath: ["docs", "search"],
+    };
+    const originalCatalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [originalDefinition],
+    }).catalog;
+    const currentCatalog = createAttemptToolEnvironment({
+      scope,
+      generation: 2,
+      definitions: [currentDefinition],
+    }).catalog;
+    const operationId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    let catalogReads = 0;
+    const submissions: Array<Record<string, unknown>> = [];
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        if (String(input).endsWith("/catalog")) {
+          catalogReads += 1;
+          return Response.json(catalogReads === 1 ? originalCatalog : currentCatalog);
+        }
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        submissions.push(body);
+        if (submissions.length === 1) {
+          return Response.json(
+            {
+              error: {
+                status: 409,
+                code: "conflict",
+                message: "Codemode tool catalog is stale for the active execution attempt",
+                retryable: true,
+                details: { code: "codemode_catalog_stale" },
+              },
+            },
+            { status: 409 },
+          );
+        }
+        return Response.json({
+          operation: {
+            ...operation(operationId, currentCatalog.digest, "completed"),
+            identity: currentDefinition.identity,
+          },
+          dispatch: "terminal",
+        });
+      }) as typeof fetch,
+    });
+
+    expect(await client.callPath(["docs", "search"], { query: "hello" }, { operationId })).toEqual({
+      content: [{ type: "text", text: "found" }],
+    });
+    expect(catalogReads).toBe(2);
+    expect(submissions).toEqual([
+      expect.objectContaining({
+        operationId,
+        catalogDigest: originalCatalog.digest,
+        identity: originalDefinition.identity,
+      }),
+      expect.objectContaining({
+        operationId,
+        catalogDigest: currentCatalog.digest,
+        identity: currentDefinition.identity,
+      }),
+    ]);
+  });
+
+  test("an abort stops observation without sending server cancellation", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const controller = new AbortController();
+    const operationId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let markCreated!: () => void;
+    const created = new Promise<void>((resolve) => {
+      markCreated = resolve;
+    });
+    const requests: Array<{ method: string; url: string }> = [];
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input, init) => {
+        const method = init?.method ?? "GET";
+        requests.push({ method, url: String(input) });
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        markCreated();
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      }) as typeof fetch,
+    });
+    const call = client.call(
+      definition.identity,
+      { query: "hello" },
+      { operationId, signal: controller.signal },
+    );
+    await created;
+    controller.abort(new DOMException("Caller stopped observing", "AbortError"));
+    await expect(call).rejects.toMatchObject({ name: "AbortError" });
+    expect(requests).toEqual([
+      { method: "GET", url: "https://api.example.test/codemode/catalog" },
+      { method: "POST", url: "https://api.example.test/codemode/calls" },
+    ]);
+  });
+
+  test("exposes stable structured transport codes without changing error identity", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const client = new CodemodeClient({
+      baseUrl: "https://api.example.test/codemode",
+      token: "token",
+      fetch: (async (input) => {
+        if (String(input).endsWith("/catalog")) return Response.json(catalog);
+        return Response.json(
+          {
+            error: {
+              status: 409,
+              code: "conflict",
+              message: "Codemode tool catalog is stale for the active execution attempt",
+              retryable: true,
+              outcomeUnknown: false,
+              details: { code: "codemode_catalog_stale" },
+            },
+          },
+          { status: 409 },
+        );
+      }) as typeof fetch,
+    });
+    let caught: unknown;
+    try {
+      await client.call(definition.identity, { query: "hello" });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CodemodeTransportError);
+    expect(caught).toMatchObject({
+      name: "CodemodeTransportError",
+      code: "codemode_transport_error",
+      remoteCode: "codemode_catalog_stale",
+      status: 409,
+      retryable: true,
+      outcomeUnknown: false,
+    });
   });
 
   test("calls the exact catalog identity through a lazy namespace without parsing wire names", async () => {

@@ -43,6 +43,19 @@ export class ToolGatewayCatalogTooLargeError extends Error {
   }
 }
 
+export class ToolGatewayPathCollisionError extends Error {
+  readonly code = "tool_path_collision";
+
+  constructor(path: readonly string[], kind: "collision" | "extends_leaf") {
+    super(
+      kind === "extends_leaf"
+        ? `Tool path ${path.join(".")} extends a tool leaf`
+        : `Tool path ${path.join(".")} collides`,
+    );
+    this.name = "ToolGatewayPathCollisionError";
+  }
+}
+
 export class ToolGatewayInputValidationError extends Error {
   readonly code = "invalid_tool_arguments";
 

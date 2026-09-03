@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogStaleError,
+  AttemptToolInputValidationError,
   AttemptToolNotFoundError,
   codemodeDispatchSubject,
   decodeCodemodeDispatchRequest,
@@ -219,6 +220,35 @@ export class CodemodeAttemptDispatcher {
       return;
     }
 
+    let preparedCall: Awaited<ReturnType<AttemptToolEnvironment["prepareCall"]>>;
+    try {
+      preparedCall = await this.environment.prepareCall(
+        {
+          operationId: operation.operationId,
+          catalogDigest: operation.catalogDigest,
+          identity: operation.identity,
+          arguments: operation.arguments,
+          caller: operation.caller,
+        },
+        { signal },
+      );
+    } catch (error) {
+      await this.settleWithOutput(operation, claimId, {
+        state: "failed",
+        errorCode: errorCode(error, signal, false),
+        errorMessage: safeErrorMessage(error),
+      });
+      return;
+    }
+    if (signal.aborted) {
+      await this.settleWithOutput(operation, claimId, {
+        state: "failed",
+        errorCode: "attempt_cancelled",
+        errorMessage: "Execution attempt ended before the Codemode call started",
+      });
+      return;
+    }
+
     const claimAuthority = {
       accountId: this.scope.accountId,
       workspaceId: this.scope.workspaceId,
@@ -236,16 +266,7 @@ export class CodemodeAttemptDispatcher {
     }, CODEMODE_CLAIM_HEARTBEAT_MS);
     heartbeat.unref?.();
     try {
-      const result = await this.environment.call(
-        {
-          operationId: operation.operationId,
-          catalogDigest: operation.catalogDigest,
-          identity: operation.identity,
-          arguments: operation.arguments,
-          caller: operation.caller,
-        },
-        { signal },
-      );
+      const result = await preparedCall.execute();
       await this.settleWithOutput(operation, claimId, { state: "completed", result });
     } catch (error) {
       const knownPreExecution =
@@ -255,7 +276,7 @@ export class CodemodeAttemptDispatcher {
         connectorActionWasNotExecuted(error);
       await this.settleWithOutput(operation, claimId, {
         state: knownPreExecution ? "failed" : "outcome_unknown",
-        errorCode: errorCode(error, signal),
+        errorCode: errorCode(error, signal, true),
         errorMessage: !knownPreExecution
           ? "Tool execution ended without a durable result. Its side-effect outcome is unknown; inspect actual state before retrying."
           : safeErrorMessage(error),
@@ -324,8 +345,10 @@ function combinedSignal(primary: AbortSignal, secondary?: AbortSignal): AbortSig
   return secondary ? AbortSignal.any([primary, secondary]) : primary;
 }
 
-function errorCode(error: unknown, signal: AbortSignal): string {
-  if (signal.aborted) return "attempt_cancelled_during_execution";
+function errorCode(error: unknown, signal: AbortSignal, executionStarted: boolean): string {
+  if (signal.aborted) {
+    return executionStarted ? "attempt_cancelled_during_execution" : "attempt_cancelled";
+  }
   if (connectorActionWasNotExecuted(error)) return "connector_action_not_executed";
   if (typeof error === "object" && error !== null && "code" in error) {
     const code = (error as { code?: unknown }).code;
@@ -338,6 +361,7 @@ function safeErrorMessage(error: unknown): string {
   if (
     error instanceof AttemptToolApprovalRequiredError ||
     error instanceof AttemptToolCatalogStaleError ||
+    error instanceof AttemptToolInputValidationError ||
     error instanceof AttemptToolNotFoundError
   ) {
     return error.message;
