@@ -1337,6 +1337,22 @@ zero, and checkpoints the typed terminal provider observation before changing
 the lifecycle row. Running, offline, timed-out, malformed, and successor-only
 states remain active/deferred; connection retirement or elapsed time is not
 physical proof and cannot license replay or rebinding.
+The exact terminal transition is also the agent-input boundary: changing the
+command to `exited|lost` and appending `session.command.finished` commit
+together. For a nonterminal session, one dedupe-keyed
+`background_command_result`, `system.update.pending`, and any idle workflow
+wake join that transaction. A failed or cancelled session remains terminal and
+keeps event-only command audit rather than reopening pending model input. A
+failed transaction leaves the command unsettled so the same already-checkpointed
+proof can retry; a duplicate proof cannot create a second result.
+For a managed retained process, its process row, parent admission, process
+holder, lease counts, linked command transition, event, model input, and wake
+are one transaction. A notification failure therefore rolls the process back
+to active with its provider proof intact; the reaper defers that exact proof and
+never repeats provider execution.
+`command_wait` uses the terminal event only as a short live hint and re-reads
+the durable command row. A longer wait uses session-level `wait_for_input`,
+whose timeout never cancels the command.
 
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace

@@ -7,6 +7,7 @@ import {
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
+  SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -455,6 +456,7 @@ describe("deployment contract", () => {
     for (const cutover of [
       MODEL_CATALOG_MAINTENANCE_CUTOVER,
       SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
+      SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
       CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
     ]) {
       const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {

@@ -178,8 +178,16 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#holdSessionGoalContinuationWithEvent": {
+  "packages/db/src/index.ts#waitForSessionInputWithEvent": {
     inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#settleSessionInputWaitInActivity": {
+    inserts: 2,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#backgroundCommandTerminalMutation": {
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#rejectSessionGoalRevisionWithEvent": {

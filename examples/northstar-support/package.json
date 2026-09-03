@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/example-northstar-support",
-  "version": "0.0.135",
+  "version": "0.0.136",
   "private": true,
   "type": "module",
   "scripts": {

@@ -6593,6 +6593,7 @@ function bindModelVisibleContextCapture(
 function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {
   if (lazyToolRuntimeForAgent(agent)) return;
   const model = agent.model as { getResponse?: unknown; getStreamedResponse?: unknown } | undefined;
+  if (model instanceof ModelRequestCaptureModel) return;
   if (
     !model ||
     typeof model !== "object" ||

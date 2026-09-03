@@ -174,7 +174,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
         tools: withFirstPartyTools(settings, session.tools),
         sandboxBackend: session.sandboxBackend,
       },
-      // The hold guidance is only given when `goal_wait` is actually in this
+      // Long-wait guidance is only given when `wait_for_input` is actually in this
       // session's effective first-party selection (the same source the worker
       // signs into the delegated token and the API uses to register tools), so
       // a pre-existing narrowed selection is never told to call a missing tool.
@@ -184,7 +184,7 @@ export function createGoalActivities(services: () => Promise<ControlActivityServ
           session.firstPartyMcpTools,
         );
         return goalContinuationPrompt(goal, autoContinuation, cap, {
-          goalWaitAvailable: effectiveFirstPartyTools.includes("goal_wait"),
+          inputWaitAvailable: effectiveFirstPartyTools.includes("wait_for_input"),
           humanInputRespondAvailable: effectiveFirstPartyTools.includes(
             "session_human_input_respond",
           ),
@@ -254,15 +254,15 @@ export function goalContinuationPrompt(
   _goal: SessionGoal,
   _autoContinuation: number,
   _cap: number | null,
-  options: { goalWaitAvailable?: boolean; humanInputRespondAvailable?: boolean } = {},
+  options: { inputWaitAvailable?: boolean; humanInputRespondAvailable?: boolean } = {},
 ): string {
-  const waitingGuidance = options.goalWaitAvailable
+  const waitingGuidance = options.inputWaitAvailable
     ? [
-        "Waiting on child sessions or external events:",
-        "- When the next progress depends on child sessions you spawned or on an external event, do not sleep, loop, or poll sessions_list/session_get/session_events to wait for it.",
-        "- Re-check sessions_list or session_get once; if the work is still in flight, call opengeni__goal_wait with a concrete reason and a deadline (untilSeconds), then end your turn immediately. You will be woken by a child result, a message, a human prompt, or at the deadline, and this goal stays active.",
-        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__goal_wait and end the turn. Report only material new state or a newly discovered blocker.",
-        "- A hold is for child/external progress only. If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
+        "Waiting on child sessions, background commands, or external events:",
+        "- When further progress depends on work already in flight, do not sleep, loop, or poll session or command state repeatedly.",
+        "- Re-check once; if the work is still in flight and the wait is long or uncertain, call opengeni__wait_for_input with a concrete reason and timeoutSeconds, then end your turn immediately. Relevant session input or the safety deadline will start a new turn, and this goal stays active.",
+        "- If the immediately preceding user-facing update already reported this same unchanged wait, do not restate it or produce another equivalent final answer. Call opengeni__wait_for_input and end the turn. Report only material new state or a newly discovered blocker.",
+        "- If you are blocked on a human decision, use opengeni__goal_pause under the blocked audit below instead.",
         "",
       ]
     : [];

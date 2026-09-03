@@ -22,6 +22,7 @@ import {
   getRetainedProcess,
   retainWorkspaceMutationProcess,
   retainedProcessSettlementIdentity,
+  settleConnectedMachineSessionBackgroundCommand,
   settleRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
@@ -36,10 +37,6 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import {
-  settleConnectedMachineSessionBackgroundCommand,
-  settleSessionBackgroundCommandForRetainedProcess,
-} from "@opengeni/db/session-background-commands";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
@@ -686,15 +683,11 @@ function settleRetainedProcessForTurn(
     if (settlement.process.state === "active") {
       throw new Error("Retained-process settlement returned an active durable process");
     }
-    await settleSessionBackgroundCommandForRetainedProcess(services.db, {
-      accountId: fence.accountId,
-      workspaceId: ids.workspaceId,
-      sessionId: ids.sessionId,
-      retainedProcessId: process.id,
-      outcome: settlement.process.state,
-      exitCode: settlement.process.exitCode,
-      reason: settlement.process.settlementReason ?? proof.reason,
-    });
+    if (settlement.backgroundCommandEvents.length > 0 && services.bus) {
+      await services.bus
+        .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
+        .catch(() => undefined);
+    }
   };
 }
 
@@ -794,7 +787,7 @@ export function wrapTurnBoxWithRouting(
             return { commandId: adopted.id };
           },
           selfhostedSettleBackgroundCommand: async (command) => {
-            await settleConnectedMachineSessionBackgroundCommand(db, {
+            const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
               accountId: backgroundCommandAccountId,
               workspaceId: ids.workspaceId,
               sessionId: ids.sessionId,
@@ -807,6 +800,11 @@ export function wrapTurnBoxWithRouting(
               exitCode: command.exitCode,
               reason: command.reason,
             });
+            if (settlement && bus) {
+              await bus
+                .publish(ids.workspaceId, ids.sessionId, settlement.events)
+                .catch(() => undefined);
+            }
           },
         }
       : {}),
@@ -1038,7 +1036,7 @@ export function wrapLazyTurnBoxWithRouting(
             return { commandId: adopted.id };
           },
           selfhostedSettleBackgroundCommand: async (command) => {
-            await settleConnectedMachineSessionBackgroundCommand(db, {
+            const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
               accountId: backgroundCommandAccountId,
               workspaceId: ids.workspaceId,
               sessionId: ids.sessionId,
@@ -1051,6 +1049,11 @@ export function wrapLazyTurnBoxWithRouting(
               exitCode: command.exitCode,
               reason: command.reason,
             });
+            if (settlement && bus) {
+              await bus
+                .publish(ids.workspaceId, ids.sessionId, settlement.events)
+                .catch(() => undefined);
+            }
           },
         }
       : {}),
@@ -1383,7 +1386,7 @@ export async function establishSelfhostedTurnSession(
         }
       : {}),
     settleBackgroundCommand: async (command) => {
-      await settleConnectedMachineSessionBackgroundCommand(db, {
+      const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
         accountId: args.accountId,
         workspaceId: args.workspaceId,
         sessionId: args.sessionId,
@@ -1396,6 +1399,11 @@ export async function establishSelfhostedTurnSession(
         exitCode: command.exitCode,
         reason: command.reason,
       });
+      if (settlement && bus) {
+        await bus
+          .publish(args.workspaceId, args.sessionId, settlement.events)
+          .catch(() => undefined);
+      }
     },
     // Meter every control op (out-of-band telemetry) — no-op when unwired.
     ...(onOp !== undefined ? { onOp } : {}),

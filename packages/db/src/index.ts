@@ -124,6 +124,7 @@ import type {
   SessionHumanInputRequest,
   LineageNode,
   SessionMcpApprovalPolicy,
+  SessionBackgroundCommand,
   SessionSkill,
   SessionMcpServerMetadata,
   SessionStatus,
@@ -378,7 +379,12 @@ import {
 } from "./session-realtime";
 import {
   insertConnectedMachineSessionBackgroundCommandInTransaction,
+  boundedSessionBackgroundCommandReason,
   insertManagedSessionBackgroundCommandInTransaction,
+  settleClaimedConnectedMachineBackgroundCommandWithMutation,
+  settleConnectedMachineSessionBackgroundCommandWithMutation,
+  settleSessionBackgroundCommandForRetainedProcessInTransaction,
+  type ConnectedMachineBackgroundCommandClaim,
 } from "./session-background-commands";
 import {
   isSessionRealtimeDelegationTurnMetadata,
@@ -412,7 +418,6 @@ import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
   SESSION_GOAL_CONTINUATION_EPOCH_RESET,
-  SESSION_GOAL_HOLD_CLEARED,
   SESSION_GOAL_SUPPRESSION_CLEARED,
   type SessionGoalAutoResumedByExternalInput,
 } from "./session-goal-pacing";
@@ -49086,8 +49091,9 @@ export async function countExpiredDrainingSandboxLeases(
 }
 
 /** Settle an exact retained process only after exit or definitive loss proof.
- * The process row, parent admission, non-TTL holder, and lease count transition
- * commit atomically. A duplicate terminal state + exit code is idempotent and
+ * The process row, parent admission, non-TTL holder, lease count, and any
+ * linked background-command terminal input commit atomically. A duplicate
+ * terminal state + exit code is idempotent and
  * preserves the first durable evidence reason; contradictory physical truth
  * fails closed. */
 export async function settleRetainedProcess(
@@ -49104,7 +49110,11 @@ export async function settleRetainedProcess(
     reason: string;
     idleGraceMs: number;
   },
-): Promise<{ settled: boolean; process: SandboxRetainedProcess }> {
+): Promise<{
+  settled: boolean;
+  process: SandboxRetainedProcess;
+  backgroundCommandEvents: SessionEvent[];
+}> {
   const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
   if (exitCode !== null && !Number.isSafeInteger(exitCode)) {
@@ -49113,77 +49123,94 @@ export async function settleRetainedProcess(
       "Retained process exit code must be a safe integer or null",
     );
   }
-  return await withRlsContext(
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (txRaw) => {
-        const tx = txRaw as unknown as Database;
-        const session = await lockWorkspaceMutationSessionTx(
-          tx,
-          input.workspaceId,
-          input.sessionId,
+    async (tx) => {
+      const session = await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+      const [process] = await tx
+        .select()
+        .from(schema.sandboxRetainedProcesses)
+        .where(
+          and(
+            eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+            eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+            eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+            eq(schema.sandboxRetainedProcesses.id, input.processId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!process) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Retained process settlement did not match a durable process",
         );
-        const [process] = await tx
-          .select()
-          .from(schema.sandboxRetainedProcesses)
+      }
+      if (!retainedProcessMatchesSettlementIdentity(process, input.expected)) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Retained process settlement did not match the copied durable identity",
+        );
+      }
+      if (process.state !== "active") {
+        if (process.state !== input.outcome || process.exitCode !== exitCode) {
+          throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
+        }
+        await tx
+          .update(schema.sandboxPtySessions)
+          .set({ status: "closed", closedAt: new Date() })
           .where(
             and(
-              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
-              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
-              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
-              eq(schema.sandboxRetainedProcesses.id, input.processId),
+              eq(schema.sandboxPtySessions.retainedProcessId, process.id),
+              eq(schema.sandboxPtySessions.status, "open"),
             ),
-          )
-          .for("update")
-          .limit(1);
-        if (!process) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "process_fenced",
-            "Retained process settlement did not match a durable process",
           );
-        }
-        if (!retainedProcessMatchesSettlementIdentity(process, input.expected)) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "process_fenced",
-            "Retained process settlement did not match the copied durable identity",
-          );
-        }
-        if (process.state !== "active") {
-          if (process.state !== input.outcome || process.exitCode !== exitCode) {
-            throw new SandboxRetainedProcessTerminalError(process.state, process.exitCode);
-          }
-          await tx
-            .update(schema.sandboxPtySessions)
-            .set({ status: "closed", closedAt: new Date() })
-            .where(
-              and(
-                eq(schema.sandboxPtySessions.retainedProcessId, process.id),
-                eq(schema.sandboxPtySessions.status, "open"),
-              ),
-            );
-          return { settled: false, process: mapRetainedProcess(process) };
-        }
-        if (
-          input.reconciliationClaimId !== undefined &&
-          process.reconcileClaimId !== input.reconciliationClaimId
-        ) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "process_fenced",
-            "Retained process settlement reconciliation claim was lost or superseded",
-          );
-        }
-        const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
-        if (
-          durableProof &&
-          (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)
-        ) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "process_fenced",
-            "Retained process settlement conflicts with checkpointed provider proof",
-          );
-        }
-        const admissions = await tx.execute<AdmissionIdentityRow>(sql`
+        const terminalProcess = mapRetainedProcess(process);
+        const commandMutation = backgroundCommandTerminalMutation({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+        });
+        await settleSessionBackgroundCommandForRetainedProcessInTransaction(
+          tx,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            retainedProcessId: input.processId,
+            outcome: input.outcome,
+            exitCode,
+            reason: terminalProcess.settlementReason ?? reason,
+          },
+          commandMutation,
+        );
+        return {
+          settled: false,
+          process: terminalProcess,
+          backgroundCommandEvents: [...commandMutation.events],
+        };
+      }
+      if (
+        input.reconciliationClaimId !== undefined &&
+        process.reconcileClaimId !== input.reconciliationClaimId
+      ) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Retained process settlement reconciliation claim was lost or superseded",
+        );
+      }
+      const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
+      if (
+        durableProof &&
+        (durableProof.outcome !== input.outcome || durableProof.exitCode !== exitCode)
+      ) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Retained process settlement conflicts with checkpointed provider proof",
+        );
+      }
+      const admissions = await tx.execute<AdmissionIdentityRow>(sql`
           select * from sandbox_workspace_mutation_admissions
           where id = ${process.parentAdmissionId}
             and account_id = ${input.accountId}
@@ -49201,13 +49228,13 @@ export async function settleRetainedProcess(
             and settled_at is null
           for update
         `);
-        if (!admissions[0]) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "admission_fenced",
-            "Retained process parent admission is not open",
-          );
-        }
-        const leases = await tx.execute<LeaseRow>(sql`
+      if (!admissions[0]) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "admission_fenced",
+          "Retained process parent admission is not open",
+        );
+      }
+      const leases = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where id = ${process.leaseId}
             and account_id = ${input.accountId}
@@ -49215,97 +49242,97 @@ export async function settleRetainedProcess(
             and sandbox_group_id = ${process.sandboxGroupId}
           for update
         `);
-        const lease = leases[0];
-        if (!lease) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "lease_fenced",
-            "Retained process settlement lease no longer exists",
-          );
-        }
-        const processOwnsCurrentLease =
-          Number(lease.lease_epoch) === process.leaseEpoch &&
-          lease.backend === process.providerBackend &&
-          lease.instance_id === process.providerInstanceId;
-        // A successor lease may inherit stale process-holder rows from the old
-        // provider identity. Removing those rows is necessary, but only a
-        // reconciliation claim carrying durable provider exit/loss proof may
-        // cross that identity boundary. A late owner callback without such a
-        // proof remains fenced.
-        if (
-          !processOwnsCurrentLease &&
-          (input.reconciliationClaimId === undefined || durableProof === null)
-        ) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "lease_fenced",
-            "Superseded retained process settlement requires durable provider proof",
-          );
-        }
-        await tx
-          .update(schema.sandboxPtySessions)
-          .set({ status: "closed", closedAt: new Date() })
-          .where(
-            and(
-              eq(schema.sandboxPtySessions.retainedProcessId, process.id),
-              eq(schema.sandboxPtySessions.status, "open"),
-            ),
-          );
-        const [updated] = await tx
-          .update(schema.sandboxRetainedProcesses)
-          .set({
-            state: input.outcome,
-            exitCode,
-            // A checkpointed provider proof is the first durable evidence for
-            // this physical terminal state. A later owner/reaper observation
-            // may classify the same state + exit code differently, but it must
-            // not overwrite that already-durable evidence provenance.
-            settlementReason: durableProof?.reason ?? reason,
-            settledAt: new Date(),
-            reconcileClaimId: null,
-            reconcileClaimedAt: null,
-            lastReconcileOutcome:
-              input.reconciliationClaimId === undefined
-                ? `owner_settled_${input.outcome}`
-                : `reconciled_${input.outcome}`,
-          })
-          .where(
-            and(
-              eq(schema.sandboxRetainedProcesses.id, process.id),
-              eq(schema.sandboxRetainedProcesses.state, "active"),
-            ),
-          )
-          .returning();
-        if (!updated) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "process_fenced",
-            "Retained process changed while its row was locked",
-          );
-        }
-        await tx.execute(sql`
+      const lease = leases[0];
+      if (!lease) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "lease_fenced",
+          "Retained process settlement lease no longer exists",
+        );
+      }
+      const processOwnsCurrentLease =
+        Number(lease.lease_epoch) === process.leaseEpoch &&
+        lease.backend === process.providerBackend &&
+        lease.instance_id === process.providerInstanceId;
+      // A successor lease may inherit stale process-holder rows from the old
+      // provider identity. Removing those rows is necessary, but only a
+      // reconciliation claim carrying durable provider exit/loss proof may
+      // cross that identity boundary. A late owner callback without such a
+      // proof remains fenced.
+      if (
+        !processOwnsCurrentLease &&
+        (input.reconciliationClaimId === undefined || durableProof === null)
+      ) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "lease_fenced",
+          "Superseded retained process settlement requires durable provider proof",
+        );
+      }
+      await tx
+        .update(schema.sandboxPtySessions)
+        .set({ status: "closed", closedAt: new Date() })
+        .where(
+          and(
+            eq(schema.sandboxPtySessions.retainedProcessId, process.id),
+            eq(schema.sandboxPtySessions.status, "open"),
+          ),
+        );
+      const [updated] = await tx
+        .update(schema.sandboxRetainedProcesses)
+        .set({
+          state: input.outcome,
+          exitCode,
+          // A checkpointed provider proof is the first durable evidence for
+          // this physical terminal state. A later owner/reaper observation
+          // may classify the same state + exit code differently, but it must
+          // not overwrite that already-durable evidence provenance.
+          settlementReason: durableProof?.reason ?? reason,
+          settledAt: new Date(),
+          reconcileClaimId: null,
+          reconcileClaimedAt: null,
+          lastReconcileOutcome:
+            input.reconciliationClaimId === undefined
+              ? `owner_settled_${input.outcome}`
+              : `reconciled_${input.outcome}`,
+        })
+        .where(
+          and(
+            eq(schema.sandboxRetainedProcesses.id, process.id),
+            eq(schema.sandboxRetainedProcesses.state, "active"),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new SandboxWorkspaceMutationFencedError(
+          "process_fenced",
+          "Retained process changed while its row was locked",
+        );
+      }
+      await tx.execute(sql`
           update sandbox_workspace_mutation_admissions set
             provider_outcome = ${input.outcome === "exited" ? "resolved" : "rejected"},
             settled_at = now()
           where id = ${process.parentAdmissionId}
             and provider_outcome = 'retained' and settled_at is null
         `);
-        await tx.execute(sql`
+      await tx.execute(sql`
           delete from sandbox_lease_holders
           where lease_id = ${process.leaseId}
             and account_id = ${input.accountId}
             and workspace_id = ${input.workspaceId}
             and kind = 'process' and holder_id = ${process.holderId}
         `);
-        const [counts] = await tx.execute<{
-          total: number;
-          turns: number;
-          viewers: number;
-        }>(sql`
+      const [counts] = await tx.execute<{
+        total: number;
+        turns: number;
+        viewers: number;
+      }>(sql`
           select count(*)::int as total,
             count(*) filter (where kind = 'turn')::int as turns,
             count(*) filter (where kind = 'viewer')::int as viewers
           from sandbox_lease_holders where lease_id = ${process.leaseId}
         `);
-        const enterDraining = processOwnsCurrentLease && (counts?.total ?? 0) === 0;
-        await tx.execute(sql`
+      const enterDraining = processOwnsCurrentLease && (counts?.total ?? 0) === 0;
+      await tx.execute(sql`
           update sandbox_leases set
             refcount = ${counts?.total ?? 0},
             turn_holders = ${counts?.turns ?? 0},
@@ -49325,24 +49352,47 @@ export async function settleRetainedProcess(
           where id = ${process.leaseId}
             and sandbox_group_id = ${process.sandboxGroupId}
         `);
-        if (
-          process.ownerAttemptId &&
-          (await hasPendingSessionAttemptQuiescenceTx(tx, {
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            attemptId: process.ownerAttemptId,
-          }))
-        ) {
-          await enqueueSessionWorkflowWakeInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
-            reason: "retained_process_settled_quiescence",
-          });
-        }
-        return { settled: true, process: mapRetainedProcess(updated) };
-      }),
+      const settledProcess = mapRetainedProcess(updated);
+      const commandMutation = backgroundCommandTerminalMutation({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      await settleSessionBackgroundCommandForRetainedProcessInTransaction(
+        tx,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          retainedProcessId: input.processId,
+          outcome: input.outcome,
+          exitCode,
+          reason: settledProcess.settlementReason ?? reason,
+        },
+        commandMutation,
+      );
+      if (
+        process.ownerAttemptId &&
+        (await hasPendingSessionAttemptQuiescenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: process.ownerAttemptId,
+        }))
+      ) {
+        await enqueueSessionWorkflowWakeInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId: session.temporalWorkflowId ?? `session-${input.sessionId}`,
+          reason: "retained_process_settled_quiescence",
+        });
+      }
+      return {
+        settled: true,
+        process: settledProcess,
+        backgroundCommandEvents: [...commandMutation.events],
+      };
+    },
   );
 }
 
@@ -56432,7 +56482,7 @@ export type SessionGoalContinuationProjection = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** The agent's stated `goal_wait` reason while `held_for_input`; null otherwise. */
+  /** The agent's stated `wait_for_input` reason while held; null otherwise. */
   holdReason: string | null;
 };
 
@@ -56555,36 +56605,10 @@ export async function getSessionGoalWithContinuation(
         )
         .limit(1);
 
-      // An agent-declared `goal_wait` hold is current only while its declaring
-      // turn is still the latest finished turn and the deadline is ahead. This
-      // is the same notion the materializer applies under lock.
-      let currentHoldUntil: Date | null = null;
-      if (goal.continuationHoldTurnId && goal.continuationHoldUntil) {
-        // Newest finished truth by finish time (a human turn queued after
-        // internal turns has a low position but finishes later).
-        const [latestFinishedTurn] = await tx
-          .select({ id: schema.sessionTurns.id })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, workspaceId),
-              eq(schema.sessionTurns.sessionId, sessionId),
-              sql`${schema.sessionTurns.finishedAt} is not null`,
-            ),
-          )
-          .orderBy(
-            desc(schema.sessionTurns.finishedAt),
-            desc(schema.sessionTurns.position),
-            desc(schema.sessionTurns.createdAt),
-          )
-          .limit(1);
-        if (
-          latestFinishedTurn?.id === goal.continuationHoldTurnId &&
-          goal.continuationHoldUntil.getTime() > (await transactionNow(tx)).getTime()
-        ) {
-          currentHoldUntil = goal.continuationHoldUntil;
-        }
-      }
+      // The goal pill may project the session-level wait when this session also
+      // has an active goal. The wait itself remains independent of goal state.
+      const sessionWait = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
+      const currentWaitUntil = sessionWait.disposition === "held" ? session.inputWaitUntil : null;
 
       const pendingWorkflowWake =
         wake !== undefined && wake.wakeRevision > wake.deliveredRevision ? wake : null;
@@ -56655,7 +56679,7 @@ export async function getSessionGoalWithContinuation(
           reason: "continuation_pending",
           ...base,
         };
-      } else if (currentHoldUntil) {
+      } else if (currentWaitUntil) {
         // The agent asked to wait for child results / external input. The
         // obligation stays armed (wake > observed) and the delayed workflow
         // wake fires at the deadline; this is a truthful blocked state, never
@@ -56664,8 +56688,8 @@ export async function getSessionGoalWithContinuation(
           state: "blocked",
           reason: "held_for_input",
           ...base,
-          nextAttemptAt: currentHoldUntil.toISOString(),
-          holdReason: goal.continuationHoldReason ?? null,
+          nextAttemptAt: currentWaitUntil.toISOString(),
+          holdReason: session.inputWaitReason ?? null,
         };
       } else if (
         goal.continuationWakeRevision > goal.continuationObservedRevision &&
@@ -56987,7 +57011,6 @@ export async function upsertSessionGoal(
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
           continuationWakeRevision: existing.continuationWakeRevision + 1,
-          ...SESSION_GOAL_HOLD_CLEARED,
           ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
@@ -57596,7 +57619,6 @@ export async function updateSessionGoal(
         ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
         ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
-        ...SESSION_GOAL_HOLD_CLEARED,
         ...SESSION_GOAL_SUPPRESSION_CLEARED,
         updatedAt: new Date(),
       })
@@ -57702,7 +57724,7 @@ export async function updateSessionGoalWithEvent(
               rationale: input.rationale ?? null,
               expectedObjectiveRevision: input.expectedObjectiveRevision ?? null,
             }),
-            identityScope: "goal_operation",
+            identityScope: "target_operation",
           })
         : null;
       if (reserved?.replay) {
@@ -57950,8 +57972,6 @@ export async function updateSessionGoalWithEvent(
           ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
           version: existing.version + 1,
           objectiveRevision: existing.objectiveRevision + 1,
-          // An applied semantic change supersedes any agent-declared hold.
-          ...SESSION_GOAL_HOLD_CLEARED,
           ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
@@ -58020,24 +58040,15 @@ export async function updateSessionGoalWithEvent(
   );
 }
 
-/**
- * Record execution progress without changing goal semantics or either goal
- * revision. The attempt-fenced operation receipt makes a recovered tool call
- * converge on the original event instead of manufacturing progress twice.
- */
-/**
- * Column set that retires an agent-declared `goal_wait` hold. Spread into every
- * goal head mutation (status transition, applied semantic revision, replace) so
- * newer truth never sits behind an older wait.
- */
-export const SESSION_GOAL_HOLD_MIN_SECONDS = 30;
-export const SESSION_GOAL_HOLD_MAX_SECONDS = 7 * 24 * 60 * 60;
+/** Maximum relative duration accepted by the session-level out-of-turn wait. */
+export const SESSION_INPUT_WAIT_MIN_SECONDS = 30;
+export const SESSION_INPUT_WAIT_MAX_SECONDS = 7 * 24 * 60 * 60;
+export const SESSION_INPUT_WAIT_REASON_MAX_BYTES = 2 * 1024;
 
 /**
- * The database clock of the current transaction. Hold deadlines are compared
- * against this rather than the worker's `Date.now()` because the wake-outbox
- * dispatcher claims rows on Postgres `now()`; one authority avoids clock-skew
- * re-wake loops right at the deadline.
+ * The database clock of the current transaction. Wait deadlines are compared
+ * against this rather than a worker clock because the wake-outbox dispatcher
+ * also claims rows on PostgreSQL now().
  */
 async function transactionNow(tx: Database): Promise<Date> {
   const rows = await rawRows<{ now: string | Date }>(tx, sql`select now() as now`);
@@ -58047,25 +58058,18 @@ async function transactionNow(tx: Database): Promise<Date> {
 }
 
 /**
- * Agent `goal_wait`: record that the active goal's next continuation should
- * wait for child results, a message, a human prompt, or the deadline instead of
- * materializing immediately after the declaring turn ends.
- *
- * The hold is bound to the exact caller turn. The materializer honors it only
- * while that turn is still the latest finished turn and `now < until`; it
- * never consumes the wake/observed revision ledger. The receipt, goal
- * mutation, and `goal.held` timeline fact commit under the canonical goal
- * event-write prefix (control FOR SHARE -> workspace FOR KEY SHARE -> session
- * FOR NO KEY UPDATE), never a workspace FOR UPDATE. A replacement attempt
- * replaying the same target-scoped operation key receives the stored result.
+ * Agent `wait_for_input`: persist one session-owned, self-only out-of-turn
+ * wait. The exact declaring turn and absolute deadline are causal authority;
+ * Temporal/NATS are replaceable wake hints. A replacement attempt replaying
+ * the same target-scoped operation key receives the committed result.
  */
-export async function holdSessionGoalContinuationWithEvent(
+export async function waitForSessionInputWithEvent(
   db: Database,
   workspaceId: string,
   sessionId: string,
   input: {
     reason: string;
-    untilSeconds: number;
+    timeoutSeconds: number;
     command: {
       accountId: string;
       actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
@@ -58073,22 +58077,25 @@ export async function holdSessionGoalContinuationWithEvent(
     };
   },
 ): Promise<{
-  goal: SessionGoal;
   events: SessionEvent[];
   operationId: string;
   replay: boolean;
-  holdTurnId: string;
-  untilAt: string;
+  waitTurnId: string;
+  deadlineAt: string;
 }> {
-  assertSessionGoalFieldBytes(input.reason, SESSION_GOAL_RATIONALE_MAX_BYTES, "goal hold reason");
-  if (!input.reason.trim()) throw new Error("goal hold reason must not be empty");
+  assertSessionGoalFieldBytes(
+    input.reason,
+    SESSION_INPUT_WAIT_REASON_MAX_BYTES,
+    "session input wait reason",
+  );
+  if (!input.reason.trim()) throw new Error("session input wait reason must not be empty");
   if (
-    !Number.isInteger(input.untilSeconds) ||
-    input.untilSeconds < SESSION_GOAL_HOLD_MIN_SECONDS ||
-    input.untilSeconds > SESSION_GOAL_HOLD_MAX_SECONDS
+    !Number.isInteger(input.timeoutSeconds) ||
+    input.timeoutSeconds < SESSION_INPUT_WAIT_MIN_SECONDS ||
+    input.timeoutSeconds > SESSION_INPUT_WAIT_MAX_SECONDS
   ) {
     throw new Error(
-      `goal hold untilSeconds must be an integer between ${SESSION_GOAL_HOLD_MIN_SECONDS} and ${SESSION_GOAL_HOLD_MAX_SECONDS}`,
+      `session input wait timeoutSeconds must be an integer between ${SESSION_INPUT_WAIT_MIN_SECONDS} and ${SESSION_INPUT_WAIT_MAX_SECONDS}`,
     );
   }
   return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
@@ -58106,73 +58113,50 @@ export async function holdSessionGoalContinuationWithEvent(
         accountId: input.command.accountId,
         workspaceId,
         actor: input.command.actor,
-        action: "goal.wait",
+        action: "session.wait_for_input",
         targetSessionId: sessionId,
         targetTurnId: null,
         operationKey: input.command.operationKey,
         canonicalRequestHash: canonicalSessionCommandHash({
           reason: input.reason,
-          untilSeconds: input.untilSeconds,
+          timeoutSeconds: input.timeoutSeconds,
         }),
-        identityScope: "goal_operation",
+        identityScope: "target_operation",
       });
       if (reserved.replay) {
         const stored = reserved.receipt.result as Record<string, unknown> | null;
-        const parsed = SessionGoalContract.safeParse(stored?.["goal"]);
-        const holdTurnId = typeof stored?.["holdTurnId"] === "string" ? stored["holdTurnId"] : null;
-        const untilAt = typeof stored?.["untilAt"] === "string" ? stored["untilAt"] : null;
-        if (!parsed.success || !holdTurnId || !untilAt) {
+        const waitTurnId = typeof stored?.["waitTurnId"] === "string" ? stored["waitTurnId"] : null;
+        const deadlineAt = typeof stored?.["deadlineAt"] === "string" ? stored["deadlineAt"] : null;
+        if (!waitTurnId || !deadlineAt) {
           throw new SessionControlInvariantError(
-            `Goal hold receipt ${reserved.receipt.id} has no valid committed result`,
+            `Session input wait receipt ${reserved.receipt.id} has no valid committed result`,
           );
         }
         return {
-          goal: parsed.data,
           events: [],
           operationId: reserved.receipt.id,
           replay: true,
-          holdTurnId,
-          untilAt,
+          waitTurnId,
+          deadlineAt,
         };
       }
       await assertAgentCommandAuthorityInTransaction(tx, {
         workspaceId,
         actor: input.command.actor,
         targetSessionId: sessionId,
-        action: "goal",
+        action: "wait",
       });
-      const [existing] = await tx
-        .select()
-        .from(schema.sessionGoals)
-        .where(
-          and(
-            eq(schema.sessionGoals.workspaceId, workspaceId),
-            eq(schema.sessionGoals.sessionId, sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!existing) throw new Error("this session has no goal; use goal_set first");
-      if (existing.status !== "active") {
-        throw new Error("session goal is not active; only an active goal can wait");
+      if (session.status === "cancelled") {
+        throw new Error("cancelled sessions cannot wait for input");
       }
-      const now = new Date();
-      const until = new Date(now.getTime() + input.untilSeconds * 1000);
-      const [updated] = await tx
-        .update(schema.sessionGoals)
-        .set({
-          continuationHoldTurnId: input.command.actor.turnId,
-          continuationHoldUntil: until,
-          continuationHoldReason: input.reason,
-          continuationHoldSetAt: now,
-          ...SESSION_GOAL_SUPPRESSION_CLEARED,
-          updatedAt: now,
-        })
-        .where(eq(schema.sessionGoals.id, existing.id))
-        .returning();
-      if (!updated) throw new Error(`Session goal not found: ${sessionId}`);
-      const goal = mapSessionGoal(updated);
-      const untilAt = until.toISOString();
+      if (!session.temporalWorkflowId) {
+        throw new SessionControlInvariantError(
+          `Session ${sessionId} has no Temporal workflow identity`,
+        );
+      }
+      const now = await transactionNow(tx);
+      const deadline = new Date(now.getTime() + input.timeoutSeconds * 1000);
+      const deadlineAt = deadline.toISOString();
       const [event] = await tx
         .insert(schema.sessionEvents)
         .values(
@@ -58186,11 +58170,10 @@ export async function holdSessionGoalContinuationWithEvent(
               turnAttemptId: input.command.actor.attemptId,
               turnAssociation: "current",
               sequence: session.lastSequence + 1,
-              type: "goal.held",
+              type: "session.wait.started",
               payload: {
-                goalId: goal.id,
-                turnId: input.command.actor.turnId,
-                untilAt,
+                waitTurnId: input.command.actor.turnId,
+                deadlineAt,
                 reason: input.reason,
                 actor: "agent",
               },
@@ -58201,31 +58184,50 @@ export async function holdSessionGoalContinuationWithEvent(
           ),
         )
         .returning();
-      if (!event) throw new Error("Failed to append goal.held event");
+      if (!event) throw new Error("Failed to append session.wait.started event");
       await tx
         .update(schema.sessions)
-        .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+        .set({
+          inputWaitTurnId: input.command.actor.turnId,
+          inputWaitUntil: deadline,
+          inputWaitReason: input.reason,
+          inputWaitSetAt: now,
+          lastSequence: session.lastSequence + 1,
+          updatedAt: now,
+        })
         .where(eq(schema.sessions.id, sessionId));
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: session.accountId,
+        workspaceId,
+        sessionId,
+        temporalWorkflowId: session.temporalWorkflowId,
+        reason: "session_input_wait_deadline",
+        notBefore: deadline,
+      });
       await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
         result: {
-          goal,
           eventId: event.id,
-          holdTurnId: input.command.actor.turnId,
-          untilAt,
+          waitTurnId: input.command.actor.turnId,
+          deadlineAt,
+          reason: input.reason,
         },
       });
       return {
-        goal,
         events: [mapEvent(event)],
         operationId: reserved.receipt.id,
         replay: false,
-        holdTurnId: input.command.actor.turnId,
-        untilAt,
+        waitTurnId: input.command.actor.turnId,
+        deadlineAt,
       };
     }),
   );
 }
 
+/**
+ * Record execution progress without changing goal semantics or either goal
+ * revision. The attempt-fenced operation receipt makes a recovered tool call
+ * converge on the original event instead of manufacturing progress twice.
+ */
 export async function recordSessionGoalProgressWithEvent(
   db: Database,
   workspaceId: string,
@@ -58269,7 +58271,7 @@ export async function recordSessionGoalProgressWithEvent(
         canonicalRequestHash: canonicalSessionCommandHash({
           progressNote: input.progressNote,
         }),
-        identityScope: "goal_operation",
+        identityScope: "target_operation",
       });
       if (reserved.replay) {
         const parsed = SessionGoalContract.safeParse(reserved.receipt.result.goal);
@@ -58633,9 +58635,6 @@ export async function setSessionGoalStatus(
         status: input.status,
         version: existing.version + 1,
         updatedAt: new Date(),
-        // Every lifecycle transition is newer truth than an agent-declared
-        // goal_wait hold; a human redirect must never sit behind it.
-        ...SESSION_GOAL_HOLD_CLEARED,
         ...SESSION_GOAL_SUPPRESSION_CLEARED,
         ...(input.status === "completed"
           ? {
@@ -59132,10 +59131,6 @@ export type GoalIdleBackoffPolicy = {
 
 export type MaterializeGoalContinuationResult =
   | { action: "none" | "queue"; events: [] }
-  // An agent-declared `goal_wait` hold is current: no continuation was
-  // materialized, the wake/observed ledger is untouched, and a delayed
-  // workflow wake is armed at the hold deadline.
-  | { action: "held"; events: []; holdTurnId: string; holdUntil: Date }
   // Idle backoff: the previous continuation consumed no external input and
   // finished less than its pacing delay ago. Nothing was materialized, the
   // wake/observed ledger is untouched, and a delayed workflow wake is armed at
@@ -59389,27 +59384,17 @@ export async function materializeGoalContinuation(
           return { action: "none", events: [] } as const;
         }
 
-        // Pending machine input (a child result, agent message, schedule, ...)
-        // is real model input that the next claim delivers. It wins over a
-        // synthesized continuation, and it closes the peek/materialize race
-        // because both serialize on the session lock. Mirror `peekSessionWork`:
-        // after a failed context compaction ordinary pending input is inert
-        // until newer truth, so do not spin the workflow on it here either.
-        // Against a CURRENT agent-declared `goal_wait` hold only an
-        // `immediate`-class input wins; `deferred` child notices (resolution,
-        // pause, capacity wait, progress) leave the hold in place and are
-        // delivered when it ends or an immediate input arrives.
+        // Pending machine input is real model input that the next claim
+        // delivers. The workflow evaluates a session-level wait before calling
+        // this goal materializer, so any pending update reaching this locked
+        // boundary wins over a synthesized continuation.
         const pendingMachineInput = await pendingSystemUpdateWakeClassesTx(
           tx,
           input.workspaceId,
           input.sessionId,
         );
-        const hold = await goalContinuationHoldStateTx(tx, input.workspaceId, input.sessionId, {
-          continuationHoldTurnId: goalRead.continuationHoldTurnId,
-          continuationHoldUntil: goalRead.continuationHoldUntil,
-        });
         if (
-          (pendingMachineInput.immediate || (pendingMachineInput.deferred && !hold.current)) &&
+          (pendingMachineInput.immediate || pendingMachineInput.deferred) &&
           !(await latestFinishedTurnHasFailureCodeTx(
             tx,
             input.workspaceId,
@@ -59447,47 +59432,6 @@ export async function materializeGoalContinuation(
           }
         }
 
-        // A hold whose deadline has just passed is due now: the evaluation
-        // that retires it skips the idle backoff once, so pacing never extends
-        // the agent's own stated deadline (the streak keeps counting after).
-        let holdDeadlinePassed = false;
-        if (goalRead.continuationHoldTurnId && goalRead.continuationHoldUntil) {
-          const holdUntil = goalRead.continuationHoldUntil;
-          if (hold.current) {
-            // The declaring turn is still the newest finished truth and its
-            // deadline has not passed: leave the obligation armed (the wake
-            // revision stays unconsumed so a crash cannot lose it) and make
-            // sure a delayed workflow wake exists at the deadline. Re-arming on
-            // every idle evaluation is required: an earlier immediate wake
-            // (e.g. a child result) delivered in between advances the
-            // outbox's delivered revision and would otherwise drop the
-            // deadline row; the outbox coalesces an undelivered earlier wake
-            // with `least(next_attempt_at, notBefore)`.
-            await enqueueSessionWorkflowWakeInTransaction(tx, {
-              accountId: session.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: session.id,
-              temporalWorkflowId: session.temporalWorkflowId ?? input.workflowId,
-              reason: "goal_hold_deadline",
-              notBefore: holdUntil,
-            });
-            return {
-              action: "held",
-              events: [],
-              holdTurnId: goalRead.continuationHoldTurnId,
-              holdUntil,
-            } as const;
-          }
-          // A newer turn finished after the hold was declared, or the deadline
-          // passed: retire the hold in this same transaction and continue
-          // exactly as before.
-          holdDeadlinePassed = hold.deadlinePassed;
-          await tx
-            .update(schema.sessionGoals)
-            .set({ ...SESSION_GOAL_HOLD_CLEARED, updatedAt: new Date() })
-            .where(eq(schema.sessionGoals.id, goalRead.id));
-        }
-
         // Idle backoff between CONSECUTIVE no-input continuations. This is
         // pacing, not a cap, and it is decided here, before the ledger/cap
         // evaluation, so a deferred pass consumes nothing. The streak is
@@ -59499,7 +59443,6 @@ export async function materializeGoalContinuation(
         // above), and they pull the delayed outbox wake to now.
         if (
           input.idleBackoff &&
-          !holdDeadlinePassed &&
           goalRead.autoContinuations >= 1 &&
           goalRead.lastContinuationTurnId
         ) {
@@ -64646,6 +64589,12 @@ export type SessionWorkPeek =
     }
   | { kind: "interruption-pending"; attemptId: string }
   | { kind: "cancellation-wait"; attemptId: string }
+  | {
+      kind: "input-wait";
+      disposition: "held" | "timeout" | "superseded";
+      waitTurnId: string;
+      deadlineAt: string;
+    }
   | { kind: "idle" };
 
 /**
@@ -64857,7 +64806,7 @@ async function queuedSteerHasUnquiescedPredecessor(
 /**
  * Which wake classes are represented among a session's pending machine inputs.
  * `immediate` kinds make the session runnable even against a current
- * `goal_wait` hold; `deferred` child notices only do so without one.
+ * `wait_for_input` declaration; deferred child notices only do so without one.
  */
 async function pendingSystemUpdateWakeClassesTx(
   db: Database,
@@ -64886,22 +64835,21 @@ async function pendingSystemUpdateWakeClassesTx(
 }
 
 /**
- * Whether an agent-declared `goal_wait` hold is current: its declaring turn is
- * still the newest finished turn (by finish time, the notion every evaluator
- * shares) and its deadline is still ahead of the database clock (the clock the
- * wake-outbox dispatcher fires on).
+ * Evaluate the durable session-level wait against the newest finished turn and
+ * the PostgreSQL clock. A newer completed turn is input that supersedes the
+ * declaration; only the unchanged declaring turn can time out.
  */
-async function goalContinuationHoldStateTx(
+async function sessionInputWaitStateTx(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  goal: {
-    continuationHoldTurnId: string | null;
-    continuationHoldUntil: Date | null;
+  wait: {
+    inputWaitTurnId: string | null;
+    inputWaitUntil: Date | null;
   },
-): Promise<{ current: boolean; deadlinePassed: boolean }> {
-  if (!goal.continuationHoldTurnId || !goal.continuationHoldUntil) {
-    return { current: false, deadlinePassed: false };
+): Promise<{ disposition: "none" | "held" | "timeout" | "superseded" }> {
+  if (!wait.inputWaitTurnId || !wait.inputWaitUntil) {
+    return { disposition: "none" };
   }
   const [latestFinishedTurn] = await db
     .select({ id: schema.sessionTurns.id })
@@ -64919,11 +64867,12 @@ async function goalContinuationHoldStateTx(
       desc(schema.sessionTurns.createdAt),
     )
     .limit(1);
+  if (latestFinishedTurn?.id !== wait.inputWaitTurnId) {
+    return { disposition: "superseded" };
+  }
   const dbNow = await transactionNow(db);
-  const deadlinePassed = goal.continuationHoldUntil.getTime() <= dbNow.getTime();
   return {
-    current: latestFinishedTurn?.id === goal.continuationHoldTurnId && !deadlinePassed,
-    deadlinePassed,
+    disposition: wait.inputWaitUntil.getTime() <= dbNow.getTime() ? "timeout" : "held",
   };
 }
 
@@ -65196,6 +65145,16 @@ export async function peekSessionWork(
       )
       .limit(1);
     if (queued || session.compactRequested) return { kind: "runnable" };
+    const waitState = await sessionInputWaitStateTx(scopedDb, workspaceId, sessionId, session);
+    const inputWaitPeek =
+      session.inputWaitTurnId && session.inputWaitUntil && waitState.disposition !== "none"
+        ? ({
+            kind: "input-wait",
+            disposition: waitState.disposition,
+            waitTurnId: session.inputWaitTurnId,
+            deadlineAt: session.inputWaitUntil.toISOString(),
+          } as const)
+        : null;
     const [pendingUpdate] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
       .from(schema.sessionSystemUpdates)
@@ -65207,7 +65166,7 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    if (!pendingUpdate) return { kind: "idle" };
+    if (!pendingUpdate) return inputWaitPeek ?? { kind: "idle" };
     if (
       !(await latestFinishedTurnHasFailureCodeTx(
         scopedDb,
@@ -65216,31 +65175,12 @@ export async function peekSessionWork(
         "context_compaction_failed",
       ))
     ) {
-      // Mirror the materializer: against a current agent-declared `goal_wait`
-      // hold only immediate-class pending input makes the session runnable;
-      // deferred child notices leave it idle (held) until the hold ends or an
-      // immediate input arrives.
+      // Immediate machine input wakes a wait and becomes the next turn. Deferred
+      // child status notices stay parked until the wait times out, is superseded
+      // by newer input, or an immediate input arrives.
       const wakeClasses = await pendingSystemUpdateWakeClassesTx(scopedDb, workspaceId, sessionId);
       if (wakeClasses.immediate) return { kind: "runnable" };
-      const [goal] = await scopedDb
-        .select({
-          status: schema.sessionGoals.status,
-          continuationHoldTurnId: schema.sessionGoals.continuationHoldTurnId,
-          continuationHoldUntil: schema.sessionGoals.continuationHoldUntil,
-        })
-        .from(schema.sessionGoals)
-        .where(
-          and(
-            eq(schema.sessionGoals.workspaceId, workspaceId),
-            eq(schema.sessionGoals.sessionId, sessionId),
-          ),
-        )
-        .limit(1);
-      const hold =
-        goal?.status === "active"
-          ? await goalContinuationHoldStateTx(scopedDb, workspaceId, sessionId, goal)
-          : { current: false, deadlinePassed: false };
-      return hold.current ? { kind: "idle" } : { kind: "runnable" };
+      return inputWaitPeek ?? { kind: "runnable" };
     }
     const [pendingAgentSteer] = await scopedDb
       .select({ id: schema.sessionSystemUpdates.id })
@@ -65254,8 +65194,249 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    return pendingAgentSteer ? { kind: "runnable" } : { kind: "idle" };
+    return pendingAgentSteer ? { kind: "runnable" } : (inputWaitPeek ?? { kind: "idle" });
   });
+}
+
+class SessionInputWaitSettlementStaleError extends Error {
+  readonly name = "SessionInputWaitSettlementStaleError";
+}
+
+export type SettleSessionInputWaitResult =
+  | { action: "held"; events: []; workflowWakeRevision: number }
+  | { action: "timeout"; events: SessionEvent[]; workflowWakeRevision: number | null }
+  | { action: "superseded"; events: SessionEvent[] }
+  | { action: "stale"; events: [] };
+
+/**
+ * Retire one exact durable wait. Timeout settlement atomically appends the wait
+ * audit event, queues typed model input, and registers its workflow wake.
+ * Supersession records only the audit boundary because the newer finished turn
+ * already consumed the waking input.
+ */
+async function settleSessionInputWaitInActivity(
+  db: SessionActivityDatabase,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waitTurnId: string;
+    disposition: "held" | "timeout" | "superseded";
+  },
+): Promise<SettleSessionInputWaitResult> {
+  if (input.disposition === "timeout") {
+    const [expected] = await db
+      .select({
+        inputWaitTurnId: schema.sessions.inputWaitTurnId,
+        inputWaitUntil: schema.sessions.inputWaitUntil,
+        inputWaitReason: schema.sessions.inputWaitReason,
+      })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (
+      !expected ||
+      expected.inputWaitTurnId !== input.waitTurnId ||
+      !expected.inputWaitUntil ||
+      !expected.inputWaitReason
+    ) {
+      return { action: "stale", events: [] };
+    }
+    const deadlineAt = expected.inputWaitUntil.toISOString();
+    const reason = expected.inputWaitReason;
+    try {
+      const result = await addSessionSystemUpdateWithSourceMutation(
+        db,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          kind: "session_wait_timeout",
+          classification: "info",
+          sourceId: input.waitTurnId,
+          dedupeKey: `session-input-wait-timeout:${input.waitTurnId}`,
+          summary: "The wait_for_input timeout elapsed without newer input.",
+          payload: {
+            type: "session_wait_timeout",
+            waitTurnId: input.waitTurnId,
+            deadlineAt,
+            reason,
+          },
+        },
+        async () => undefined,
+        {
+          prepareSource: async (tx) => {
+            const locks = await lockSessionEventWriteRows(tx, {
+              workspaceId: input.workspaceId,
+              controlLock: "share",
+              sessionIds: [input.sessionId],
+            });
+            const session = locks.sessions[0];
+            if (
+              !session ||
+              session.inputWaitTurnId !== input.waitTurnId ||
+              session.inputWaitUntil?.toISOString() !== deadlineAt ||
+              session.inputWaitReason !== reason
+            ) {
+              throw new SessionInputWaitSettlementStaleError();
+            }
+            const state = await sessionInputWaitStateTx(
+              tx,
+              input.workspaceId,
+              input.sessionId,
+              session,
+            );
+            if (state.disposition !== "timeout") {
+              throw new SessionInputWaitSettlementStaleError();
+            }
+            const now = await transactionNow(tx);
+            const [event] = await tx
+              .insert(schema.sessionEvents)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: session.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: session.lastSequence + 1,
+                    type: "session.wait.finished",
+                    payload: {
+                      waitTurnId: input.waitTurnId,
+                      outcome: "timeout",
+                      deadlineAt,
+                      reason,
+                    },
+                    occurredAt: now,
+                  },
+                  "payload",
+                  "payloadCodecVersion",
+                ),
+              )
+              .returning();
+            if (!event) throw new Error("Failed to append session.wait.finished event");
+            await tx
+              .update(schema.sessions)
+              .set({
+                inputWaitTurnId: null,
+                inputWaitUntil: null,
+                inputWaitReason: null,
+                inputWaitSetAt: null,
+                lastSequence: session.lastSequence + 1,
+                updatedAt: now,
+              })
+              .where(eq(schema.sessions.id, input.sessionId));
+            return {
+              lineage: { waitTurnId: input.waitTurnId, deadlineAt },
+              events: [mapEvent(event)],
+            };
+          },
+        },
+      );
+      if (!result.added) return { action: "stale", events: [] };
+      return {
+        action: "timeout",
+        events: result.events,
+        workflowWakeRevision: result.workflowWakeRevision,
+      };
+    } catch (error) {
+      if (error instanceof SessionInputWaitSettlementStaleError) {
+        return { action: "stale", events: [] };
+      }
+      throw error;
+    }
+  }
+
+  return await withSessionActivitySavepoint(db, async (tx) => {
+    const locks = await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    const session = locks.sessions[0];
+    if (!session || session.inputWaitTurnId !== input.waitTurnId) {
+      return { action: "stale", events: [] } as const;
+    }
+    const state = await sessionInputWaitStateTx(tx, input.workspaceId, input.sessionId, session);
+    if (state.disposition === "held" && input.disposition === "held") {
+      if (!session.temporalWorkflowId || !session.inputWaitUntil) {
+        throw new SessionControlInvariantError(
+          `Session ${input.sessionId} has no durable input-wait workflow identity`,
+        );
+      }
+      const wake = await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: session.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: session.temporalWorkflowId,
+        reason: "session_input_wait_deadline",
+        notBefore: session.inputWaitUntil,
+      });
+      return {
+        action: "held",
+        events: [],
+        workflowWakeRevision: wake,
+      } as const;
+    }
+    if (state.disposition !== "superseded" || input.disposition !== "superseded") {
+      return { action: "stale", events: [] } as const;
+    }
+    const now = await transactionNow(tx);
+    const [event] = await tx
+      .insert(schema.sessionEvents)
+      .values(
+        withLosslessContentWriteVersion(
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            sequence: session.lastSequence + 1,
+            type: "session.wait.finished",
+            payload: {
+              waitTurnId: input.waitTurnId,
+              outcome: "input",
+              deadlineAt: session.inputWaitUntil?.toISOString() ?? null,
+              reason: session.inputWaitReason,
+            },
+            occurredAt: now,
+          },
+          "payload",
+          "payloadCodecVersion",
+        ),
+      )
+      .returning();
+    if (!event) throw new Error("Failed to append session.wait.finished event");
+    await tx
+      .update(schema.sessions)
+      .set({
+        inputWaitTurnId: null,
+        inputWaitUntil: null,
+        inputWaitReason: null,
+        inputWaitSetAt: null,
+        lastSequence: session.lastSequence + 1,
+        updatedAt: now,
+      })
+      .where(eq(schema.sessions.id, input.sessionId));
+    return { action: "superseded", events: [mapEvent(event)] } as const;
+  });
+}
+export async function settleSessionInputWait(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    waitTurnId: string;
+    disposition: "held" | "timeout" | "superseded";
+  },
+): Promise<SettleSessionInputWaitResult> {
+  return await withWorkspaceSessionActivityRls(db, input.workspaceId, (scopedDb) =>
+    settleSessionInputWaitInActivity(scopedDb, input),
+  );
 }
 
 export type FailSessionWorkBeforeAttemptClaimInput = {
@@ -70831,14 +71012,17 @@ export async function addSessionSystemUpdateWithSourceMutation<
         // progress) remains durable model memory, but it is not new human
         // intent. A completed goal, a goal paused by intent, or an
         // already-failed parent is settled authority and cannot be restarted
-        // solely by a late child. A live parent turn consumes the update in its
-        // ordinary loop. Once an ordinary no-goal turn has settled, its child
-        // notice remains pending until new human intent arrives. Only an
-        // active goal (including one this input just resumed from its pacing
-        // ceiling) is a durable obligation that may autonomously wake an idle
-        // parent, and only an `immediate` kind wakes at all.
+        // solely by a late child. An active session-level input wait is also an
+        // explicit durable obligation, independent of whether the session has
+        // a goal, so an immediate child result may wake it.
+        const waitingForInput =
+          childLifecycleKind &&
+          session.status !== "failed" &&
+          (await sessionInputWaitStateTx(tx, input.workspaceId, input.sessionId, session))
+            .disposition === "held";
         const childNoticeMayWake =
-          !childLifecycleKind || (session.status !== "failed" && goalStatus === "active");
+          !childLifecycleKind ||
+          (session.status !== "failed" && (goalStatus === "active" || waitingForInput));
         const shouldWake =
           wakeClass === "immediate" &&
           childNoticeMayWake &&
@@ -70883,6 +71067,308 @@ export async function addSessionSystemUpdateWithSourceMutation<
         };
       }),
   )) as AddSessionSystemUpdateResult<RequireIdleSession>;
+}
+
+function backgroundCommandTerminalMutation(input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+}): {
+  events: SessionEvent[];
+  prepare: (tx: SessionActivityDatabase) => Promise<void>;
+  commit: (tx: SessionActivityDatabase, command: SessionBackgroundCommand) => Promise<void>;
+} {
+  let controlActive = false;
+  const events: SessionEvent[] = [];
+  return {
+    events,
+    prepare: async (tx: SessionActivityDatabase): Promise<void> => {
+      const locks = await lockSessionEventWriteRows(tx, {
+        workspaceId: input.workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+      });
+      const session = locks.sessions[0];
+      if (!locks.control || !locks.workspace || !session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
+      if (session.accountId !== input.accountId) {
+        throw new SessionControlInvariantError(
+          `Session ${input.sessionId} does not belong to account ${input.accountId}`,
+        );
+      }
+      controlActive =
+        (
+          await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+            workspaceControl: locks.control,
+          })
+        ).state === "active";
+    },
+    commit: async (
+      tx: SessionActivityDatabase,
+      command: SessionBackgroundCommand,
+    ): Promise<void> => {
+      if (
+        command.workspaceId !== input.workspaceId ||
+        command.sessionId !== input.sessionId ||
+        (command.state !== "exited" && command.state !== "lost") ||
+        !command.settledAt ||
+        !command.settlementReason
+      ) {
+        throw new SessionControlInvariantError("Background command terminal identity is invalid");
+      }
+      const [session] = await tx
+        .select()
+        .from(schema.sessions)
+        .where(
+          and(
+            eq(schema.sessions.workspaceId, input.workspaceId),
+            eq(schema.sessions.id, input.sessionId),
+          ),
+        )
+        .limit(1);
+      if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+      const terminalOccurredAt = new Date(command.settledAt);
+      const now = new Date();
+      const reason = boundedSessionBackgroundCommandReason(
+        command.settlementReason,
+        "Stored background command settlement reason",
+      );
+      const outputLocator = {
+        eventType: "sandbox.command.output.delta" as const,
+        commandId: command.id,
+      };
+      const [finishedEvent] = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 1,
+              type: "session.command.finished",
+              payload: {
+                commandId: command.id,
+                provider: command.provider,
+                state: command.state,
+                exitCode: command.exitCode,
+                reason,
+                settledAt: command.settledAt,
+                outputLocator,
+              },
+              occurredAt: terminalOccurredAt,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      if (!finishedEvent) throw new Error("Failed to append session.command.finished event");
+      // Failed/cancelled sessions are terminal and cannot claim another model
+      // turn. Their terminal transition has already drained pending machine
+      // input, so reopening one here would violate cancellation authority. The
+      // exact command event remains durable audit/read truth; live sessions get
+      // the typed model input below.
+      if (session.status === "cancelled" || session.status === "failed") {
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        events.push(mapEvent(finishedEvent));
+        return;
+      }
+      const classification: SystemUpdateClassification =
+        command.state === "exited" && command.exitCode === 0 ? "success" : "failure";
+      const summary =
+        command.state === "lost"
+          ? "A background command was lost before its exit status could be confirmed."
+          : command.exitCode === 0
+            ? "A background command completed successfully."
+            : `A background command exited with code ${command.exitCode ?? "unknown"}.`;
+      const payload = {
+        type: "background_command_result" as const,
+        commandId: command.id,
+        state: command.state,
+        exitCode: command.exitCode,
+        reason,
+        outputLocator,
+      };
+      const [insertedUpdate] = await tx
+        .insert(schema.sessionSystemUpdates)
+        .values(
+          withLosslessContentWriteVersion(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                kind: "background_command_result",
+                classification,
+                sourceId: command.id,
+                dedupeKey: `background-command-result:${command.id}`,
+                summary,
+                payload,
+                lineage: { commandId: command.id, provider: command.provider },
+                state: "pending",
+              },
+              "summary",
+              "summaryCodecVersion",
+            ),
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .onConflictDoNothing({
+          target: [
+            schema.sessionSystemUpdates.workspaceId,
+            schema.sessionSystemUpdates.sessionId,
+            schema.sessionSystemUpdates.dedupeKey,
+          ],
+        })
+        .returning();
+      if (!insertedUpdate) {
+        throw new SessionControlInvariantError(
+          `Background command ${command.id} terminal input already exists before settlement`,
+        );
+      }
+      const preview = internalUpdateEventMember(insertedUpdate);
+      const [pendingEvent] = await tx
+        .insert(schema.sessionEvents)
+        .values(
+          withLosslessContentWriteVersion(
+            {
+              accountId: session.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              sequence: session.lastSequence + 2,
+              type: "system.update.pending",
+              payload: {
+                updateId: preview.id,
+                kind: preview.kind,
+                classification: preview.classification,
+                sourceId: preview.sourceId,
+                sourceIdTruncated: preview.sourceIdTruncated,
+                summary: preview.summary,
+                summaryTruncated: preview.summaryTruncated,
+              },
+              occurredAt: now,
+            },
+            "payload",
+            "payloadCodecVersion",
+          ),
+        )
+        .returning();
+      if (!pendingEvent) throw new Error("Failed to append background command pending event");
+      const autoResumed = await autoResumeGoalPausedByCapInTransaction(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        cause: { kind: "background_command_result", updateId: insertedUpdate.id },
+        now,
+      });
+      const [resumedEvent] = autoResumed
+        ? await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                {
+                  accountId: session.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  sequence: session.lastSequence + 3,
+                  type: "goal.resumed",
+                  payload: autoResumed.payload,
+                  occurredAt: now,
+                },
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning()
+        : [];
+      if (autoResumed && !resumedEvent) {
+        throw new Error("Failed to append goal.resumed event for background command");
+      }
+      const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+        tx,
+        input.workspaceId,
+        input.sessionId,
+      );
+      const shouldWake =
+        session.status !== "failed" &&
+        session.activeTurnId === null &&
+        controlActive &&
+        !realtimeActive;
+      if (shouldWake) {
+        await registerInternalUpdateWakeInTransaction(tx, {
+          accountId: session.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+        });
+      }
+      await tx
+        .update(schema.sessions)
+        .set({
+          lastSequence: session.lastSequence + (autoResumed ? 3 : 2),
+          ...(shouldWake ? { status: "queued" as const } : {}),
+          updatedAt: now,
+        })
+        .where(eq(schema.sessions.id, session.id));
+      events.push(
+        mapEvent(finishedEvent),
+        mapEvent(pendingEvent),
+        ...(resumedEvent ? [mapEvent(resumedEvent)] : []),
+      );
+    },
+  };
+}
+
+export type SessionBackgroundCommandTerminalSettlement = {
+  command: SessionBackgroundCommand;
+  events: SessionEvent[];
+};
+
+export async function settleConnectedMachineSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    commandId: string;
+    controlWorkspaceId: string;
+    enrollmentId: string;
+    connectionInstanceId: string;
+    opId: string;
+    outcome: "exited" | "lost";
+    exitCode: number | null;
+    reason: string;
+  },
+): Promise<SessionBackgroundCommandTerminalSettlement | null> {
+  const mutation = backgroundCommandTerminalMutation(input);
+  const command = await settleConnectedMachineSessionBackgroundCommandWithMutation(
+    db,
+    input,
+    mutation,
+  );
+  return command ? { command, events: [...mutation.events] } : null;
+}
+
+export async function settleClaimedConnectedMachineBackgroundCommand(
+  db: Database,
+  input: { claim: ConnectedMachineBackgroundCommandClaim },
+): Promise<{ settled: boolean; events: SessionEvent[] }> {
+  const mutation = backgroundCommandTerminalMutation({
+    accountId: input.claim.accountId,
+    workspaceId: input.claim.workspaceId,
+    sessionId: input.claim.sessionId,
+  });
+  const settled = await settleClaimedConnectedMachineBackgroundCommandWithMutation(
+    db,
+    input,
+    mutation,
+  );
+  return { settled, events: settled ? [...mutation.events] : [] };
 }
 
 /**

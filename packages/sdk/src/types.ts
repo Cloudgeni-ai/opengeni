@@ -1753,6 +1753,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -2877,7 +2879,7 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
-  | "goal_wait"
+  | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2917,6 +2919,7 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -4600,7 +4603,7 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  /** Agent-stated reason for a `wait_for_input` hold; null otherwise. */
   holdReason?: string | null | undefined;
 };
 
@@ -4800,6 +4803,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
+  | "session_wait_timeout"
+  | "background_command_result"
   | "child_terminal_result"
   | "media_generation_result"
   | "child_requires_action"
@@ -4815,6 +4820,30 @@ export type SessionSystemUpdateState =
   | "superseded"
   | "failed";
 
+export type SessionSystemUpdatePayload =
+  | {
+      type: "session_wait_timeout";
+      waitTurnId: string;
+      deadlineAt: string;
+      reason: string;
+      [key: string]: unknown;
+    }
+  | {
+      type: "background_command_result";
+      commandId: string;
+      state: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+      outputLocator: {
+        eventType: "sandbox.command.output.delta";
+        commandId: string;
+      };
+      [key: string]: unknown;
+    }
+  | ({
+      type: Exclude<SessionSystemUpdateKind, "session_wait_timeout" | "background_command_result">;
+    } & Record<string, unknown>);
+
 export type SessionSystemUpdate = {
   id: string;
   sessionId: string;
@@ -4823,7 +4852,7 @@ export type SessionSystemUpdate = {
   sourceId: string;
   dedupeKey: string;
   summary: string;
-  payload: Record<string, unknown>;
+  payload: SessionSystemUpdatePayload;
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;

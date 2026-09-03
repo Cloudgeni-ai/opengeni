@@ -198,7 +198,9 @@ still permission-, deployment-, session-, and exact-attempt-catalog-dependent.
 | --- | --- | --- |
 | First-party: `set_session_title` | Mutation | v1 receipt |
 | First-party: `scheduled_tasks_create`, `scheduled_tasks_update`, `scheduled_tasks_pause`, `scheduled_tasks_resume`, `scheduled_tasks_trigger`, `scheduled_tasks_delete` | Mutation | v1 receipt |
-| First-party: `goal_set`, `goal_update`, `goal_progress`, `goal_wait`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
+| First-party: `goal_set`, `goal_update`, `goal_progress`, `goal_complete`, `goal_pause` | Mutation | v1 receipt |
+| First-party: `wait_for_input` | Mutation | Durable wait receipt (`status`, absolute `deadlineAt`, operation id/replay fact, next action) |
+| First-party: `session_wait`, `command_wait` | Read/wait | Bounded durable state/event result; timeout is non-mutating and never cancels work |
 | First-party: `rig_propose_change`, `rig_verify`, `rig_promote` | Mutation | v1 receipt |
 | First-party: `session_create`, `session_send_message`, `session_pause`, `session_resume`, `session_steer`, `set_other_session_title` | Mutation | v1 receipt |
 | First-party: `variable_set_set_variable`, deprecated `environment_set_variable` | Mutation | v1 receipt; secret values are never returned |

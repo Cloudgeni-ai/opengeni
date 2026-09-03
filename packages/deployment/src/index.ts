@@ -1799,12 +1799,15 @@ const HELM_APPLICATION_DRAIN_ARGS = [
 
 export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
 export const SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER = "0394_session_selected_skill_activation";
+export const SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER =
+  "0402_session_input_wait_and_background_command_results";
 export const CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER =
   "0401_codex_unconditional_credential_leasing";
 
 const MAINTENANCE_CUTOVERS = {
   [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migration: "0389" },
   [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migration: "0394" },
+  [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migration: "0402" },
   [CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER]: { migration: "0401" },
 } as const;
 

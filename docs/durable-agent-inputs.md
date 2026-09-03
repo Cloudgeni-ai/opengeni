@@ -1,9 +1,10 @@
 # Durable agent inputs
 
 Agent-to-agent messages, Agent Steer instructions, child results, scheduled
-occurrences, and goal continuations share one durable lifecycle. They are not
-human prompts, but they are real model input and therefore cannot exist only in
-an activity-local system message.
+occurrences, goal continuations, session-wait timeouts, and terminal background
+commands share one durable lifecycle. They are not human prompts, but they are
+real model input and therefore cannot exist only in an activity-local system
+message.
 
 ## Canonical lifecycle
 
@@ -35,25 +36,26 @@ The database links every delivered input to one
 Agent Steer is guaranteed admission to the bounded batch and is serialized last
 so an older goal or lifecycle notice cannot override the replacement direction.
 
-Pending machine input also wakes a held orchestrator. An active goal whose
-latest turn declared a `goal_wait` hold (see [`goals.md`](goals.md)) does not
-materialize a goal continuation at idle, but a pending `session_system_updates`
-row of an `immediate` wake class (a child result, agent message, schedule, or
-`child_requires_action`) still makes the session runnable: the idle evaluation
-returns `queue` instead of `held`, the next claim delivers the batch, and that
-delivering turn retires the hold because it is a newer finished turn. The hold
-only suppresses the synthesized continuation between real inputs and the hold
-deadline. `deferred` rows (see below) do not end a current hold; they are
-delivered when it ends or an immediate input arrives. Without a current hold any
-pending row makes the session runnable.
+Pending machine input also wakes a session-level `wait_for_input` declaration.
+The wait belongs to the session, not its goal: it persists the exact declaring
+turn, reason, set time, and absolute PostgreSQL deadline. An `immediate` update
+(a child terminal/action notice, Agent message or Steer, schedule, media result,
+or background-command result) makes the session runnable. The next claim
+delivers the batch, and the newer finished turn retires the wait with
+`session.wait.finished{outcome:"input"}`. `deferred` child notices remain
+pending without ending a current wait; they are delivered when the wait times
+out, is superseded, or immediate input arrives. When the database deadline
+passes unchanged, settlement clears the wait and atomically queues one typed
+`session_wait_timeout` input plus its workflow wake.
 
 ## Wake classes and child lifecycle notices
 
 Every kind has one wake class in `SESSION_SYSTEM_UPDATE_WAKE_CLASS`
 (`@opengeni/contracts`). `immediate` kinds (every pre-existing kind plus
-`child_requires_action`) register a workflow wake in the same commit as the
-pending row, may resume a goal paused only by its continuation ceiling, and end a
-`goal_wait` hold at the next idle evaluation. `deferred` kinds insert only the
+`child_requires_action`, `session_wait_timeout`, and
+`background_command_result`) register a workflow wake in the same commit as the
+pending row, may resume a goal paused only by its continuation ceiling, and end
+a `wait_for_input` declaration through the next durable turn. `deferred` kinds insert only the
 durable pending row and its `system.update.pending` event; the next claim
 delivers them coalesced, `session_wait` reports them without ending the wait
 (`ownPendingImmediateUpdates` vs `ownPendingDeferredUpdateKinds`), and they
@@ -83,8 +85,28 @@ marks the still-pending `child_requires_action` of that boundary `superseded`
 generation and a new notice), a newer `child_progress` supersedes the older
 pending one, and the parent timeline records `system.update.cancelled` with
 `reason: superseded_by_resolution | superseded_by_newer_progress`. Like child
-results, no child notice may autonomously wake a parent whose goal is not
-active or that has already failed.
+results, an immediate child notice may autonomously wake a parent with either
+an active goal or a current session-level wait. Without either durable
+obligation, child lifecycle notices remain pending until new intent arrives.
+
+Terminal background-command settlement follows the same proof-first rule as
+the command lifecycle. The transaction that changes the exact command row from
+`running|stopping` to `exited|lost` also appends
+`session.command.finished` and, for a nonterminal session, inserts one
+dedupe-keyed `background_command_result` input with an output locator, appends
+`system.update.pending`, and registers the workflow wake when idle and
+runnable. A failed or cancelled session cannot claim another turn: its terminal
+control transition already drained pending input, so command settlement keeps
+the exact event but does not reopen model work. A duplicate or stale proof
+changes nothing and cannot create a second input. NATS publication happens only
+after commit and is a replaceable short-wait hint; PostgreSQL remains
+authoritative.
+
+Managed retained-process settlement includes this command/input boundary in
+the same transaction as the process row, parent admission, non-TTL holder, and
+lease-count transition. If event/input/wake persistence fails, none of those
+terminal state changes commit; the already-checkpointed provider proof remains
+eligible for a settlement-only retry and provider execution is never replayed.
 
 The five new kinds are produced only while
 `OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED` is on (default off): a worker from

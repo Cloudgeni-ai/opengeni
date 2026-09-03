@@ -175,6 +175,18 @@ A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
 adoption, ordinary turn completion and Steer detach from it, while explicit
 command cancellation, Pause, or terminal Cancel control its lifetime.
+Exact terminal proof settles the command row and appends its terminal session
+event in one PostgreSQL transaction. A nonterminal session also receives one
+typed model input and any idle workflow wake in that commit; a failed or
+cancelled session remains terminal and keeps event-only audit rather than
+reopening machine input. Live fanout is post-commit and replaceable.
+
+A long external wait is likewise session state, not workflow memory or goal
+state. `wait_for_input` records the exact declaring turn and an absolute
+PostgreSQL deadline, then the agent ends its turn. The workflow closes while
+the wait is current and is restarted by durable input or the deadline outbox;
+timeout becomes typed machine input. `session_wait` and `command_wait` remain
+short in-turn reads and never hold an inference indefinitely.
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

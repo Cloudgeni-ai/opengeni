@@ -1,8 +1,7 @@
-// The rail's top switcher: a muted Organization line over a prominent Workspace
-// line. The org line opens organization switching, creation, and settings; the
-// workspace line lists the current org's workspaces plus workspace actions.
-// Collapsed, the whole block reduces to a workspace-initial avatar that opens
-// the same workspace menu.
+// The rail's compact workspace switcher. Its menu groups workspaces by
+// organization and carries workspace/organization creation and settings so the
+// rail does not spend permanent vertical space on a second organization row.
+// Collapsed, it reduces to a workspace-initial avatar that opens the same menu.
 import { Link } from "@tanstack/react-router";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
@@ -19,11 +18,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useAppContext } from "@/context";
 import { useRail } from "@/components/rail/rail-context";
-import {
-  activeOrganizationLabel,
-  WorkspaceSwitcherMenu,
-} from "@/components/rail/workspace-switcher";
-import { organizationsForSubject, type OrgOption } from "@/lib/org";
+import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import type { OrgOption } from "@/lib/org";
 import { canCreateAdditionalOrganization } from "@/lib/managed-self-context";
 
 const LazyCreateOrganizationDialog = lazy(() =>
@@ -52,19 +48,11 @@ export function additionalOrganizationCreationAttemptIsCurrent(input: {
   );
 }
 
-export const WORKSPACE_SWITCHER_GRID_CLASS =
-  "grid min-w-0 grid-cols-[minmax(0,1fr)] gap-1.5 px-3 pt-1";
+export const WORKSPACE_SWITCHER_GRID_CLASS = "grid min-w-0 grid-cols-[minmax(0,1fr)] px-2";
 
 export function SwitcherBlock() {
   const context = useAppContext();
   const rail = useRail();
-  const activeWorkspace =
-    context.workspaces.find((workspace) => workspace.id === rail.workspaceId) ?? null;
-  const activeAccountId =
-    activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
-
-  const orgs = organizationsForSubject(context.accessContext, context.workspaces);
-  const currentOrgLabel = activeOrganizationLabel(orgs, activeAccountId);
   const managedUserId = context.authSession?.user.id ?? null;
   const canCreateOrganization =
     context.clientConfig.auth.mode === "managedSession" &&
@@ -224,14 +212,6 @@ export function SwitcherBlock() {
 
   return (
     <div className={WORKSPACE_SWITCHER_GRID_CLASS}>
-      <OrganizationSwitcherLine
-        orgs={orgs}
-        currentLabel={currentOrgLabel}
-        activeAccountId={activeAccountId}
-        onSelect={rail.openOrg}
-        onCreate={canCreateOrganization ? () => setCreateOpen(true) : undefined}
-        workspaceId={rail.workspaceId}
-      />
       {createOpen ? (
         <Suspense fallback={null}>
           <LazyCreateOrganizationDialog
@@ -253,6 +233,7 @@ export function SwitcherBlock() {
         collapsed={false}
         align="start"
         onSelect={rail.openWorkspace}
+        onCreateOrganization={canCreateOrganization ? () => setCreateOpen(true) : undefined}
       />
     </div>
   );
