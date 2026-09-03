@@ -64,6 +64,20 @@ describe("MCP OAuth discovery", () => {
     expect(
       parseMcpOAuthChallenge('Bearer error="unterminated, Basic realm=x, scope=must-not-leak'),
     ).toEqual({ scheme: null, scope: [] });
+    expect(
+      parseMcpOAuthChallenge(
+        `Bearer, OAuth resource_metadata="${modernPrmUrl}", scope="documents:read"`,
+      ),
+    ).toEqual({
+      scheme: "oauth",
+      resourceMetadata: modernPrmUrl,
+      scope: ["documents:read"],
+    });
+    expect(parseMcpOAuthChallenge('Bearer, OAuth resource_metadata=""')).toEqual({
+      scheme: "oauth",
+      resourceMetadata: "",
+      scope: [],
+    });
   });
 
   test("prefers RFC 9728 protected resource metadata and binds provenance", async () => {
@@ -129,6 +143,26 @@ describe("MCP OAuth discovery", () => {
       resolveMcpOAuthDiscovery({
         resourceUrl,
         challenge: parseMcpOAuthChallenge(`Bearer resource_metadata="${modernPrmUrl}"`),
+        fetchMetadata: metadataFetcher({
+          "https://mcp.example.test/.well-known/oauth-authorization-server": {
+            issuer: "https://mcp.example.test",
+            authorization_endpoint: "https://mcp.example.test/authorize",
+            token_endpoint: "https://mcp.example.test/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        }),
+        validateEndpoint,
+        canonicalizeResource,
+      }),
+    ).rejects.toMatchObject({
+      classification: "oauth_discovery_broken",
+      stage: "protected_resource_metadata",
+    });
+
+    await expect(
+      resolveMcpOAuthDiscovery({
+        resourceUrl,
+        challenge: parseMcpOAuthChallenge('Bearer resource_metadata=""'),
         fetchMetadata: metadataFetcher({
           "https://mcp.example.test/.well-known/oauth-authorization-server": {
             issuer: "https://mcp.example.test",

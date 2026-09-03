@@ -131,7 +131,7 @@ export async function resolveMcpOAuthDiscovery(
     });
   }
 
-  if (input.challenge.resourceMetadata) {
+  if (input.challenge.resourceMetadata !== undefined) {
     throw new McpOAuthDiscoveryError(
       "protected_resource_metadata",
       "oauth_discovery_broken",
@@ -181,11 +181,22 @@ export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge
   if (!header) return { scheme: null, scope: [] };
   const challenges = parseAuthenticateChallenges(header);
   if (!challenges) return { scheme: null, scope: [] };
-  const challenge = challenges.find((candidate) => {
-    const scheme = candidate.scheme.toLowerCase();
-    return scheme === "bearer" || scheme === "oauth";
-  });
-  if (!challenge) return { scheme: null, scope: [] };
+  const oauthChallenges = challenges
+    .filter((candidate) => {
+      const scheme = candidate.scheme.toLowerCase();
+      return scheme === "bearer" || scheme === "oauth";
+    })
+    .map(parseOAuthChallenge);
+  return (
+    oauthChallenges.find((challenge) => challenge.resourceMetadata !== undefined) ??
+    oauthChallenges[0] ?? { scheme: null, scope: [] }
+  );
+}
+
+function parseOAuthChallenge(challenge: {
+  scheme: string;
+  parameterParts: string[];
+}): McpOAuthChallenge {
   const scheme = challenge.scheme.toLowerCase() as "bearer" | "oauth";
   const paramsText = challenge.parameterParts.join(",");
   const params: Record<string, string> = {};
@@ -200,7 +211,7 @@ export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge
   return {
     scheme,
     scope: params.scope ? params.scope.split(/\s+/).filter(Boolean) : [],
-    ...(params.resource_metadata ? { resourceMetadata: params.resource_metadata } : {}),
+    ...("resource_metadata" in params ? { resourceMetadata: params.resource_metadata } : {}),
     ...(params.error ? { error: params.error } : {}),
   };
 }
@@ -270,7 +281,7 @@ export function protectedResourceMetadataCandidates(
   advertisedUrl?: string,
 ): string[] {
   return uniqueStrings([
-    ...(advertisedUrl ? [advertisedUrl] : []),
+    ...(advertisedUrl !== undefined ? [advertisedUrl] : []),
     ...oauthWellKnownCandidates(resourceUrl, "oauth-protected-resource"),
   ]);
 }
