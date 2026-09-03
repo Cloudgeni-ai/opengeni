@@ -1085,6 +1085,98 @@ function SandboxFilePublishRenderer({ item, loadRetainedArtifact }: ToolRenderer
   );
 }
 
+type PublishedSiteReceipt = {
+  workspaceId: string;
+  artifactId: string;
+  title: string;
+  revision: number;
+  replayed: boolean;
+};
+
+function publishedSiteReceipt(output: unknown): PublishedSiteReceipt | null {
+  const { text, isError } = unwrapMcpOutput(output);
+  if (isError) return null;
+  const parsed = tryParseJson(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const artifact = (parsed as Record<string, unknown>).artifact;
+  const version = (parsed as Record<string, unknown>).version;
+  if (
+    !artifact ||
+    typeof artifact !== "object" ||
+    Array.isArray(artifact) ||
+    !version ||
+    typeof version !== "object" ||
+    Array.isArray(version)
+  ) {
+    return null;
+  }
+  const artifactRecord = artifact as Record<string, unknown>;
+  const versionRecord = version as Record<string, unknown>;
+  if (
+    typeof artifactRecord.workspaceId !== "string" ||
+    typeof artifactRecord.id !== "string" ||
+    typeof artifactRecord.title !== "string" ||
+    typeof versionRecord.revision !== "number" ||
+    !Number.isInteger(versionRecord.revision) ||
+    versionRecord.revision < 1
+  ) {
+    return null;
+  }
+  return {
+    workspaceId: artifactRecord.workspaceId,
+    artifactId: artifactRecord.id,
+    title: artifactRecord.title,
+    revision: versionRecord.revision,
+    replayed: (parsed as Record<string, unknown>).replayed === true,
+  };
+}
+
+function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
+  const href = `/workspaces/${encodeURIComponent(receipt.workspaceId)}/artifacts/${encodeURIComponent(receipt.artifactId)}`;
+  return (
+    <a
+      href={href}
+      aria-label={`Open ${receipt.title}`}
+      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong outline-none hover:bg-og-surface-2 hover:underline focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      Open
+    </a>
+  );
+}
+
+function SiteArtifactRenderer({ item }: ToolRendererProps) {
+  const leaf = mcpToolLeaf(item.name);
+  const publishingExisting = leaf === "artifacts_publish";
+  if (item.status === "running") {
+    return (
+      <ActivityDisclosure
+        icon={<PanelsTopLeftIcon className={ICON_SIZE} />}
+        iconTone="running"
+        title={publishingExisting ? "Publishing Site update" : "Publishing Site"}
+        running
+        preview={<RunningPreview>retaining source and compiled HTML…</RunningPreview>}
+      />
+    );
+  }
+  const receipt = publishedSiteReceipt(item.output);
+  if (!receipt || item.status === "failed") return <GenericRenderer item={item} />;
+  return (
+    <ActivityDisclosure
+      icon={<PanelsTopLeftIcon className={ICON_SIZE} />}
+      iconTone="accent"
+      title={publishingExisting ? `Updated ${receipt.title}` : `Published ${receipt.title}`}
+      media={<SiteOpenLink receipt={receipt} />}
+    >
+      <BodyNote>
+        Version {receipt.revision} is live
+        {receipt.replayed ? " (replayed from the original publication)." : "."}
+      </BodyNote>
+    </ActivityDisclosure>
+  );
+}
+
 function GeneratedImageDisclosure({
   receipt,
   load,
@@ -2308,6 +2400,8 @@ const BASE_ENTRIES: ToolRegistryEntry[] = [
   { match: "name", name: "tool_search", render: ToolSearchRenderer },
   { match: "name", name: "view_image", render: ViewImageRenderer },
   { match: "name", name: "sandbox_file_publish", render: SandboxFilePublishRenderer },
+  { match: "name", name: "artifacts_create", render: SiteArtifactRenderer },
+  { match: "name", name: "artifacts_publish", render: SiteArtifactRenderer },
   { match: "name", name: "environment_set_variable", render: SecretSetRenderer },
   { match: "name", name: "variable_set_set_variable", render: SecretSetRenderer },
   { match: "name", name: "search_documents", render: DocsSearchRenderer },

@@ -15,6 +15,10 @@ describe("artifact authoring sessions", () => {
     expect(ARTIFACT_CREATE_TOOLS).toEqual(["artifacts_create"]);
     expect(ARTIFACT_EDIT_TOOLS).toEqual(["artifacts_get_source", "artifacts_publish"]);
     expect(artifactCreateInstructions()).toContain("follow the opengeni-sites Skill");
+    expect(artifactCreateInstructions()).toContain(
+      "/workspaces/<workspaceId>/artifacts/<artifactId>",
+    );
+    expect(artifactCreateInstructions()).toContain("artifact.workspaceId and artifact.id");
   });
 
   test("create opening does not name the create tool", () => {
@@ -34,6 +38,8 @@ describe("artifact authoring sessions", () => {
     expect(instructions).toContain("artifact id artifact-1");
     expect(instructions).toContain("current version version-2");
     expect(instructions).toContain("follow the opengeni-sites Skill");
+    expect(instructions).toContain("/workspaces/<workspaceId>/artifacts/<artifactId>");
+    expect(instructions).toContain("artifact.workspaceId and artifact.id");
   });
 
   test("applies the durable model preference without replacing an explicit choice", () => {

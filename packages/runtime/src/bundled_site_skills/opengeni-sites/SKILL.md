@@ -103,6 +103,17 @@ For an existing Site, call `opengeni__artifacts_publish` with the same complete
 payload plus the current version id returned by `artifacts_get_source`. Never
 force a stale publish; re-read and reconcile concurrent changes.
 
+After a successful create or publish, use the returned `artifact.workspaceId`
+and `artifact.id` to give the user a standard Markdown link to the durable Site:
+
+```md
+[Open <Site title>](/workspaces/<workspaceId>/artifacts/<artifactId>)
+```
+
+Include that link in the completion reply instead of making the user search for
+the Site. Never present a sandbox URL, API content URL, or object-storage URL as
+the finished destination.
+
 Archive with `opengeni__artifacts_archive` and restore with
 `opengeni__artifacts_restore`. Archiving unpublishes the Site but preserves its
 immutable versions and retained source. There is no hard-delete workflow.
@@ -118,3 +129,5 @@ immutable versions and retained source. There is no hard-delete workflow.
   states are understandable.
 - The durable Site contains both the final HTML and the source needed for the
   next `Edit with Geni` iteration.
+- The completion reply contains the working Markdown link returned from the
+  durable artifact identity.

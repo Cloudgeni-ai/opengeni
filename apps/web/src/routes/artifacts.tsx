@@ -445,6 +445,18 @@ export function ArtifactDetailRoute({
                       ) : null}
                       <p className="mt-1 text-xs text-fg-subtle">
                         {formatDate(version.createdAt)} · {(version.sizeBytes / 1024).toFixed(1)} KB
+                        {version.sourceSessionId ? (
+                          <>
+                            {" · "}
+                            <Link
+                              to="/workspaces/$workspaceId/sessions/$sessionId"
+                              params={{ workspaceId, sessionId: version.sourceSessionId }}
+                              className="font-medium text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+                            >
+                              {version.revision === 1 ? "Creation session" : "Publishing session"}
+                            </Link>
+                          </>
+                        ) : null}
                       </p>
                     </div>
                     {!current ? (

@@ -292,11 +292,12 @@ export class CodemodeClient {
             continue;
           }
           if (options.signal?.aborted) throw error;
-          if (!canReconcileCodemodeSubmission(error)) throw error;
+          if (operation === null && !canReconcileCodemodeSubmission(error)) throw error;
           // The POST may have committed before its response was lost, or an
-          // attempt may have closed between submission and a wake retry. The
-          // caller-owned id is the recovery handle: read before deciding that
-          // another side effect is necessary.
+          // already-bound operation may have settled while a later wake
+          // notification failed deterministically. The caller-owned id is the
+          // recovery handle: read and re-prove the exact binding before
+          // deciding that another side effect is necessary.
           let recovered: CodemodeOperationValue;
           try {
             recovered = await this.read(operationId, options.signal);

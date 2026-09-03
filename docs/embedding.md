@@ -258,6 +258,8 @@ The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
 boolean: the authenticated parent first creates a five-minute, hash-only,
 single-use approval capability bound to the current human, operation, catalog,
 identity, and arguments, then presents that token on the exact matching call.
+After consumption, its hash-only row remains as an operation tombstone so the
+same operation id cannot be approved again after an ambiguous provider outcome.
 Sites use a different host-owned boundary: an active immutable Site version may
 call its retained tool identities directly without per-call approval, while the
 parent intersects that allowlist with the viewer's live catalog and the API

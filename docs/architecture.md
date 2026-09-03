@@ -1115,7 +1115,10 @@ instance, or connection changes therefore invalidate older approvals without
 changing the public catalog. Connection-backed approval issuance uses a
 credential preflight mode that never refreshes tokens or records provider usage;
 an approval-required provider adapter without that seam is omitted from the
-current-human catalog until it can fail safely before capability issuance.
+current-human catalog until it can fail safely before capability issuance. A
+pre-execution reapproval may replace an unconsumed capability, but consumption
+retains a hash-only operation tombstone permanently: an ambiguous provider
+outcome cannot reapprove and replay the same operation id.
 
 External MCP clients may use the opt-in OAuth authorization server. Its public
 metadata and dynamic registration lead to an authorization-code flow with

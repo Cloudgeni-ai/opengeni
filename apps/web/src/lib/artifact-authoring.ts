@@ -27,7 +27,7 @@ export function artifactCreateOpeningMessage(): string {
 }
 
 export function artifactCreateInstructions(): string {
-  return `You are the Site author for this session. Load and follow the opengeni-sites Skill, then ask me what the Site should do. After I answer, create a normal Bun + React source project in the workspace, use ordinary packages and build tooling, compile it to one self-contained HTML document, and call artifacts_create yourself with both the retained source bundle and compiled HTML before replying that the work is complete. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT} A Site may be a page, visualization, gallery, dashboard, workflow, or focused app.`;
+  return `You are the Site author for this session. Load and follow the opengeni-sites Skill, then ask me what the Site should do. After I answer, create a normal Bun + React source project in the workspace, use ordinary packages and build tooling, compile it to one self-contained HTML document, and call artifacts_create yourself with both the retained source bundle and compiled HTML before replying that the work is complete. In the completion reply, include a standard Markdown link to /workspaces/<workspaceId>/artifacts/<artifactId> using the exact artifact.workspaceId and artifact.id returned by artifacts_create. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT} A Site may be a page, visualization, gallery, dashboard, workflow, or focused app.`;
 }
 
 export function artifactEditOpeningMessage(title: string): string {
@@ -39,7 +39,7 @@ export function artifactEditInstructions(input: {
   title: string;
   currentVersionId: string;
 }): string {
-  return `You are editing the workspace Site "${input.title}" (artifact id ${input.artifactId}). Load and follow the opengeni-sites Skill, then ask me what I want changed. After I answer, call artifacts_get_source yourself, restore its retained Bun + React source, make and validate the requested changes, compile it to one self-contained HTML document, and call artifacts_publish yourself with both source and HTML in this same session using current version ${input.currentVersionId} for optimistic concurrency. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT}`;
+  return `You are editing the workspace Site "${input.title}" (artifact id ${input.artifactId}). Load and follow the opengeni-sites Skill, then ask me what I want changed. After I answer, call artifacts_get_source yourself, restore its retained Bun + React source, make and validate the requested changes, compile it to one self-contained HTML document, and call artifacts_publish yourself with both source and HTML in this same session using current version ${input.currentVersionId} for optimistic concurrency. In the completion reply, include a standard Markdown link to /workspaces/<workspaceId>/artifacts/<artifactId> using the exact artifact.workspaceId and artifact.id returned by artifacts_publish. Do not create, spawn, or delegate to another session, and do not stop after merely writing or validating files. ${ARTIFACT_RUNTIME_CONTRACT}`;
 }
 
 /** Apply the actor's durable new-session model preference without replacing an explicit choice. */

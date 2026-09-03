@@ -491,6 +491,14 @@ single-use capability after the catalog digest changes; instead it throws
 `OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
 the trusted host can show approval again for the same operation id.
 
+Reapproval is valid only before the original capability is consumed. Once a
+call crosses that boundary, the server retains a hash-only tombstone for the
+operation id and rejects another approval with
+`409 details.code = "tool_gateway_operation_already_started"` and
+`outcomeUnknown: true`. The host must reconcile the provider outcome; it must
+not turn an ambiguous call into a second approved execution by minting a fresh
+operation id automatically.
+
 Do not request approval capabilities speculatively or expose them to Site
 iframe code. Sites do not use this approval sequence: the host projects only
 the active immutable version's requested identities, supplies the Site context

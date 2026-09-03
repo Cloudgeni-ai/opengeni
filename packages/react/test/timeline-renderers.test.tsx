@@ -455,6 +455,42 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
   };
 }
 
+describe("SiteArtifactRenderer", () => {
+  test("renders a direct durable Site link from the structured mutation result", async () => {
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              artifact: {
+                id: "22222222-2222-4222-8222-222222222222",
+                workspaceId: "11111111-1111-4111-8111-111111111111",
+                title: "Incident board",
+              },
+              version: { revision: 1 },
+              replayed: false,
+            }),
+          },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Published Incident board");
+    const link = r.container.querySelector('a[aria-label="Open Incident board"]');
+    expect(link?.getAttribute("href")).toBe(
+      "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
+    );
+
+    await r.unmount();
+  });
+});
+
 describe("tool-output truncation disclosure", () => {
   test("shows bounded delivery and non-retention facts only after expansion", async () => {
     const item = toolItem({

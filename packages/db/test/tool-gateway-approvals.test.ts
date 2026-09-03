@@ -7,6 +7,7 @@ import {
   createDb,
   deleteWorkspace,
   issueToolGatewayApproval,
+  ToolGatewayApprovalOperationStartedError,
   type DbClient,
 } from "../src";
 
@@ -91,6 +92,23 @@ describe("tool gateway approval capabilities", () => {
       expect(
         await consumeToolGatewayApproval(client.db, { ...common, tokenHash: "e".repeat(64) }),
       ).toBe(false);
+      await expect(
+        issueToolGatewayApproval(client.db, {
+          ...common,
+          tokenHash: "f".repeat(64),
+          expiresAt: new Date(Date.now() + 5 * 60_000),
+        }),
+      ).rejects.toBeInstanceOf(ToolGatewayApprovalOperationStartedError);
+      const [tombstone] = await shared.admin<
+        Array<{ token_hash: string; consumed_at: Date | null }>
+      >`
+        select token_hash, consumed_at
+        from tool_gateway_approval_capabilities
+        where workspace_id = ${grant.workspaceId}
+          and subject_id = ${grant.subjectId}
+          and operation_id = ${operationId}`;
+      expect(tombstone?.token_hash).toBe("e".repeat(64));
+      expect(tombstone?.consumed_at).toBeInstanceOf(Date);
     } finally {
       await deleteWorkspace(client.db, grant.workspaceId);
     }

@@ -183,5 +183,6 @@ export function isConfigItemActive(
   workspaceId: string,
   to: WorkspaceConfigTarget,
 ): boolean {
-  return pathname === `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  const destination = `/workspaces/${workspaceId}/${configPathSuffix(to)}`;
+  return pathname === destination || pathname.startsWith(`${destination}/`);
 }

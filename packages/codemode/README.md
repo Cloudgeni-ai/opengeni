@@ -37,10 +37,14 @@ emits that code only before creating an operation. Ambiguous transport failures
 may be reconciled by operation id only when the recovered row exactly matches
 the requested attempt scope, catalog digest, tool identity, and canonical
 arguments. Deterministic HTTP conflicts are returned directly and never adopt an
-existing operation. The database serializes concurrent first submissions of one
-operation id, so identical races converge to one creation plus one replay rather
-than a unique-constraint failure. No response after operation creation triggers
-a catalog retry. Public `CodemodeTransportError` identity and its
+existing operation during initial admission. Once the API has returned the exact
+operation, a later wake-notification failure resumes from an exact journal read;
+it still rejects any mismatched operation. The API also treats its post-dispatch
+journal refresh as best-effort and returns the already-admitted operation if that
+refresh is unavailable. The database serializes concurrent first submissions of
+one operation id, so identical races converge to one creation plus one replay
+rather than a unique-constraint failure. No response after operation creation
+triggers a catalog retry. Public `CodemodeTransportError` identity and its
 `codemode_transport_error` compatibility code remain unchanged; the stable API
 detail is exposed as `remoteCode`.
 

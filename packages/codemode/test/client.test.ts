@@ -32,7 +32,7 @@ const definition: AttemptToolDefinition = {
 function operation(
   operationId: string,
   catalogDigest: string,
-  state: "running" | "completed" | "outcome_unknown",
+  state: "queued" | "running" | "completed" | "outcome_unknown",
 ) {
   const now = "2026-08-09T12:00:00.000Z";
   return {
@@ -51,7 +51,7 @@ function operation(
     createdAt: now,
     claimedAt: now,
     executionStartedAt: now,
-    completedAt: state === "running" ? null : now,
+    completedAt: state === "completed" || state === "outcome_unknown" ? now : null,
     updatedAt: now,
   };
 }
@@ -252,6 +252,66 @@ describe("CodemodeClient", () => {
       outcomeUnknown: false,
     });
     expect(operationReads).toBe(0);
+  });
+
+  test("recovers the exact bound operation when a deterministic wake notification fails", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const operationId = "89898989-8989-4989-8989-898989898988";
+    const originalNow = Date.now;
+    let now = originalNow();
+    let posts = 0;
+    let reads = 0;
+    Date.now = () => now;
+    try {
+      const client = new CodemodeClient({
+        baseUrl: "https://api.example.test/codemode",
+        token: "token",
+        fetch: (async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/catalog")) return Response.json(catalog);
+          if (init?.method === "POST") {
+            posts += 1;
+            if (posts === 1) {
+              return Response.json({
+                operation: operation(operationId, catalog.digest, "queued"),
+                dispatch: "accepted",
+              });
+            }
+            return Response.json(
+              {
+                error: {
+                  code: "conflict",
+                  message: "Codemode execution attempt is no longer active",
+                  retryable: false,
+                  outcomeUnknown: false,
+                  details: { code: "codemode_inactive_attempt" },
+                },
+              },
+              { status: 409 },
+            );
+          }
+          reads += 1;
+          if (reads === 1) {
+            now += 2_001;
+            return Response.json(operation(operationId, catalog.digest, "queued"));
+          }
+          return Response.json(operation(operationId, catalog.digest, "completed"));
+        }) as typeof fetch,
+        pollIntervalMs: 1,
+      });
+
+      expect(await client.call(definition.identity, { query: "hello" }, { operationId })).toEqual({
+        content: [{ type: "text", text: "found" }],
+      });
+      expect(posts).toBe(2);
+      expect(reads).toBe(2);
+    } finally {
+      Date.now = originalNow;
+    }
   });
 
   test("rejects a mismatched operation recovered after an ambiguous POST failure", async () => {

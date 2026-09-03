@@ -27,7 +27,10 @@ one-shot human-approval classification. HTTP/SDK approval capabilities bind a
 private provider-authority revision as well as the public catalog identity and
 arguments. Their connection preflight never refreshes credentials or records
 provider usage, and an approval-required connection-backed adapter without that
-seam is omitted until it can fail before capability issuance.
+seam is omitted until it can fail before capability issuance. An unconsumed
+capability may be replaced when catalog or provider authority changes, but a
+consumed capability leaves a durable hash-only operation tombstone: the same
+operation id cannot be approved again after execution may have started.
 
 First-party OpenGeni MCP memory tools:
 

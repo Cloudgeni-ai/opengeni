@@ -10,6 +10,10 @@ export class ToolGatewayApprovalRateLimitError extends Error {
   readonly name = "ToolGatewayApprovalRateLimitError";
 }
 
+export class ToolGatewayApprovalOperationStartedError extends Error {
+  readonly name = "ToolGatewayApprovalOperationStartedError";
+}
+
 export async function issueToolGatewayApproval(
   db: Database,
   input: {
@@ -28,15 +32,33 @@ export async function issueToolGatewayApproval(
   await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, async (scopedDb) => {
     await lockApprovalSubject(scopedDb, input.workspaceId, input.subjectId);
     await lockApprovalOperation(scopedDb, input.workspaceId, input.subjectId, input.operationId);
-    await scopedDb
-      .delete(schema.toolGatewayApprovalCapabilities)
+    const [existing] = await scopedDb
+      .select({
+        tokenHash: schema.toolGatewayApprovalCapabilities.tokenHash,
+        consumedAt: schema.toolGatewayApprovalCapabilities.consumedAt,
+      })
+      .from(schema.toolGatewayApprovalCapabilities)
       .where(
         and(
           eq(schema.toolGatewayApprovalCapabilities.workspaceId, input.workspaceId),
           eq(schema.toolGatewayApprovalCapabilities.subjectId, input.subjectId),
           eq(schema.toolGatewayApprovalCapabilities.operationId, input.operationId),
         ),
+      )
+      .limit(1);
+    if (existing?.consumedAt) {
+      throw new ToolGatewayApprovalOperationStartedError(
+        "The tool operation has already consumed its approval",
       );
+    }
+    if (existing) {
+      // Reapproval before execution is allowed when catalog or provider
+      // authority changed. Once consumed, the row is retained permanently as
+      // the operation tombstone above and is never replaced.
+      await scopedDb
+        .delete(schema.toolGatewayApprovalCapabilities)
+        .where(eq(schema.toolGatewayApprovalCapabilities.tokenHash, existing.tokenHash));
+    }
     await scopedDb.execute(sql`
       delete from tool_gateway_approval_capabilities
       where token_hash in (
@@ -44,7 +66,8 @@ export async function issueToolGatewayApproval(
         from tool_gateway_approval_capabilities
         where workspace_id = ${input.workspaceId}
           and subject_id = ${input.subjectId}
-          and (expires_at <= clock_timestamp() or consumed_at is not null)
+          and expires_at <= clock_timestamp()
+          and consumed_at is null
         order by expires_at, token_hash
         limit 128
       )

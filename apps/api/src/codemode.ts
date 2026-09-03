@@ -191,13 +191,14 @@ export async function submitAndDispatchCodemodeCall(
     } catch {
       dispatch = "unavailable";
     }
-    operation =
-      (await getCodemodeOperation(deps.db, {
+    operation = await refreshAdmittedCodemodeOperation(operation, () =>
+      getCodemodeOperation(deps.db, {
         accountId: authority.accountId,
         workspaceId: authority.workspaceId,
         attemptId: authority.attemptId,
         operationId: operation.operationId,
-      })) ?? operation;
+      }),
+    );
     if (terminal(operation)) dispatch = "terminal";
     else if (operation.state === "running" && dispatch === "unavailable") {
       dispatch = "already_running";
@@ -223,4 +224,18 @@ export async function readCodemodeOperation(
 
 function terminal(operation: CodemodeOperation): boolean {
   return ["completed", "failed", "outcome_unknown", "cancelled"].includes(operation.state);
+}
+
+export async function refreshAdmittedCodemodeOperation(
+  admitted: CodemodeOperation,
+  read: () => Promise<CodemodeOperation | null>,
+): Promise<CodemodeOperation> {
+  try {
+    return (await read()) ?? admitted;
+  } catch {
+    // Admission is already durable. Returning the known row lets the client
+    // continue with the same operation id instead of turning a refresh outage
+    // into an unmarked post-commit failure.
+    return admitted;
+  }
 }

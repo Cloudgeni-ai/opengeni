@@ -4,7 +4,10 @@ import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
-import { ToolGatewayApprovalRateLimitError } from "@opengeni/db";
+import {
+  ToolGatewayApprovalOperationStartedError,
+  ToolGatewayApprovalRateLimitError,
+} from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
 import { testSettings } from "@opengeni/testing";
 import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
@@ -439,6 +442,38 @@ describe("workspace tool gateway adapters", () => {
       ),
     ).rejects.toMatchObject({ status: 429 });
     expect(order).toEqual(["authorize", "issue"]);
+  });
+
+  test("refuses to reapprove an operation after its single-use capability was consumed", async () => {
+    const prepared = preparedGateway([], "human");
+    const operationId = "33333333-3333-4333-8333-333333333333";
+    await expect(
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        grant(),
+        {} as never,
+        {
+          operationId,
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "MAY-HAVE-RUN-1" },
+        },
+        async () => {
+          throw new ToolGatewayApprovalOperationStartedError(
+            "The tool operation has already consumed its approval",
+          );
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: false,
+      outcomeUnknown: true,
+      details: {
+        code: "tool_gateway_operation_already_started",
+        operationId,
+      },
+    });
   });
 
   test("still requires approval for a human-classified non-Site HTTP call", async () => {

@@ -39,6 +39,7 @@ import {
   consumeToolGatewayApproval,
   getWorkspaceArtifact,
   issueToolGatewayApproval,
+  ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
   type ApiIntegrationRuntime,
@@ -522,6 +523,20 @@ export async function approveWorkspaceToolGatewayCall(
     if (error instanceof ToolGatewayApprovalRateLimitError) {
       observation.end("rate_limited");
       throw new HTTPException(429, { message: "tool_approval_rate_limited", cause: error });
+    }
+    if (error instanceof ToolGatewayApprovalOperationStartedError) {
+      observation.end("failed");
+      throw new ApiHttpError(409, {
+        code: "conflict",
+        message:
+          "This tool operation may already have started and cannot be approved again. Reconcile its outcome before creating a new operation.",
+        retryable: false,
+        outcomeUnknown: true,
+        details: {
+          code: "tool_gateway_operation_already_started",
+          operationId: request.operationId,
+        },
+      });
     }
     observation.end("failed");
     throw error;

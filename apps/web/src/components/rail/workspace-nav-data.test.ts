@@ -3,10 +3,12 @@ import { describe, expect, test } from "bun:test";
 import {
   PRIMARY_WORKSPACE_ITEMS,
   WORKSPACE_CONFIG_GROUPS,
+  isConfigItemActive,
   isWorkspaceConfigPath,
 } from "./workspace-nav-data";
 
 const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
+const primaryNavSource = await Bun.file(`${import.meta.dir}/primary-nav.tsx`).text();
 
 describe("workspace rail destinations", () => {
   test("labels the settings entry without changing its destination", () => {
@@ -36,5 +38,18 @@ describe("workspace rail destinations", () => {
     expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
+    expect(
+      isConfigItemActive(
+        "/workspaces/ws-1/artifacts/site-1",
+        "ws-1",
+        "/workspaces/$workspaceId/artifacts",
+      ),
+    ).toBe(true);
+  });
+
+  test("nests recent individual Sites beneath the primary Sites destination", () => {
+    expect(primaryNavSource).toContain("import { RecentSitesNav }");
+    expect(primaryNavSource).toContain("<RecentSitesNav />");
+    expect(primaryNavSource).toContain('item.to === "/workspaces/$workspaceId/artifacts"');
   });
 });
