@@ -87,10 +87,7 @@ function eventFromRow(row: EventRow): WorkspaceArtifactEvent {
   };
 }
 
-function artifactFromRow(
-  row: ArtifactRow,
-  version: VersionRow | null,
-): WorkspaceArtifact {
+function artifactFromRow(row: ArtifactRow, version: VersionRow | null): WorkspaceArtifact {
   return {
     id: row.id,
     accountId: row.accountId,
@@ -106,10 +103,7 @@ function artifactFromRow(
   };
 }
 
-async function currentVersion(
-  scopedDb: any,
-  artifact: ArtifactRow,
-): Promise<VersionRow | null> {
+async function currentVersion(scopedDb: any, artifact: ArtifactRow): Promise<VersionRow | null> {
   if (!artifact.currentVersionId) return null;
   const [row] = await scopedDb
     .select()
@@ -124,12 +118,7 @@ async function currentVersion(
   return row ?? null;
 }
 
-async function artifactRow(
-  scopedDb: any,
-  workspaceId: string,
-  artifactId: string,
-  lock = false,
-) {
+async function artifactRow(scopedDb: any, workspaceId: string, artifactId: string, lock = false) {
   let query = scopedDb
     .select()
     .from(schema.workspaceArtifacts)
@@ -163,9 +152,7 @@ export async function listWorkspaceArtifacts(
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
     const visibility = and(
       eq(schema.workspaceArtifacts.workspaceId, workspaceId),
-      ...(options.status
-        ? [eq(schema.workspaceArtifacts.status, options.status)]
-        : []),
+      ...(options.status ? [eq(schema.workspaceArtifacts.status, options.status)] : []),
       ...(cursor
         ? [
             or(
@@ -182,17 +169,12 @@ export async function listWorkspaceArtifacts(
       .select()
       .from(schema.workspaceArtifacts)
       .where(visibility)
-      .orderBy(
-        desc(schema.workspaceArtifacts.updatedAt),
-        desc(schema.workspaceArtifacts.id),
-      )
+      .orderBy(desc(schema.workspaceArtifacts.updatedAt), desc(schema.workspaceArtifacts.id))
       .limit(limit + 1);
     const truncated = rows.length > limit;
     const pageRows = rows.slice(0, limit);
     const artifacts = await Promise.all(
-      pageRows.map(async (row) =>
-        artifactFromRow(row, await currentVersion(scopedDb, row)),
-      ),
+      pageRows.map(async (row) => artifactFromRow(row, await currentVersion(scopedDb, row))),
     );
     const tail = truncated ? pageRows.at(-1) : null;
     return {
@@ -207,10 +189,7 @@ const artifactCursorId =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function encodeListCursor(row: ArtifactRow): string {
-  return Buffer.from(
-    JSON.stringify([iso(row.updatedAt), row.id]),
-    "utf8",
-  ).toString("base64url");
+  return Buffer.from(JSON.stringify([iso(row.updatedAt), row.id]), "utf8").toString("base64url");
 }
 
 function decodeListCursor(value: string): { updatedAt: Date; id: string } {
@@ -226,8 +205,7 @@ function decodeListCursor(value: string): { updatedAt: Date; id: string } {
       throw new Error("invalid shape");
     }
     const updatedAt = new Date(parsed[0]);
-    if (!Number.isFinite(updatedAt.getTime()))
-      throw new Error("invalid timestamp");
+    if (!Number.isFinite(updatedAt.getTime())) throw new Error("invalid timestamp");
     return { updatedAt, id: parsed[1] };
   } catch {
     throw new WorkspaceArtifactOperationError("Invalid artifact list cursor");
@@ -241,8 +219,7 @@ export async function getWorkspaceArtifact(
 ): Promise<WorkspaceArtifactDetailResponse> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
-    if (!artifact)
-      throw new WorkspaceArtifactNotFoundError("Artifact not found");
+    if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     const [versionRows, eventRows, current] = await Promise.all([
       scopedDb
         .select()
@@ -291,13 +268,9 @@ export async function getWorkspaceArtifactContentRef(
 }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const artifact = await artifactRow(scopedDb, workspaceId, artifactId);
-    if (!artifact)
-      throw new WorkspaceArtifactNotFoundError("Artifact not found");
+    if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
     const targetId = versionId ?? artifact.currentVersionId;
-    if (!targetId)
-      throw new WorkspaceArtifactNotFoundError(
-        "Artifact has no published version",
-      );
+    if (!targetId) throw new WorkspaceArtifactNotFoundError("Artifact has no published version");
     const [version] = await scopedDb
       .select()
       .from(schema.workspaceArtifactVersions)
@@ -309,8 +282,7 @@ export async function getWorkspaceArtifactContentRef(
         ),
       )
       .limit(1);
-    if (!version)
-      throw new WorkspaceArtifactNotFoundError("Artifact version not found");
+    if (!version) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
     return {
       artifactId,
       version: versionFromRow(version),
@@ -349,17 +321,14 @@ async function discardPersistedArtifactContent(
   throw error;
 }
 
-type ArtifactOperationReplay = NonNullable<
-  Awaited<ReturnType<typeof replayForOperation>>
->;
+type ArtifactOperationReplay = NonNullable<Awaited<ReturnType<typeof replayForOperation>>>;
 
 function persistedArtifactContentIsReferenced(
   replay: ArtifactOperationReplay,
   input: Pick<PublishMetadata, "contentKey" | "sourceKey">,
 ): boolean {
   return (
-    replay.version.contentKey === input.contentKey ||
-    replay.version.sourceKey === input.sourceKey
+    replay.version.contentKey === input.contentKey || replay.version.sourceKey === input.sourceKey
   );
 }
 
@@ -376,11 +345,7 @@ async function reconcilePersistedArtifactMutation(
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (scopedDb) => {
         await lockOperation(scopedDb, input.workspaceId, input.operationKey);
-        return await replayForOperation(
-          scopedDb,
-          input.workspaceId,
-          input.operationKey,
-        );
+        return await replayForOperation(scopedDb, input.workspaceId, input.operationKey);
       },
     );
   } catch {
@@ -430,13 +395,8 @@ async function assertAttemptAuthority(
     input.sourceExecutionGeneration,
   ];
   if (provenance.every((value) => value === null)) return;
-  if (
-    provenance.some((value) => value === null) ||
-    input.sourceToolName === null
-  ) {
-    throw new WorkspaceArtifactOperationError(
-      "Artifact attempt provenance is incomplete",
-    );
+  if (provenance.some((value) => value === null) || input.sourceToolName === null) {
+    throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
   }
   const rows = (await scopedDb.execute(sql`
     WITH locked_workspace AS MATERIALIZED (
@@ -526,9 +486,7 @@ async function assertArtifactRequestedToolAuthority(
     input.sourceTurnId === null ||
     input.sourceExecutionGeneration === null
   ) {
-    throw new WorkspaceArtifactOperationError(
-      "Artifact attempt provenance is incomplete",
-    );
+    throw new WorkspaceArtifactOperationError("Artifact attempt provenance is incomplete");
   }
   const [row] = await scopedDb
     .select({ catalog: schema.sessionAttemptToolCatalogs.catalog })
@@ -540,10 +498,7 @@ async function assertArtifactRequestedToolAuthority(
         eq(schema.sessionAttemptToolCatalogs.sessionId, input.sourceSessionId),
         eq(schema.sessionAttemptToolCatalogs.turnId, input.sourceTurnId),
         eq(schema.sessionAttemptToolCatalogs.attemptId, input.sourceAttemptId),
-        eq(
-          schema.sessionAttemptToolCatalogs.executionGeneration,
-          input.sourceExecutionGeneration,
-        ),
+        eq(schema.sessionAttemptToolCatalogs.executionGeneration, input.sourceExecutionGeneration),
       ),
     )
     .limit(1);
@@ -561,18 +516,12 @@ async function assertArtifactRequestedToolAuthority(
       "Artifact requested tool authority is unavailable for the exact attempt",
     );
   }
-  if (
-    requestedTools.some((identity) => !allowed.has(toolIdentityKey(identity)))
-  ) {
+  if (requestedTools.some((identity) => !allowed.has(toolIdentityKey(identity)))) {
     throw new WorkspaceArtifactOperationError(
       "Artifact requested tools must be present in the exact attempt tool catalog",
     );
   }
-  if (
-    requestedTools.some(
-      (identity) => allowed.get(toolIdentityKey(identity)) !== "none",
-    )
-  ) {
+  if (requestedTools.some((identity) => allowed.get(toolIdentityKey(identity)) !== "none")) {
     throw new WorkspaceArtifactOperationError(
       "Agent-authored Site versions cannot activate tools requiring policy or current-human approval",
     );
@@ -583,11 +532,7 @@ function toolIdentityKey(identity: ToolGatewayIdentity): string {
   return `${identity.serverId}\u0000${identity.toolName}`;
 }
 
-async function replayForOperation(
-  scopedDb: any,
-  workspaceId: string,
-  operationKey: string,
-) {
+async function replayForOperation(scopedDb: any, workspaceId: string, operationKey: string) {
   const [event] = await scopedDb
     .select()
     .from(schema.workspaceArtifactEvents)
@@ -635,19 +580,13 @@ async function replayForOperation(
   } as const;
 }
 
-async function lockOperation(
-  scopedDb: any,
-  workspaceId: string,
-  operationKey: string,
-) {
+async function lockOperation(scopedDb: any, workspaceId: string, operationKey: string) {
   await scopedDb.execute(
     sql`SELECT pg_advisory_xact_lock(hashtextextended(${`${workspaceId}:${operationKey}`}, 0))`,
   );
 }
 
-function assertCreateReplay(
-  replay: Awaited<ReturnType<typeof replayForOperation>>,
-) {
+function assertCreateReplay(replay: Awaited<ReturnType<typeof replayForOperation>>) {
   if (
     !replay ||
     replay.event.type !== "published" ||
@@ -671,10 +610,7 @@ function assertCreateReplayMatchesInput(
 ): void {
   assertCreateReplay(replay);
   const requestDigest = createArtifactRequestDigest(input);
-  if (
-    replay.event.requestDigest !== null &&
-    replay.event.requestDigest !== requestDigest
-  ) {
+  if (replay.event.requestDigest !== null && replay.event.requestDigest !== requestDigest) {
     throw new WorkspaceArtifactConflictError(
       "Idempotency key was already used with different artifact metadata",
     );
@@ -684,11 +620,7 @@ function assertCreateReplayMatchesInput(
       "Idempotency key was already used with different content",
     );
   }
-  assertReplayVersionMetadata(
-    replay.version,
-    input,
-    input.requestedTools ?? [],
-  );
+  assertReplayVersionMetadata(replay.version, input, input.requestedTools ?? []);
 }
 
 function assertPublishReplay(
@@ -716,21 +648,14 @@ function assertPublishReplayMatchesInput(
   },
 ): void {
   assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
-  const expectedRequestedTools =
-    input.requestedTools ?? replay.fromVersion?.requestedTools;
+  const expectedRequestedTools = input.requestedTools ?? replay.fromVersion?.requestedTools;
   if (!expectedRequestedTools) {
     throw new WorkspaceArtifactConflictError(
       "Idempotency key was already used for a publication with missing source authority",
     );
   }
-  const requestDigest = publishArtifactRequestDigest(
-    input,
-    expectedRequestedTools,
-  );
-  if (
-    replay.event.requestDigest !== null &&
-    replay.event.requestDigest !== requestDigest
-  ) {
+  const requestDigest = publishArtifactRequestDigest(input, expectedRequestedTools);
+  if (replay.event.requestDigest !== null && replay.event.requestDigest !== requestDigest) {
     throw new WorkspaceArtifactConflictError(
       "Idempotency key was already used with different publication metadata",
     );
@@ -744,9 +669,7 @@ function assertPublishReplayMatchesInput(
 }
 
 function hashArtifactRequest(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(value), "utf8")
-    .digest("hex");
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
 
 function createArtifactRequestDigest(
@@ -760,8 +683,7 @@ function createArtifactRequestDigest(
   return hashArtifactRequest({
     version: 1,
     operation: "create",
-    requestedSlug:
-      input.requestedSlug === undefined ? input.slug : input.requestedSlug,
+    requestedSlug: input.requestedSlug === undefined ? input.slug : input.requestedSlug,
     title: input.title,
     description: input.description,
     contentSha256: input.contentSha256,
@@ -784,10 +706,7 @@ function publishArtifactRequestDigest(
     operation: "publish",
     artifactId: input.artifactId,
     expectedCurrentVersionId: input.expectedCurrentVersionId,
-    title:
-      input.title === undefined
-        ? { present: false }
-        : { present: true, value: input.title },
+    title: input.title === undefined ? { present: false } : { present: true, value: input.title },
     description:
       input.description === undefined
         ? { present: false }
@@ -874,11 +793,7 @@ export async function createWorkspaceArtifact(
       async (scopedDb) => {
         return await scopedDb.transaction(async (tx) => {
           await lockOperation(tx, input.workspaceId, input.operationKey);
-          const replay = await replayForOperation(
-            tx,
-            input.workspaceId,
-            input.operationKey,
-          );
+          const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
           if (replay) {
             assertCreateReplayMatchesInput(replay, input);
             return mutationResult(
@@ -890,11 +805,7 @@ export async function createWorkspaceArtifact(
             );
           }
           await assertAttemptAuthority(tx, input);
-          await assertArtifactRequestedToolAuthority(
-            tx,
-            input,
-            input.requestedTools ?? [],
-          );
+          await assertArtifactRequestedToolAuthority(tx, input, input.requestedTools ?? []);
           await input.persistContent();
           contentPersisted = true;
           const [artifact] = await tx
@@ -964,14 +875,9 @@ export async function createWorkspaceArtifact(
     );
   } catch (error) {
     if (contentPersisted) {
-      return await reconcilePersistedArtifactMutation(
-        db,
-        input,
-        error,
-        (replay) => {
-          assertCreateReplayMatchesInput(replay, input);
-        },
-      );
+      return await reconcilePersistedArtifactMutation(db, input, error, (replay) => {
+        assertCreateReplayMatchesInput(replay, input);
+      });
     }
     throw error;
   }
@@ -994,11 +900,7 @@ export async function publishWorkspaceArtifactVersion(
       async (scopedDb) => {
         return await scopedDb.transaction(async (tx) => {
           await lockOperation(tx, input.workspaceId, input.operationKey);
-          const replay = await replayForOperation(
-            tx,
-            input.workspaceId,
-            input.operationKey,
-          );
+          const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
           if (replay) {
             assertPublishReplayMatchesInput(replay, input);
             return mutationResult(
@@ -1010,18 +912,10 @@ export async function publishWorkspaceArtifactVersion(
             );
           }
           await assertAttemptAuthority(tx, input);
-          const artifact = await artifactRow(
-            tx,
-            input.workspaceId,
-            input.artifactId,
-            true,
-          );
-          if (!artifact)
-            throw new WorkspaceArtifactNotFoundError("Artifact not found");
+          const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+          if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
           if (artifact.status !== "active") {
-            throw new WorkspaceArtifactOperationError(
-              "Archived artifacts cannot be published",
-            );
+            throw new WorkspaceArtifactOperationError("Archived artifacts cannot be published");
           }
           if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
             throw new WorkspaceArtifactConflictError(
@@ -1030,10 +924,7 @@ export async function publishWorkspaceArtifactVersion(
             );
           }
           const current = await currentVersion(tx, artifact);
-          if (!current)
-            throw new WorkspaceArtifactNotFoundError(
-              "Artifact has no current version",
-            );
+          if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
           await assertArtifactRequestedToolAuthority(
             tx,
             input,
@@ -1044,14 +935,8 @@ export async function publishWorkspaceArtifactVersion(
             .from(schema.workspaceArtifactVersions)
             .where(
               and(
-                eq(
-                  schema.workspaceArtifactVersions.workspaceId,
-                  input.workspaceId,
-                ),
-                eq(
-                  schema.workspaceArtifactVersions.artifactId,
-                  input.artifactId,
-                ),
+                eq(schema.workspaceArtifactVersions.workspaceId, input.workspaceId),
+                eq(schema.workspaceArtifactVersions.artifactId, input.artifactId),
               ),
             )
             .orderBy(desc(schema.workspaceArtifactVersions.revision))
@@ -1080,14 +965,12 @@ export async function publishWorkspaceArtifactVersion(
               createdBySubjectId: input.actorSubjectId,
             })
             .returning();
-          const update: Partial<typeof schema.workspaceArtifacts.$inferInsert> =
-            {
-              currentVersionId: version!.id,
-              updatedAt: new Date(),
-            };
+          const update: Partial<typeof schema.workspaceArtifacts.$inferInsert> = {
+            currentVersionId: version!.id,
+            updatedAt: new Date(),
+          };
           if (input.title !== undefined) update.title = input.title;
-          if (input.description !== undefined)
-            update.description = input.description;
+          if (input.description !== undefined) update.description = input.description;
           const [updated] = await tx
             .update(schema.workspaceArtifacts)
             .set(update)
@@ -1121,14 +1004,9 @@ export async function publishWorkspaceArtifactVersion(
     );
   } catch (error) {
     if (contentPersisted) {
-      return await reconcilePersistedArtifactMutation(
-        db,
-        input,
-        error,
-        (replay) => {
-          assertPublishReplayMatchesInput(replay, input);
-        },
-      );
+      return await reconcilePersistedArtifactMutation(db, input, error, (replay) => {
+        assertPublishReplayMatchesInput(replay, input);
+      });
     }
     throw error;
   }
@@ -1160,11 +1038,7 @@ export async function rollbackWorkspaceArtifact(
     async (scopedDb) => {
       return await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
-        const replay = await replayForOperation(
-          tx,
-          input.workspaceId,
-          input.operationKey,
-        );
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
         if (replay) {
           assertRollbackReplay(
             replay,
@@ -1182,18 +1056,10 @@ export async function rollbackWorkspaceArtifact(
           );
         }
         await assertAttemptAuthority(tx, input);
-        const artifact = await artifactRow(
-          tx,
-          input.workspaceId,
-          input.artifactId,
-          true,
-        );
-        if (!artifact)
-          throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+        if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
         if (artifact.status !== "active") {
-          throw new WorkspaceArtifactOperationError(
-            "Archived artifacts cannot be rolled back",
-          );
+          throw new WorkspaceArtifactOperationError("Archived artifacts cannot be rolled back");
         }
         if (artifact.currentVersionId !== input.expectedCurrentVersionId)
           throw new WorkspaceArtifactConflictError(
@@ -1205,24 +1071,14 @@ export async function rollbackWorkspaceArtifact(
           .from(schema.workspaceArtifactVersions)
           .where(
             and(
-              eq(
-                schema.workspaceArtifactVersions.workspaceId,
-                input.workspaceId,
-              ),
+              eq(schema.workspaceArtifactVersions.workspaceId, input.workspaceId),
               eq(schema.workspaceArtifactVersions.artifactId, input.artifactId),
               eq(schema.workspaceArtifactVersions.id, input.versionId),
             ),
           )
           .limit(1);
-        if (!target)
-          throw new WorkspaceArtifactNotFoundError(
-            "Artifact version not found",
-          );
-        await assertArtifactRequestedToolAuthority(
-          tx,
-          input,
-          target.requestedTools,
-        );
+        if (!target) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
+        await assertArtifactRequestedToolAuthority(tx, input, target.requestedTools);
         const [updated] = await tx
           .update(schema.workspaceArtifacts)
           .set({ currentVersionId: target.id, updatedAt: new Date() })
@@ -1278,11 +1134,7 @@ export async function setWorkspaceArtifactStatus(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockOperation(tx, input.workspaceId, input.operationKey);
-        const replay = await replayForOperation(
-          tx,
-          input.workspaceId,
-          input.operationKey,
-        );
+        const replay = await replayForOperation(tx, input.workspaceId, input.operationKey);
         if (replay) {
           assertStatusReplay(
             replay,
@@ -1300,14 +1152,8 @@ export async function setWorkspaceArtifactStatus(
           );
         }
         await assertAttemptAuthority(tx, input);
-        const artifact = await artifactRow(
-          tx,
-          input.workspaceId,
-          input.artifactId,
-          true,
-        );
-        if (!artifact)
-          throw new WorkspaceArtifactNotFoundError("Artifact not found");
+        const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
+        if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
         if (artifact.currentVersionId !== input.expectedCurrentVersionId) {
           throw new WorkspaceArtifactConflictError(
             "Artifact changed in another request",
@@ -1315,16 +1161,9 @@ export async function setWorkspaceArtifactStatus(
           );
         }
         const current = await currentVersion(tx, artifact);
-        if (!current)
-          throw new WorkspaceArtifactNotFoundError(
-            "Artifact has no current version",
-          );
+        if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
         if (input.status === "active") {
-          await assertArtifactRequestedToolAuthority(
-            tx,
-            input,
-            current.requestedTools,
-          );
+          await assertArtifactRequestedToolAuthority(tx, input, current.requestedTools);
         }
         if (artifact.status === input.status) {
           throw new WorkspaceArtifactOperationError(
@@ -1368,8 +1207,7 @@ function assertReplayVersionMetadata(
 ): void {
   if (
     version.sourceSha256 !== input.sourceSha256 ||
-    JSON.stringify(version.requestedTools) !==
-      JSON.stringify(expectedRequestedTools)
+    JSON.stringify(version.requestedTools) !== JSON.stringify(expectedRequestedTools)
   ) {
     throw new WorkspaceArtifactConflictError(
       "Idempotency key was already used with different source or requested tools",

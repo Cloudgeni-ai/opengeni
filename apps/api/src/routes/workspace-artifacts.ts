@@ -48,32 +48,21 @@ import { prepareWorkspaceToolGatewayForGrant } from "../workspace-tool-gateway";
 
 const ArtifactId = z.string().uuid();
 
-async function body<S extends z.ZodType>(
-  context: Context,
-  schema: S,
-): Promise<z.infer<S>> {
+async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z.infer<S>> {
   const parsed = schema.safeParse(await context.req.json().catch(() => null));
-  if (!parsed.success)
-    throw new HTTPException(422, { message: "Invalid artifact request" });
+  if (!parsed.success) throw new HTTPException(422, { message: "Invalid artifact request" });
   return parsed.data;
 }
 
 function artifactId(context: Context): string {
   const parsed = ArtifactId.safeParse(context.req.param("artifactId"));
-  if (!parsed.success)
-    throw new HTTPException(422, { message: "Invalid artifact id" });
+  if (!parsed.success) throw new HTTPException(422, { message: "Invalid artifact id" });
   return parsed.data;
 }
 
-export function workspaceArtifactErrorResponse(
-  context: Context,
-  error: unknown,
-): Response {
+export function workspaceArtifactErrorResponse(context: Context, error: unknown): Response {
   if (error instanceof WorkspaceArtifactNotFoundError) {
-    return context.json(
-      { code: "WORKSPACE_ARTIFACT_NOT_FOUND", message: error.message },
-      404,
-    );
+    return context.json({ code: "WORKSPACE_ARTIFACT_NOT_FOUND", message: error.message }, 404);
   }
   if (error instanceof WorkspaceArtifactConflictError) {
     return context.json(
@@ -112,11 +101,7 @@ function prepareContent(
     throw new HTTPException(503, {
       message: "Object storage is not configured",
     });
-  return prepareWorkspaceArtifactContent(
-    deps.objectStorage,
-    workspaceId,
-    input,
-  );
+  return prepareWorkspaceArtifactContent(deps.objectStorage, workspaceId, input);
 }
 
 function provenance(subjectId: string, idempotencyKey: string) {
@@ -139,8 +124,7 @@ async function requireRequestedSiteToolAuthority(
   if (requestedTools.length === 0) return;
   if (grant.principalKind !== "human_session") {
     throw new HTTPException(403, {
-      message:
-        "Requested Site tools require current-human publishing authority",
+      message: "Requested Site tools require current-human publishing authority",
     });
   }
   const prepared = await prepareWorkspaceToolGatewayForGrant(deps, grant);
@@ -152,13 +136,11 @@ async function requireRequestedSiteToolAuthority(
     );
     if (
       requestedTools.some(
-        (identity) =>
-          !allowed.has(JSON.stringify([identity.serverId, identity.toolName])),
+        (identity) => !allowed.has(JSON.stringify([identity.serverId, identity.toolName])),
       )
     ) {
       throw new HTTPException(403, {
-        message:
-          "Requested Site tools must be available to the publishing human",
+        message: "Requested Site tools must be available to the publishing human",
       });
     }
   } finally {
@@ -172,14 +154,8 @@ async function requestedToolsForArtifactVersion(
   targetArtifactId: string,
   versionId: string,
 ) {
-  return (
-    await getWorkspaceArtifactContentRef(
-      deps.db,
-      workspaceId,
-      targetArtifactId,
-      versionId,
-    )
-  ).version.requestedTools;
+  return (await getWorkspaceArtifactContentRef(deps.db, workspaceId, targetArtifactId, versionId))
+    .version.requestedTools;
 }
 
 async function canReadProvenanceSession(
@@ -217,10 +193,7 @@ async function mutationResponse(
   );
 }
 
-export function registerWorkspaceArtifactRoutes(
-  app: Hono,
-  deps: ApiRouteDeps,
-): void {
+export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): void {
   // `published-artifacts` deliberately avoids the existing `/artifacts/:id`
   // retained-output API. The product route remains simply `/artifacts`.
   const base = "/v1/workspaces/:workspaceId/published-artifacts";
@@ -233,8 +206,7 @@ export function registerWorkspaceArtifactRoutes(
       cursor: context.req.query("cursor"),
       status: context.req.query("status"),
     });
-    if (!query.success)
-      throw new HTTPException(422, { message: "Invalid artifact list query" });
+    if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
     try {
       return context.json(
         WorkspaceArtifactListResponse.parse(
@@ -254,29 +226,16 @@ export function registerWorkspaceArtifactRoutes(
 
   app.post(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      workspaceId,
-      "artifacts:publish",
-    );
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, CreateWorkspaceArtifactRequest);
-    await requireRequestedSiteToolAuthority(
-      deps,
-      grant,
-      request.requestedTools ?? [],
-    );
+    await requireRequestedSiteToolAuthority(deps, grant, request.requestedTools ?? []);
     const id = crypto.randomUUID();
-    const slugBase =
-      request.slug ??
-      (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
+    const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
     const content = prepareContent(deps, workspaceId, {
       html: request.html,
       ...(request.source ? { source: request.source } : {}),
-      ...(request.requestedTools
-        ? { requestedTools: request.requestedTools }
-        : {}),
+      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
     });
     try {
       return context.json(
@@ -304,18 +263,9 @@ export function registerWorkspaceArtifactRoutes(
 
   app.get(`${base}/:artifactId`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      workspaceId,
-      "artifacts:read",
-    );
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     try {
-      const detail = await getWorkspaceArtifact(
-        deps.db,
-        workspaceId,
-        artifactId(context),
-      );
+      const detail = await getWorkspaceArtifact(deps.db, workspaceId, artifactId(context));
       return context.json(
         WorkspaceArtifactDetailResponse.parse(
           await projectWorkspaceArtifactDetailProvenance(detail, (sessionId) =>
@@ -351,10 +301,7 @@ export function registerWorkspaceArtifactRoutes(
         content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
       } catch (error) {
         throw new HTTPException(503, {
-          message:
-            error instanceof Error
-              ? error.message
-              : "Artifact content is unavailable",
+          message: error instanceof Error ? error.message : "Artifact content is unavailable",
           cause: error,
         });
       }
@@ -374,12 +321,7 @@ export function registerWorkspaceArtifactRoutes(
 
   app.post(`${base}/:artifactId/versions`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      workspaceId,
-      "artifacts:publish",
-    );
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
     await requireRequestedSiteToolAuthority(
@@ -396,9 +338,7 @@ export function registerWorkspaceArtifactRoutes(
     const content = prepareContent(deps, workspaceId, {
       html: request.html,
       ...(request.source ? { source: request.source } : {}),
-      ...(request.requestedTools
-        ? { requestedTools: request.requestedTools }
-        : {}),
+      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
     });
     try {
       return context.json(
@@ -411,9 +351,7 @@ export function registerWorkspaceArtifactRoutes(
             artifactId: id,
             expectedCurrentVersionId: request.expectedCurrentVersionId,
             ...(request.title !== undefined ? { title: request.title } : {}),
-            ...(request.description !== undefined
-              ? { description: request.description }
-              : {}),
+            ...(request.description !== undefined ? { description: request.description } : {}),
             ...content,
             ...provenance(grant.subjectId, request.idempotencyKey),
           }),
@@ -426,23 +364,13 @@ export function registerWorkspaceArtifactRoutes(
 
   app.post(`${base}/:artifactId/rollback`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      workspaceId,
-      "artifacts:publish",
-    );
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, RollbackWorkspaceArtifactRequest);
     const id = artifactId(context);
     await requireRequestedSiteToolAuthority(
       deps,
       grant,
-      await requestedToolsForArtifactVersion(
-        deps,
-        workspaceId,
-        id,
-        request.versionId,
-      ),
+      await requestedToolsForArtifactVersion(deps, workspaceId, id, request.versionId),
     );
     try {
       return context.json(
@@ -467,12 +395,7 @@ export function registerWorkspaceArtifactRoutes(
 
   app.patch(`${base}/:artifactId/status`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(
-      context,
-      deps,
-      workspaceId,
-      "artifacts:publish",
-    );
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:publish");
     const request = await body(context, SetWorkspaceArtifactStatusRequest);
     const id = artifactId(context);
     if (request.status === "active") {

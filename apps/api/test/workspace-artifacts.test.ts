@@ -100,6 +100,7 @@ beforeAll(async () => {
     }),
     db: client.db,
     objectStorage,
+    getDocumentServices: () => ({}) as never,
   } as ApiRouteDeps);
 }, 180_000);
 
