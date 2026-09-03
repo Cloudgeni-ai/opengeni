@@ -1,6 +1,9 @@
 {{- if and (eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (ne (toString .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED) "true") }}
 {{- fail "config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED must be true before enabling setup-account query transport" }}
 {{- end }}
+{{- if and (eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (not .Values.ingress.setupAccountIngress.enabled) }}
+{{- fail "ingress.setupAccountIngress.enabled must be true before enabling setup-account query transport; otherwise /setup-account falls through the primary Ingress logging and tracing policy" }}
+{{- end }}
 {{- $setupAccountHosts := list }}
 {{- range .Values.ingress.hosts }}
   {{- $host := . }}

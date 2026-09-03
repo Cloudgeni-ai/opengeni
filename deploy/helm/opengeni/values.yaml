@@ -95,7 +95,9 @@ config:
   OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment
   # Query transport additionally requires a separately proven controller/edge
   # error-log policy. Access-log and OpenTelemetry annotations do not sanitize
-  # ingress-nginx's error_log request line.
+  # ingress-nginx's error_log request line. Query mode also requires the chart's
+  # dedicated setupAccountIngress to remain enabled so the request cannot fall
+  # through the ordinarily logged/traced primary Ingress.
   OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"
   # Canonical organization-tenancy authority activation. Pinned to the
   # reversible pre-activation posture so an upgrade can never cross the one-way
@@ -1029,6 +1031,8 @@ ingress:
   # requires proven controller/edge error-log handling. This map is for the
   # required deployment-specific mitigation and other annotations.
   setupAccountIngress:
+    # Required when setup email token transport is "query". Disabling this
+    # while query mode is selected aborts rendering with an operator error.
     enabled: true
     annotations: {}
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the

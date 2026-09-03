@@ -14,9 +14,28 @@ export function assertOrganizationUserSetupDeliveryConfigured(
   settings: Settings,
   transport: ManagedEmailTransport,
 ): void {
+  assertOrganizationUserSetupQueryTransportConfigured(settings);
   requiredSetupSecret(settings);
   requiredPublicBaseUrl(settings);
   assertManagedEmailTransportMetadata(transport);
+}
+
+/** Enforce the query-bearing edge proof for env and embedded settings alike. */
+export function assertOrganizationUserSetupQueryTransportConfigured(
+  settings: Pick<
+    Settings,
+    | "organizationUserSetupEmailTokenTransport"
+    | "organizationUserSetupQueryEdgeSanitizationConfirmed"
+  >,
+): void {
+  if (
+    settings.organizationUserSetupEmailTokenTransport === "query" &&
+    !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
+  ) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true is required when OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=query",
+    );
+  }
 }
 
 /** Reject an invalid embedded-provider contract before any durable boundary. */

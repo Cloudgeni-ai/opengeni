@@ -19,6 +19,9 @@ describe("managed setup-account ingress", () => {
     expect(ingress).toContain(
       '.Values.ingress.setupAccountIngress.enabled .Values.web.enabled (eq .Values.config.OPENGENI_PRODUCT_ACCESS_MODE "managed") (gt (len $setupAccountHosts) 0)',
     );
+    expect(ingress).toContain(
+      '(eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (not .Values.ingress.setupAccountIngress.enabled)',
+    );
     expect(ingress).toContain('name: {{ include "opengeni.fullname" . }}-setup-account');
     expect(ingress).toContain("- path: /setup-account\n            pathType: Exact");
     expect(ingress).toContain('nginx.ingress.kubernetes.io/enable-access-log: "false"');
@@ -84,6 +87,13 @@ describe("managed setup-account ingress", () => {
           }),
         ),
       ).toBeDefined();
+      await expect(
+        renderIngresses(hosts, {
+          tokenTransport: "query",
+          queryEdgeSanitizationConfirmed: true,
+          setupAccountIngressEnabled: false,
+        }),
+      ).rejects.toThrow(/setupAccountIngress\.enabled must be true/);
     },
   );
 });
@@ -118,6 +128,7 @@ async function renderIngresses(
     setupAnnotations?: Record<string, string>;
     tokenTransport?: "fragment" | "query";
     queryEdgeSanitizationConfirmed?: boolean;
+    setupAccountIngressEnabled?: boolean;
   } = {},
 ): Promise<Ingress[]> {
   const helm = Bun.which("helm");
@@ -138,7 +149,10 @@ async function renderIngresses(
       ingress: {
         enabled: true,
         hosts,
-        setupAccountIngress: { annotations: options.setupAnnotations ?? {} },
+        setupAccountIngress: {
+          enabled: options.setupAccountIngressEnabled ?? true,
+          annotations: options.setupAnnotations ?? {},
+        },
       },
     }),
   );

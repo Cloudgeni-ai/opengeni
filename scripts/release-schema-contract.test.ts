@@ -160,7 +160,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0401_organization_user_setup_token_transport.sql",
       ),
     ).toMatchObject({
-      sha256: "ccc4b19929454f585b936c41c2f59077b7a81bfefe02578b0fe8c2e8c17c08d6",
+      sha256: "16b39cc0468ce05b34ce11cf1b64798a028f7dfbf271956dc016f617822f6366",
       deploymentMode: "rolling",
     });
   });

@@ -1,8 +1,10 @@
 -- deployment-mode: rolling
 -- Freeze the setup-link transport at the same first-provider boundary as the
--- immutable payload digest. The nullable column preserves old API binaries;
--- new binaries can recover an already-prepared legacy row by matching its
--- digest before setting the missing transport.
+-- immutable payload digest. The nullable column preserves old API binaries in
+-- fragment mode; the replacement v1 claim rolls back any attempted claim of a
+-- query-frozen retry so only a 0401-aware v2 replica can service that row.
+-- New binaries recover an already-prepared legacy row by matching its digest
+-- before setting the missing transport.
 
 ALTER TABLE organization_user_setup_deliveries
   ADD COLUMN setup_token_transport text;
@@ -10,6 +12,44 @@ ALTER TABLE organization_user_setup_deliveries
 ALTER TABLE organization_user_setup_deliveries
   ADD CONSTRAINT organization_user_setup_deliveries_token_transport_check
   CHECK (setup_token_transport IS NULL OR setup_token_transport IN ('fragment', 'query'));
+
+-- Preserve the original 0351 implementation as a private implementation
+-- detail for the v2 capability. The public v1 name becomes a compatibility
+-- fence: if an old replica reaches a query-frozen row, the raised exception
+-- rolls back the nested claim/attempt changes before the transaction returns.
+ALTER FUNCTION claim_organization_user_setup_delivery(jsonb)
+  RENAME TO claim_organization_user_setup_delivery_unfenced_0401;
+ALTER FUNCTION claim_organization_user_setup_delivery_unfenced_0401(jsonb)
+  SET SCHEMA opengeni_private;
+
+CREATE FUNCTION claim_organization_user_setup_delivery(p_command jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path FROM CURRENT
+AS $body$
+DECLARE
+  result jsonb;
+  delivery_id_value uuid;
+  setup_token_transport_value text;
+BEGIN
+  result := opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(
+    p_command
+  );
+  IF result ->> 'claimed' IS DISTINCT FROM 'true' THEN
+    RETURN result;
+  END IF;
+  delivery_id_value := nullif(result #>> '{delivery,id}', '')::uuid;
+  SELECT delivery.setup_token_transport INTO setup_token_transport_value
+  FROM organization_user_setup_deliveries delivery
+  WHERE delivery.id = delivery_id_value;
+  IF setup_token_transport_value = 'query' THEN
+    RAISE EXCEPTION
+      'query-frozen organization setup delivery requires a 0401-aware API replica'
+      USING ERRCODE = '55000';
+  END IF;
+  RETURN result;
+END
+$body$;
 
 CREATE FUNCTION claim_organization_user_setup_delivery_v2(p_command jsonb)
 RETURNS jsonb
@@ -21,7 +61,9 @@ DECLARE
   delivery_id_value uuid;
   delivery organization_user_setup_deliveries%ROWTYPE;
 BEGIN
-  result := claim_organization_user_setup_delivery(p_command);
+  result := opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(
+    p_command
+  );
   IF result ->> 'claimed' IS DISTINCT FROM 'true' THEN
     RETURN result;
   END IF;
@@ -80,6 +122,14 @@ DO $hardening$
 DECLARE data_schema text := current_schema();
 BEGIN
   EXECUTE format(
+    'ALTER FUNCTION opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(jsonb) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema
+  );
+  EXECUTE format(
+    'ALTER FUNCTION %I.claim_organization_user_setup_delivery(jsonb) SET search_path = pg_catalog, %I, pg_temp',
+    data_schema, data_schema
+  );
+  EXECUTE format(
     'ALTER FUNCTION %I.claim_organization_user_setup_delivery_v2(jsonb) SET search_path = pg_catalog, %I, pg_temp',
     data_schema, data_schema
   );
@@ -88,6 +138,13 @@ BEGIN
     data_schema, data_schema
   );
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'opengeni_app') THEN
+    REVOKE ALL ON FUNCTION
+      opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(jsonb)
+      FROM opengeni_app;
+    EXECUTE format(
+      'GRANT EXECUTE ON FUNCTION %I.claim_organization_user_setup_delivery(jsonb) TO opengeni_app',
+      data_schema
+    );
     EXECUTE format(
       'GRANT EXECUTE ON FUNCTION %I.claim_organization_user_setup_delivery_v2(jsonb) TO opengeni_app',
       data_schema
@@ -100,11 +157,18 @@ BEGIN
 END
 $hardening$;
 
+REVOKE ALL ON FUNCTION
+  opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(jsonb) FROM PUBLIC;
+REVOKE ALL ON FUNCTION claim_organization_user_setup_delivery(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION claim_organization_user_setup_delivery_v2(jsonb) FROM PUBLIC;
 REVOKE ALL ON FUNCTION prepare_organization_user_setup_delivery_v2(jsonb) FROM PUBLIC;
 
 COMMENT ON COLUMN organization_user_setup_deliveries.setup_token_transport IS
   'Fragment or query transport frozen at first preparation; NULL only for rolling old-binary rows pending digest recovery.';
+COMMENT ON FUNCTION claim_organization_user_setup_delivery(jsonb) IS
+  'Pre-0401 compatibility claim; rolls back query-frozen claims so a v2 replica can service them.';
+COMMENT ON FUNCTION opengeni_private.claim_organization_user_setup_delivery_unfenced_0401(jsonb) IS
+  'Private 0351 claim implementation used only by the 0401-aware v2 capability.';
 COMMENT ON FUNCTION claim_organization_user_setup_delivery_v2(jsonb) IS
   'Rolling claim projection including the frozen setup transport and legacy payload digest.';
 COMMENT ON FUNCTION prepare_organization_user_setup_delivery_v2(jsonb) IS

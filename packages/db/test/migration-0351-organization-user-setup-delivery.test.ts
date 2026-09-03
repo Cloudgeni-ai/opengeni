@@ -261,6 +261,144 @@ describe("migration 0351 organization user setup delivery", () => {
       retryState: "available",
     });
 
+    const queryInvitationOperationId = crypto.randomUUID();
+    const queryInvitation = await createOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      operationId: queryInvitationOperationId,
+      targetSubjectId: null,
+      targetEmail: `query-delivery-${crypto.randomUUID()}@example.test`,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    const queryFirst = await claimOrganizationUserSetupDelivery(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      invitationId: queryInvitation.id,
+      invitationOperationId: queryInvitationOperationId,
+      operationId: crypto.randomUUID(),
+    });
+    if (!queryFirst.claimed) throw new Error("query setup delivery was not claimed");
+    const queryTokenDigest = "1".repeat(64);
+    const queryPayloadDigest = "2".repeat(64);
+    await prepareOrganizationUserSetupDelivery(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      deliveryId: queryFirst.delivery.id,
+      attemptId: queryFirst.attemptId,
+      claimHolderId: queryFirst.claimHolderId,
+      tokenDigest: queryTokenDigest,
+      payloadDigest: queryPayloadDigest,
+      setupTokenTransport: "query",
+      providerIdempotencyScope,
+      providerIdempotencyRetentionSeconds,
+    });
+    await settleOrganizationUserSetupDelivery(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      deliveryId: queryFirst.delivery.id,
+      attemptId: queryFirst.attemptId,
+      claimHolderId: queryFirst.claimHolderId,
+      outcome: "failed",
+      errorClass: "provider_refused",
+    });
+
+    const legacyClaimOperationId = crypto.randomUUID();
+    await expectSqlState(
+      () =>
+        app!.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${organizationId}, true)`;
+          await sql`select set_config('opengeni.subject_id', ${ownerSubject}, true)`;
+          await sql`select claim_organization_user_setup_delivery(
+            ${JSON.stringify({
+              organizationId,
+              actorSubjectId: ownerSubject,
+              invitationId: queryInvitation.id,
+              operationId: legacyClaimOperationId,
+            })}::jsonb
+          )`;
+        }),
+      "55000",
+    );
+    const [afterLegacyClaim] = await shared.admin<
+      Array<{ attemptCount: number; attempts: number; claimHolderId: string | null }>
+    >`
+      select delivery.attempt_count as "attemptCount",
+        delivery.claim_holder_id as "claimHolderId",
+        (select count(*)::int from organization_user_setup_delivery_attempts attempt
+          where attempt.delivery_id = delivery.id) as attempts
+      from organization_user_setup_deliveries delivery
+      where delivery.id = ${queryFirst.delivery.id}`;
+    expect(afterLegacyClaim).toEqual({ attemptCount: 1, attempts: 1, claimHolderId: null });
+
+    const queryRetry = await claimOrganizationUserSetupDelivery(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      invitationId: queryInvitation.id,
+      operationId: crypto.randomUUID(),
+    });
+    if (!queryRetry.claimed) throw new Error("v2 query retry was not claimed");
+    expect(queryRetry).toMatchObject({
+      setupTokenTransport: "query",
+      payloadDigest: queryPayloadDigest,
+    });
+    await expectSqlState(
+      () =>
+        app!.begin(async (sql) => {
+          await sql`select set_config('opengeni.account_id', ${organizationId}, true)`;
+          await sql`select set_config('opengeni.subject_id', ${ownerSubject}, true)`;
+          await sql`select prepare_organization_user_setup_delivery(
+            ${JSON.stringify({
+              organizationId,
+              actorSubjectId: ownerSubject,
+              deliveryId: queryRetry.delivery.id,
+              attemptId: queryRetry.attemptId,
+              claimHolderId: queryRetry.claimHolderId,
+              tokenDigest: queryTokenDigest,
+              payloadDigest: "3".repeat(64),
+              providerIdempotencyScope,
+              providerIdempotencyRetentionSeconds,
+            })}::jsonb
+          )`;
+        }),
+      "23505",
+    );
+    const [afterLegacyPrepare] = await shared.admin<
+      Array<{ deliveryProviderStarted: boolean; attemptProviderStarted: boolean }>
+    >`
+      select delivery.provider_started_at is not null as "deliveryProviderStarted",
+        attempt.provider_started_at is not null as "attemptProviderStarted"
+      from organization_user_setup_deliveries delivery
+      join organization_user_setup_delivery_attempts attempt on attempt.id = ${queryRetry.attemptId}
+      where delivery.id = ${queryRetry.delivery.id}`;
+    expect(afterLegacyPrepare).toEqual({
+      deliveryProviderStarted: false,
+      attemptProviderStarted: false,
+    });
+    await prepareOrganizationUserSetupDelivery(client.db, {
+      organizationId,
+      actorSubjectId: ownerSubject,
+      deliveryId: queryRetry.delivery.id,
+      attemptId: queryRetry.attemptId,
+      claimHolderId: queryRetry.claimHolderId,
+      tokenDigest: queryTokenDigest,
+      payloadDigest: queryPayloadDigest,
+      setupTokenTransport: "query",
+      providerIdempotencyScope,
+      providerIdempotencyRetentionSeconds,
+    });
+    expect(
+      await settleOrganizationUserSetupDelivery(client.db, {
+        organizationId,
+        actorSubjectId: ownerSubject,
+        deliveryId: queryRetry.delivery.id,
+        attemptId: queryRetry.attemptId,
+        claimHolderId: queryRetry.claimHolderId,
+        outcome: "failed",
+        errorClass: "provider_refused",
+      }),
+    ).toMatchObject({ state: "failed", attemptCount: 2 });
+
     const administratorSubject = `user:${crypto.randomUUID()}`;
     const administratorInvitationOperationId = crypto.randomUUID();
     const administratorInvitation = await createOrganizationInvitation(client.db, {
