@@ -22,6 +22,7 @@ async function buildSchemaContract(directory?: string) {
         "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
         "0396_model_call_equivalent_credit_cost.sql",
         "0399_additional_managed_organization_creation.sql",
+        "0400_session_attempt_model_context_snapshots.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -128,7 +129,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0399_additional_managed_organization_creation.sql",
+      "0400_session_attempt_model_context_snapshots.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -144,6 +145,14 @@ describe("release schema contract", () => {
       ),
     ).toMatchObject({
       sha256: "851f5563db7540c47fe243caaabbe7b2a1e83104029ecb4e084009823cc57f22",
+      deploymentMode: "rolling",
+    });
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
+      ),
+    ).toMatchObject({
+      sha256: "8960f9ef90364e93ee5fc741dcb2fdbc3ebc7231b5dfb8a3055d58bb216ba9a2",
       deploymentMode: "rolling",
     });
   });
@@ -432,12 +441,16 @@ describe("release schema contract", () => {
     const additionalManagedOrganizationCreation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
     );
+    const sessionAttemptModelContextSnapshots = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
+    );
 
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
         ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
         : {}),
       fileCount:
+        (sessionAttemptModelContextSnapshots ? 1 : 0) +
         (additionalManagedOrganizationCreation ? 1 : 0) +
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
@@ -588,13 +601,18 @@ describe("release schema contract", () => {
       ...(additionalManagedOrganizationCreation
         ? { latestMigration: "0399_additional_managed_organization_creation.sql" }
         : {}),
+      ...(sessionAttemptModelContextSnapshots
+        ? { latestMigration: "0400_session_attempt_model_context_snapshots.sql" }
+        : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      additionalManagedOrganizationCreation
-        ? "0399_additional_managed_organization_creation.sql"
-        : organizationWorkspaceManagementEntry
-          ? "0398_organization_workspace_management_entry.sql"
-          : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      sessionAttemptModelContextSnapshots
+        ? "0400_session_attempt_model_context_snapshots.sql"
+        : additionalManagedOrganizationCreation
+          ? "0399_additional_managed_organization_creation.sql"
+          : organizationWorkspaceManagementEntry
+            ? "0398_organization_workspace_management_entry.sql"
+            : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
@@ -822,6 +840,7 @@ describe("release schema contract", () => {
       "0396_model_call_equivalent_credit_cost.sql",
       "0395_scheduled_task_unclaimed_occurrence_invalidation.sql",
       "0399_additional_managed_organization_creation.sql",
+      "0400_session_attempt_model_context_snapshots.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -990,6 +1009,9 @@ describe("release schema contract", () => {
     const additionalManagedOrganizationCreation = completeSourceContract.migrations.some(
       (migration) => migration.path === "0399_additional_managed_organization_creation.sql",
     );
+    const sessionAttemptModelContextSnapshots = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0400_session_attempt_model_context_snapshots.sql",
+    );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
         ...completeSourceContract,
@@ -1016,6 +1038,7 @@ describe("release schema contract", () => {
     }
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (sessionAttemptModelContextSnapshots ? 1 : 0) +
         (additionalManagedOrganizationCreation ? 1 : 0) +
         (sessionSelectedSkillActivation ? 1 : 0) +
         (scheduledTaskUnclaimedOccurrenceInvalidation ? 1 : 0) +
@@ -1180,11 +1203,13 @@ describe("release schema contract", () => {
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
-      additionalManagedOrganizationCreation
-        ? "0399_additional_managed_organization_creation.sql"
-        : organizationWorkspaceManagementEntry
-          ? "0398_organization_workspace_management_entry.sql"
-          : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+      sessionAttemptModelContextSnapshots
+        ? "0400_session_attempt_model_context_snapshots.sql"
+        : additionalManagedOrganizationCreation
+          ? "0399_additional_managed_organization_creation.sql"
+          : organizationWorkspaceManagementEntry
+            ? "0398_organization_workspace_management_entry.sql"
+            : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults

@@ -107,8 +107,10 @@ export function ModelContextInspectorPane(props: {
             <InfoRow label="Provider cached" value={formatTokens(providerUsage.cachedTokens)} />
           ) : null}
           <p className="text-2xs text-fg-subtle">
-            Prefix counts are conservative estimates (ASCII/4, non-ASCII counted fully). Provider
-            input is the last reported complete request, including conversation history.
+            Prefix counts cover only what was on the wire: the sent system instructions plus eager
+            tool schemas. Searchable tools are listed below but not counted. Estimates are
+            conservative (ASCII/4, non-ASCII counted fully). Provider input is the last reported
+            complete request, including conversation history.
           </p>
           <InfoRow label="Request" value={`#${snapshot.requestIndex}`} />
           {response?.attemptId ? (
@@ -118,8 +120,10 @@ export function ModelContextInspectorPane(props: {
 
         <InspectorSection title="System instructions">
           <p className="text-2xs text-fg-subtle">
-            Exact <code>systemInstructions</code> on the provider request after sandbox wrapping,
-            input filters, and the missing-title directive.
+            Raw <code>systemInstructions</code> from the provider ModelRequest at{" "}
+            <code>getResponse</code>/<code>getStreamedResponse</code>, after sandbox wrapping, input
+            filters, and lazy-tool hiding. The OpenAI Responses client sends this same string as{" "}
+            <code>instructions</code>.
           </p>
           <pre className="max-h-96 max-w-full overflow-auto rounded-md border border-border bg-bg/35 p-2 text-2xs leading-5 whitespace-pre-wrap text-fg-muted">
             {snapshot.instructions}
@@ -142,6 +146,9 @@ export function ModelContextInspectorPane(props: {
             Copy sent instructions
           </Button>
           <div className="text-xs font-medium">Split for reading</div>
+          <p className="text-2xs text-fg-subtle">
+            Derived from the sent string above. The raw block is the source of truth.
+          </p>
           {snapshot.layers.map((layer) => (
             <Collapsible
               key={`${layer.id}:${layer.title}:${layer.utf8Bytes}`}
@@ -169,8 +176,8 @@ export function ModelContextInspectorPane(props: {
 
         <InspectorSection title="Tools as the model sees them">
           <p className="text-2xs text-fg-subtle">
-            Eager tools are the <code>tools</code> array on that same provider request. Searchable
-            tools stay behind tool_search until disclosed and are not in that array.
+            Eager tools are the raw <code>tools</code> array on that same ModelRequest. Searchable
+            tools stay behind tool_search until disclosed and were not sent.
           </p>
           {snapshot.tools.map((tool) => (
             <Collapsible
@@ -215,8 +222,14 @@ export function ModelContextInspectorPane(props: {
         </InspectorSection>
 
         <InspectorSection title="Skills">
+          <p className="text-2xs text-fg-subtle">
+            Parsed from the sent instructions and skill activations. Skills are not a separate
+            provider field.
+          </p>
           {snapshot.skills.length === 0 ? (
-            <p className="text-xs text-fg-subtle">No skill descriptors were on this request.</p>
+            <p className="text-xs text-fg-subtle">
+              No skill descriptors were parsed from the sent instructions.
+            </p>
           ) : (
             snapshot.skills.map((skill) => (
               <div

@@ -312,6 +312,21 @@ function serializedToolToModelContextTool(
   });
 }
 
+function onWireTokenCounts(
+  instructions: string,
+  tools: readonly ModelContextTool[],
+): ModelContextSnapshot["tokens"] {
+  const instructionsTokens = estimateTextTokens(instructions);
+  const toolsTokens = tools
+    .filter((tool) => tool.visibility === "eager")
+    .reduce((total, tool) => total + tool.estimatedTokens, 0);
+  return {
+    instructions: instructionsTokens,
+    tools: toolsTokens,
+    prefix: instructionsTokens + toolsTokens,
+  };
+}
+
 export function skillsFromSelections(
   selections: readonly EffectiveSkillSelection[],
 ): ModelContextSkill[] {
@@ -424,8 +439,6 @@ export async function buildModelContextSnapshot(input: {
     ...skillsFromGovernanceLayer(governance),
     ...skillsFromSelections(input.skillSelections),
   ];
-  const instructionsTokens = estimateTextTokens(input.capturedInstructions);
-  const toolsTokens = tools.reduce((total, tool) => total + tool.estimatedTokens, 0);
   return {
     version: MODEL_CONTEXT_SNAPSHOT_VERSION,
     capturedAt: (input.now ?? new Date()).toISOString(),
@@ -435,11 +448,7 @@ export async function buildModelContextSnapshot(input: {
     layers,
     tools,
     skills,
-    tokens: {
-      instructions: instructionsTokens,
-      tools: toolsTokens,
-      prefix: instructionsTokens + toolsTokens,
-    },
+    tokens: onWireTokenCounts(input.capturedInstructions, tools),
   };
 }
 
@@ -518,8 +527,6 @@ export function buildModelContextSnapshotFromRequest(input: {
     ...skillsFromGovernanceLayer(governance),
     ...skillsFromSelections(input.skillSelections),
   ];
-  const instructionsTokens = estimateTextTokens(capturedInstructions);
-  const toolsTokens = tools.reduce((total, tool) => total + tool.estimatedTokens, 0);
   return {
     version: MODEL_CONTEXT_SNAPSHOT_VERSION,
     capturedAt: (input.now ?? new Date()).toISOString(),
@@ -529,10 +536,6 @@ export function buildModelContextSnapshotFromRequest(input: {
     layers,
     tools,
     skills,
-    tokens: {
-      instructions: instructionsTokens,
-      tools: toolsTokens,
-      prefix: instructionsTokens + toolsTokens,
-    },
+    tokens: onWireTokenCounts(capturedInstructions, tools),
   };
 }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ModelRequest } from "@openai/agents";
 import { AGENT_INSTRUCTIONS_CORE_PLACEHOLDER, DEFAULT_AGENT_INSTRUCTIONS } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
@@ -10,6 +11,7 @@ import {
   joinPersistentAgentInstructionLayers,
 } from "../src/index";
 import {
+  buildModelContextSnapshotFromRequest,
   skillsFromGovernanceLayer,
   splitCapturedInstructions,
 } from "../src/model-context-inspector";
@@ -121,5 +123,40 @@ describe("model context inspector", () => {
       coreInstructions().join(" "),
     );
     expect(DEFAULT_AGENT_INSTRUCTIONS).toContain(AGENT_INSTRUCTIONS_CORE_PLACEHOLDER);
+  });
+
+  test("snapshot from request keeps systemInstructions verbatim", () => {
+    const inspection = inspectPersistentAgentInstructions(testSettings(), {
+      sessionInstructions: "Be terse.",
+    });
+    const captured = [
+      "You are operating inside an isolated sandbox workspace.",
+      "",
+      "# Agent instructions",
+      "",
+      inspection.composed,
+      "",
+      "# Filesystem",
+      "",
+      "You have access to a container with a filesystem.",
+    ].join("\n");
+    const snapshot = buildModelContextSnapshotFromRequest({
+      request: {
+        systemInstructions: captured,
+        tools: [{ type: "function", name: "exec_command" }],
+      } as ModelRequest,
+      agent: {},
+      persistentLayers: inspection.layers,
+      genesisTitleDirective: "TITLE DIRECTIVE",
+      requestIndex: 3,
+      skillSelections: [],
+      now: new Date("2026-09-03T00:00:00.000Z"),
+    });
+    expect(snapshot.instructions).toBe(captured);
+    expect(snapshot.source).toBe("model_request");
+    expect(snapshot.requestIndex).toBe(3);
+    expect(snapshot.tools.map((tool) => tool.name)).toEqual(["exec_command"]);
+    expect(snapshot.tools.every((tool) => tool.visibility === "eager")).toBe(true);
+    expect(snapshot.tokens.prefix).toBe(snapshot.tokens.instructions + snapshot.tokens.tools);
   });
 });

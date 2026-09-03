@@ -3,7 +3,7 @@ import {
   ModelContextSnapshot,
   SessionModelContextResponse,
 } from "@opengeni/contracts";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
@@ -88,6 +88,7 @@ export async function persistModelContextSnapshot(
               snapshot,
               updatedAt: now,
             },
+            setWhere: sql`${schema.sessionAttemptModelContextSnapshots.requestIndex} <= ${snapshot.requestIndex}`,
           });
       }),
   );

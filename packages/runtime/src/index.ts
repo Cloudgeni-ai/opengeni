@@ -281,7 +281,11 @@ import {
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
-import { ModelRequestCaptureModel, withModelRequestCapture } from "./model-request-capture";
+import {
+  ModelRequestCaptureModel,
+  ModelRequestCaptureProvider,
+  withModelRequestCapture,
+} from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
@@ -7013,10 +7017,12 @@ function lazyToolRunBindings(agent: Agent<any, any>): {
 function runScopedRunner(settings: Settings, agent: Agent<any, any>): Runner {
   const baseProvider = new MultiProviderModelProvider(settings);
   const lazyRuntime = lazyToolRuntimeForAgent(agent);
+  // LazyToolModel already captures the post-hide request. Non-lazy string models
+  // resolve through this provider, which is the actual getResponse seam.
   return new Runner({
     modelProvider: lazyRuntime
       ? new LazyToolModelProvider(baseProvider, lazyRuntime)
-      : baseProvider,
+      : new ModelRequestCaptureProvider(baseProvider),
   });
 }
 
