@@ -78,7 +78,11 @@ validation, and argument-sensitive connector-policy prepare complete before the
 durable execution-start marker. The prepared call performs connector begin at
 the executor boundary and completion afterward, so model MCP and Codemode share
 one lifecycle while invalid, blocked, Ask, or unavailable-policy calls settle
-before provider execution.
+before provider execution. Human-gated model calls additionally require the
+attempt host's exact approved SDK invocation context; calling the environment
+directly cannot bypass approval. The dispatcher keeps its claim alive during
+gateway preparation and reuses a deterministic durable tool-created event if a
+pre-execution claim is reclaimed.
 
 `CodemodeCallOptions.signal` cancels only the caller's HTTP/polling observation.
 It does not request server cancellation and cannot prove that an operation

@@ -541,7 +541,10 @@ After the marker, the prepared gateway call performs durable connector begin at
 the executor boundary and completes the same request as `completed`,
 `not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
 gateway lifecycle; the model SDK wrapper only projects Ask into the ordinary
-human-approval interruption and marks the exact approved call id on resume. A client
+human-approval interruption and carries the exact approved call id into a
+host-only invocation context on resume. The gateway rejects a direct model call
+to an `approval: human` entry when that context is absent or belongs to another
+tool/subject. A client
 `AbortSignal` is observer-only: it stops HTTP/polling waits but creates no server
 cancellation authority. Attempt/turn interruption remains the sole cancellation
 boundary and still drains or closes journaled work under the existing lifecycle.
@@ -1452,14 +1455,22 @@ reinterpretation, or blind replay of an ambiguous operation.
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn
-and approval id before invocation. For connection-backed tools, argument-sensitive
-prepare, begin, and completion are owned by the canonical attempt gateway used by
-both model MCP and Codemode. Dedicated GitHub and Google Drive adapters classify
+and approval id before invocation. Argument-sensitive prepare, begin, and
+completion for both classes are owned by the canonical attempt gateway used by
+model MCP and Codemode; an approval-wrapped MCP adapter without that exact
+attempt gateway fails before provider execution. Dedicated GitHub and Google Drive adapters classify
 provider outcomes but do not register a second policy lifecycle. The approved
 transition admits the provider once; a replay after execution started is recorded
 as outcome-unknown, and a replay after completion is rejected as already executed.
 Recovery may therefore re-enter the SDK approval step without issuing the MCP
 request again.
+
+The Codemode dispatcher renews its operation claim during gateway preparation,
+not only after the execution marker. Its visible `agent.toolCall.created` event
+uses a deterministic per-operation client event id, so reclaiming an expired
+pre-execution claim reuses one durable timeline entry before the replacement
+claimant crosses the execution boundary. During a rolling upgrade it also
+recognizes the exact unkeyed event written by a predecessor worker.
 
 Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
 operation receipts bind the exact accepted turn, attempt, execution generation,

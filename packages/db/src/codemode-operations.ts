@@ -221,7 +221,12 @@ export async function getCodemodeOperation(
 }
 
 export type ClaimCodemodeOperationResult =
-  | { status: "claimed"; operation: CodemodeOperationValue; claimId: string }
+  | {
+      status: "claimed";
+      operation: CodemodeOperationValue;
+      claimId: string;
+      reclaimed: boolean;
+    }
   | { status: "execution_owner_lost"; operation: CodemodeOperationValue; claimId: string }
   | { status: "already_running" | "terminal"; operation: CodemodeOperationValue }
   | { status: "rejected"; operation: CodemodeOperationValue | null };
@@ -259,6 +264,7 @@ export async function claimCodemodeOperation(
         }
         const now = input.now ?? new Date();
         const claimExpiresAt = new Date(now.getTime() + boundedClaimLeaseMs(input.claimLeaseMs));
+        let reclaimed = false;
         if (row.state === "running") {
           if (!row.claimExpiresAt || row.claimExpiresAt.getTime() > now.getTime()) {
             return { status: "already_running", operation: mapOperation(row) };
@@ -292,6 +298,7 @@ export async function claimCodemodeOperation(
             .returning();
           if (!requeued) throw new Error("Codemode expired claim recovery lost its row lock");
           row = requeued;
+          reclaimed = true;
         }
         if (isTerminalState(row.state)) return { status: "terminal", operation: mapOperation(row) };
 
@@ -351,7 +358,12 @@ export async function claimCodemodeOperation(
           )
           .returning();
         if (!claimed) throw new Error("Codemode operation claim lost its row lock");
-        return { status: "claimed", operation: mapOperation(claimed), claimId: input.claimId };
+        return {
+          status: "claimed",
+          operation: mapOperation(claimed),
+          claimId: input.claimId,
+          reclaimed,
+        };
       }),
   );
 }

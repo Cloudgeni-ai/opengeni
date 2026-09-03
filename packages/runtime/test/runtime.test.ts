@@ -2022,6 +2022,67 @@ describe("runtime event normalization", () => {
       }
     });
 
+    test("only the exact SDK-approved interaction call can cross the attempt gateway", async () => {
+      let executions = 0;
+      const prepared = await prepareAgentTools(testSettings(), [], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        attemptToolDefinitions: [
+          {
+            identity: { serverId: "interaction", toolName: "request_human" },
+            modelName: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+            inputSchema: { type: "object", additionalProperties: false },
+            source: "interaction",
+            approval: "human",
+            execute: async () => {
+              executions += 1;
+              return { content: [{ type: "text", text: "resumed" }] };
+            },
+          },
+        ],
+      });
+      const callId = "interaction-approved-call";
+      try {
+        await expect(
+          prepared.attemptToolEnvironment!.callModel({
+            modelName: INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+            arguments: {},
+            subjectId: "worker:mcp-model",
+          }),
+        ).rejects.toMatchObject({ code: "approval_required" });
+        expect(executions).toBe(0);
+
+        const agent = buildOpenGeniAgent(testSettings(), [], {
+          mcpServers: prepared.mcpServers,
+          approvedToolCallId: callId,
+        });
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" &&
+            candidate.name === INTERACTION_REQUEST_HUMAN_MODEL_TOOL_NAME,
+        );
+        if (!tool || tool.type !== "function") throw new Error("interaction tool missing");
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify({}), {
+            toolCall: { callId },
+          } as any),
+        ).resolves.toBeDefined();
+        expect(executions).toBe(1);
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify({}), {
+            toolCall: { callId: "interaction-unapproved-call" },
+          } as any),
+        ).toMatchObject({ isError: true });
+        expect(executions).toBe(1);
+      } finally {
+        await prepared.close();
+      }
+    });
+
     test("requireApproval survives the sandbox clone() tool-resolution path", async () => {
       const mcp = startTestMcpServer();
       const serverConfig = {
@@ -2779,7 +2840,6 @@ describe("runtime event normalization", () => {
         sandboxBackend: "none",
         mcpServers: [serverConfig],
       });
-      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
       const policyCalls: Array<{
         phase: string;
         call: Record<string, unknown>;
@@ -2809,6 +2869,15 @@ describe("runtime event normalization", () => {
           });
         },
       };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
@@ -2828,15 +2897,16 @@ describe("runtime event normalization", () => {
         await expect(
           tool.invoke(new RunContext(), JSON.stringify(input), details),
         ).resolves.toBeDefined();
-        await expect(tool.invoke(new RunContext(), JSON.stringify(input), details)).rejects.toThrow(
-          "already_executed",
-        );
+        expect(await tool.invoke(new RunContext(), JSON.stringify(input), details)).toMatchObject({
+          isError: true,
+        });
 
         expect(mcp.calls).toEqual([{ tool: "search_documents", args: input }]);
         expect(policyCalls.map(({ phase }) => phase)).toEqual([
           "prepare",
           "begin",
           "complete:legacy-request:completed",
+          "prepare",
           "begin",
         ]);
         for (const { call } of policyCalls.filter(({ phase }) => !phase.startsWith("complete:"))) {
@@ -2889,6 +2959,61 @@ describe("runtime event normalization", () => {
             toolCall: { callId: "legacy-unfenced-call" },
           } as any),
         ).rejects.toThrow("durable execution policy is unavailable");
+        expect(mcp.calls).toEqual([]);
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("approval-gated MCP execution fails closed when no exact attempt gateway is bound", async () => {
+      const mcp = startTestMcpServer();
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: true,
+          },
+        ],
+      });
+      const policyPhases: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => {
+          policyPhases.push("prepare");
+          return { managed: true, decision: "ask" };
+        },
+        begin: async () => {
+          policyPhases.push("begin");
+          return { allowed: true, managed: true, requestId: "must-not-begin" };
+        },
+        complete: async () => {
+          policyPhases.push("complete");
+        },
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }]);
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+
+      try {
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
+        const input = { query: "must-use-gateway" };
+        expect(await tool.needsApproval(new RunContext(), input, "legacy-no-gateway")).toBe(true);
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify(input), {
+            toolCall: { callId: "legacy-no-gateway" },
+          } as any),
+        ).rejects.toThrow("exact attempt gateway is unavailable");
+        expect(policyPhases).toEqual(["prepare"]);
         expect(mcp.calls).toEqual([]);
       } finally {
         await prepared.close();

@@ -26,7 +26,10 @@ import {
   acquireSharedTestDatabase,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { CodemodeAttemptDispatcher } from "../src/activities/codemode-dispatcher";
+import {
+  CodemodeAttemptDispatcher,
+  codemodeToolCallCreatedClientEventId,
+} from "../src/activities/codemode-dispatcher";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -223,10 +226,186 @@ describe("CodemodeAttemptDispatcher", () => {
         "agent.toolCall.created",
         "agent.toolCall.output",
       ]);
+      expect(toolEvents[0]?.clientEventId).toBe(codemodeToolCallCreatedClientEventId(operationId));
       expect(
         toolEvents.map((event) => (event.payload as { subjectId?: string } | undefined)?.subjectId),
       ).toEqual(["sandbox:test", "sandbox:test"]);
     } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("reuses the durable created event when an expired pre-execution claim is reclaimed", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(async () => {
+      executions += 1;
+      return "reclaimed";
+    });
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: { query: "reclaim" },
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const expiredClaimId = crypto.randomUUID();
+    expect(
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: environment.catalog.digest,
+        operationId,
+        claimId: expiredClaimId,
+        now: new Date(Date.now() - 5_000),
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", claimId: expiredClaimId });
+    const bus = new MemoryEventBus();
+    expect(
+      (
+        await appendAndPublishTurnEventsFenced(
+          client.db,
+          bus,
+          scope.workspaceId,
+          scope.sessionId,
+          scope.turnId,
+          scope.executionGeneration,
+          scope.attemptId,
+          [
+            {
+              type: "agent.toolCall.created",
+              turnId: scope.turnId,
+              turnGeneration: scope.executionGeneration,
+              turnAttemptId: scope.attemptId,
+              producerId: "sandbox:test",
+              payload: {
+                id: operationId,
+                name: environment.catalog.entries[0]!.modelName,
+                arguments: { query: "reclaim" },
+                origin: "codemode",
+                subjectId: "sandbox:test",
+                raw: {
+                  type: "codemode_call",
+                  serverId: "docs",
+                  toolName: "search",
+                  catalogDigest: environment.catalog.digest,
+                },
+              },
+            },
+          ],
+        )
+      ).accepted,
+    ).toBe(true);
+
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+        result: { content: [{ type: "text", text: "reclaimed" }] },
+      });
+      expect(executions).toBe(1);
+      const toolEvents = await waitForToolEventCount(scope, 2);
+      expect(toolEvents.map((event) => event.type)).toEqual([
+        "agent.toolCall.created",
+        "agent.toolCall.output",
+      ]);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("renews the durable claim while provider preparation is still running", async () => {
+    if (!available) return;
+    let signalPreparationStarted!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => {
+      signalPreparationStarted = resolve;
+    });
+    let releasePreparation!: () => void;
+    const preparationBlocked = new Promise<void>((resolve) => {
+      releasePreparation = resolve;
+    });
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "prepared";
+      },
+      { type: "object" },
+      {
+        prepare: async () => {
+          signalPreparationStarted();
+          await preparationBlocked;
+        },
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(
+      client.db,
+      bus,
+      environment,
+      scope,
+      undefined,
+      1,
+      { claimLeaseMs: 1_000, claimHeartbeatMs: 100 },
+    );
+    dispatcher.start();
+    const request = async () =>
+      decodeCodemodeDispatchAck(
+        (
+          await bus.request(
+            codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+            encodeCodemodeDispatchRequest({
+              version: 1,
+              operationId,
+              catalogDigest: environment.catalog.digest,
+            }),
+            { timeoutMs: 1_000 },
+          )
+        ).data,
+      ).status;
+    try {
+      expect(await request()).toBe("accepted");
+      await preparationStarted;
+      await Bun.sleep(1_200);
+      expect(await request()).toBe("already_running");
+      releasePreparation();
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "completed",
+      });
+      expect(executions).toBe(1);
+    } finally {
+      releasePreparation();
       await dispatcher.close();
     }
   });

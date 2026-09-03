@@ -36251,6 +36251,42 @@ export async function getSessionEventByClientEventId(
   });
 }
 
+/**
+ * Resolve the visible creation event for one exact tool operation. This is a
+ * rolling-upgrade compatibility lookup for producers that predate deterministic
+ * client event ids; the operation id remains bound to the same turn attempt.
+ */
+export async function getSessionToolCallCreatedEventByOperationId(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    operationId: string;
+  },
+): Promise<SessionEvent | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+          eq(schema.sessionEvents.turnAssociation, "current"),
+          eq(schema.sessionEvents.type, "agent.toolCall.created"),
+          eq(sql<string>`${schema.sessionEvents.payload} ->> 'id'`, input.operationId),
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    return row ? mapEvent(row) : null;
+  });
+}
+
 export const APPROVAL_RUN_STATE_MAX_JSON_BYTES = 3 * 1024 * 1024;
 export const APPROVAL_RUN_STATE_MAX_JSON_NODES = 65_536;
 export const APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES = 32_768;

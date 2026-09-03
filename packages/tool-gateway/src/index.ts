@@ -135,12 +135,18 @@ export class PreparedToolGatewayDefinitions {
       caller: ToolGatewayCaller,
       context: { transportMeta?: Record<string, unknown> | null },
     ) => boolean;
+    confirmModelApproval?: (input: {
+      entry: ToolGatewayCatalogEntryValue;
+      modelName: string;
+      subjectId: string;
+    }) => boolean;
   }): ToolGateway {
     return new ToolGateway(
       input.catalogDigest,
       this.definitions,
       input.authorize,
       input.requireApproval,
+      input.confirmModelApproval,
     );
   }
 }
@@ -160,6 +166,13 @@ export class ToolGateway {
           context: { transportMeta?: Record<string, unknown> | null },
         ) => boolean)
       | undefined,
+    private readonly confirmModelApproval:
+      | ((input: {
+          entry: ToolGatewayCatalogEntryValue;
+          modelName: string;
+          subjectId: string;
+        }) => boolean)
+      | undefined,
   ) {
     for (const definition of definitions) {
       this.byIdentity.set(identityKey(definition.entry.identity), definition);
@@ -171,12 +184,20 @@ export class ToolGateway {
     input: ToolGatewayCall,
     context: ToolGatewayCallContext = {},
   ): Promise<ToolGatewayResultValue> {
-    return await (await this.prepareCall(input, context)).execute();
+    return await (await this.prepareCallWithModelApproval(input, context, false)).execute();
   }
 
   async prepareCall(
     input: ToolGatewayCall,
     context: ToolGatewayCallContext = {},
+  ): Promise<PreparedToolGatewayCall> {
+    return await this.prepareCallWithModelApproval(input, context, false);
+  }
+
+  private async prepareCallWithModelApproval(
+    input: ToolGatewayCall,
+    context: ToolGatewayCallContext,
+    modelApprovalConfirmed: boolean,
   ): Promise<PreparedToolGatewayCall> {
     const request = ToolGatewayCallRequest.parse({
       operationId: input.operationId,
@@ -198,6 +219,13 @@ export class ToolGateway {
     }
     if (!definition.validateInput(request.arguments)) {
       throw new ToolGatewayInputValidationError();
+    }
+    if (
+      caller.kind === "model" &&
+      definition.entry.approval === "human" &&
+      !modelApprovalConfirmed
+    ) {
+      throw new ToolGatewayApprovalRequiredError();
     }
     const call = {
       operationId,
@@ -266,19 +294,27 @@ export class ToolGateway {
     if (!definition) {
       throw new ToolGatewayToolNotFoundError();
     }
-    return await this.call(
-      {
-        operationId: input.operationId ?? randomUUID(),
-        catalogDigest: this.catalogDigest,
-        identity: definition.entry.identity,
-        arguments: input.arguments,
-        caller: { kind: "model", subjectId: input.subjectId },
-      },
-      {
-        ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
-        ...(input.signal === undefined ? {} : { signal: input.signal }),
-      },
-    );
+    const call = {
+      operationId: input.operationId ?? randomUUID(),
+      catalogDigest: this.catalogDigest,
+      identity: definition.entry.identity,
+      arguments: input.arguments,
+      caller: { kind: "model" as const, subjectId: input.subjectId },
+    };
+    const context = {
+      ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    };
+    const modelApprovalConfirmed =
+      definition.entry.approval === "human" &&
+      this.confirmModelApproval?.({
+        entry: definition.entry,
+        modelName: input.modelName,
+        subjectId: input.subjectId,
+      }) === true;
+    return await (
+      await this.prepareCallWithModelApproval(call, context, modelApprovalConfirmed)
+    ).execute();
   }
 }
 

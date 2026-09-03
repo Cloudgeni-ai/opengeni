@@ -75,6 +75,13 @@ describe("ToolGateway", () => {
       }),
     ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
     await expect(
+      gateway.callModel({
+        modelName: definition.modelName,
+        arguments: { query: "model-bypass" },
+        subjectId: "agent:test",
+      }),
+    ).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    await expect(
       gateway.call({
         operationId: crypto.randomUUID(),
         catalogDigest: catalog.digest,

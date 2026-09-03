@@ -241,11 +241,14 @@ describe("AttemptToolEnvironment", () => {
     expect(executed).toBe(false);
   });
 
-  test("keeps approval-required tools model-visible but blocks Codemode bypass", async () => {
+  test("requires exact host confirmation before a model can execute a human-approved tool", async () => {
     let executions = 0;
+    let approvalConfirmed = false;
     const environment = createAttemptToolEnvironment({
       scope,
       generation: 1,
+      confirmModelApproval: ({ modelName, subjectId }) =>
+        approvalConfirmed && modelName === "github__delete" && subjectId === "agent:test",
       definitions: [
         {
           ...definition("github", "delete", async () => {
@@ -263,6 +266,23 @@ describe("AttemptToolEnvironment", () => {
         identity: { serverId: "github", toolName: "delete" },
         arguments: {},
         caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
+    expect(executions).toBe(0);
+    await expect(
+      environment.callModel({
+        modelName: "github__delete",
+        arguments: {},
+        subjectId: "agent:test",
+      }),
+    ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
+    expect(executions).toBe(0);
+    approvalConfirmed = true;
+    await expect(
+      environment.callModel({
+        modelName: "github__delete",
+        arguments: {},
+        subjectId: "wrong-agent",
       }),
     ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
     expect(executions).toBe(0);

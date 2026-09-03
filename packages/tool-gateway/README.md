@@ -50,7 +50,10 @@ Connection-backed approval issuance first resolves credentials in a preflight
 mode that neither refreshes tokens nor records provider usage; a provider adapter
 without that side-effect-free preflight is omitted from the current-human
 catalog. Agent attempts keep their existing durable approval and operation
-lifecycle. Sites do not use per-call approval: the active immutable version's
+lifecycle. A model call to an `approval: human` entry is rejected by the gateway
+unless the attempt host confirms the exact model name and subject from its
+approved SDK invocation context; model-supplied arguments or transport metadata
+cannot grant that authority. Sites do not use per-call approval: the active immutable version's
 requested identities are a host-filtered direct-call allowlist, and the API
 revalidates that version and the viewer's live authority before passing trusted
 transport metadata to the gateway. Agent-authored versions may retain only

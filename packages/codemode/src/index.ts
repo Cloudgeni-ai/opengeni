@@ -75,6 +75,8 @@ export type CreateAttemptToolEnvironmentInput = {
   definitions: readonly AttemptToolDefinition[];
   createdAt?: Date;
   authorize?: AttemptToolAuthorization;
+  /** Host-only approval projection for one exact model invocation. */
+  confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
 };
 
 export type ModelAttemptToolCall = {
@@ -578,6 +580,15 @@ export function createAttemptToolEnvironment(
     prepared.create({
       catalogDigest: catalog.digest,
       requireApproval: (entry, caller) => caller.kind === "codemode" && entry.approval === "human",
+      ...(input.confirmModelApproval
+        ? {
+            confirmModelApproval: ({ entry, subjectId }) =>
+              input.confirmModelApproval!({
+                modelName: entry.modelName,
+                subjectId,
+              }),
+          }
+        : {}),
       ...(input.authorize
         ? {
             authorize: async ({ call, entry }) =>

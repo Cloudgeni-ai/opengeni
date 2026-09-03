@@ -343,17 +343,15 @@ describe("durable attempt tool catalogs", () => {
     ).toBe("claimed");
     const recoveredClaimId = crypto.randomUUID();
     expect(
-      (
-        await claimCodemodeOperation(client.db, {
-          ...scope,
-          catalogDigest: exactCatalog.digest,
-          operationId: beforeBoundary.operationId,
-          claimId: recoveredClaimId,
-          now: new Date(startedAt.getTime() + 1_001),
-          claimLeaseMs: 1_000,
-        })
-      ).status,
-    ).toBe("claimed");
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: exactCatalog.digest,
+        operationId: beforeBoundary.operationId,
+        claimId: recoveredClaimId,
+        now: new Date(startedAt.getTime() + 1_001),
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", reclaimed: true });
     expect(
       await markCodemodeOperationExecutionStarted(client.db, {
         accountId: scope.accountId,

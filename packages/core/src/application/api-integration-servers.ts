@@ -112,9 +112,6 @@ export function buildApiIntegrationMcpServers(
   });
 }
 
-/** @deprecated Use buildApiIntegrationMcpServers. */
-export const buildApiIntegrationServersForTurn = buildApiIntegrationMcpServers;
-
 const providerBlockingPreflightTransport = directIntegrationTransport(async () => {
   throw new Error("integration provider request blocked by preflight");
 });
