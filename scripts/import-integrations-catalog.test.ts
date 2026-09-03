@@ -1137,6 +1137,49 @@ describe("integrations.sh MCP endpoint probe", () => {
       },
     });
     expect(timedOut).toMatchObject({ status: "unverified", reason: "timeout" });
+
+    const normalized = normalizeCatalogSnapshot(
+      {
+        generatedAt: "2026-09-03T00:00:00.000Z",
+        importRows: [
+          row({ domain: "rate-limited.example", mcpUrl: "https://rate-limited.example/mcp" }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
+    const attempts = new Map<string, number>();
+    const sleeps: number[] = [];
+    const retried = await probeCatalogSnapshot(normalized, {
+      concurrency: 1,
+      transientRetries: 1,
+      transientRetryDelayMs: 10,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetchImpl: async (input) => {
+        const url = String(input);
+        const attempt = (attempts.get(url) ?? 0) + 1;
+        attempts.set(url, attempt);
+        if (url === "https://rate-limited.example/mcp") {
+          return new Response("Unauthorized", {
+            status: 401,
+            headers: { "www-authenticate": "Bearer" },
+          });
+        }
+        if (url === "https://rate-limited.example/.well-known/oauth-authorization-server") {
+          return new Response(attempt === 1 ? "rate limited" : "not found", {
+            status: attempt === 1 ? 429 : 404,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    expect(retried.rows.map((candidate) => candidate.domain)).toEqual(["rate-limited.example"]);
+    expect(attempts.get("https://rate-limited.example/mcp")).toBe(2);
+    expect(
+      attempts.get("https://rate-limited.example/.well-known/oauth-authorization-server"),
+    ).toBe(2);
+    expect(sleeps).toEqual([10]);
   });
 
   test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {

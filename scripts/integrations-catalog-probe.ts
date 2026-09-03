@@ -22,6 +22,7 @@ export type CatalogProbeReason =
   | "auth_challenge"
   | "http_not_found"
   | "connection_error"
+  | "rate_limited"
   | "timeout"
   | "html_response"
   | "non_mcp_json"
@@ -45,7 +46,7 @@ export type ProbeCatalogOptions = {
   overallBudgetMs?: number;
   now?: () => number;
   /**
-   * Extra attempts for a transient outcome (connection error, timeout, 5xx).
+   * Extra attempts for a transient outcome (connection error, timeout, rate limit, 5xx).
    * A live endpoint that flakes once under probe concurrency must not be
    * evicted from the snapshot on that single observation.
    */
@@ -76,7 +77,11 @@ export function isTransientProbeOutcome(outcome: CatalogProbeOutcome): boolean {
   if (outcome.status === "real") {
     return false;
   }
-  if (outcome.reason === "connection_error" || outcome.reason === "timeout") {
+  if (
+    outcome.reason === "connection_error" ||
+    outcome.reason === "rate_limited" ||
+    outcome.reason === "timeout"
+  ) {
     return true;
   }
   return outcome.reason === "http_status" && (outcome.httpStatus ?? 0) >= 500;
@@ -256,7 +261,7 @@ export async function probeMcpEndpoint(
     if (error instanceof CatalogOAuthMetadataTransientError) {
       return {
         status: "unverified",
-        reason: "http_status",
+        reason: error.httpStatus === 429 ? "rate_limited" : "http_status",
         httpStatus: error.httpStatus,
       };
     }
