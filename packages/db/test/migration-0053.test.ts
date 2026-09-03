@@ -145,7 +145,8 @@ describe("migration 0053 (Codex credential leases)", () => {
               metadata = jsonb_build_object(
                 'dispatchGeneration', 1,
                 'dispatchAttempt', jsonb_build_object(
-                  'id', ${dispatchId}, 'generation', 1, 'triggerEventId', ${triggerEventId}
+                  'id', ${dispatchId}::text, 'generation', 1,
+                  'triggerEventId', ${triggerEventId}::uuid
                 )
               )
           where id = ${turnId}`;

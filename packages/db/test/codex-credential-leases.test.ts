@@ -125,7 +125,7 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
         ${attemptId}, jsonb_build_object(
           'dispatchGeneration', 1,
           'dispatchAttempt', jsonb_build_object(
-            'id', ${dispatchId}, 'generation', 1, 'triggerEventId', ${triggerEventId}
+            'id', ${dispatchId}::text, 'generation', 1, 'triggerEventId', ${triggerEventId}
           )
         )
       )
