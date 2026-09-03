@@ -1,5 +1,4 @@
 import { GlobeIcon, Loader2Icon, PlugIcon, SearchIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
@@ -204,7 +203,17 @@ export function CapabilityBrowseSection({
             ))}
           </div>
           {visibleBrowse.length < browseItems.length ? (
-            <LoadMoreSentinel onReach={onLoadMore} />
+            <div className="flex justify-center pt-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="pointer-coarse:min-h-11"
+                onClick={onLoadMore}
+              >
+                See more
+              </Button>
+            </div>
           ) : null}
         </>
       )}
@@ -389,25 +398,4 @@ function RegistryFallback({
       }
     />
   );
-}
-
-function LoadMoreSentinel({ onReach }: { onReach: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  const onReachRef = useRef(onReach);
-  useEffect(() => {
-    onReachRef.current = onReach;
-  }, [onReach]);
-  useEffect(() => {
-    const node = ref.current;
-    if (!node) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) onReachRef.current();
-      },
-      { rootMargin: "600px" },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, []);
-  return <div ref={ref} className="h-1" aria-hidden />;
 }

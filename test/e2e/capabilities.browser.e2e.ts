@@ -398,12 +398,21 @@ describe("capabilities browser e2e", () => {
       expect(initialCount).toBeGreaterThan(0);
       expect(initialCount).toBeLessThanOrEqual(48);
 
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await expectVisible(seeMore);
+      await page.getByRole("heading", { name: "Bundles" }).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(100);
+      expect(await tiles.count()).toBe(initialCount);
+
+      await seeMore.click();
+      expect(await tiles.count()).toBe(initialCount + 48);
+
       const startedAt = performance.now();
       await page.getByLabel("Search connectors").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);
-      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
       await page.screenshot({
         path: `${evidenceDir}large-catalog-filtered-1280.png`,
         fullPage: true,
