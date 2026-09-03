@@ -6,7 +6,6 @@ const SKILL_FILE = "SKILL.md";
 const MAX_DISCOVERED_SKILLS = 256;
 const MAX_SKILL_ENTRIES = 1_024;
 const MAX_SKILL_BYTES = 32 * 1024 * 1024;
-const MAX_CONCURRENT_SKILL_READS = 16;
 const SAFE_SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export type WorkspaceSkillSearchPath = Readonly<{
@@ -20,14 +19,6 @@ type WorkspaceSkill = Readonly<{
   path: string;
   source: string;
 }>;
-
-export type WorkspaceSkillDiscoveryCache = {
-  discovery?: Promise<readonly WorkspaceSkill[]>;
-};
-
-export function createWorkspaceSkillDiscoveryCache(): WorkspaceSkillDiscoveryCache {
-  return {};
-}
 
 type DiscoveredWorkspaceSkill = {
   name: string;
@@ -48,26 +39,26 @@ type DiscoveredWorkspaceSkill = {
  */
 export class WorkspaceSkillsCapability extends Capability {
   readonly type = "workspace-skills";
+  private discovery?: Promise<readonly WorkspaceSkill[]>;
 
   constructor(
     private readonly searchPaths: readonly WorkspaceSkillSearchPath[],
     private readonly reservedNames: ReadonlySet<string> = new Set(),
     private readonly shadowedNames: ReadonlySet<string> = new Set(),
-    private readonly discoveryCache: WorkspaceSkillDiscoveryCache = createWorkspaceSkillDiscoveryCache(),
   ) {
     super();
   }
 
   override async instructions(): Promise<string | null> {
     const session = requireWorkspaceSkillSession(this._session);
-    const skills = await prepareWorkspaceSkillDiscovery(
-      this.discoveryCache,
+    this.discovery ??= discoverWorkspaceSkills(
       session,
       this.searchPaths,
       this.reservedNames,
       this._runAs,
       this.shadowedNames,
     );
+    const skills = await this.discovery;
     if (skills.length === 0) return null;
 
     const available = skills
@@ -92,32 +83,12 @@ export function workspaceSkills(
   searchPaths: readonly WorkspaceSkillSearchPath[],
   reservedNames: Iterable<string> = [],
   shadowedNames: Iterable<string> = [],
-  discoveryCache: WorkspaceSkillDiscoveryCache = createWorkspaceSkillDiscoveryCache(),
 ): WorkspaceSkillsCapability {
   return new WorkspaceSkillsCapability(
     searchPaths,
     new Set([...reservedNames].map((name) => name.toLowerCase())),
     new Set([...shadowedNames].map((name) => name.toLowerCase())),
-    discoveryCache,
   );
-}
-
-export function prepareWorkspaceSkillDiscovery(
-  cache: WorkspaceSkillDiscoveryCache,
-  session: SandboxSessionLike,
-  searchPaths: readonly WorkspaceSkillSearchPath[],
-  reservedNames: ReadonlySet<string> = new Set(),
-  runAs?: string,
-  shadowedNames: ReadonlySet<string> = new Set(),
-): Promise<readonly WorkspaceSkill[]> {
-  cache.discovery ??= discoverWorkspaceSkills(
-    session,
-    searchPaths,
-    reservedNames,
-    runAs,
-    shadowedNames,
-  );
-  return cache.discovery;
 }
 
 export async function discoverWorkspaceSkills(
@@ -131,48 +102,30 @@ export async function discoverWorkspaceSkills(
     throw new Error("Workspace skill discovery requires sandbox listDir() and readFile() support");
   }
   const discovered = new Map<string, DiscoveredWorkspaceSkill>();
-  const directoriesByPath = await Promise.all(
-    searchPaths.map(async (searchPath) => {
-      let entries;
-      try {
-        entries = await session.listDir!({
-          path: searchPath.path,
-          ...(runAs ? { runAs } : {}),
-        });
-      } catch {
-        return [];
+  let candidates = 0;
+  for (const searchPath of searchPaths) {
+    let entries;
+    try {
+      entries = await session.listDir({ path: searchPath.path, ...(runAs ? { runAs } : {}) });
+    } catch {
+      continue;
+    }
+    for (const entry of [...entries].sort((left, right) => left.name.localeCompare(right.name))) {
+      if (entry.type !== "dir") continue;
+      candidates += 1;
+      if (candidates > MAX_DISCOVERED_SKILLS) {
+        throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
       }
-      return [...entries]
-        .filter((entry) => entry.type === "dir")
-        .sort((left, right) => left.name.localeCompare(right.name));
-    }),
-  );
-  const directoryCount = directoriesByPath.reduce(
-    (total, directories) => total + directories.length,
-    0,
-  );
-  if (directoryCount > MAX_DISCOVERED_SKILLS) {
-    throw new Error(`Repository skill discovery exceeds ${MAX_DISCOVERED_SKILLS} directories`);
-  }
-  const candidatesByPath = searchPaths.map((): DiscoveredWorkspaceSkill[] => []);
-  const directoryJobs = directoriesByPath.flatMap((directories, searchPathIndex) =>
-    directories.map((entry) => ({ entry, searchPathIndex })),
-  );
-  const loaded = await mapWithConcurrency(
-    directoryJobs,
-    MAX_CONCURRENT_SKILL_READS,
-    async ({ entry, searchPathIndex }) => {
-      const searchPath = searchPaths[searchPathIndex]!;
       const skillMarkdownPath = joinWorkspacePath(entry.path, SKILL_FILE);
       let markdown: string;
       try {
-        const content = await session.readFile!({
+        const content = await session.readFile({
           path: skillMarkdownPath,
           ...(runAs ? { runAs } : {}),
         });
         markdown = typeof content === "string" ? content : new TextDecoder().decode(content);
       } catch {
-        return null;
+        continue;
       }
       const frontmatter = parseSkillFrontmatter(markdown);
       const name = frontmatter.name?.trim() || entry.name;
@@ -180,7 +133,7 @@ export async function discoverWorkspaceSkills(
         throw new Error(`Repository skill has an invalid name: ${name.slice(0, 64)}`);
       }
       const key = name.toLowerCase();
-      if (shadowedNames.has(key)) return null;
+      if (shadowedNames.has(key)) continue;
       const description = frontmatter.description?.trim() || "No description provided.";
       if (description.length > 2_048 || /[\r\n]/.test(description)) {
         throw new Error(`Repository skill "${name}" has an invalid description`);
@@ -188,26 +141,13 @@ export async function discoverWorkspaceSkills(
       if (reservedNames.has(key)) {
         throw new Error(`Workspace skill "${name}" conflicts with a configured OpenGeni skill`);
       }
-      return {
-        searchPathIndex,
-        candidate: {
-          name,
-          description,
-          path: skillMarkdownPath,
-          source: searchPath.source,
-          directory: entry.path,
-        } satisfies DiscoveredWorkspaceSkill,
+      const candidate: DiscoveredWorkspaceSkill = {
+        name,
+        description,
+        path: skillMarkdownPath,
+        source: searchPath.source,
+        directory: entry.path,
       };
-    },
-  );
-  for (const result of loaded) {
-    if (result) candidatesByPath[result.searchPathIndex]!.push(result.candidate);
-  }
-  // Fold in declared search-path order so alias precedence remains deterministic
-  // even though remote directory and frontmatter reads run concurrently.
-  for (const candidates of candidatesByPath) {
-    for (const candidate of candidates) {
-      const key = candidate.name.toLowerCase();
       const existing = discovered.get(key);
       if (!existing) {
         discovered.set(key, candidate);
@@ -225,7 +165,7 @@ export async function discoverWorkspaceSkills(
       );
       if (existingFingerprint !== candidateFingerprint) {
         throw new Error(
-          `Workspace skill "${candidate.name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
+          `Workspace skill "${name}" has conflicting definitions in ${existing.source} and ${candidate.source}`,
         );
       }
       existing.fingerprint = existingFingerprint;
@@ -234,27 +174,6 @@ export async function discoverWorkspaceSkills(
   return [...discovered.values()]
     .map(({ name, description, path, source }) => ({ name, description, path, source }))
     .sort((left, right) => left.name.localeCompare(right.name));
-}
-
-async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  concurrency: number,
-  map: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = nextIndex;
-      nextIndex += 1;
-      if (index >= items.length) return;
-      results[index] = await map(items[index]!);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(concurrency, items.length) }, async () => await worker()),
-  );
-  return results;
 }
 
 async function fingerprintWorkspaceDirectory(

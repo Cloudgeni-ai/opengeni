@@ -105,50 +105,6 @@ description: Prepare a safe release.
     expect(reads).toEqual([".agents/skills/deploy/SKILL.md", ".agents/skills/release/SKILL.md"]);
   });
 
-  test("starts every repository search-root read concurrently", async () => {
-    const releases: Array<() => void> = [];
-    const started: string[] = [];
-    const session = {
-      listDir: async ({ path }: { path: string }) => {
-        started.push(path);
-        await new Promise<void>((resolve) => releases.push(resolve));
-        return [];
-      },
-      readFile: async () => "",
-    } as SandboxSessionLike;
-    const searchPaths = Array.from({ length: 10 }, (_, index) => ({
-      path: `repos/repository-${index}/.agents/skills`,
-      source: `repository-${index}`,
-    }));
-    const discovery = discoverWorkspaceSkills(session, searchPaths);
-
-    while (started.length < searchPaths.length) await Bun.sleep(0);
-    expect(started).toEqual(searchPaths.map((entry) => entry.path));
-    for (const release of releases) release();
-    await expect(discovery).resolves.toEqual([]);
-  });
-
-  test("enforces the directory bound before starting frontmatter reads", async () => {
-    let readCalls = 0;
-    const session = {
-      listDir: async () =>
-        Array.from({ length: 257 }, (_, index) => ({
-          type: "dir" as const,
-          name: `skill-${index}`,
-          path: `.agents/skills/skill-${index}`,
-        })),
-      readFile: async () => {
-        readCalls += 1;
-        return "";
-      },
-    } as SandboxSessionLike;
-
-    await expect(
-      discoverWorkspaceSkills(session, [{ path: ".agents/skills", source: ".agents/skills" }]),
-    ).rejects.toThrow("Repository skill discovery exceeds 256 directories");
-    expect(readCalls).toBe(0);
-  });
-
   test("fails when the same skill name has different contents", async () => {
     const session = fakeSession({
       ".agents/skills/release/SKILL.md":

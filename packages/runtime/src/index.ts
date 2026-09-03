@@ -255,13 +255,7 @@ import {
   recordRuntimeMcpToolCallMetric,
   resolveTurnModel,
 } from "./model-provider";
-import {
-  createWorkspaceSkillDiscoveryCache,
-  prepareWorkspaceSkillDiscovery,
-  workspaceSkills,
-  type WorkspaceSkillDiscoveryCache,
-  type WorkspaceSkillSearchPath,
-} from "./workspace-skills";
+import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
   type EffectiveSkillSelection,
@@ -2418,10 +2412,6 @@ export function buildOpenGeniAgent(
     throw new Error("A Connected Machine agent requires its reported workspace root");
   }
   const runAs = sandboxRunAs(settings);
-  const workspaceSkillPaths = repositoryWorkspaceSkillPathsOption(resources).workspaceSkillPaths;
-  const workspaceSkillDiscovery = workspaceSkillPaths
-    ? createWorkspaceSkillDiscoveryCache()
-    : undefined;
   const agent = new SandboxAgent({
     ...baseConfig,
     defaultManifest: buildManifest(
@@ -2440,8 +2430,7 @@ export function buildOpenGeniAgent(
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
-      ...(workspaceSkillPaths ? { workspaceSkillPaths } : {}),
-      ...(workspaceSkillDiscovery ? { workspaceSkillDiscovery } : {}),
+      ...repositoryWorkspaceSkillPathsOption(resources),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -2477,23 +2466,7 @@ export function buildOpenGeniAgent(
   );
   agentRepositoryCloneHooks.set(
     agent,
-    sandboxRepositoryCloneHooks(
-      settings,
-      resources,
-      options.activeSandboxBackend,
-      workspaceSkillPaths && workspaceSkillDiscovery
-        ? async (session, context) => {
-            await prepareWorkspaceSkillDiscovery(
-              workspaceSkillDiscovery,
-              session,
-              workspaceSkillPaths,
-              new Set(skillComposition.configuredNames.map((name) => name.toLowerCase())),
-              context.runAs,
-              new Set(skillComposition.nativeToolNames.map((name) => name.toLowerCase())),
-            );
-          }
-        : undefined,
-    ),
+    sandboxRepositoryCloneHooks(settings, resources, options.activeSandboxBackend),
   );
   if (artifactRuntimeAvailable) {
     agentArtifactRuntimeHooks.set(
@@ -3154,7 +3127,6 @@ export function buildAgentCapabilities(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
-    workspaceSkillDiscovery?: WorkspaceSkillDiscoveryCache;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     /** @deprecated Managed ComputerSession tools replace model-bound desktop capability tools. */
@@ -3183,7 +3155,6 @@ function buildAgentCapabilitiesFromComposition(
     editableArtifactToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
-    workspaceSkillDiscovery?: WorkspaceSkillDiscoveryCache;
     structuredToolTransport?: boolean;
     supportsImageInput?: boolean;
     computerToolMode?: ComputerToolMode;
@@ -3246,7 +3217,6 @@ function buildAgentCapabilitiesFromComposition(
         options.workspaceSkillPaths,
         skillComposition.configuredNames,
         skillComposition.nativeToolNames,
-        options.workspaceSkillDiscovery,
       ),
     );
   }
@@ -8351,7 +8321,6 @@ function sandboxRepositoryCloneHooks(
   settings: Settings,
   resources: ResourceRef[],
   activeSandboxBackend: Settings["sandboxBackend"] = settings.sandboxBackend,
-  afterClone?: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>,
 ): SandboxLifecycleHook[] {
   const repositories = resources.filter(
     (resource): resource is Extract<ResourceRef, { kind: "repository" }> =>
@@ -8366,7 +8335,7 @@ function sandboxRepositoryCloneHooks(
       id: "repository-clone",
       phase: "beforeAgentStart",
       run: async (session, context) => {
-        await runRepositoryCloneHook(session, repositories, context, afterClone);
+        await runRepositoryCloneHook(session, repositories, context);
       },
     },
   ];
@@ -9908,7 +9877,6 @@ export async function runRepositoryCloneHook(
   session: SandboxSessionLike,
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
-  afterClone?: (session: SandboxSessionLike, context: SandboxLifecycleHookContext) => Promise<void>,
 ): Promise<void> {
   const payload = {
     name: "repository-clone",
@@ -9961,10 +9929,6 @@ export async function runRepositoryCloneHook(
       context.commandRunner,
     );
     assertSandboxCommandSucceeded(result, "Repository clone hook");
-    // Repository skill metadata is part of repository readiness. Populate the
-    // agent's shared discovery cache on the already-pinned setup session so the
-    // SDK's first model call never performs routed filesystem probes.
-    await afterClone?.(session, context);
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
       payload,

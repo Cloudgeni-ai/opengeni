@@ -649,9 +649,6 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     // Stub live box: records execs; its manifest mirrors the agent's default manifest
     // so applyManifestToProvidedSession sees no delta to apply.
     const execCalls: Array<{ cmd: string }> = [];
-    let repositoryReady = false;
-    let skillListCalls = 0;
-    let skillListCallsAfterRepositoryReady = 0;
     const providedSession = {
       state: { manifest: buildManifest(settings, [repoResource], environment) },
       exec: async (args: { cmd: string }) => {
@@ -665,11 +662,7 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
         execCalls.push(args);
         return { exitCode: 0, stdout: "", stderr: "" };
       },
-      listDir: async () => {
-        skillListCalls += 1;
-        if (repositoryReady) skillListCallsAfterRepositoryReady += 1;
-        return [];
-      },
+      listDir: async () => [],
       readFile: async () => "",
       pathExists: async () => false,
       materializeEntry: async () => undefined,
@@ -684,14 +677,6 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
         client: stubClient as never,
         session: providedSession as never,
       },
-      onRuntimeEvent: async (event) => {
-        if (
-          event.type === "sandbox.operation.completed" &&
-          event.payload.name === "repository-clone"
-        ) {
-          repositoryReady = true;
-        }
-      },
     });
     for await (const _ of result.toStream()) {
       void _;
@@ -705,11 +690,6 @@ describe("owned-path beforeAgentStart hooks — the provided-session blind spot"
     expect(cloneExecs[0]!.cmd).toContain("OPENGENI_GIT_TOKEN_SEED");
     expect(cloneExecs[0]!.cmd).toContain("seed-token-e2e");
     expect(cloneExecs[0]!.cmd).toContain("repos/example/repo");
-    // Four declared search roots (workspace/repository × .agents/.claude) are
-    // inspected once on the pinned setup session and never again through the
-    // SDK's routed first-model-call session.
-    expect(skillListCalls).toBe(4);
-    expect(skillListCallsAfterRepositoryReady).toBe(0);
   });
 
   test("connected machine (effective backend selfhosted): NO platform setup exec touches the user's box", async () => {
