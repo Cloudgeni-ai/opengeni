@@ -980,8 +980,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // The current runtime evaluator intentionally requires every capability in
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function and the 0380 company-profile
-    // autonomy policy tables/functions, and the 0400 model-context snapshot
-    // table. Preserve those exact expected boundary gaps while continuing to
+    // autonomy policy tables/functions, the 0400 model-context snapshot table,
+    // and the 0401 setup-delivery transport routines. Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.
     const expectedPost0353EvaluatorGaps = [
@@ -999,6 +999,8 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
       "target-schema runtime capability undo_governed_learning_activation(uuid, uuid, uuid, uuid) authority tables are missing: remember_knowledge_memory_materializations",
       "target-schema runtime capability list_organization_workspace_ids(uuid) is missing or ambiguous",
       "target-schema runtime capability authorize_organization_shared_workspace_administration(uuid, uuid, text) is missing or ambiguous",
+      "target-schema runtime capability claim_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
+      "target-schema runtime capability prepare_organization_user_setup_delivery_v2(jsonb) is missing or ambiguous",
     ];
     const sessionSetTables = new Set([
       "managed_auth_actor_mutation_leases",
