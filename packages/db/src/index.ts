@@ -66928,7 +66928,12 @@ export async function applySessionTurnSettlement(
 export type SettleCodexCredentialFailoverResult =
   | { action: "recovering"; failoverCount: number; events: SessionEvent[] }
   | { action: "stale"; failoverCount: number; events: [] }
-  | { action: "limit_exceeded"; failoverCount: number; events: [] };
+  | {
+      action: "limit_exceeded";
+      failoverCount: number;
+      maxFailovers: number;
+      events: [];
+    };
 
 export type SettleCodexCredentialLeaseLossResult =
   | { action: "recovering"; events: SessionEvent[] }
@@ -67301,11 +67306,22 @@ export async function settleCodexCredentialFailover(
           } as const;
         }
 
+        const persistedMaxFailovers = turn.metadata?.codexCredentialFailoverLimit;
+        if (
+          persistedMaxFailovers !== undefined &&
+          (typeof persistedMaxFailovers !== "number" ||
+            !Number.isSafeInteger(persistedMaxFailovers) ||
+            persistedMaxFailovers < 1)
+        ) {
+          throw new Error("Persisted Codex failover bound must be a positive safe integer");
+        }
+        const maxFailovers = persistedMaxFailovers ?? input.maxFailovers;
         const failoverCount = currentFailovers + 1;
-        if (failoverCount > input.maxFailovers) {
+        if (failoverCount > maxFailovers) {
           return {
             action: "limit_exceeded",
             failoverCount,
+            maxFailovers,
             events: [],
           } as const;
         }
@@ -67387,6 +67403,7 @@ export async function settleCodexCredentialFailover(
             metadata: {
               ...turn.metadata,
               codexCredentialFailovers: failoverCount,
+              codexCredentialFailoverLimit: maxFailovers,
             },
             finishedAt: null,
             updatedAt: now,

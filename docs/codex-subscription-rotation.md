@@ -310,9 +310,11 @@ counter, emits `turn.recovery.requested`, and leaves the **same logical turn** i
 `recovering`. It creates no prompt queue row or synthetic user/resume message.
 The next attempt reconstructs durable model history and tool lineage. This is an
 explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
-bounded by pool size so a malformed classification cannot walk forever; a stale
-holder cannot quarantine a credential or settle the turn. Reaching the bound is
-a terminal result for that accepted turn and explicitly suppresses an active
+bounded by the enabled-alternate count frozen by the first accepted failover, so
+later pool shrink cannot strand an originally permitted alternate and later pool
+growth cannot add attempts. A malformed classification therefore cannot walk
+forever; a stale holder cannot quarantine a credential or settle the turn.
+Reaching the bound is a terminal result for that accepted turn and explicitly suppresses an active
 goal's autonomous continuation wake. The goal row fences that suppression to
 the exact exhausted turn; evaluation and invariant repair keep unchanged input
 inert, while a later human, API, machine-input, or goal mutation becomes newer

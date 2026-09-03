@@ -439,6 +439,7 @@ describe("definitive Codex failure settlement", () => {
     const failover = spyOn(opengeniDb, "settleCodexCredentialFailover").mockResolvedValue({
       action: "limit_exceeded",
       failoverCount: 1,
+      maxFailovers: 2,
       events: [],
     });
     const parentDelivery = spyOn(parentWake, "deliverFailedChildTurnToParent").mockImplementation(
@@ -467,7 +468,7 @@ describe("definitive Codex failure settlement", () => {
               retryable: false,
               recovery: "user_message",
               failoverCount: 1,
-              maxFailovers: 1,
+              maxFailovers: 2,
             },
           },
           { type: "session.status.changed", payload: { status: "idle" } },

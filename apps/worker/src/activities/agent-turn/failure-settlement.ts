@@ -877,7 +877,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             retryable: false,
             recovery: "user_message",
             failoverCount: settlement.failoverCount,
-            maxFailovers,
+            maxFailovers: settlement.maxFailovers,
           };
           if (
             !(await eventing.settle!({
