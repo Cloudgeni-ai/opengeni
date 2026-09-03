@@ -89,7 +89,7 @@ describe("session Codex realtime broker", () => {
     expect(capturedAuth?.accessToken).toBe(BEARER_DEFAULT);
     expect(capturedAuth?.chatgptAccountId).toBe("account-bound");
     expect(capturedAuth?.isFedramp).toBe(true);
-    expect(capturedAuth?.clientVersion).toBe("0.145.0");
+    expect(capturedAuth?.clientVersion).toBe("0.153.0");
     expect(capturedInput).toEqual({
       ...request,
       sessionId: "session-one",

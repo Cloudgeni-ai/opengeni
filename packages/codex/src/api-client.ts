@@ -55,8 +55,11 @@ export async function fetchCodexModels(
       await res.arrayBuffer().catch(() => undefined);
       return { ok: false, status: res.status, slugs: [] as string[] };
     }
-    const body = (await res.json()) as { models?: Array<{ slug?: string }> };
+    const body = (await res.json()) as {
+      models?: Array<{ slug?: string; visibility?: "list" | "hide" | "none" }>;
+    };
     const slugs = (body.models ?? [])
+      .filter((model) => model.visibility === "list")
       .map((model) => model.slug)
       .filter((slug): slug is string => typeof slug === "string");
     return { ok: true, status: res.status, slugs };
