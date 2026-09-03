@@ -53,6 +53,17 @@ describe("MCP OAuth discovery", () => {
         'Basic realm="mcp", OAuth scope="documents:read", Basic scope="must-not-leak"',
       ),
     ).toEqual({ scheme: "oauth", scope: ["documents:read"] });
+    expect(parseMcpOAuthChallenge('Basic realm="x, Bearer, y"')).toEqual({
+      scheme: null,
+      scope: [],
+    });
+    expect(parseMcpOAuthChallenge('Basic realm="x, OAuth scope=realm-value", Bearer')).toEqual({
+      scheme: "bearer",
+      scope: [],
+    });
+    expect(
+      parseMcpOAuthChallenge('Bearer error="unterminated, Basic realm=x, scope=must-not-leak'),
+    ).toEqual({ scheme: null, scope: [] });
   });
 
   test("prefers RFC 9728 protected resource metadata and binds provenance", async () => {

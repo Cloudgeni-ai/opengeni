@@ -179,10 +179,15 @@ export async function resolveMcpOAuthDiscovery(
 
 export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge {
   if (!header) return { scheme: null, scope: [] };
-  const schemeMatch = /(?:^|,)\s*(Bearer|OAuth)(?=\s|,|$)/i.exec(header);
-  if (!schemeMatch) return { scheme: null, scope: [] };
-  const scheme = schemeMatch[1]!.toLowerCase() as "bearer" | "oauth";
-  const paramsText = challengeParametersText(header, schemeMatch.index + schemeMatch[0].length);
+  const challenges = parseAuthenticateChallenges(header);
+  if (!challenges) return { scheme: null, scope: [] };
+  const challenge = challenges.find((candidate) => {
+    const scheme = candidate.scheme.toLowerCase();
+    return scheme === "bearer" || scheme === "oauth";
+  });
+  if (!challenge) return { scheme: null, scope: [] };
+  const scheme = challenge.scheme.toLowerCase() as "bearer" | "oauth";
+  const paramsText = challenge.parameterParts.join(",");
   const params: Record<string, string> = {};
   const re = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|[^,\s]+)/g;
   let match: RegExpExecArray | null;
@@ -200,10 +205,41 @@ export function parseMcpOAuthChallenge(header: string | null): McpOAuthChallenge
   };
 }
 
-function challengeParametersText(header: string, start: number): string {
+function parseAuthenticateChallenges(
+  header: string,
+): Array<{ scheme: string; parameterParts: string[] }> | null {
+  const segments = splitAuthenticateHeader(header);
+  if (!segments) return null;
+  const challenges: Array<{ scheme: string; parameterParts: string[] }> = [];
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (!trimmed) return null;
+    const token = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/.exec(trimmed)?.[0];
+    if (!token) return null;
+    let cursor = token.length;
+    while (/\s/.test(trimmed[cursor] ?? "")) cursor += 1;
+    if (trimmed[cursor] === "=") {
+      const current = challenges.at(-1);
+      if (!current) return null;
+      current.parameterParts.push(trimmed);
+      continue;
+    }
+    const remainder = trimmed.slice(token.length);
+    if (remainder && !/^\s/.test(remainder)) return null;
+    challenges.push({
+      scheme: token,
+      parameterParts: remainder.trim() ? [remainder.trim()] : [],
+    });
+  }
+  return challenges;
+}
+
+function splitAuthenticateHeader(header: string): string[] | null {
+  const segments: string[] = [];
+  let segmentStart = 0;
   let quoted = false;
   let escaped = false;
-  for (let index = start; index < header.length; index += 1) {
+  for (let index = 0; index < header.length; index += 1) {
     const character = header[index]!;
     if (quoted) {
       if (escaped) {
@@ -219,19 +255,14 @@ function challengeParametersText(header: string, start: number): string {
       quoted = true;
       continue;
     }
-    if (character !== ",") continue;
-
-    let cursor = index + 1;
-    while (/\s/.test(header[cursor] ?? "")) cursor += 1;
-    const token = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/.exec(header.slice(cursor))?.[0];
-    if (!token) continue;
-    cursor += token.length;
-    while (/\s/.test(header[cursor] ?? "")) cursor += 1;
-    if (header[cursor] !== "=") {
-      return header.slice(start, index);
+    if (character === ",") {
+      segments.push(header.slice(segmentStart, index));
+      segmentStart = index + 1;
     }
   }
-  return header.slice(start);
+  if (quoted) return null;
+  segments.push(header.slice(segmentStart));
+  return segments;
 }
 
 export function protectedResourceMetadataCandidates(
