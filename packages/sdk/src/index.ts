@@ -1,5 +1,9 @@
 export { OpenGeniClient } from "./artifact-client";
-export { OpenGeniToolCallError, OpenGeniToolsClient } from "./tools";
+export {
+  OpenGeniToolCallError,
+  OpenGeniToolReapprovalRequiredError,
+  OpenGeniToolsClient,
+} from "./tools";
 export type {
   OpenGeniDynamicToolNamespace,
   OpenGeniDynamicToolNode,

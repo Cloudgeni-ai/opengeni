@@ -478,6 +478,15 @@ await tools.$call(identity, input, {
 });
 ```
 
+When a call or approval request receives the typed
+`409 details.code = "catalog_stale"` response, the SDK refreshes the catalog,
+re-resolves the exact identity or generated namespace path, preserves the
+operation id (generating it before the first attempt when omitted), and retries
+once. A call that already carries an approval token cannot reuse that
+single-use capability after the catalog digest changes; instead it throws
+`OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
+the trusted host can show approval again for the same operation id.
+
 Do not request approval capabilities speculatively or expose them to Site
 iframe code. Sites do not use this approval sequence: the host projects only
 the active immutable version's requested identities, supplies the Site context

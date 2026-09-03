@@ -57,6 +57,7 @@ import {
   ToolGatewayToolNotFoundError,
   digestCanonicalJson,
   generateToolGatewayDeclarations,
+  type PreparedToolGatewayCall,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
@@ -406,14 +407,28 @@ export async function callWorkspaceToolGateway(
             identity: request.identity,
           }
         : null;
-    if (entry && siteContext) {
+    // Approval is adapter-owned, so prepare with an in-process provisional
+    // confirmation, then replace it with the actual capability decision before
+    // executing the same prepared call. No provider execution begins here.
+    const transportMeta = { approvalConfirmed: true };
+    const preparedCall = await prepared.toolGateway.prepareCall(
+      {
+        operationId,
+        catalogDigest: request.catalogDigest,
+        identity: request.identity,
+        arguments: request.arguments,
+        caller: { kind: "http", subjectId: grant.subjectId },
+      },
+      { transportMeta },
+    );
+    if (siteContext) {
       if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
       await authorizeSiteTool(db, grant, siteContext);
     }
     // An authorized active Site version is the transport-owned approval boundary:
     // its retained identity allowlist replaces per-invocation human confirmation.
     let approvalConfirmed = siteContext !== null;
-    const approvalRequired = entry?.approval === "human" && siteContext === null;
+    const approvalRequired = preparedCall.entry.approval === "human" && siteContext === null;
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -429,18 +444,8 @@ export async function callWorkspaceToolGateway(
     if (approvalRequired && !approvalConfirmed) {
       throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
-    const result = await prepared.toolGateway.call(
-      {
-        operationId,
-        catalogDigest: request.catalogDigest,
-        identity: request.identity,
-        arguments: request.arguments,
-        caller: { kind: "http", subjectId: grant.subjectId },
-      },
-      {
-        transportMeta: { approvalConfirmed },
-      },
-    );
+    transportMeta.approvalConfirmed = approvalConfirmed;
+    const result = await preparedCall.execute();
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({
       operationId,
@@ -449,19 +454,7 @@ export async function callWorkspaceToolGateway(
     });
   } catch (error) {
     observation.end(workspaceToolGatewayOutcome(error));
-    if (error instanceof ToolGatewayCatalogStaleError) {
-      throw catalogStaleHttpError();
-    }
-    if (error instanceof ToolGatewayToolNotFoundError) {
-      throw new HTTPException(404, { message: error.code, cause: error });
-    }
-    if (error instanceof ToolGatewayInputValidationError) {
-      throw new HTTPException(422, { message: error.code, cause: error });
-    }
-    if (error instanceof ToolGatewayApprovalRequiredError) {
-      throw new HTTPException(409, { message: error.code, cause: error });
-    }
-    throw error;
+    throwWorkspaceToolGatewayHttpError(error);
   }
 }
 
@@ -474,22 +467,28 @@ export async function approveWorkspaceToolGatewayCall(
   observability?: Observability,
 ) {
   const request = ToolGatewayApprovalRequest.parse(input);
-  if (request.catalogDigest !== prepared.toolGatewayCatalog.digest) {
-    throw catalogStaleHttpError();
+  let preparedCall: PreparedToolGatewayCall;
+  try {
+    preparedCall = await prepared.toolGateway.prepareCall(
+      {
+        operationId: request.operationId,
+        catalogDigest: request.catalogDigest,
+        identity: request.identity,
+        arguments: request.arguments,
+        caller: { kind: "http", subjectId: grant.subjectId },
+      },
+      { transportMeta: { approvalConfirmed: true } },
+    );
+  } catch (error) {
+    throwWorkspaceToolGatewayHttpError(error);
   }
-  const entry = prepared.toolGatewayCatalog.entries.find(
-    (candidate) =>
-      candidate.identity.serverId === request.identity.serverId &&
-      candidate.identity.toolName === request.identity.toolName,
-  );
-  if (!entry) throw new HTTPException(404, { message: "tool_not_found" });
-  if (entry.approval !== "human") {
+  if (preparedCall.entry.approval !== "human") {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
   const observation = startWorkspaceToolGatewayObservation(observability, {
     adapter: "http",
     operation: "approval",
-    source: entry.source,
+    source: preparedCall.entry.source,
   });
   const approvalToken = `ogta_${randomBytes(32).toString("base64url")}`;
   const expiresAt = new Date(Date.now() + 5 * 60_000);
@@ -528,6 +527,22 @@ function catalogStaleHttpError(): ApiHttpError {
     retryable: true,
     details: { code: "catalog_stale" },
   });
+}
+
+function throwWorkspaceToolGatewayHttpError(error: unknown): never {
+  if (error instanceof ToolGatewayCatalogStaleError) {
+    throw catalogStaleHttpError();
+  }
+  if (error instanceof ToolGatewayToolNotFoundError) {
+    throw new HTTPException(404, { message: error.code, cause: error });
+  }
+  if (error instanceof ToolGatewayInputValidationError) {
+    throw new HTTPException(422, { message: error.code, cause: error });
+  }
+  if (error instanceof ToolGatewayApprovalRequiredError) {
+    throw new HTTPException(409, { message: error.code, cause: error });
+  }
+  throw error;
 }
 
 async function requireWorkspaceSiteToolAuthorization(

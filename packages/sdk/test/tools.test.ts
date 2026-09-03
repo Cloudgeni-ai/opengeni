@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
+import { OpenGeniToolReapprovalRequiredError } from "../src/tools";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -23,13 +24,35 @@ const catalog = {
   ],
 };
 
-function response(body: unknown): Response {
+const refreshedCatalog = {
+  ...catalog,
+  generation: 2,
+  digest: "b".repeat(64),
+  createdAt: "2026-09-03T00:00:00.000Z",
+};
+
+function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
+    status,
     headers: {
       "content-type": "application/json",
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
     },
   });
+}
+
+function staleCatalogResponse(): Response {
+  return response(
+    {
+      error: {
+        code: "conflict",
+        message: "The workspace tool catalog changed; retry with the current catalog.",
+        retryable: true,
+        details: { code: "catalog_stale" },
+      },
+    },
+    409,
+  );
 }
 
 describe("OpenGeniClient tools", () => {
@@ -113,6 +136,175 @@ describe("OpenGeniClient tools", () => {
       .forWorkspace(workspaceId)
       .$call(catalog.entries[0]!.identity, { query: "opaque" });
     expect(result).toEqual({ content: [] });
+  });
+
+  test("refreshes and retries one direct identity call with the same generated operation id", async () => {
+    let catalogReads = 0;
+    const calls: Record<string, unknown>[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        const request = new Request(input, init);
+        if (request.method === "GET") {
+          catalogReads += 1;
+          return response(catalogReads === 1 ? catalog : refreshedCatalog);
+        }
+        calls.push((await request.json()) as Record<string, unknown>);
+        if (calls.length === 1) return staleCatalogResponse();
+        return response({
+          operationId: calls.at(-1)!.operationId,
+          catalogDigest: refreshedCatalog.digest,
+          result: { content: [], structuredContent: { matches: 2 } },
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(
+      client.tools
+        .forWorkspace(workspaceId)
+        .$call(catalog.entries[0]!.identity, { query: "retry" }),
+    ).resolves.toEqual({ matches: 2 });
+    expect(catalogReads).toBe(2);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]!.operationId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    expect(calls[1]!.operationId).toBe(calls[0]!.operationId);
+    expect(calls.map((call) => call.catalogDigest)).toEqual([
+      catalog.digest,
+      refreshedCatalog.digest,
+    ]);
+  });
+
+  test("re-resolves a generated path against the refreshed catalog before retrying", async () => {
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const initial = {
+      ...catalog,
+      entries: [
+        {
+          ...catalog.entries[0]!,
+          identity: { serverId: "docs", toolName: "search_v1" },
+        },
+      ],
+    };
+    const current = {
+      ...refreshedCatalog,
+      entries: [
+        {
+          ...refreshedCatalog.entries[0]!,
+          identity: { serverId: "docs", toolName: "search_v2" },
+        },
+      ],
+    };
+    let catalogReads = 0;
+    const calls: Record<string, unknown>[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        const request = new Request(input, init);
+        if (request.method === "GET") {
+          catalogReads += 1;
+          return response(catalogReads === 1 ? initial : current);
+        }
+        calls.push((await request.json()) as Record<string, unknown>);
+        if (calls.length === 1) return staleCatalogResponse();
+        return response({
+          operationId,
+          catalogDigest: current.digest,
+          result: { content: [], structuredContent: { matches: 3 } },
+        });
+      }) as typeof fetch,
+    });
+
+    const tools = client.tools.forWorkspace(workspaceId);
+    await expect(
+      (tools.docs!.search as (args: unknown, options: unknown) => Promise<unknown>)(
+        { query: "generated" },
+        { operationId },
+      ),
+    ).resolves.toEqual({ matches: 3 });
+    expect(calls.map((call) => call.identity)).toEqual([
+      initial.entries[0]!.identity,
+      current.entries[0]!.identity,
+    ]);
+    expect(calls.map((call) => call.operationId)).toEqual([operationId, operationId]);
+  });
+
+  test("refreshes and retries one approval request with the same operation id", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    let catalogReads = 0;
+    const approvals: Record<string, unknown>[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        const request = new Request(input, init);
+        if (request.method === "GET") {
+          catalogReads += 1;
+          return response(catalogReads === 1 ? catalog : refreshedCatalog);
+        }
+        approvals.push((await request.json()) as Record<string, unknown>);
+        if (approvals.length === 1) return staleCatalogResponse();
+        return response({
+          operationId,
+          approvalToken: `ogta_${"b".repeat(43)}`,
+          expiresAt: "2026-09-03T00:05:00.000Z",
+        });
+      }) as typeof fetch,
+    });
+
+    await expect(
+      client.tools
+        .forWorkspace(workspaceId)
+        .$approve(catalog.entries[0]!.identity, { query: "approve" }, { operationId }),
+    ).resolves.toMatchObject({ operationId });
+    expect(approvals).toHaveLength(2);
+    expect(approvals.map((approval) => approval.operationId)).toEqual([operationId, operationId]);
+    expect(approvals.map((approval) => approval.catalogDigest)).toEqual([
+      catalog.digest,
+      refreshedCatalog.digest,
+    ]);
+  });
+
+  test("requires reapproval instead of reusing a token after the digest changes", async () => {
+    const operationId = "66666666-6666-4666-8666-666666666666";
+    let catalogReads = 0;
+    let callCount = 0;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (_input, init) => {
+        if (init?.method === "POST") {
+          callCount += 1;
+          return staleCatalogResponse();
+        }
+        catalogReads += 1;
+        return response(catalogReads === 1 ? catalog : refreshedCatalog);
+      }) as typeof fetch,
+    });
+
+    let caught: unknown;
+    try {
+      await client.tools.forWorkspace(workspaceId).$call(
+        catalog.entries[0]!.identity,
+        { query: "approved" },
+        {
+          operationId,
+          approvalToken: `ogta_${"a".repeat(43)}`,
+        },
+      );
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(OpenGeniToolReapprovalRequiredError);
+    expect(caught).toMatchObject({
+      code: "tool_reapproval_required",
+      retryable: false,
+      operationId,
+      previousCatalogDigest: catalog.digest,
+      catalogDigest: refreshedCatalog.digest,
+      identity: refreshedCatalog.entries[0]!.identity,
+    });
+    expect(catalogReads).toBe(2);
+    expect(callCount).toBe(1);
   });
 
   test("requires the approved operation id when a call carries a capability", async () => {

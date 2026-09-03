@@ -4,9 +4,10 @@ import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
+import { ToolGatewayApprovalRateLimitError } from "@opengeni/db";
 import { prepareWorkspaceToolGatewayTools } from "@opengeni/runtime/workspace-tool-gateway";
 import { testSettings } from "@opengeni/testing";
-import { createWorkspaceToolGateway } from "@opengeni/tool-gateway";
+import { createWorkspaceToolGateway, type ToolGatewayAuthorization } from "@opengeni/tool-gateway";
 import { HTTPException } from "hono/http-exception";
 import { mcpOAuthConsentToolIdentities } from "../src/mcp-oauth";
 import {
@@ -38,6 +39,10 @@ function grant(overrides: Partial<AccessGrant> = {}): AccessGrant {
 function preparedGateway(
   calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }>,
   approval: "human" | "none" = "none",
+  options: {
+    authorize?: ToolGatewayAuthorization;
+    onExecute?: () => void;
+  } = {},
 ): PreparedWorkspaceToolGateway {
   const { catalog, gateway } = createWorkspaceToolGateway({
     accountId,
@@ -65,6 +70,7 @@ function preparedGateway(
         source: "mcp",
         approval,
         execute: async (argumentsValue, context) => {
+          options.onExecute?.();
           calls.push({ kind: context.caller.kind, argumentsValue });
           return {
             content: [{ type: "text", text: JSON.stringify({ count: 7 }) }],
@@ -75,6 +81,7 @@ function preparedGateway(
     ],
     requireApproval: (entry, _caller, context) =>
       entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+    ...(options.authorize ? { authorize: options.authorize } : {}),
   });
   return {
     toolGateway: gateway,
@@ -289,6 +296,7 @@ describe("workspace tool gateway adapters", () => {
         identity: { serverId: "inventory", toolName: "missing" },
       }),
     ).rejects.toMatchObject({ status: 404 });
+    let consumedInvalidApproval = false;
     await expect(
       callWorkspaceToolGateway(
         prepared,
@@ -300,13 +308,22 @@ describe("workspace tool gateway adapters", () => {
           approvalToken: `ogta_${"a".repeat(43)}`,
         },
         {} as never,
-        async () => true,
+        async () => {
+          consumedInvalidApproval = true;
+          return true;
+        },
       ),
     ).rejects.toMatchObject({ status: 422 });
+    expect(consumedInvalidApproval).toBe(false);
   });
 
   test("issues an opaque approval capability bound to the exact operation", async () => {
-    const prepared = preparedGateway([], "human");
+    const order: string[] = [];
+    const prepared = preparedGateway([], "human", {
+      authorize: () => {
+        order.push("authorize");
+      },
+    });
     const access = grant();
     const issued: unknown[] = [];
     const response = await approveWorkspaceToolGatewayCall(
@@ -320,6 +337,7 @@ describe("workspace tool gateway adapters", () => {
         arguments: { sku: "SKU-2" },
       },
       async (_db, input) => {
+        order.push("issue");
         issued.push(input);
       },
     );
@@ -333,11 +351,69 @@ describe("workspace tool gateway adapters", () => {
       operationId: response.operationId,
       identity: { serverId: "inventory", toolName: "lookup" },
     });
+    expect(order).toEqual(["authorize", "issue"]);
+  });
+
+  test("preflights approval input before issuing a single-use capability", async () => {
+    const prepared = preparedGateway([], "human");
+    let issueCalls = 0;
+    await expect(
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        grant(),
+        {} as never,
+        {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: {},
+        },
+        async () => {
+          issueCalls += 1;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(issueCalls).toBe(0);
+  });
+
+  test("preserves the approval issuance rate limit after preflight", async () => {
+    const order: string[] = [];
+    const prepared = preparedGateway([], "human", {
+      authorize: () => {
+        order.push("authorize");
+      },
+    });
+    await expect(
+      approveWorkspaceToolGatewayCall(
+        prepared,
+        grant(),
+        {} as never,
+        {
+          operationId: "33333333-3333-4333-8333-333333333333",
+          catalogDigest: prepared.toolGatewayCatalog.digest,
+          identity: { serverId: "inventory", toolName: "lookup" },
+          arguments: { sku: "RATE-LIMITED-1" },
+        },
+        async () => {
+          order.push("issue");
+          throw new ToolGatewayApprovalRateLimitError("Too many live tool approvals");
+        },
+      ),
+    ).rejects.toMatchObject({ status: 429 });
+    expect(order).toEqual(["authorize", "issue"]);
   });
 
   test("still requires approval for a human-classified non-Site HTTP call", async () => {
     const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
-    const prepared = preparedGateway(calls, "human");
+    const order: string[] = [];
+    const prepared = preparedGateway(calls, "human", {
+      authorize: () => {
+        order.push("authorize");
+      },
+      onExecute: () => {
+        order.push("execute");
+      },
+    });
     const access = grant();
     const request = {
       operationId: "33333333-3333-4333-8333-333333333333",
@@ -357,6 +433,7 @@ describe("workspace tool gateway adapters", () => {
       { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
       {} as never,
       async (_db, input) => {
+        order.push("consume");
         consumed.push(input);
         return true;
       },
@@ -365,6 +442,43 @@ describe("workspace tool gateway adapters", () => {
     expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
     expect(consumed).toHaveLength(1);
     expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "HUMAN-1" } }]);
+    expect(order).toEqual(["authorize", "authorize", "consume", "execute"]);
+  });
+
+  test("does not consume or issue approval when gateway authorization fails", async () => {
+    const prepared = preparedGateway([], "human", {
+      authorize: () => {
+        throw new HTTPException(403, { message: "tool_not_authorized" });
+      },
+    });
+    const request = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "DENIED-1" },
+    };
+    let consumeCalls = 0;
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        grant(),
+        { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
+        {} as never,
+        async () => {
+          consumeCalls += 1;
+          return true;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(consumeCalls).toBe(0);
+
+    let issueCalls = 0;
+    await expect(
+      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, request, async () => {
+        issueCalls += 1;
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(issueCalls).toBe(0);
   });
 
   test("returns a typed retryable conflict when approval uses a stale catalog", async () => {

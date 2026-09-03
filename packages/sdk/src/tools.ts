@@ -9,6 +9,7 @@ import type {
   ToolGatewayIdentity,
   ToolGatewayResult,
 } from "./types";
+import { OpenGeniApiError } from "./errors";
 
 export type OpenGeniToolCallOptions = {
   operationId?: string;
@@ -89,6 +90,24 @@ export class OpenGeniToolCallError extends Error {
   }
 }
 
+/** A catalog refresh invalidated the single-use approval capability for this call. */
+export class OpenGeniToolReapprovalRequiredError extends Error {
+  readonly code = "tool_reapproval_required" as const;
+  readonly retryable = false;
+
+  constructor(
+    readonly operationId: string,
+    readonly previousCatalogDigest: string,
+    readonly catalogDigest: string,
+    readonly identity: ToolGatewayIdentity,
+  ) {
+    super(
+      "The workspace tool catalog changed after approval. Request a new approval for the refreshed tool identity and retry with the same operation ID.",
+    );
+    this.name = "OpenGeniToolReapprovalRequiredError";
+  }
+}
+
 export class OpenGeniToolsClient implements OpenGeniToolsFacade {
   constructor(private readonly transport: OpenGeniToolTransport) {}
 
@@ -109,41 +128,80 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       catalogSnapshot = next;
       return next;
     };
-    const callIdentity = async (
-      identity: ToolGatewayIdentity,
-      argumentsValue: Record<string, unknown> = {},
-      options: OpenGeniToolCallOptions = {},
+    const callResolvedIdentity = async (
+      resolveIdentity: (current: ToolGatewayCatalog) => ToolGatewayIdentity,
+      argumentsValue: Record<string, unknown>,
+      options: OpenGeniToolCallOptions,
     ): Promise<unknown> => {
       if (options.approvalToken && !options.operationId) {
         throw new TypeError("operationId is required when using an approval token");
       }
-      const current = await catalog({
+      const operationId = options.operationId ?? crypto.randomUUID();
+      const initial = await catalog({
         ...(options.refreshCatalog === undefined ? {} : { refresh: options.refreshCatalog }),
         ...(options.signal ? { signal: options.signal } : {}),
       });
-      const request: ToolGatewayCallRequest = {
-        ...(options.operationId ? { operationId: options.operationId } : {}),
-        catalogDigest: current.digest,
-        identity,
-        arguments: argumentsValue,
-        ...(options.approvalToken ? { approvalToken: options.approvalToken } : {}),
+      const invoke = async (current: ToolGatewayCatalog): Promise<unknown> => {
+        const identity = resolveIdentity(current);
+        const request: ToolGatewayCallRequest = {
+          operationId,
+          catalogDigest: current.digest,
+          identity,
+          arguments: argumentsValue,
+          ...(options.approvalToken ? { approvalToken: options.approvalToken } : {}),
+        };
+        let response: ToolGatewayCallResponse;
+        try {
+          response = await this.transport.requestJson<ToolGatewayCallResponse>(
+            "POST",
+            `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/calls`,
+            request,
+            {},
+            options.signal ? { signal: options.signal } : {},
+          );
+        } catch (error) {
+          if (isCatalogStaleApiError(error)) catalogSnapshot = null;
+          throw error;
+        }
+        if (response.catalogDigest !== current.digest) {
+          catalogSnapshot = null;
+        }
+        if (response.result.isError) throw new OpenGeniToolCallError(response.result);
+        const entry = findCatalogEntry(current, identity);
+        return entry?.outputSchema && response.result.structuredContent !== undefined
+          ? response.result.structuredContent
+          : response.result;
       };
-      const response = await this.transport.requestJson<ToolGatewayCallResponse>(
-        "POST",
-        `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/calls`,
-        request,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      );
-      if (response.catalogDigest !== current.digest) {
-        catalogSnapshot = null;
+      try {
+        return await invoke(initial);
+      } catch (error) {
+        if (!isCatalogStaleApiError(error)) throw error;
       }
-      if (response.result.isError) throw new OpenGeniToolCallError(response.result);
-      const entry = findCatalogEntry(current, identity);
-      return entry?.outputSchema && response.result.structuredContent !== undefined
-        ? response.result.structuredContent
-        : response.result;
+      const refreshed = await catalog({
+        refresh: true,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      const refreshedIdentity = resolveIdentity(refreshed);
+      if (options.approvalToken && refreshed.digest !== initial.digest) {
+        throw new OpenGeniToolReapprovalRequiredError(
+          operationId,
+          initial.digest,
+          refreshed.digest,
+          refreshedIdentity,
+        );
+      }
+      return await invoke(refreshed);
     };
+    const callIdentity = async (
+      identity: ToolGatewayIdentity,
+      argumentsValue: Record<string, unknown> = {},
+      options: OpenGeniToolCallOptions = {},
+    ): Promise<unknown> =>
+      await callResolvedIdentity(
+        (current) => requireCatalogIdentity(current, identity),
+        argumentsValue,
+        options,
+      );
     const approveIdentity = async (
       identity: ToolGatewayIdentity,
       argumentsValue: Record<string, unknown> = {},
@@ -152,38 +210,49 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         signal?: AbortSignal;
       } = {},
     ): Promise<ToolGatewayApprovalResponse> => {
-      const current = await catalog(options.signal ? { signal: options.signal } : {});
-      const request: ToolGatewayApprovalRequest = {
-        operationId: options.operationId ?? crypto.randomUUID(),
-        catalogDigest: current.digest,
-        identity,
-        arguments: argumentsValue,
+      const operationId = options.operationId ?? crypto.randomUUID();
+      const approve = async (current: ToolGatewayCatalog): Promise<ToolGatewayApprovalResponse> => {
+        const request: ToolGatewayApprovalRequest = {
+          operationId,
+          catalogDigest: current.digest,
+          identity: requireCatalogIdentity(current, identity),
+          arguments: argumentsValue,
+        };
+        try {
+          return await this.transport.requestJson<ToolGatewayApprovalResponse>(
+            "POST",
+            `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/approvals`,
+            request,
+            {},
+            options.signal ? { signal: options.signal } : {},
+          );
+        } catch (error) {
+          if (isCatalogStaleApiError(error)) catalogSnapshot = null;
+          throw error;
+        }
       };
-      return await this.transport.requestJson<ToolGatewayApprovalResponse>(
-        "POST",
-        `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/approvals`,
-        request,
-        {},
-        options.signal ? { signal: options.signal } : {},
-      );
+      const initial = await catalog(options.signal ? { signal: options.signal } : {});
+      try {
+        return await approve(initial);
+      } catch (error) {
+        if (!isCatalogStaleApiError(error)) throw error;
+      }
+      const refreshed = await catalog({
+        refresh: true,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      return await approve(refreshed);
     };
     const invokePath = async (
       path: readonly string[],
       argumentsValue: Record<string, unknown> = {},
       options: OpenGeniToolCallOptions = {},
     ): Promise<unknown> => {
-      const current = await catalog({
-        ...(options.refreshCatalog === undefined ? {} : { refresh: options.refreshCatalog }),
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
-      const entry = current.entries.find(
-        (candidate) =>
-          candidate.codemodePath.length === path.length &&
-          candidate.codemodePath.every((segment, index) => segment === path[index]),
+      return await callResolvedIdentity(
+        (current) => requireCatalogPath(current, path).identity,
+        argumentsValue,
+        options,
       );
-      if (!entry)
-        throw new Error(`Tool is not present in the workspace catalog: ${path.join(".")}`);
-      return await callIdentity(entry.identity, argumentsValue, options);
     };
     const node = (path: readonly string[]): OpenGeniDynamicToolNode =>
       new Proxy(
@@ -230,6 +299,40 @@ function findCatalogEntry(
     (entry) =>
       entry.identity.serverId === identity.serverId &&
       entry.identity.toolName === identity.toolName,
+  );
+}
+
+function requireCatalogIdentity(
+  catalog: ToolGatewayCatalog,
+  identity: ToolGatewayIdentity,
+): ToolGatewayIdentity {
+  const entry = findCatalogEntry(catalog, identity);
+  if (!entry) {
+    throw new Error(
+      `Tool is not present in the workspace catalog: ${identity.serverId}/${identity.toolName}`,
+    );
+  }
+  return entry.identity;
+}
+
+function requireCatalogPath(
+  catalog: ToolGatewayCatalog,
+  path: readonly string[],
+): ToolGatewayCatalogEntry {
+  const entry = catalog.entries.find(
+    (candidate) =>
+      candidate.codemodePath.length === path.length &&
+      candidate.codemodePath.every((segment, index) => segment === path[index]),
+  );
+  if (!entry) throw new Error(`Tool is not present in the workspace catalog: ${path.join(".")}`);
+  return entry;
+}
+
+function isCatalogStaleApiError(error: unknown): error is OpenGeniApiError {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 409 &&
+    error.details?.code === "catalog_stale"
   );
 }
 
