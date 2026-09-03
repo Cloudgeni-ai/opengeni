@@ -108,10 +108,19 @@ describe("session control surface architecture", () => {
   });
 
   test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
-    const rail = await source("components/rail/session-list.tsx");
+    const [rail, route, focusRequest] = await Promise.all([
+      source("components/rail/session-list.tsx"),
+      source("routes/sessions-index.tsx"),
+      source("lib/create-composer-focus.ts"),
+    ]);
     expect(rail).toContain("search={composerLaunchSearchForChannel(props.channelId)}");
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
+    expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
+    expect(focusRequest).toContain("window.dispatchEvent(createComposerFocusEvent(channelId))");
+    expect(route).toContain("const requestedChannelId = (");
+    expect(route.match(/resolveComposerLaunchChannelId\(/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(route).toContain("const projectSelection = newSessionProjectSelection(");
   });
 
   test("keeps Variable Sets editable at create time and beside an established composer", async () => {

@@ -86,6 +86,19 @@ export function rememberedProjectCompute(
   };
 }
 
+/** Apply a project change without leaving compute from the prior project behind. */
+export function newSessionProjectSelection(
+  history: NewSessionSelectionHistory,
+  channelId: string | null,
+  currentCompute: ComputeTarget,
+  defaultSandboxBackend?: SandboxBackend,
+): { channelId: string | null; compute: ComputeTarget } {
+  return {
+    channelId,
+    compute: rememberedProjectCompute(history, channelId, defaultSandboxBackend) ?? currentCompute,
+  };
+}
+
 export function rememberedMachineFolder(
   history: NewSessionSelectionHistory,
   channelId: string | null,

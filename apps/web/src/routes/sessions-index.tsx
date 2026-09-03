@@ -95,7 +95,10 @@ import {
   resolveComposerLaunchChannelId,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
-import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
+import {
+  FOCUS_CREATE_COMPOSER_EVENT,
+  type CreateComposerFocusIntent,
+} from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import {
@@ -132,8 +135,8 @@ import {
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
+  newSessionProjectSelection,
   rememberedMachineFolder,
-  rememberedProjectCompute,
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
@@ -213,6 +216,7 @@ function SessionsIndexRouteContent({
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
   });
+  const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
@@ -552,6 +556,23 @@ function SessionsIndexRouteContent({
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
   const [createComposerFocusGen, setCreateComposerFocusGen] = useState(0);
+  const selectProject = useCallback(
+    (channelId: string | null) => {
+      setSelectedChannelId(channelId);
+      setDraft((current) => {
+        const selection = newSessionProjectSelection(
+          selectionHistory,
+          channelId,
+          current.compute,
+          defaultSandboxBackend,
+        );
+        return selection.compute === current.compute
+          ? current
+          : { ...current, compute: selection.compute };
+      });
+    },
+    [defaultSandboxBackend, selectionHistory],
+  );
 
   useEffect(() => {
     resetSessionView();
@@ -562,8 +583,10 @@ function SessionsIndexRouteContent({
   // local so choosing a folder does not turn the composer URL into application
   // state.
   useEffect(() => {
-    setSelectedChannelId(launchChannelId ?? null);
-  }, [launchChannelId]);
+    selectProject(
+      resolveComposerLaunchChannelId(launchChannelId, recentChannelId),
+    );
+  }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
     if (
@@ -571,13 +594,9 @@ function SessionsIndexRouteContent({
       !channelsQuery.loading &&
       !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
     ) {
-      setSelectedChannelId(null);
-      const rememberedCompute = rememberedProjectCompute(selectionHistory, null);
-      if (rememberedCompute) {
-        setDraft((current) => ({ ...current, compute: rememberedCompute }));
-      }
+      selectProject(null);
     }
-  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectionHistory]);
+  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectProject]);
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
@@ -592,10 +611,17 @@ function SessionsIndexRouteContent({
   }, [channelsQuery, projectNameDraft]);
 
   useEffect(() => {
-    const onRequest = () => setCreateComposerFocusGen((current) => current + 1);
+    const onRequest = (event: Event) => {
+      const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
+        ?.channelId;
+      selectProject(
+        resolveComposerLaunchChannelId(requestedChannelId, recentChannelId),
+      );
+      setCreateComposerFocusGen((current) => current + 1);
+    };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
     return () => window.removeEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
-  }, []);
+  }, [recentChannelId, selectProject]);
 
   const computeReady =
     isSessionDraftComputeReady(draft) &&
@@ -692,10 +718,15 @@ function SessionsIndexRouteContent({
         launchChannelId,
         history.projects[0]?.channelId ?? null,
       );
-      const rememberedCompute = rememberedProjectCompute(history, channelId, defaultSandboxBackend);
+      const projectSelection = newSessionProjectSelection(
+        history,
+        channelId,
+        restored.compute,
+        defaultSandboxBackend,
+      );
       setSelectionHistory(history);
-      setSelectedChannelId(channelId);
-      setDraft(rememberedCompute ? { ...restored, compute: rememberedCompute } : restored);
+      setSelectedChannelId(projectSelection.channelId);
+      setDraft({ ...restored, compute: projectSelection.compute });
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
@@ -729,20 +760,6 @@ function SessionsIndexRouteContent({
       launchChannelId,
       workspaceDefaultToolIdsForHydration,
     ],
-  );
-  const selectProject = useCallback(
-    (channelId: string | null) => {
-      setSelectedChannelId(channelId);
-      const rememberedCompute = rememberedProjectCompute(
-        selectionHistory,
-        channelId,
-        defaultSandboxBackend,
-      );
-      if (rememberedCompute) {
-        setDraft((current) => ({ ...current, compute: rememberedCompute }));
-      }
-    },
-    [defaultSandboxBackend, selectionHistory],
   );
   const newSessionDraft = useNewSessionDraft({
     workspaceId,

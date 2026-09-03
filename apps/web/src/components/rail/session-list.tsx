@@ -212,8 +212,8 @@ export function NewSessionLink(props: {
         if (isModifiedNavigationClick(event)) return;
         context.resetSessionView();
         rail.setDrawerOpen(false);
-        // Same-route Link may not remount the index; ask it to refocus the composer.
-        queueMicrotask(() => requestCreateComposerFocus());
+        // Same-route Link may not remount the index or rerun search-keyed effects.
+        queueMicrotask(() => requestCreateComposerFocus(props.channelId));
       }}
     >
       {props.children}

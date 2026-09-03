@@ -7,6 +7,7 @@ import {
   emptySessionDraft,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
+  newSessionProjectSelection,
   prepareCreateSessionAttempt,
   rememberedMachineFolder,
   rememberedProjectCompute,
@@ -422,6 +423,46 @@ describe("successful-create selection history", () => {
       path: "repos/cloudgeni",
     });
     expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
+  });
+
+  test("reapplies the complete Default project selection on repeated same-route launches", () => {
+    const defaultHistory = {
+      projects: [
+        {
+          channelId: null,
+          targetSandboxId: machineB,
+          machines: [{ sandboxId: machineB, workingDir: "/workspace/default-project" }],
+        },
+        ...history.projects,
+      ],
+    };
+    const staleProjectCompute = {
+      kind: "machine" as const,
+      sandboxId: machineA,
+      folder: { kind: "path" as const, path: "/workspace/other-project" },
+    };
+
+    const firstDefault = newSessionProjectSelection(defaultHistory, null, staleProjectCompute);
+    expect(firstDefault).toEqual({
+      channelId: null,
+      compute: {
+        kind: "machine",
+        sandboxId: machineB,
+        folder: { kind: "path", path: "/workspace/default-project" },
+      },
+    });
+
+    const locallyChanged = newSessionProjectSelection(
+      defaultHistory,
+      project,
+      firstDefault.compute,
+    );
+    const repeatedDefault = newSessionProjectSelection(
+      defaultHistory,
+      null,
+      locallyChanged.compute,
+    );
+    expect(repeatedDefault).toEqual(firstDefault);
   });
 });
 
