@@ -1813,10 +1813,12 @@ const HELM_APPLICATION_DRAIN_ARGS = [
 ].join(" ");
 
 export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway_custom_models";
+export const SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER = "0394_session_selected_skill_activation";
 export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0401_mcp_oauth_authorization_server";
 
 const SUPPORTED_MAINTENANCE_CUTOVERS = [
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
+  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
 ] as const;
 type MaintenanceCutover = (typeof SUPPORTED_MAINTENANCE_CUTOVERS)[number];
@@ -2402,7 +2404,9 @@ function planNotes(
     const migrationSummary =
       maintenanceCutover === MODEL_CATALOG_MAINTENANCE_CUTOVER
         ? "migration 0389"
-        : "migrations 0401 and 0402";
+        : maintenanceCutover === SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER
+          ? "migration 0394"
+          : "migrations 0401 and 0402";
     notes.push(
       `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until ${migrationSummary} and the final exact-digest upgrade succeed.`,
     );
