@@ -42,6 +42,7 @@ import {
   artifactEditInstructions,
   artifactEditOpeningMessage,
 } from "@/lib/artifact-authoring";
+import { notifySiteNavigationChanged } from "@/lib/site-navigation";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 
 function formatDate(value: string): string {
@@ -82,7 +83,11 @@ export function ArtifactsRoute({
   artifactId?: string;
 }) {
   return artifactId ? (
-    <ArtifactDetailRoute workspaceId={workspaceId} artifactId={artifactId} />
+    <ArtifactDetailRoute
+      key={`${workspaceId}:${artifactId}`}
+      workspaceId={workspaceId}
+      artifactId={artifactId}
+    />
   ) : (
     <ArtifactListRoute workspaceId={workspaceId} />
   );
@@ -284,6 +289,7 @@ export function ArtifactDetailRoute({
           }),
         },
       );
+      notifySiteNavigationChanged();
       toast.success("Artifact version restored");
       await load();
     } catch (nextError) {
@@ -312,6 +318,7 @@ export function ArtifactDetailRoute({
           }),
         },
       );
+      notifySiteNavigationChanged();
       toast.success(status === "archived" ? "Site archived" : "Site restored");
       await load();
       return true;

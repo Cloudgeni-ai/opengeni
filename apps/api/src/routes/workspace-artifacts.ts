@@ -10,8 +10,15 @@ import {
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
   normalizeWorkspaceArtifactSlug,
+  type AccessGrant,
 } from "@opengeni/contracts";
-import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   createWorkspaceArtifact,
   getWorkspaceArtifact,
@@ -32,6 +39,10 @@ import {
   prepareWorkspaceArtifactContent,
   readWorkspaceArtifactContent,
 } from "../workspace-artifact-content";
+import {
+  projectWorkspaceArtifactDetailProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
 
 const ArtifactId = z.string().uuid();
 
@@ -98,6 +109,27 @@ function provenance(subjectId: string, idempotencyKey: string) {
   };
 }
 
+async function canReadProvenanceSession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+): Promise<boolean> {
+  try {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.read",
+      surface: "http",
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError) return false;
+    if (error instanceof SessionAuthorizationUnavailableError) {
+      throw new HTTPException(503, { message: "Session authorization is unavailable" });
+    }
+    throw error;
+  }
+}
+
 export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): void {
   // `published-artifacts` deliberately avoids the existing `/artifacts/:id`
   // retained-output API. The product route remains simply `/artifacts`.
@@ -114,10 +146,12 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     try {
       return context.json(
         WorkspaceArtifactListResponse.parse(
-          await listWorkspaceArtifacts(deps.db, workspaceId, {
-            limit: query.data.limit,
-            ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
-          }),
+          redactWorkspaceArtifactListProvenance(
+            await listWorkspaceArtifacts(deps.db, workspaceId, {
+              limit: query.data.limit,
+              ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
+            }),
+          ),
         ),
       );
     } catch (error) {
@@ -160,11 +194,14 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.get(`${base}/:artifactId`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     try {
+      const detail = await getWorkspaceArtifact(deps.db, workspaceId, artifactId(context));
       return context.json(
         WorkspaceArtifactDetailResponse.parse(
-          await getWorkspaceArtifact(deps.db, workspaceId, artifactId(context)),
+          await projectWorkspaceArtifactDetailProvenance(detail, (sessionId) =>
+            canReadProvenanceSession(deps, grant, sessionId),
+          ),
         ),
       );
     } catch (error) {

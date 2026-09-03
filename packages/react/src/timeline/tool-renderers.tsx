@@ -1137,7 +1137,7 @@ function SiteOpenLink({ receipt }: { receipt: PublishedSiteReceipt }) {
     <a
       href={href}
       aria-label={`Open ${receipt.title}`}
-      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
+      className="inline-flex min-h-7 items-center rounded-og-sm px-2 text-og-sm font-medium text-og-accent-strong hover:bg-og-surface-2 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-10"
       onClick={(event) => event.stopPropagation()}
       onKeyDown={(event) => event.stopPropagation()}
     >

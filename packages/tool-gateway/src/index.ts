@@ -412,20 +412,15 @@ function compileCatalogSchema(
 }
 
 function allocateToolPaths(definitions: readonly ToolGatewayDefinition[]): string[][] {
-  const bases = definitions.map((definition) =>
-    (definition.codemodePath?.length
-      ? definition.codemodePath
-      : [definition.identity.serverId, definition.identity.toolName]
-    ).map(safeNamespaceSegment),
+  const requested = definitions.map((definition) =>
+    definition.codemodePath?.length
+      ? [...definition.codemodePath]
+      : [definition.identity.serverId, definition.identity.toolName],
   );
-  const counts = new Map<string, number>();
-  for (const path of bases) {
-    const key = path.join("\u0000");
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
+  const bases = requested.map((path) => path.map(safeNamespaceSegment));
   const allocated = bases.map((base, index) => {
-    const key = base.join("\u0000");
-    if (counts.get(key) === 1) return base;
+    const path = requested[index]!;
+    if (path.every((segment, segmentIndex) => segment === base[segmentIndex])) return base;
     const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
     const last = base.at(-1)!;
     return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];

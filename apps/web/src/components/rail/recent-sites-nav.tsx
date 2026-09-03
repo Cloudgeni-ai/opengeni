@@ -1,4 +1,4 @@
-import type { WorkspaceArtifact, WorkspaceArtifactListResponse } from "@opengeni/sdk";
+import type { WorkspaceArtifactListResponse } from "@opengeni/sdk";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Globe2Icon } from "lucide-react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
@@ -6,10 +6,15 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { request } from "@/api";
 import { useRail } from "@/components/rail/rail-context";
 import { useAppContext } from "@/context";
-import { latestSiteMutationSequence } from "@/lib/site-navigation";
+import {
+  collectRecentActiveSites,
+  getSiteNavigationSnapshot,
+  latestSiteMutationSequence,
+  subscribeSiteNavigation,
+} from "@/lib/site-navigation";
 import { cn } from "@/lib/utils";
 
-const RECENT_SITE_FETCH_LIMIT = 12;
+const RECENT_SITE_FETCH_LIMIT = 100;
 const RECENT_SITE_DISPLAY_LIMIT = 6;
 
 /** Bounded active Site shortcuts nested beneath the primary Sites destination. */
@@ -26,24 +31,31 @@ export function RecentSitesNav() {
     () => latestSiteMutationSequence(feed?.events ?? []),
     [feed?.events],
   );
+  const navigationRefresh = useSyncExternalStore(
+    subscribeSiteNavigation,
+    getSiteNavigationSnapshot,
+    getSiteNavigationSnapshot,
+  );
   const [loaded, setLoaded] = useState<{
     workspaceId: string;
-    artifacts: readonly WorkspaceArtifact[];
+    artifacts: Awaited<ReturnType<typeof collectRecentActiveSites>>;
   } | null>(null);
 
   useEffect(() => {
     if (rail.collapsed) return;
     let current = true;
-    void request<WorkspaceArtifactListResponse>(
-      `/v1/workspaces/${encodeURIComponent(rail.workspaceId)}/published-artifacts?limit=${RECENT_SITE_FETCH_LIMIT}`,
-    )
-      .then((result) => {
+    void collectRecentActiveSites(async (cursor) => {
+      const query = new URLSearchParams({ limit: String(RECENT_SITE_FETCH_LIMIT) });
+      if (cursor) query.set("cursor", cursor);
+      return await request<WorkspaceArtifactListResponse>(
+        `/v1/workspaces/${encodeURIComponent(rail.workspaceId)}/published-artifacts?${query.toString()}`,
+      );
+    }, RECENT_SITE_DISPLAY_LIMIT)
+      .then((artifacts) => {
         if (!current) return;
         setLoaded({
           workspaceId: rail.workspaceId,
-          artifacts: result.artifacts
-            .filter((artifact) => artifact.status === "active")
-            .slice(0, RECENT_SITE_DISPLAY_LIMIT),
+          artifacts,
         });
       })
       .catch(() => {
@@ -52,7 +64,7 @@ export function RecentSitesNav() {
     return () => {
       current = false;
     };
-  }, [rail.collapsed, rail.workspaceId, refreshSequence]);
+  }, [feed?.sessionId, navigationRefresh, rail.collapsed, rail.workspaceId, refreshSequence]);
 
   if (rail.collapsed || loaded?.workspaceId !== rail.workspaceId || loaded.artifacts.length === 0) {
     return null;

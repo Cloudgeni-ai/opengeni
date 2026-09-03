@@ -301,8 +301,18 @@ export class CodemodeClient {
           let recovered: CodemodeOperationValue;
           try {
             recovered = await this.read(operationId, options.signal);
-          } catch {
-            throw error;
+          } catch (recoveryError) {
+            if (options.signal?.aborted) throw recoveryError;
+            throw new CodemodeTransportError(
+              `Codemode operation ${operationId} could not be reconciled after its submission response failed`,
+              null,
+              {
+                code: "codemode_operation_recovery_unavailable",
+                retryable: true,
+                outcomeUnknown: true,
+                details: { operationId },
+              },
+            );
           }
           assertRecoveredCodemodeOperation(recovered, {
             operationId,

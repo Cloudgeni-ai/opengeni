@@ -101,6 +101,11 @@ CREATE UNIQUE INDEX "tool_gateway_approval_capabilities_operation_uq"
   ON "tool_gateway_approval_capabilities" ("workspace_id", "subject_id", "operation_id");
 CREATE INDEX "tool_gateway_approval_capabilities_expires_idx"
   ON "tool_gateway_approval_capabilities" ("expires_at", "token_hash");
+CREATE INDEX "tool_gateway_approval_capabilities_live_subject_expiry_idx"
+  ON "tool_gateway_approval_capabilities" (
+    "workspace_id", "subject_id", "expires_at", "token_hash"
+  )
+  WHERE "consumed_at" IS NULL;
 
 ALTER TABLE "tool_gateway_approval_capabilities" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "tool_gateway_approval_capabilities" FORCE ROW LEVEL SECURITY;

@@ -3666,6 +3666,9 @@ export const toolGatewayApprovalCapabilities = pgTable(
       table.expiresAt,
       table.tokenHash,
     ),
+    liveSubjectExpiry: index("tool_gateway_approval_capabilities_live_subject_expiry_idx")
+      .on(table.workspaceId, table.subjectId, table.expiresAt, table.tokenHash)
+      .where(sql`${table.consumedAt} is null`),
     tokenHashValid: check(
       "tool_gateway_approval_capabilities_token_hash_chk",
       sql`${table.tokenHash} ~ '^[0-9a-f]{64}$'`,

@@ -393,6 +393,9 @@ catalog changed after the Site was built.
   `/v1/workspaces/:id/mcp` route and standard MCP OAuth.
 - Site authority is parent-mediated and limited twice: the immutable version's
   retained requested identities and the viewer's live workspace gateway.
+- Generated Site tool paths are stable from each identity's own normalization;
+  adding, removing, or hiding a colliding catalog neighbor cannot rename an
+  already-requested tool.
 - Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
   approval policy. The Site adapter bypasses per-invocation approval after the
   host and API verify the active immutable version's direct-call allowlist.
@@ -400,6 +403,14 @@ catalog changed after the Site was built.
   semantics. Direct current-human calls carry caller-generated operation ids;
   provider-specific idempotency/outcome handling remains in the canonical
   executor rather than a second Site journal.
+- Attempt-frozen connector Allow/Ask/Block policy and its durable request ledger
+  remain model/Codemode authority. Direct current-human HTTP/SDK/MCP calls use
+  the existing `requireApproval` classification, and Sites use the verified
+  active-version bypass; neither direct path invents an attempt-owned connector
+  request or generalized exactly-once semantics.
 - Each immutable version retains the complete bounded source bundle beside its
   single-HTML runtime. Archive/restore changes publication status without
   deleting versions or source.
+- Version provenance retains the exact source session/turn/attempt, but list
+  responses redact it and detail links are projected only when the viewer can
+  read the source session.

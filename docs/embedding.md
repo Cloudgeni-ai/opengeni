@@ -253,6 +253,12 @@ and dispatch the same executor closures. Model names and generated JavaScript
 paths are presentation only; authority is always the exact
 `{ serverId, toolName }` identity plus the active catalog digest.
 
+Attempt-frozen connector Allow/Ask/Block policy and connector-action request
+rows belong to model/Codemode execution. Direct current-human HTTP/SDK and
+workspace MCP calls use `requireApproval`; Sites use their separately verified
+active-version bypass. Direct calls keep operation ids for provider-specific
+handling but do not create a second generalized execution journal.
+
 The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
 `/tools/declarations`. Approval-required HTTP calls cannot trust a caller
 boolean: the authenticated parent first creates a five-minute, hash-only,
@@ -260,6 +266,8 @@ single-use approval capability bound to the current human, operation, catalog,
 identity, and arguments, then presents that token on the exact matching call.
 After consumption, its hash-only row remains as an operation tombstone so the
 same operation id cannot be approved again after an ambiguous provider outcome.
+Live approval issuance and expiry queries use a subject-scoped partial index
+that excludes consumed tombstones.
 Sites use a different host-owned boundary: an active immutable Site version may
 call its retained tool identities directly without per-call approval, while the
 parent intersects that allowlist with the viewer's live catalog and the API

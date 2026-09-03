@@ -1082,8 +1082,10 @@ the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
 workspace HTTP/SDK adapter project that same catalog and invoke the same executor
 closures. Friendly model names and JavaScript paths are projections of the
 opaque `{serverId, toolName}` identity and never authority. Canonical allocation
-disambiguates exact normalized path duplicates and rejects every namespace/tool
-prefix collision before a catalog can be published. In-process local model tools
+adds an identity-derived suffix whenever a requested path must be normalized, so
+the resulting path does not change when neighboring catalog entries appear or
+disappear, and rejects every remaining namespace/tool prefix or exact collision
+before a catalog can be published. In-process local model tools
 bind only to the final combined local-plus-MCP attempt environment used by
 Codemode, never to a provisional local-only gateway.
 
@@ -1094,10 +1096,13 @@ pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
 and path/identity re-resolution without retrying an existing or ambiguous
 operation. Deterministic submission conflicts are never reconciled to an
 existing row; ambiguous submission failures may adopt a row only after exact
-attempt scope, catalog, identity, and canonical-argument comparison. Concurrent
-first submissions serialize on the caller-owned operation id and converge to one
-creation plus one replay. Client abort is observer-only; server cancellation
-remains owned by the attempt/turn lifecycle. The current-human gateway
+attempt scope, catalog, identity, and canonical-argument comparison. Once an
+exact operation has been admitted, a later deterministic wake failure
+reconciles through that exact journal row; if the recovery read is unavailable,
+the client returns a typed outcome-unknown error carrying the same operation id.
+Concurrent first submissions serialize on the caller-owned operation id and
+converge to one creation plus one replay. Client abort is observer-only; server
+cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
@@ -1106,6 +1111,10 @@ retained tool identities are its direct-call allowlist: the parent intersects
 them with the current viewer's live gateway, and the API revalidates the exact
 active version and identity on every call. Sites do not use per-invocation
 approval prompts or approval capabilities; archived Sites receive no bridge.
+Every immutable version retains its causal session/turn/attempt provenance.
+List projections omit those source identifiers, and artifact detail exposes a
+source-session link only when the current viewer can read that session; private
+session relationships otherwise remain redacted.
 Provider construction is permission-filtered and resource-filtered before any
 connection or `tools/list` traffic.
 
@@ -1118,7 +1127,10 @@ an approval-required provider adapter without that seam is omitted from the
 current-human catalog until it can fail safely before capability issuance. A
 pre-execution reapproval may replace an unconsumed capability, but consumption
 retains a hash-only operation tombstone permanently: an ambiguous provider
-outcome cannot reapprove and replay the same operation id.
+outcome cannot reapprove and replay the same operation id. Live issuance and
+expiry queries use a subject-scoped partial index that excludes those permanent
+tombstones, so replay evidence does not make later approvals progressively more
+expensive.
 
 External MCP clients may use the opt-in OAuth authorization server. Its public
 metadata and dynamic registration lead to an authorization-code flow with
@@ -1126,9 +1138,10 @@ mandatory PKCE S256, one exact RFC 8707 workspace MCP resource, issuer-bound
 redirects, opaque short-lived access tokens, and rotating refresh tokens.
 Consent freezes the current human's permissions and tool identities; every MCP
 request intersects that snapshot with live workspace authority and the current
-gateway catalog. Reuse of a rotated refresh-token generation revokes every
-refresh and access token in that family. OAuth bearer tokens are never accepted
-as REST credentials. Because MCP currently has no server-verifiable one-shot
+gateway catalog. OAuth persistence accepts the same 4,096-entry ceiling as the
+canonical gateway catalog. Reuse of a rotated refresh-token generation revokes
+every refresh and access token in that family. OAuth bearer tokens are never
+accepted as REST credentials. Because MCP currently has no server-verifiable one-shot
 human approval capability, the MCP projection omits entries classified for
 human approval and rejects direct calls to their projected names; those entries
 remain available through the current-human HTTP/SDK approval path and the Site
@@ -1137,6 +1150,15 @@ direct-call path.
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
+
+The attempt-frozen connector Allow/Ask/Block policy and
+`connector_action_requests` ledger apply to model and Codemode execution only.
+Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
+use the ordinary `requireApproval` classification and preserve a caller-generated
+operation id only for provider-specific handling. Sites bypass that per-call
+approval after active-version allowlist revalidation. These direct surfaces do
+not synthesize attempt-owned connector rows or a second generalized exactly-once
+journal.
 
 GitHub App binding keeps account selection explicit whenever owner-authorized
 installations already exist: the owner may choose one of them or enter GitHub's

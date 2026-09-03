@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/sdk";
+import type { SessionEvent, WorkspaceArtifact, WorkspaceArtifactListResponse } from "@opengeni/sdk";
 
-import { latestSiteMutationSequence } from "./site-navigation";
+import {
+  collectRecentActiveSites,
+  getSiteNavigationSnapshot,
+  latestSiteMutationSequence,
+  notifySiteNavigationChanged,
+  subscribeSiteNavigation,
+} from "./site-navigation";
 
 function event(sequence: number, type: SessionEvent["type"], payload: unknown): SessionEvent {
   return {
@@ -13,6 +19,29 @@ function event(sequence: number, type: SessionEvent["type"], payload: unknown): 
     payload,
     occurredAt: "2026-09-03T00:00:00.000Z",
   };
+}
+
+function artifact(id: string, status: WorkspaceArtifact["status"]): WorkspaceArtifact {
+  return {
+    id,
+    accountId: "account-1",
+    workspaceId: "workspace-1",
+    slug: id,
+    title: id,
+    description: null,
+    status,
+    currentVersion: null,
+    createdBySubjectId: "subject-1",
+    createdAt: "2026-09-03T00:00:00.000Z",
+    updatedAt: "2026-09-03T00:00:00.000Z",
+  };
+}
+
+function page(
+  artifacts: WorkspaceArtifact[],
+  nextCursor: string | null,
+): WorkspaceArtifactListResponse {
+  return { artifacts, nextCursor, truncated: nextCursor !== null };
 }
 
 describe("Site navigation refresh", () => {
@@ -39,5 +68,39 @@ describe("Site navigation refresh", () => {
         event(2, "agent.toolCall.output", { id: "different", output: "created" }),
       ]),
     ).toBe(0);
+  });
+
+  test("pages past archived Sites until the visible active shortcuts are full", async () => {
+    const cursors: Array<string | null> = [];
+    const result = await collectRecentActiveSites(async (cursor) => {
+      cursors.push(cursor);
+      if (cursor === null) {
+        return page([artifact("archived-1", "archived")], "next-page");
+      }
+      return page(
+        [
+          artifact("active-1", "active"),
+          artifact("archived-2", "archived"),
+          artifact("active-2", "active"),
+        ],
+        null,
+      );
+    }, 2);
+
+    expect(cursors).toEqual([null, "next-page"]);
+    expect(result.map((entry) => entry.id)).toEqual(["active-1", "active-2"]);
+  });
+
+  test("publishes direct Site mutations through one workspace navigation snapshot", () => {
+    const before = getSiteNavigationSnapshot();
+    let notifications = 0;
+    const unsubscribe = subscribeSiteNavigation(() => {
+      notifications += 1;
+    });
+    notifySiteNavigationChanged();
+    unsubscribe();
+
+    expect(getSiteNavigationSnapshot()).toBe(before + 1);
+    expect(notifications).toBe(1);
   });
 });

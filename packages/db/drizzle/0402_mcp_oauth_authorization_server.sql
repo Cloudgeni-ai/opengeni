@@ -94,7 +94,7 @@ CREATE TABLE mcp_oauth_authorization_requests (
   state text CHECK (state IS NULL OR octet_length(state) BETWEEN 1 AND 1024),
   permissions jsonb NOT NULL CHECK (jsonb_typeof(permissions) = 'array'),
   tool_identities jsonb NOT NULL CHECK (
-    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 2048
+    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 4096
   ),
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -116,7 +116,7 @@ CREATE TABLE mcp_oauth_authorization_codes (
   code_challenge text NOT NULL CHECK (code_challenge ~ '^[A-Za-z0-9_-]{43}$'),
   permissions jsonb NOT NULL CHECK (jsonb_typeof(permissions) = 'array'),
   tool_identities jsonb NOT NULL CHECK (
-    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 2048
+    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 4096
   ),
   expires_at timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -138,7 +138,7 @@ CREATE TABLE mcp_oauth_refresh_tokens (
   resource text NOT NULL CHECK (octet_length(resource) BETWEEN 1 AND 2048),
   permissions jsonb NOT NULL CHECK (jsonb_typeof(permissions) = 'array'),
   tool_identities jsonb NOT NULL CHECK (
-    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 2048
+    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 4096
   ),
   expires_at timestamptz NOT NULL,
   revoked_at timestamptz,
@@ -161,7 +161,7 @@ CREATE TABLE mcp_oauth_access_tokens (
   resource text NOT NULL CHECK (octet_length(resource) BETWEEN 1 AND 2048),
   permissions jsonb NOT NULL CHECK (jsonb_typeof(permissions) = 'array'),
   tool_identities jsonb NOT NULL CHECK (
-    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 2048
+    jsonb_typeof(tool_identities) = 'array' AND jsonb_array_length(tool_identities) <= 4096
   ),
   expires_at timestamptz NOT NULL,
   revoked_at timestamptz,

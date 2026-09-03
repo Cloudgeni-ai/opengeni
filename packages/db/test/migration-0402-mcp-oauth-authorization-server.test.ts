@@ -85,6 +85,7 @@ describe("migration 0402 MCP OAuth authorization server", () => {
     expect(source.match(/REFERENCES workspaces\(id, account_id\)/g)).toHaveLength(4);
     expect(source).toContain("code_challenge text NOT NULL");
     expect(source).toContain("tool_identities jsonb NOT NULL");
+    expect(source.match(/jsonb_array_length\(tool_identities\) <= 4096/g)).toHaveLength(4);
   });
 
   test("keeps public access revoked and defers the sole runtime grant to role provisioning", () => {

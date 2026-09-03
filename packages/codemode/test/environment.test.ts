@@ -95,7 +95,15 @@ describe("AttemptToolEnvironment", () => {
     expect(paths[0]![1]).toMatch(/^_1_search_[0-9a-f]{10}$/u);
     expect(paths[1]![1]).toMatch(/^_1_search_[0-9a-f]{10}$/u);
     expect(paths[0]).not.toEqual(paths[1]);
-    expect(paths[2]).toEqual(["_constructor", "___proto__"]);
+    expect(paths[2]![0]).toBe("_constructor");
+    expect(paths[2]![1]).toMatch(/^___proto___[0-9a-f]{10}$/u);
+
+    const isolated = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition("foo-bar", "1-search")],
+    });
+    expect(isolated.catalog.entries[0]?.codemodePath).toEqual(paths[0]);
   });
 
   test("rejects path-prefix collisions while allocating the canonical catalog", () => {

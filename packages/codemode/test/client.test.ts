@@ -314,6 +314,82 @@ describe("CodemodeClient", () => {
     }
   });
 
+  test("reports outcome unknown with the operation id when wake recovery is unavailable", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const originalNow = Date.now;
+    let now = originalNow();
+    let operationId: string | null = null;
+    let posts = 0;
+    let reads = 0;
+    Date.now = () => now;
+    try {
+      const client = new CodemodeClient({
+        baseUrl: "https://api.example.test/codemode",
+        token: "token",
+        fetch: (async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/catalog")) return Response.json(catalog);
+          if (init?.method === "POST") {
+            posts += 1;
+            const body = JSON.parse(String(init.body)) as { operationId: string };
+            operationId ??= body.operationId;
+            if (posts === 1) {
+              return Response.json({
+                operation: operation(operationId, catalog.digest, "queued"),
+                dispatch: "accepted",
+              });
+            }
+            return Response.json(
+              {
+                error: {
+                  code: "conflict",
+                  message: "Codemode execution attempt is no longer active",
+                  retryable: false,
+                  outcomeUnknown: false,
+                  details: { code: "codemode_inactive_attempt" },
+                },
+              },
+              { status: 409 },
+            );
+          }
+          reads += 1;
+          if (reads === 1) {
+            now += 2_001;
+            return Response.json(operation(operationId!, catalog.digest, "queued"));
+          }
+          throw new TypeError("journal read unavailable");
+        }) as typeof fetch,
+        pollIntervalMs: 1,
+      });
+
+      let caught: unknown;
+      try {
+        await client.call(definition.identity, { query: "hello" });
+      } catch (error) {
+        caught = error;
+      }
+      const recoveredOperationId = String((caught as CodemodeTransportError).details?.operationId);
+      if (!operationId) throw new Error("missing generated operation id");
+      expect(caught).toMatchObject({
+        name: "CodemodeTransportError",
+        remoteCode: "codemode_operation_recovery_unavailable",
+        retryable: true,
+        outcomeUnknown: true,
+        details: { operationId: expect.any(String) },
+      });
+      expect(recoveredOperationId).toBe(operationId);
+      expect(operationId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(posts).toBe(2);
+      expect(reads).toBe(2);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("rejects a mismatched operation recovered after an ambiguous POST failure", async () => {
     const catalog = createAttemptToolEnvironment({
       scope,

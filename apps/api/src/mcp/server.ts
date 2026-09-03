@@ -174,6 +174,11 @@ import {
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
+  projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactVersionProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
+import {
   assertSocialConnectionProvider,
   socialMentionsLive,
   socialOwnPostsLive,
@@ -2978,7 +2983,11 @@ function registerWorkspaceArtifactTools(
     },
     async () => {
       await authorize();
-      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
     },
   );
 
@@ -2995,14 +3004,31 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
-      const [detail, ref] = await Promise.all([
+      const [rawDetail, ref] = await Promise.all([
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
+      ]);
+      const sourceAuthorizations = new Map<string, Promise<boolean>>();
+      const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
+        const existing = sourceAuthorizations.get(sourceSessionId);
+        if (existing) return existing;
+        const decision = authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+          .then(() => true)
+          .catch((error) => {
+            if (error instanceof SessionAuthorizationDeniedError) return false;
+            throw error;
+          });
+        sourceAuthorizations.set(sourceSessionId, decision);
+        return decision;
+      };
+      const [detail, projectedVersion] = await Promise.all([
+        projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
+        projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
       ]);
       const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
       return json({
         detail,
-        version: ref.version,
+        version: projectedVersion,
         ...content,
       });
     },

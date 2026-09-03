@@ -108,6 +108,10 @@ describe("migration 0403 tool gateway approval capabilities", () => {
     expect(source).toContain('"arguments_digest" text NOT NULL');
     expect(source).toContain('"authority_digest" text NOT NULL');
     expect(source).not.toContain('"site_version_id"');
+    expect(source).toContain(
+      'CREATE INDEX "tool_gateway_approval_capabilities_live_subject_expiry_idx"',
+    );
+    expect(source).toContain('WHERE "consumed_at" IS NULL');
     expect(source).toContain('length("tool_name") BETWEEN 1 AND 512');
     expect(source).toContain("interval '10 minutes'");
     expect(source).toContain(
