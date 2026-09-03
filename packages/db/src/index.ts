@@ -35538,6 +35538,10 @@ export async function listSessionEventPage(
               .select({
                 ...sessionEventProjectionSelect("full", {}, candidateRows),
                 transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
+                firstTransferBytes:
+                  sql<number>`first_value(${candidateRows.transferBytes}) over (order by ${candidateOrdering})`.as(
+                    "first_transfer_bytes",
+                  ),
                 rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
                   "row_number",
                 ),
@@ -35554,8 +35558,17 @@ export async function listSessionEventPage(
             1,
             maxBytes - bytes + (events.length === 0 ? 1 : 0),
           );
+          const firstRowExceedsTransferBudget = sql<boolean>`
+            ${rankedRows.firstTransferBytes} + 1 > ${availableTransferBytes}`;
+          const boundedCumulativeTransferBytes = sql<number>`case
+            when ${firstRowExceedsTransferBudget}
+              then ${rankedRows.cumulativeTransferBytes}
+                - ${rankedRows.firstTransferBytes}
+                + ${SESSION_EVENT_ENVELOPE_MAX_BYTES}
+            else ${rankedRows.cumulativeTransferBytes}
+          end`;
           const projectionCondition = sql<boolean>`${rankedRows.rowNumber} = 1
-            and ${rankedRows.cumulativeTransferBytes} > ${availableTransferBytes}`;
+            and ${firstRowExceedsTransferBudget}`;
           const selectedRows = await scopedDb
             .with(candidateRows, rankedRows)
             .select({
@@ -35575,7 +35588,7 @@ export async function listSessionEventPage(
               and(
                 lte(rankedRows.rowNumber, remainingCount),
                 or(
-                  lte(rankedRows.cumulativeTransferBytes, availableTransferBytes),
+                  lte(boundedCumulativeTransferBytes, availableTransferBytes),
                   eq(rankedRows.rowNumber, 1),
                 ),
               ),
