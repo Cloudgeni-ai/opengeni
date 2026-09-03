@@ -6,7 +6,7 @@ import { createDb, provisionRoles, rotateMcpOAuthRefreshToken, type DbClient } f
 import { NON_RLS_RUNTIME_TABLES, RUNTIME_FULL_DML_TABLES } from "../src/runtime-posture";
 
 const migrationPath = new URL(
-  "../drizzle/0401_mcp_oauth_authorization_server.sql",
+  "../drizzle/0402_mcp_oauth_authorization_server.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationPath).text();
@@ -23,10 +23,10 @@ let client: DbClient | null = null;
 beforeAll(async () => {
   blank = await acquireBlankTestDatabase("migration-0400-mcp-oauth");
   if (!blank) {
-    if (requireRealDatabase) throw new Error("migration 0401 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0402 requires real PostgreSQL");
     return;
   }
-  if (!blank.appPassword) throw new Error("migration 0401 app password is unavailable");
+  if (!blank.appPassword) throw new Error("migration 0402 app password is unavailable");
   admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
   await admin.unsafe(`
     create schema opengeni_private;
@@ -65,7 +65,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0401 MCP OAuth authorization server", () => {
+describe("migration 0402 MCP OAuth authorization server", () => {
   test("stores only token hashes and binds every grant to workspace/account/resource", () => {
     expect(source).toContain("-- deployment-mode: maintenance");
     expect(source).toContain("opengeni.migration_application_roles");
@@ -74,7 +74,7 @@ describe("migration 0401 MCP OAuth authorization server", () => {
     expect(source).toContain("pg_stat_activity");
     expect(source.match(/0401 MCP OAuth activation/g)).toHaveLength(5);
     expect(source).toContain("never restart a");
-    expect(source).toContain("pre-0401 image after commit");
+    expect(source).toContain("pre-0402 image after commit");
     expect(source).toContain("CREATE TABLE mcp_oauth_clients");
     expect(source).toContain("CREATE TABLE mcp_oauth_authorization_codes");
     expect(source).toContain("CREATE TABLE mcp_oauth_refresh_tokens");

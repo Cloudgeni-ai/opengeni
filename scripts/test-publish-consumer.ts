@@ -500,6 +500,13 @@ try {
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
 
+  // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
+  // importing it. Pin the version @opengeni/react already typechecks.
+  const postcssOverride =
+    typeof reactSource.devDependencies?.postcss === "string"
+      ? { postcss: reactSource.devDependencies.postcss }
+      : {};
+
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
   const artifactToolFile = `file:${artifactTool.tarball}`;
@@ -542,6 +549,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
+      ...postcssOverride,
     },
   };
 
@@ -950,6 +958,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      ...postcssOverride,
     },
   };
   await Promise.all([
@@ -1025,6 +1034,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      ...postcssOverride,
     },
   };
   await Promise.all([
@@ -1088,6 +1098,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      ...postcssOverride,
     },
   };
   await Promise.all([

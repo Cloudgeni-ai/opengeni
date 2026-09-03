@@ -90,6 +90,17 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export type {
+  ModelContextInstructionLayer,
+  ModelContextInstructionLayerId,
+  ModelContextSkill,
+  ModelContextSkillKind,
+  ModelContextSnapshot,
+  ModelContextTokenCounts,
+  ModelContextTool,
+  ModelContextToolVisibility,
+  SessionModelContextResponse,
+} from "./model-context";
 export {
   formatSseEvent,
   proxySessionEventStream,
@@ -973,6 +984,7 @@ export type {
   FsNodeType,
   FsTreeNode,
   FsEncoding,
+  FileSystemRouteIdentity,
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,

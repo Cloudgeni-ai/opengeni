@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0400_workspace_html_site_sources.sql";
+const migrationName = "0401_workspace_html_site_sources.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -39,7 +39,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0400 workspace HTML Site sources", () => {
+describe("migration 0401 workspace HTML Site sources", () => {
   test("is a bounded rolling extension of the existing immutable artifact ledger", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -60,7 +60,7 @@ describe("migration 0400 workspace HTML Site sources", () => {
       returning id`;
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, 'migration 0400 workspace')
+      values (${account!.id}, 'migration 0401 workspace')
       returning id`;
     const artifactId = crypto.randomUUID();
     const legacyVersionId = crypto.randomUUID();

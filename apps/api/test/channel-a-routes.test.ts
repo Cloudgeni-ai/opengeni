@@ -10,9 +10,11 @@ import {
 } from "@opengeni/db";
 import {
   ChannelAConflictError,
+  ChannelAFileSystemRouteChangedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
   BrowserControlTransportError,
+  RoutingActiveRouteChangedError,
   RoutingWorkspaceRootChangedError,
 } from "@opengeni/runtime/sandbox";
 import {
@@ -280,6 +282,50 @@ describe("P4.4 Channel-A route discipline", () => {
     const mapped = mapChannelAError(rootChanged);
     expect(mapped).toBeInstanceOf(HTTPException);
     expect(mapped).toMatchObject({ status: 409, code: "conflict", retryable: true });
+
+    const activeRouteChanged = new RoutingActiveRouteChangedError(
+      { activeSandboxId: null, activeEpoch: 4 },
+      { activeSandboxId: "target", activeEpoch: 5 },
+    );
+    expect(channelAOperationFailureDiagnostic(activeRouteChanged)).toEqual({
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
+    });
+    expect(mapChannelAError(activeRouteChanged)).toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: true,
+    });
+
+    const capabilityRouteChanged = new ChannelAFileSystemRouteChangedError(
+      { epoch: 4, root: "/srv/old" },
+      { epoch: 5, root: "/srv/new" },
+    );
+    expect(channelAOperationFailureDiagnostic(capabilityRouteChanged)).toEqual({
+      reason: "lifecycle_conflict",
+      status: 409,
+      errorCode: "sandbox_channel_a_lifecycle_conflict",
+    });
+    expect(mapChannelAError(capabilityRouteChanged)).toMatchObject({
+      status: 409,
+      code: "conflict",
+      retryable: true,
+    });
+  });
+
+  test("Connected Machine capability roots come from the exact live working directory", () => {
+    const route = sessionsRoute.slice(
+      sessionsRoute.indexOf(
+        'app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/stream-capabilities"',
+      ),
+    );
+    const slice = route.slice(0, 12_000);
+    expect(slice).toContain("resolveConnectedMachineWorkspaceRoot(");
+    expect(slice).toContain("session.workingDir");
+    expect(slice).toMatch(/root:\s*selfhostedActive\s*\?\s*capabilities\.FileSystem\.root/u);
+    expect(slice).toContain("currentPointer.activeEpoch !== session.activeEpoch");
+    expect(slice).not.toContain('selfhostedActive\n            ? "selfhosted"');
   });
 
   test("an unrelated provider AbortError is not misreported as a client cancellation", () => {
@@ -594,10 +640,12 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(decorateAt).toBeGreaterThan(credentialAt);
     expect(decorateAt).toBeLessThan(serviceAt);
     expect(channelASeam.slice(decorateAt, serviceAt)).toContain("session.id");
-    expect(channelASeam.slice(decorateAt, serviceAt)).toContain("routingSession.fileSystemRoot()");
+    expect(channelASeam.slice(decorateAt, serviceAt)).toContain(
+      "routingSession.fileSystemAuthority()",
+    );
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain("session: scopedSession");
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain(
-      "workspaceRoot: fileSystemRoot",
+      "workspaceRoot: fileSystemAuthority.root",
     );
   });
 

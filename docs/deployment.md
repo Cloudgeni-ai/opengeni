@@ -48,7 +48,7 @@ or appends the forwarding chain. A missing or shorter chain fails back to the
 server-owned transport peer.
 
 Current-human HTTP/SDK calls classified for human approval use the ordinary API
-database and require migration `0402_tool_gateway_approval_capabilities.sql`.
+database and require migration `0403_tool_gateway_approval_capabilities.sql`.
 No additional secret or service is required. The API stores only a token hash,
 binds each capability to the current human and exact call, expires it after five
 minutes, and consumes it once. Issuance opportunistically removes bounded
@@ -57,13 +57,13 @@ Site calls do not use this approval store: their active immutable version's
 requested identities are intersected with the current viewer's live gateway and
 revalidated by the API on every direct call.
 
-Migrations `0401_mcp_oauth_authorization_server.sql` and
-`0402_tool_gateway_approval_capabilities.sql` are one drained maintenance
+Migrations `0402_mcp_oauth_authorization_server.sql` and
+`0403_tool_gateway_approval_capabilities.sql` are one drained maintenance
 boundary even when `OPENGENI_MCP_OAUTH_ENABLED=false`. They add tables, grants,
 and FORCE-RLS state to the exact startup/readiness posture, so neither the
 previous runtime evaluator nor the target evaluator can operate in a mixed
 pre/post-schema fleet. Follow the
-[0401-0402 operator cutover](#mcp-oauth-and-tool-gateway-posture-cutover-0401-0402)
+[0402-0403 operator cutover](#mcp-oauth-and-tool-gateway-posture-cutover-0402-0403)
 before deploying the release that contains them.
 
 Refresh-token rotation is family-fenced. Reuse of any known revoked generation
@@ -342,8 +342,8 @@ maintenance migration must be selected explicitly; migration 0389 uses
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
 plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
 operator completes the documented database-role, image-digest, and application
-drain preflight. The 0401-0402 posture boundary uses
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_mcp_oauth_authorization_server`
+drain preflight. The 0402-0403 posture boundary uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0402_mcp_oauth_authorization_server`
 with the same preflight acknowledgement. Migration 0394 likewise requires a complete API and worker
 drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
@@ -1391,8 +1391,13 @@ data. The complete job graph, reusable admission gate, and local publication
 actions therefore come from reviewed controller bytes. Every job that checks
 out or executes candidate source depends on the read-only gate, which
 reconstructs the provider-owned merge, merged-source identity, retention, and
-required-check evidence. A merge composed against a different base fails before
-candidate source runs or candidate bytes exist. Acceptance, embedded
+required-check evidence. When GitHub squashes the immutable reviewed head after
+protected `main` advances, the gate accepts only a single-parent source whose
+complete parent-to-source Git-tree delta is byte-for-byte identical to the
+reviewed base-to-head delta and whose integration parent retains that reviewed
+base as an ancestor. An overlapping, truncated, extra, missing, or otherwise
+unproved composition fails before candidate source runs or candidate bytes
+exist. Acceptance, embedded
 distribution, and final publication all require that same controller SHA and
 revalidate its direct tag, immutable provider release, and successful admission
 job before trusting the candidate artifact.
@@ -1919,10 +1924,10 @@ The runtime secret must provide values such as:
 
 Do not commit real secret values.
 
-### MCP OAuth and tool-gateway posture cutover (0401-0402)
+### MCP OAuth and tool-gateway posture cutover (0402-0403)
 
-Migrations `0401_mcp_oauth_authorization_server.sql` and
-`0402_tool_gateway_approval_capabilities.sql` change the exact application-role
+Migrations `0402_mcp_oauth_authorization_server.sql` and
+`0403_tool_gateway_approval_capabilities.sql` change the exact application-role
 table, grant, and RLS inventory. The previous API/worker runtime-posture
 evaluator rejects the provisioned target schema, while the target evaluator
 rejects the old schema. This is therefore a single drained, forward-only
@@ -1940,7 +1945,7 @@ while old application pods still serve traffic.
    migrations images. For a generated Kubernetes plan, set:
 
    ```bash
-   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_mcp_oauth_authorization_server
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0402_mcp_oauth_authorization_server
    export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
    ```
 
@@ -1960,7 +1965,7 @@ while old application pods still serve traffic.
    bun run db:assert-runtime-posture
    ```
 
-   Migration 0401 and migration 0402 each validate the explicit role list and
+   Migration 0402 and migration 0403 each validate the explicit role list and
    repeat the live-session check after installing their schema. A live listed
    identity aborts with SQLSTATE `55000` and rolls back that migration. Both
    migrations remove every explicit non-owner ACL inherited from owner default
@@ -1971,7 +1976,7 @@ while old application pods still serve traffic.
    reopening admission. `OPENGENI_MCP_OAUTH_ENABLED` may remain false; feature
    enablement is independent of the mandatory schema/posture cutover.
 
-After either migration commits, do not restart a pre-0401 application image or
+After either migration commits, do not restart a pre-0402 application image or
 attempt a mixed-version rolling rollback. Keep the application drained and fix
 forward on the target schema.
 

@@ -18,12 +18,12 @@ import {
 } from "../src/runtime-posture";
 
 const migrationPath = new URL(
-  "../drizzle/0402_tool_gateway_approval_capabilities.sql",
+  "../drizzle/0403_tool_gateway_approval_capabilities.sql",
   import.meta.url,
 );
 const source = await Bun.file(migrationPath).text();
 const mcpOauthSource = await Bun.file(
-  new URL("../drizzle/0401_mcp_oauth_authorization_server.sql", import.meta.url),
+  new URL("../drizzle/0402_mcp_oauth_authorization_server.sql", import.meta.url),
 ).text();
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -91,7 +91,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0402 tool gateway approval capabilities", () => {
+describe("migration 0403 tool gateway approval capabilities", () => {
   test("stores only bounded hash-only one-shot approval evidence", () => {
     expect(source).toContain("-- deployment-mode: maintenance");
     expect(source).toContain("opengeni.migration_application_roles");
@@ -100,7 +100,7 @@ describe("migration 0402 tool gateway approval capabilities", () => {
     expect(source).toContain("pg_stat_activity");
     expect(source.match(/0402 tool gateway approval activation/g)).toHaveLength(5);
     expect(source).toContain("never restart a");
-    expect(source).toContain("pre-0402 image after commit");
+    expect(source).toContain("pre-0403 image after commit");
     expect(source).toContain('CREATE TABLE "tool_gateway_approval_capabilities"');
     expect(source).toContain('"token_hash" text PRIMARY KEY');
     expect(source).not.toContain('"approval_token"');
@@ -123,9 +123,9 @@ describe("migration 0402 tool gateway approval capabilities", () => {
   });
 
   test("requires every old/new application login to drain and grants only the provisioned target", async () => {
-    const cutover = await acquireBlankTestDatabase("migration-0401-0402-runtime-drain");
+    const cutover = await acquireBlankTestDatabase("migration-0402-0403-runtime-drain");
     if (!cutover) {
-      if (requireRealDatabase) throw new Error("migrations 0401-0402 require real PostgreSQL");
+      if (requireRealDatabase) throw new Error("migrations 0402-0403 require real PostgreSQL");
       return;
     }
     const cutoverAdmin = postgres(cutover.databaseUrl, { max: 1, prepare: false });
@@ -288,9 +288,9 @@ describe("migration 0402 tool gateway approval capabilities", () => {
   });
 
   test("the previous runtime-posture catalog rejects the provisioned target schema", async () => {
-    const shared = await acquireSharedTestDatabase("migration-0401-0402-mixed-runtime-posture");
+    const shared = await acquireSharedTestDatabase("migration-0402-0403-mixed-runtime-posture");
     if (!shared) {
-      if (requireRealDatabase) throw new Error("migrations 0401-0402 require real PostgreSQL");
+      if (requireRealDatabase) throw new Error("migrations 0402-0403 require real PostgreSQL");
       return;
     }
     const runtime = createDb(shared.appUrl, { max: 1 });

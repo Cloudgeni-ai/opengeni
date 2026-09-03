@@ -3,7 +3,7 @@
 -- instead of trusting a caller-provided approval boolean.
 -- This changes the exact runtime-posture table/grant/RLS contract. Stop every
 -- API, control worker, and turn worker before applying it, and never restart a
--- pre-0402 image after commit.
+-- pre-0403 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';

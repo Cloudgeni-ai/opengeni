@@ -3156,6 +3156,24 @@ async function lockBackgroundCommandWorkspaceLifecycle(
   }
 }
 
+async function authorizeOrganizationWorkspaceDeletion(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+  },
+): Promise<void> {
+  await setSubjectRlsContext(tx, input.subjectId);
+  await tx.execute(sql`
+    select authorize_organization_shared_workspace_administration(
+      ${input.accountId}::uuid,
+      ${input.workspaceId}::uuid,
+      ${input.subjectId}
+    )
+  `);
+}
+
 /**
  * Atomically prove a workspace has no live runtime ownership and delete it.
  *
@@ -3176,26 +3194,37 @@ export async function deleteWorkspaceIfQuiescent(
 ): Promise<DeleteWorkspaceIfQuiescentResult> {
   const transactionStartedAt = performance.now();
   try {
+    if (input.organizationAdministratorSubjectId) {
+      // Reject a clearly unauthorized caller before it can acquire or wait on
+      // the exclusive workspace lifecycle lock. This preflight is deliberately
+      // not the mutation authority: the deletion transaction repeats the same
+      // check after taking the lifecycle lock so a concurrent demotion still
+      // fails closed without reintroducing the account/lifecycle lock cycle.
+      await withRlsContext(
+        db,
+        { accountId: input.accountId, workspaceId: input.workspaceId },
+        async (scopedDb) =>
+          await authorizeOrganizationWorkspaceDeletion(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.organizationAdministratorSubjectId!,
+          }),
+      );
+    }
+
     const result = await withRlsContext(
       db,
       { accountId: input.accountId, workspaceId: input.workspaceId },
       async (scopedDb) =>
         await scopedDb.transaction(async (txRaw) => {
           const tx = txRaw as unknown as Database;
-          if (input.organizationAdministratorSubjectId) {
-            await setSubjectRlsContext(tx, input.organizationAdministratorSubjectId);
-            await tx.execute(sql`
-              select authorize_organization_shared_workspace_administration(
-                ${input.accountId}::uuid,
-                ${input.workspaceId}::uuid,
-                ${input.organizationAdministratorSubjectId}
-              )
-            `);
-          }
           // Adoption takes the matching shared prefix before its canonical
           // session/attempt or retained-process locks. Taking the exclusive
           // prefix first prevents parent-FK deletion from deadlocking with an
-          // already-started cross-workspace adoption.
+          // already-started cross-workspace adoption. It must also precede the
+          // organization-administration seam: that seam takes the account row
+          // FOR KEY SHARE, while ordinary deletion takes this lifecycle lock
+          // before upgrading the account row to FOR UPDATE.
           const lifecycleLockStartedAt = performance.now();
           await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "update");
           observeWorkspaceDeletePhase(input.observer, {
@@ -3203,6 +3232,14 @@ export async function deleteWorkspaceIfQuiescent(
             outcome: "ok",
             durationSeconds: workspaceDeletePhaseDuration(lifecycleLockStartedAt),
           });
+
+          if (input.organizationAdministratorSubjectId) {
+            await authorizeOrganizationWorkspaceDeletion(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId: input.organizationAdministratorSubjectId,
+            });
+          }
 
           const accountWorkspaceLockStartedAt = performance.now();
           const [account] = await tx
@@ -21869,6 +21906,8 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     workspaceId: string;
     subjectId: string | null;
     mode: WorkspaceCodexSubscriptionMode;
+    /** Effective source captured under the source lock before caller-owned credential writes. */
+    effectiveSourceBeforeMutation?: EffectiveCodexSubscriptionSource;
   },
 ): Promise<WorkspaceCodexSubscriptionSource> {
   await lockWorkspaceCodexSubscriptionSource(scopedDb, input.workspaceId);
@@ -21879,48 +21918,55 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
   if (current.workspaceKind === "personal" && input.mode !== "automatic") {
     throw new Error("personal workspaces always use workspace Codex subscriptions");
   }
-  if (current.mode === input.mode) return current;
-  const [activeCodexTurn] = await scopedDb
-    .select({ id: schema.sessionTurns.id })
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-        sql`${schema.sessionTurns.model} like 'codex/%'`,
-      ),
-    )
-    .limit(1);
-  const [liveLease] = await scopedDb
-    .select({ id: schema.codexCredentialLeases.id })
-    .from(schema.codexCredentialLeases)
-    .where(
-      and(
-        eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-        gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-      ),
-    )
-    .limit(1);
-  if (activeCodexTurn || liveLease) {
-    throw new Error("Codex subscription source cannot change while active turns are using it");
-  }
-  await scopedDb
-    .insert(schema.workspaceCodexSubscriptionPreferences)
-    .values({
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      mode: input.mode,
-      updatedBySubjectId: input.subjectId,
-    })
-    .onConflictDoUpdate({
-      target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
-      set: {
+  const effectiveSourceBeforeMutation =
+    input.effectiveSourceBeforeMutation ?? current.effectiveSource;
+  let next = current;
+  if (current.mode !== input.mode) {
+    await scopedDb
+      .insert(schema.workspaceCodexSubscriptionPreferences)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
         mode: input.mode,
         updatedBySubjectId: input.subjectId,
-        updatedAt: new Date(),
-      },
-    });
-  return await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+      })
+      .onConflictDoUpdate({
+        target: schema.workspaceCodexSubscriptionPreferences.workspaceId,
+        set: {
+          mode: input.mode,
+          updatedBySubjectId: input.subjectId,
+          updatedAt: new Date(),
+        },
+      });
+    next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
+  }
+  if (next.effectiveSource !== effectiveSourceBeforeMutation) {
+    const [activeCodexTurn] = await scopedDb
+      .select({ id: schema.sessionTurns.id })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
+          sql`${schema.sessionTurns.model} like 'codex/%'`,
+        ),
+      )
+      .limit(1);
+    const [liveLease] = await scopedDb
+      .select({ id: schema.codexCredentialLeases.id })
+      .from(schema.codexCredentialLeases)
+      .where(
+        and(
+          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
+          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
+        ),
+      )
+      .limit(1);
+    if (activeCodexTurn || liveLease) {
+      throw new Error("Codex subscription source cannot change while active turns are using it");
+    }
+  }
+  return next;
 }
 
 export async function setWorkspaceCodexSubscriptionMode(
@@ -73314,6 +73360,7 @@ export * from "./transcription-recordings";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";
 export * from "./attempt-tool-catalogs";
+export * from "./model-context-snapshots";
 export * from "./codemode-operations";
 export * from "./browser-sessions";
 export * from "./computer-sessions";

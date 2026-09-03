@@ -1,5 +1,7 @@
 # @opengeni/artifact-kernel-wasm-document
 
+## 0.3.17
+
 ## 0.3.16
 
 ## 0.3.15

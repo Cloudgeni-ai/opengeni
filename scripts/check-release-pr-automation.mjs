@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import {
+  directTreeManifest,
   verifyHistoricalSourceAdmission,
   verifySourceAdmission,
 } from "./check-source-admission.mjs";
@@ -61,6 +62,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const positiveIntegerPattern = /^[1-9][0-9]*$/;
+const allowedReleaseTreeBlobModes = new Set(["100644", "100755", "120000"]);
 const retryableVersionProjectionErrors = new Set([
   "Version PR base SHA changed",
   "Version PR head SHA changed",
@@ -91,6 +93,40 @@ function assertSha(value, label) {
     `${label} is not a lowercase Git SHA`,
   );
   return value;
+}
+
+// Keep this release-only parser local. The hotfix admission workflow fetches
+// check-source-admission.mjs from the immutable production base, so changing
+// that helper's bytes on main would disable hotfix admission until production
+// caught up with the new digest.
+function canonicalReleaseLeafMap(value, expectedSha, label) {
+  invariant(value?.sha === expectedSha, `${label} identity changed`);
+  invariant(value?.truncated === false, `${label} is truncated`);
+  invariant(Array.isArray(value?.tree), `${label} entries are missing`);
+  const out = new Map();
+  for (const entry of value.tree) {
+    invariant(entry !== null && typeof entry === "object", `${label} has an invalid entry`);
+    if (entry.type === "tree") continue;
+    invariant(
+      typeof entry.path === "string" && entry.path.length > 0,
+      `${label} has an invalid path`,
+    );
+    invariant(!out.has(entry.path), `${label} has a duplicate path`);
+    const sha = assertSha(entry.sha, `${label} object ${entry.path}`);
+    if (entry.type === "blob") {
+      invariant(
+        allowedReleaseTreeBlobModes.has(entry.mode),
+        `${label} has an invalid blob mode: ${entry.path}`,
+      );
+    } else {
+      invariant(
+        entry.type === "commit" && entry.mode === "160000",
+        `${label} has an invalid leaf: ${entry.path}`,
+      );
+    }
+    out.set(entry.path, { mode: entry.mode, type: entry.type, sha });
+  }
+  return out;
 }
 
 function assertPositiveInteger(value, label) {
@@ -1983,6 +2019,84 @@ async function classifyMergeOutcome(api, source, pullIdentity) {
   return "rebase";
 }
 
+function treeManifestSha256(manifest) {
+  const text = `${manifest.map(({ line }) => line).join("\n")}\n`;
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function manifestsMatch(left, right) {
+  return (
+    left.length === right.length && left.every((entry, index) => entry.line === right[index]?.line)
+  );
+}
+
+async function classifyReleaseSourceComposition(api, source, base, head, pullIdentity) {
+  if (source.treeSha === head.treeSha) {
+    return {
+      mergeMethod: await classifyMergeOutcome(api, source, pullIdentity),
+      sourceComposition: {
+        type: "exact-reviewed-tree",
+        reviewedTreeSha: head.treeSha,
+      },
+    };
+  }
+
+  invariant(
+    source.parents.length === 1,
+    "release source tree differs from the exact reviewed head and is not a single-parent moving-main squash",
+  );
+  const integrationBaseSha = source.parents[0];
+  invariant(
+    integrationBaseSha !== pullIdentity.baseSha,
+    "release source tree differs from the exact reviewed head on its exact PR base",
+  );
+  await assertSourceAncestorOfCurrentMain(
+    api,
+    pullIdentity.baseSha,
+    integrationBaseSha,
+    "moving-main integration base",
+    "reviewed base",
+  );
+  const integrationBase = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${integrationBaseSha}`)),
+    integrationBaseSha,
+    "moving-main integration-base commit",
+  );
+  const [baseTree, headTree, integrationBaseTree, sourceTree] = await Promise.all([
+    api.get(repositoryPath(`/git/trees/${base.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${head.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${integrationBase.treeSha}?recursive=1`)),
+    api.get(repositoryPath(`/git/trees/${source.treeSha}?recursive=1`)),
+  ]);
+  const reviewedManifest = directTreeManifest(
+    canonicalReleaseLeafMap(baseTree, base.treeSha, "reviewed base tree"),
+    canonicalReleaseLeafMap(headTree, head.treeSha, "reviewed head tree"),
+  );
+  const landedManifest = directTreeManifest(
+    canonicalReleaseLeafMap(
+      integrationBaseTree,
+      integrationBase.treeSha,
+      "moving-main integration-base tree",
+    ),
+    canonicalReleaseLeafMap(sourceTree, source.treeSha, "moving-main release source tree"),
+  );
+  invariant(reviewedManifest.length > 0, "reviewed release tree delta is empty");
+  invariant(
+    manifestsMatch(reviewedManifest, landedManifest),
+    "release source tree differs from the exact reviewed moving-main composition",
+  );
+  return {
+    mergeMethod: "provider-verified-moving-main-squash",
+    sourceComposition: {
+      type: "exact-reviewed-delta-on-moving-main",
+      integrationBaseSha,
+      integrationBaseTreeSha: integrationBase.treeSha,
+      manifestSha256: treeManifestSha256(reviewedManifest),
+      pathCount: reviewedManifest.length,
+    },
+  };
+}
+
 function releaseApprovalContext(env, suppliedSourceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
@@ -2116,11 +2230,13 @@ export async function verifyApprovedMerge(options = {}) {
       "release controller tree differs from the exact reviewed base tree",
     );
   }
-  invariant(
-    source.treeSha === head.treeSha,
-    "release source tree differs from the exact reviewed head",
+  const { mergeMethod, sourceComposition } = await classifyReleaseSourceComposition(
+    api,
+    source,
+    base,
+    head,
+    pullIdentity,
   );
-  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
   const reviewUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
     `/pull/${pullNumber}`;
@@ -2198,6 +2314,7 @@ export async function verifyApprovedMerge(options = {}) {
     },
     pullRequestNumber: pullNumber,
     mergeMethod,
+    sourceComposition,
     providerPullCommitCount: pullIdentity.commitCount,
     mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
     reviewedBaseSha: pullIdentity.baseSha,
