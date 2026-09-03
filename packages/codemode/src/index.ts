@@ -261,7 +261,9 @@ export class CodemodeClient {
         );
       }
       const shouldNotify =
-        !submitted || (operation?.state === "queued" && Date.now() >= nextNotifyAt);
+        !submitted ||
+        ((operation?.state === "queued" || operation?.state === "running") &&
+          Date.now() >= nextNotifyAt);
       if (shouldNotify) {
         submitted = true;
         nextNotifyAt = Date.now() + 2_000;

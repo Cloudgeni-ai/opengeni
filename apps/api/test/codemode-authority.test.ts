@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
+  codemodeOperationNeedsDispatch,
   refreshAdmittedCodemodeOperation,
   requireMatchingCodemodeCatalog,
   type CodemodeGrantAuthority,
@@ -129,5 +130,13 @@ describe("Codemode attempt catalog authority", () => {
     };
 
     expect(await refreshAdmittedCodemodeOperation(admitted, async () => refreshed)).toBe(refreshed);
+  });
+
+  test("re-notifies queued and running operations so expired claims can recover", () => {
+    const queued = operation(authority());
+    expect(codemodeOperationNeedsDispatch(queued)).toBe(true);
+    expect(codemodeOperationNeedsDispatch({ ...queued, state: "running" })).toBe(true);
+    expect(codemodeOperationNeedsDispatch({ ...queued, state: "completed" })).toBe(false);
+    expect(codemodeOperationNeedsDispatch({ ...queued, state: "outcome_unknown" })).toBe(false);
   });
 });

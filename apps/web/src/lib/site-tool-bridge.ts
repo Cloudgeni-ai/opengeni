@@ -109,7 +109,10 @@ export function isCatalogStaleApiError(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.status === 409 &&
-    (error.body.includes("catalog_stale") || error.message.includes("catalog_stale"))
+    (error.code === "catalog_stale" ||
+      error.details?.code === "catalog_stale" ||
+      error.body.includes("catalog_stale") ||
+      error.message.includes("catalog_stale"))
   );
 }
 

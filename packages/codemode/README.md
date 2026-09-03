@@ -46,7 +46,11 @@ its post-dispatch journal refresh as best-effort and returns the already-admitte
 operation if that refresh is unavailable. The database serializes concurrent
 first submissions of one operation id, so identical races converge to one
 creation plus one replay rather than a unique-constraint failure. No response
-after operation creation triggers a catalog retry. Public
+after operation creation triggers a catalog retry. While a journaled operation
+remains queued or running, the client periodically re-notifies the dispatcher
+with the same operation id. A live claim is not replayed; an expired claim is
+either reclaimed before execution or durably settled outcome-unknown after the
+execution marker. Public
 `CodemodeTransportError` identity and its `codemode_transport_error`
 compatibility code remain unchanged; the stable API detail is exposed as
 `remoteCode`.

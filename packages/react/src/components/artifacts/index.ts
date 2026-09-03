@@ -6,7 +6,7 @@ export {
 export {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
-  openGeniSiteBridgePortForFrame,
+  openGeniSiteBridgePortFromBootstrap,
   type PublishedHtmlArtifactFrameProps,
   type PublishedHtmlArtifactToolBridge,
 } from "./published-html-artifact-frame";

@@ -2,6 +2,7 @@ import { describe, expect, jest, test } from "bun:test";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 import {
   AuthApiError,
+  apiErrorFromResponseBody,
   authHeadersForAccessKey,
   configureManagedActorEpoch,
   configureClientAuth,
@@ -25,6 +26,30 @@ import {
 } from "./api";
 
 describe("web API auth helpers", () => {
+  test("preserves structured retry and outcome ambiguity from API error envelopes", () => {
+    const error = apiErrorFromResponseBody(
+      503,
+      JSON.stringify({
+        error: {
+          status: 503,
+          code: "service_unavailable",
+          message: "Tool settlement is unknown",
+          retryable: false,
+          outcomeUnknown: true,
+          details: { code: "tool_outcome_unknown", operationId: "operation-1" },
+        },
+      }),
+    );
+    expect(error).toMatchObject({
+      status: 503,
+      code: "service_unavailable",
+      message: "Tool settlement is unknown",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown", operationId: "operation-1" },
+    });
+  });
+
   test("bounds browser event streams only on HTTP/1", () => {
     expect(shouldBoundBrowserSseForProtocol("http/1.0")).toBe(true);
     expect(shouldBoundBrowserSseForProtocol("http/1.1")).toBe(true);

@@ -53,7 +53,10 @@ catalog. Agent attempts keep their existing durable approval and operation
 lifecycle. Sites do not use per-call approval: the active immutable version's
 requested identities are a host-filtered direct-call allowlist, and the API
 revalidates that version and the viewer's live authority before passing trusted
-transport metadata to the gateway. The external/current-human MCP adapter has no
+transport metadata to the gateway. Agent-authored versions may retain only
+`approval: none` identities from their exact attempt catalog; a current human
+must publish a version that activates another approval class. The
+external/current-human MCP adapter has no
 server-verifiable one-shot approval exchange, so it projects only entries whose
 classification is not `human`; a direct call to a hidden projected name is
 rejected instead of advertising a tool that can never execute.

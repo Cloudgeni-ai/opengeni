@@ -4,6 +4,7 @@ import {
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  normalizeWorkspaceArtifactSlug,
   signDelegatedAccessToken,
   type AttemptToolCatalog,
   type FirstPartyMcpToolName,
@@ -95,6 +96,7 @@ beforeAll(async () => {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SIGNING_SECRET,
+      mcpServers: [{ id: "docs", url: "https://docs.example.test/mcp", cacheToolsList: true }],
     }),
     db: client.db,
     objectStorage,
@@ -246,6 +248,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
   test("publishes, versions concurrently, rolls back, replays, and isolates content", async () => {
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+    const publishPermissions: Permission[] = ["artifacts:publish", "documents:search"];
     expect((await request(grant, ["workspace:read"], base)).status).toBe(403);
 
     const createBody = {
@@ -256,10 +259,17 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         entrypoint: "src/index.tsx",
         files: [{ path: "src/index.tsx", content: "export const version = 1;" }],
       },
-      requestedTools: [{ serverId: "docs", toolName: "search" }],
+      requestedTools: [{ serverId: "docs", toolName: "search_documents" }],
       idempotencyKey: "create-status-board",
     };
-    const createdResponse = await request(grant, ["artifacts:publish"], base, {
+    const putsBeforeDeniedPublisher = objectPutCount;
+    const deniedPublisherResponse = await request(grant, ["artifacts:publish"], base, {
+      method: "POST",
+      body: JSON.stringify(createBody),
+    });
+    expect(deniedPublisherResponse.status).toBe(403);
+    expect(objectPutCount).toBe(putsBeforeDeniedPublisher);
+    const createdResponse = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
@@ -272,7 +282,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(created.version.sourceSha256).toHaveLength(64);
     const putsAfterCreate = objectPutCount;
 
-    const replayResponse = await request(grant, ["artifacts:publish"], base, {
+    const replayResponse = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
@@ -281,14 +291,20 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(replay.artifact.id).toBe(created.artifact.id);
     expect(objectPutCount).toBe(putsAfterCreate);
 
+    const changedCreateMetadata = await request(grant, publishPermissions, base, {
+      method: "POST",
+      body: JSON.stringify({ ...createBody, title: "Changed status board" }),
+    });
+    expect(changedCreateMetadata.status).toBe(409);
+
     const createWithoutRequestedTools = { ...createBody, requestedTools: undefined };
-    const createAuthorityConflict = await request(grant, ["artifacts:publish"], base, {
+    const createAuthorityConflict = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify(createWithoutRequestedTools),
     });
     expect(createAuthorityConflict.status).toBe(409);
 
-    const authoritySeedResponse = await request(grant, ["artifacts:publish"], base, {
+    const authoritySeedResponse = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -304,29 +320,34 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     const authorityPublishBody = {
       html: "<!doctype html><h1>Explicit authority</h1>",
       expectedCurrentVersionId: authoritySeed.version.id,
-      requestedTools: [{ serverId: "inventory", toolName: "lookup" }],
+      requestedTools: [{ serverId: "docs", toolName: "knowledge_search" }],
       idempotencyKey: "requested-tools-replay-authority-publish",
     };
     const authorityPublishResponse = await request(
       grant,
-      ["artifacts:publish"],
+      publishPermissions,
       authorityVersionPath,
       { method: "POST", body: JSON.stringify(authorityPublishBody) },
     );
     expect(authorityPublishResponse.status).toBe(200);
+    const changedPublishMetadata = await request(grant, publishPermissions, authorityVersionPath, {
+      method: "POST",
+      body: JSON.stringify({ ...authorityPublishBody, title: "Changed publication title" }),
+    });
+    expect(changedPublishMetadata.status).toBe(409);
     const publishWithoutRequestedTools = {
       ...authorityPublishBody,
       requestedTools: undefined,
     };
     const publishAuthorityConflict = await request(
       grant,
-      ["artifacts:publish"],
+      publishPermissions,
       authorityVersionPath,
       { method: "POST", body: JSON.stringify(publishWithoutRequestedTools) },
     );
     expect(publishAuthorityConflict.status).toBe(409);
 
-    const conflictSeed = await request(grant, ["artifacts:publish"], base, {
+    const conflictSeed = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -336,7 +357,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     });
     expect(conflictSeed.status).toBe(201);
     const keysBeforeConflict = [...objects.keys()].sort();
-    const conflict = await request(grant, ["artifacts:publish"], base, {
+    const conflict = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify({
         ...createBody,
@@ -349,14 +370,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect([...objects.keys()].sort()).toEqual(keysBeforeConflict);
 
     const concurrentCreate = await Promise.all([
-      request(grant, ["artifacts:publish"], base, {
+      request(grant, publishPermissions, base, {
         method: "POST",
         body: JSON.stringify({
           ...createBody,
           idempotencyKey: "concurrent-create",
         }),
       }),
-      request(grant, ["artifacts:publish"], base, {
+      request(grant, publishPermissions, base, {
         method: "POST",
         body: JSON.stringify({
           ...createBody,
@@ -409,7 +430,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
     const versionPath = `${base}/${created.artifact.id}/versions`;
     const publish = (html: string, key: string) =>
-      request(grant, ["artifacts:publish"], versionPath, {
+      request(grant, publishPermissions, versionPath, {
         method: "POST",
         body: JSON.stringify({
           html,
@@ -435,7 +456,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(stalePublish.status).toBe(409);
     expect(objectPutCount).toBe(putsBeforeStalePublish);
 
-    const reusedPublishKey = await request(grant, ["artifacts:publish"], versionPath, {
+    const reusedPublishKey = await request(grant, publishPermissions, versionPath, {
       method: "POST",
       body: JSON.stringify({
         html: createBody.html,
@@ -447,7 +468,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
     const rollbackResponse = await request(
       grant,
-      ["artifacts:publish"],
+      publishPermissions,
       `${base}/${created.artifact.id}/rollback`,
       {
         method: "POST",
@@ -465,7 +486,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
 
     const archivedResponse = await request(
       grant,
-      ["artifacts:publish"],
+      publishPermissions,
       `${base}/${created.artifact.id}/status`,
       {
         method: "PATCH",
@@ -484,7 +505,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(archived.replayed).toBe(false);
     const archiveReplay = WorkspaceArtifactMutationResponse.parse(
       await (
-        await request(grant, ["artifacts:publish"], `${base}/${created.artifact.id}/status`, {
+        await request(grant, publishPermissions, `${base}/${created.artifact.id}/status`, {
           method: "PATCH",
           body: JSON.stringify({
             status: "archived",
@@ -497,7 +518,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     );
     expect(archiveReplay.replayed).toBe(true);
     const putsBeforeArchivedPublish = objectPutCount;
-    const archivedPublish = await request(grant, ["artifacts:publish"], versionPath, {
+    const archivedPublish = await request(grant, publishPermissions, versionPath, {
       method: "POST",
       body: JSON.stringify({
         html: "<!doctype html><h1>Archived write</h1>",
@@ -509,7 +530,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(objectPutCount).toBe(putsBeforeArchivedPublish);
     const restoredResponse = await request(
       grant,
-      ["artifacts:publish"],
+      publishPermissions,
       `${base}/${created.artifact.id}/status`,
       {
         method: "PATCH",
@@ -705,7 +726,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(restored.artifact.status).toBe("active");
       expect(restored.event.sourceExecutionGeneration).toBe(attempt.executionGeneration);
 
-      await supersedeAttempt(attempt);
+      const replacement = await supersedeAttempt(attempt);
       const putsBeforeStaleAttempt = objectPutCount;
       const staleResult = await mcp.callTool({
         name: "artifacts_create",
@@ -717,6 +738,58 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       });
       expect(staleResult.isError).toBe(true);
       expect(objectPutCount).toBe(putsBeforeStaleAttempt);
+
+      const replacementServer = buildOpenGeniMcpServer(
+        {
+          settings: testSettings(),
+          db: client.db,
+          objectStorage,
+          bus: new MemoryEventBus(),
+        } as ApiRouteDeps,
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          subjectId: "worker:first-party-mcp",
+          permissions: ["artifacts:read", "artifacts:publish"],
+          principalKind: "agent_attempt",
+          metadata: {
+            sessionId: replacement.sessionId,
+            turnId: replacement.turnId,
+            attemptId: replacement.attemptId,
+            executionGeneration: replacement.executionGeneration,
+            firstPartyMcpTools: ["artifacts_create"],
+          },
+        },
+      );
+      const [replacementClientTransport, replacementServerTransport] =
+        InMemoryTransport.createLinkedPair();
+      const replacementMcp = new Client({ name: "workspace-artifact-replacement", version: "1" });
+      await replacementServer.connect(replacementServerTransport);
+      await replacementMcp.connect(replacementClientTransport);
+      try {
+        const replayAfterReplacement = await replacementMcp.callTool({
+          name: "artifacts_create",
+          arguments: {
+            title: "Agent-created map",
+            html: "<!doctype html><main>Created through MCP</main>",
+            idempotencyKey: "agent-create-map",
+          },
+        });
+        const replayAfterReplacementText = replayAfterReplacement.content.find(
+          (item) => item.type === "text",
+        );
+        if (!replayAfterReplacementText || replayAfterReplacementText.type !== "text") {
+          throw new Error("missing replacement replay result");
+        }
+        const replacementReplay = WorkspaceArtifactMutationResponse.parse(
+          JSON.parse(replayAfterReplacementText.text),
+        );
+        expect(replacementReplay.replayed).toBe(true);
+        expect(replacementReplay.artifact.id).toBe(created.artifact.id);
+        expect(objectPutCount).toBe(putsBeforeStaleAttempt);
+      } finally {
+        await Promise.all([replacementMcp.close(), replacementServer.close()]);
+      }
     } finally {
       await Promise.all([mcp.close(), server.close()]);
     }
@@ -727,7 +800,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       permissions: ["artifacts:publish"],
       tools: ["artifacts_create", "artifacts_publish", "artifacts_rollback", "artifacts_restore"],
     });
-    await persistArtifactAttemptCatalog(grant, attempt, [{ serverId: "docs", toolName: "search" }]);
+    await persistArtifactAttemptCatalog(grant, attempt, [
+      { serverId: "docs", toolName: "search" },
+      { serverId: "inventory", toolName: "charge_card", approval: "human" },
+      { serverId: "crm", toolName: "sync_contacts", approval: "policy" },
+    ]);
     const server = buildOpenGeniMcpServer(
       {
         settings: testSettings(),
@@ -761,6 +838,37 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     await mcp.connect(clientTransport);
     const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
     const suffix = crypto.randomUUID();
+    const seedStoredArtifact = async (
+      title: string,
+      requestedTools: Array<{ serverId: string; toolName: string }>,
+      operationKey: string,
+    ) => {
+      const artifactId = crypto.randomUUID();
+      return await createWorkspaceArtifact(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        artifactId,
+        slug: `${normalizeWorkspaceArtifactSlug(title)}-${artifactId.slice(0, 8)}`,
+        title,
+        description: null,
+        contentKey: `workspace-artifacts/${grant.workspaceId}/${artifactId}/index.html`,
+        contentSha256: "d".repeat(64),
+        sizeBytes: 64,
+        sourceKey: null,
+        sourceSha256: null,
+        sourceSizeBytes: null,
+        requestedTools,
+        operationKey,
+        actorSubjectId: grant.subjectId,
+        sourceSessionId: null,
+        sourceTurnId: null,
+        sourceAttemptId: null,
+        sourceExecutionGeneration: null,
+        sourceToolName: null,
+        persistContent: async () => undefined,
+        discardContent: async () => undefined,
+      });
+    };
     try {
       const putsBeforeDeniedCreate = objectPutCount;
       const deniedCreate = await mcp.callTool({
@@ -773,6 +881,42 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         },
       });
       expect(deniedCreate.isError).toBe(true);
+      expect(objectPutCount).toBe(putsBeforeDeniedCreate);
+
+      const deniedHumanApprovalCreate = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Human approval cannot be minted",
+          html: "<!doctype html><main>Denied</main>",
+          requestedTools: [{ serverId: "inventory", toolName: "charge_card" }],
+          idempotencyKey: `denied-human-approval-create-${suffix}`,
+        },
+      });
+      expect(deniedHumanApprovalCreate.isError).toBe(true);
+      expect(deniedHumanApprovalCreate.content.find((item) => item.type === "text")).toMatchObject({
+        text: expect.stringContaining(
+          "cannot activate tools requiring policy or current-human approval",
+        ),
+      });
+      expect(objectPutCount).toBe(putsBeforeDeniedCreate);
+
+      const deniedPolicyApprovalCreate = await mcp.callTool({
+        name: "artifacts_create",
+        arguments: {
+          title: "Attempt policy cannot be minted",
+          html: "<!doctype html><main>Denied</main>",
+          requestedTools: [{ serverId: "crm", toolName: "sync_contacts" }],
+          idempotencyKey: `denied-policy-approval-create-${suffix}`,
+        },
+      });
+      expect(deniedPolicyApprovalCreate.isError).toBe(true);
+      expect(deniedPolicyApprovalCreate.content.find((item) => item.type === "text")).toMatchObject(
+        {
+          text: expect.stringContaining(
+            "cannot activate tools requiring policy or current-human approval",
+          ),
+        },
+      );
       expect(objectPutCount).toBe(putsBeforeDeniedCreate);
 
       const allowedCreate = await mcp.callTool({
@@ -806,18 +950,10 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(deniedPublish.isError).toBe(true);
       expect(objectPutCount).toBe(putsBeforeDeniedPublish);
 
-      const rollbackSeedResponse = await request(grant, ["artifacts:publish"], base, {
-        method: "POST",
-        body: JSON.stringify({
-          title: "Rollback authority seed",
-          html: "<!doctype html><main>Unsafe version</main>",
-          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
-          idempotencyKey: `rollback-seed-${suffix}`,
-        }),
-      });
-      expect(rollbackSeedResponse.status).toBe(201);
-      const rollbackSeed = WorkspaceArtifactMutationResponse.parse(
-        await rollbackSeedResponse.json(),
+      const rollbackSeed = await seedStoredArtifact(
+        "Rollback authority seed",
+        [{ serverId: "inventory", toolName: "delete_item" }],
+        `rollback-seed-${suffix}`,
       );
       const putsBeforeInheritedPublish = objectPutCount;
       const deniedInheritedPublish = await mcp.callTool({
@@ -833,14 +969,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(objectPutCount).toBe(putsBeforeInheritedPublish);
       const rollbackCurrentResponse = await request(
         grant,
-        ["artifacts:publish"],
+        ["artifacts:publish", "documents:search"],
         `${base}/${rollbackSeed.artifact.id}/versions`,
         {
           method: "POST",
           body: JSON.stringify({
             html: "<!doctype html><main>Safe current version</main>",
             expectedCurrentVersionId: rollbackSeed.version.id,
-            requestedTools: [{ serverId: "docs", toolName: "search" }],
+            requestedTools: [{ serverId: "docs", toolName: "search_documents" }],
             idempotencyKey: `rollback-current-${suffix}`,
           }),
         },
@@ -867,17 +1003,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       );
       expect(rollbackDetail.artifact.currentVersion?.id).toBe(rollbackCurrent.version.id);
 
-      const restoreSeedResponse = await request(grant, ["artifacts:publish"], base, {
-        method: "POST",
-        body: JSON.stringify({
-          title: "Restore authority seed",
-          html: "<!doctype html><main>Unsafe archived version</main>",
-          requestedTools: [{ serverId: "inventory", toolName: "delete_item" }],
-          idempotencyKey: `restore-seed-${suffix}`,
-        }),
-      });
-      expect(restoreSeedResponse.status).toBe(201);
-      const restoreSeed = WorkspaceArtifactMutationResponse.parse(await restoreSeedResponse.json());
+      const restoreSeed = await seedStoredArtifact(
+        "Restore authority seed",
+        [{ serverId: "inventory", toolName: "delete_item" }],
+        `restore-seed-${suffix}`,
+      );
       const archiveResponse = await request(
         grant,
         ["artifacts:publish"],
@@ -1055,7 +1185,11 @@ async function seedAttempt(
 async function persistArtifactAttemptCatalog(
   targetGrant: Grant,
   attempt: Attempt,
-  identities: Array<{ serverId: string; toolName: string }>,
+  identities: Array<{
+    serverId: string;
+    toolName: string;
+    approval?: "none" | "human" | "policy";
+  }>,
 ): Promise<void> {
   const unsigned: Omit<AttemptToolCatalog, "digest"> = {
     version: 1,
@@ -1067,13 +1201,13 @@ async function persistArtifactAttemptCatalog(
     executionGeneration: attempt.executionGeneration,
     generation: 1,
     createdAt: new Date().toISOString(),
-    entries: identities.map((identity) => ({
+    entries: identities.map(({ approval = "none", ...identity }) => ({
       identity,
       modelName: `${identity.serverId}__${identity.toolName}`,
       codemodePath: [identity.serverId, identity.toolName],
       inputSchema: { type: "object" },
       source: identity.serverId === "docs" ? "docs" : "mcp",
-      approval: "none",
+      approval,
     })),
   };
   await persistAttemptToolCatalog(client.db, {
@@ -1082,7 +1216,7 @@ async function persistArtifactAttemptCatalog(
   });
 }
 
-async function supersedeAttempt(attempt: Attempt): Promise<void> {
+async function supersedeAttempt(attempt: Attempt): Promise<Attempt> {
   const replacementId = crypto.randomUUID();
   const replacementGeneration = attempt.executionGeneration + 1;
   await shared.admin.begin(async (tx) => {
@@ -1107,4 +1241,10 @@ async function supersedeAttempt(attempt: Attempt): Promise<void> {
         verified_control_revision, mcp_approval_policies
       FROM session_turn_attempts WHERE id = ${attempt.attemptId}`;
   });
+  return {
+    sessionId: attempt.sessionId,
+    turnId: attempt.turnId,
+    attemptId: replacementId,
+    executionGeneration: replacementGeneration,
+  };
 }

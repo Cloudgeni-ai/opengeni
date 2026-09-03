@@ -399,6 +399,9 @@ catalog changed after the Site was built.
 - Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
   approval policy. The Site adapter bypasses per-invocation approval after the
   host and API verify the active immutable version's direct-call allowlist.
+  Agent-authored versions may place only `approval: none` identities from the
+  exact attempt catalog in that allowlist; a current human must publish a
+  version that activates another approval class.
 - Codemode keeps its exact-attempt durable operation journal and recovery
   semantics. Direct current-human calls carry caller-generated operation ids;
   provider-specific idempotency/outcome handling remains in the canonical

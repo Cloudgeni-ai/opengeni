@@ -5,7 +5,7 @@ import type {
   ToolGatewayCatalog,
 } from "@opengeni/sdk";
 
-import { ApiError } from "@/api";
+import { ApiError, apiErrorFromResponseBody } from "@/api";
 
 import { createSiteToolBridge } from "./site-tool-bridge";
 
@@ -42,7 +42,7 @@ function catalog(digestCharacter: string, includeTool = true): ToolGatewayCatalo
 }
 
 function staleCatalogError(): ApiError {
-  return new ApiError(
+  return apiErrorFromResponseBody(
     409,
     JSON.stringify({
       error: {

@@ -179,6 +179,56 @@ describe("CodemodeClient", () => {
     expect(posts).toBe(1);
   });
 
+  test("re-notifies a running operation so an expired execution claim can settle", async () => {
+    const catalog = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition],
+    }).catalog;
+    const operationId = "78787878-7878-4787-8787-787878787878";
+    const originalNow = Date.now;
+    let now = originalNow();
+    let posts = 0;
+    let reads = 0;
+    Date.now = () => now;
+    try {
+      const client = new CodemodeClient({
+        baseUrl: "https://api.example.test/codemode",
+        token: "token",
+        fetch: (async (input, init) => {
+          const url = String(input);
+          if (url.endsWith("/catalog")) return Response.json(catalog);
+          if (init?.method === "POST") {
+            posts += 1;
+            return Response.json({
+              operation: operation(
+                operationId,
+                catalog.digest,
+                posts === 1 ? "running" : "outcome_unknown",
+              ),
+              dispatch: posts === 1 ? "accepted" : "terminal",
+            });
+          }
+          reads += 1;
+          now += 2_001;
+          return Response.json(operation(operationId, catalog.digest, "running"));
+        }) as typeof fetch,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        client.call(definition.identity, { query: "hello" }, { operationId }),
+      ).rejects.toMatchObject({
+        name: "CodemodeOperationError",
+        code: "tool_outcome_unknown",
+      } satisfies Partial<CodemodeOperationError>);
+      expect(posts).toBe(2);
+      expect(reads).toBe(1);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
   test("recovers a committed operation by id when the POST response is lost", async () => {
     const catalog = createAttemptToolEnvironment({
       scope,

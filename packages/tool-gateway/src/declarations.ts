@@ -1,5 +1,5 @@
 import type { ToolGatewayCatalogEntry } from "@opengeni/contracts";
-import { parseVerifiedToolGatewayCatalog } from "./catalog";
+import { compareCanonicalStrings, parseVerifiedToolGatewayCatalog } from "./catalog";
 import { ToolGatewayPathCollisionError } from "./errors";
 
 export type GenerateToolGatewayDeclarationsOptions = {
@@ -97,7 +97,7 @@ function renderChildren(
 ): string[] {
   const lines: string[] = [];
   for (const [name, child] of [...node.children].sort(([left], [right]) =>
-    left.localeCompare(right),
+    compareCanonicalStrings(left, right),
   )) {
     if (child.entry) {
       const entry = child.entry;
@@ -222,12 +222,16 @@ function objectType(
       ? schema.required.filter((value): value is string => typeof value === "string")
       : [],
   );
-  const entries = Object.entries(properties).sort(([left], [right]) => left.localeCompare(right));
+  const entries = Object.entries(properties).sort(([left], [right]) =>
+    compareCanonicalStrings(left, right),
+  );
   const fields = entries.map(
     ([name, value]) =>
       `readonly ${identifierOrQuoted(name)}${required.has(name) ? "" : "?"}: ${schemaType(value, root, resolving, depth + 1)}`,
   );
-  for (const missing of [...required].filter((name) => !Object.hasOwn(properties, name)).sort()) {
+  for (const missing of [...required]
+    .filter((name) => !Object.hasOwn(properties, name))
+    .sort(compareCanonicalStrings)) {
     fields.push(`readonly ${identifierOrQuoted(missing)}: unknown`);
   }
   if (schema.additionalProperties !== false) {
@@ -279,7 +283,7 @@ function literalType(value: unknown): string {
   if (Array.isArray(value)) return `readonly [${value.map(literalType).join(", ")}]`;
   if (isObject(value)) {
     return `{ ${Object.entries(value)
-      .sort(([left], [right]) => left.localeCompare(right))
+      .sort(([left], [right]) => compareCanonicalStrings(left, right))
       .map(([key, child]) => `readonly ${identifierOrQuoted(key)}: ${literalType(child)}`)
       .join("; ")} }`;
   }

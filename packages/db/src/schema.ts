@@ -288,6 +288,7 @@ export const workspaceArtifactEvents = pgTable(
     fromVersionId: uuid("from_version_id"),
     toVersionId: uuid("to_version_id").notNull(),
     operationKey: text("operation_key").notNull(),
+    requestDigest: text("request_digest"),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
     sourceAttemptId: uuid("source_attempt_id"),

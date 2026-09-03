@@ -2972,9 +2972,7 @@ function registerWorkspaceArtifactTools(
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationKey: `attempt:${createHash("sha256")
-        .update(
-          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
-        )
+        .update(`${claims.sessionId}:${claims.turnId}:${idempotencyKey}`)
         .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
@@ -3090,6 +3088,7 @@ function registerWorkspaceArtifactTools(
           await createWorkspaceArtifact(deps.db, {
             artifactId,
             slug: resolvedSlug,
+            requestedSlug: slug ?? null,
             title,
             description: description ?? null,
             ...prepare(html, source, requestedTools),

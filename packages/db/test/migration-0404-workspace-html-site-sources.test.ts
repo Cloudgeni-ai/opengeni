@@ -48,6 +48,8 @@ describe("migration 0404 workspace HTML Site sources", () => {
     expect(source).toContain('"size_bytes" BETWEEN 1 AND 4194304');
     expect(source).toContain('"source_size_bytes" BETWEEN 1 AND 4194304');
     expect(source).toContain('jsonb_array_length("requested_tools") <= 128');
+    expect(source).toContain('ADD COLUMN "request_digest" text');
+    expect(source).toContain("\"request_digest\" ~ '^[0-9a-f]{64}$'");
     expect(source).toContain("'archived', 'restored'");
     expect(source).toContain('CREATE INDEX "workspace_artifacts_status_list_idx"');
     expect(source).not.toMatch(/UPDATE\s+"workspace_artifact_versions"/u);
@@ -113,6 +115,10 @@ describe("migration 0404 workspace HTML Site sources", () => {
       source_size_bytes: null,
       requested_tools: [],
     });
+    const [legacyEvent] = await admin<Array<{ request_digest: string | null }>>`
+      select request_digest from workspace_artifact_events
+      where operation_key = 'legacy-publish'`;
+    expect(legacyEvent).toEqual({ request_digest: null });
 
     const newVersionId = crypto.randomUUID();
     await admin`

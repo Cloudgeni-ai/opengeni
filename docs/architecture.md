@@ -1100,6 +1100,10 @@ attempt scope, catalog, identity, and canonical-argument comparison. Once an
 exact operation has been admitted, a later deterministic wake failure
 reconciles through that exact journal row; if the recovery read is unavailable,
 the client returns a typed outcome-unknown error carrying the same operation id.
+While an admitted operation remains queued or running, the client periodically
+re-notifies the owning dispatcher with that same id. This does not replay the
+tool: a live claim answers already-running, an expired pre-execution claim may
+be reclaimed, and an expired post-execution claim settles outcome-unknown.
 Concurrent first submissions serialize on the caller-owned operation id and
 converge to one creation plus one replay. Client abort is observer-only; server
 cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
@@ -1110,7 +1114,10 @@ credentials nor workspace routing context. The active immutable Site version's
 retained tool identities are its direct-call allowlist: the parent intersects
 them with the current viewer's live gateway, and the API revalidates the exact
 active version and identity on every call. Sites do not use per-invocation
-approval prompts or approval capabilities; archived Sites receive no bridge.
+approval prompts or approval capabilities. An agent-authored version may retain
+only identities classified `approval: none` in its exact attempt catalog; a
+current human must publish any version that activates another approval class.
+Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
 source-session link only when the current viewer can read that session; private

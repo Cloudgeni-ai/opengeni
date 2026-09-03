@@ -27,6 +27,11 @@ export function digestCanonicalJson(value: unknown): string {
     .digest("hex");
 }
 
+/** Compare canonical JSON keys by JavaScript UTF-16 code units, independent of host locale. */
+export function compareCanonicalStrings(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export function assertToolGatewayCatalogSize(catalog: ToolGatewayCatalogValue): void {
   assertCatalogSize(catalog);
 }
@@ -44,7 +49,7 @@ function canonicalJsonValue(value: unknown): unknown {
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
+        .sort(([left], [right]) => compareCanonicalStrings(left, right))
         .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
     );
   }

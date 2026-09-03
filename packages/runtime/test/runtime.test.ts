@@ -25,6 +25,7 @@ import {
 } from "@openai/agents";
 import { RunToolApprovalItem, Usage } from "@openai/agents-core";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { IntegrationInvocationError } from "@opengeni/capabilities";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -6711,6 +6712,59 @@ describe("runtime event normalization", () => {
     await expect(oversizedUncertainOutcome.executeCatalogTool("inspect", {})).rejects.toThrow(
       "MCP tool result exceeds the 1048576-byte safety limit",
     );
+  });
+
+  test("preserves generated integration outcome uncertainty across best-effort isolation", async () => {
+    const observations: Array<Parameters<NonNullable<RuntimeMetricsHooks["onMcpToolCall"]>>[0]> =
+      [];
+    configureRuntimeMetricsHooks({
+      onMcpToolCall: (input) => observations.push(input),
+    });
+    const sourceFailure = new IntegrationInvocationError(
+      "request_failed",
+      "Integration request failed",
+      "unknown",
+      false,
+    );
+    const server: MCPServer = {
+      name: "generated-integration-outcome-unknown",
+      cacheToolsList: false,
+      async connect() {},
+      async close() {},
+      async listTools() {
+        return [];
+      },
+      async callTool() {
+        throw sourceFailure;
+      },
+      async callToolResult() {
+        throw sourceFailure;
+      },
+      async invalidateToolsCache() {},
+    };
+    try {
+      for (const bestEffort of [false, true]) {
+        const prefixed = new PrefixedMcpServer(
+          server,
+          bestEffort ? "generated-best-effort" : "generated-required",
+          undefined,
+          bestEffort,
+        );
+        let caught: unknown;
+        try {
+          await prefixed.executeCatalogTool("mutate", {});
+        } catch (error) {
+          caught = error;
+        }
+        expect(caught).toBe(sourceFailure);
+      }
+      expect(observations.map(({ outcome }) => outcome)).toEqual([
+        "outcome_uncertain",
+        "outcome_uncertain",
+      ]);
+    } finally {
+      configureRuntimeMetricsHooks(null);
+    }
   });
 
   test("MCP outcome metrics and projections cannot replace hostile source failures", async () => {

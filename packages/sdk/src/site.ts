@@ -10,7 +10,7 @@ import type {
   ToolGatewayDeclarationsResponse,
 } from "./types";
 
-export const OPENGENI_SITE_BRIDGE_VERSION = 1 as const;
+export const OPENGENI_SITE_BRIDGE_VERSION = 2 as const;
 export const OPENGENI_SITE_BRIDGE_CONNECT = "opengeni.site.connect" as const;
 export const OPENGENI_SITE_BRIDGE_READY = "opengeni.site.ready" as const;
 export const OPENGENI_SITE_BRIDGE_REQUEST = "opengeni.site.request" as const;
@@ -81,8 +81,12 @@ export type OpenGeniSiteClient = {
 };
 
 export type OpenGeniSiteClientOptions = {
-  /** Advanced embedding seam; ordinary Sites use the current window's exact parent. */
-  parentWindow?: Pick<Window, "postMessage">;
+  /** Advanced embedding seam; ordinary Sites accept bootstrap only from their exact parent. */
+  parentWindow?: MessageEventSource;
+  /** Advanced embedding seam for listening to the host's document-bound bootstrap message. */
+  siteWindow?: Pick<Window, "parent" | "addEventListener" | "removeEventListener">;
+  /** Test/embedding seam for an already document-bound host bootstrap port. */
+  bootstrapPort?: MessagePort;
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   createMessageChannel?: () => MessageChannel;
@@ -172,12 +176,14 @@ export function sanitizeOpenGeniSiteToolCallRequest(
 
 class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   private readonly options: OpenGeniSiteClientOptions;
+  private readonly bootstrap: SiteBridgeBootstrap;
   private port: MessagePort | null = null;
   private connecting: Promise<MessagePort> | null = null;
   private closed = false;
 
   constructor(options: OpenGeniSiteClientOptions) {
     this.options = options;
+    this.bootstrap = createSiteBridgeBootstrap(options);
   }
 
   async requestJson<T>(
@@ -209,6 +215,7 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.bootstrap.close();
     this.port?.close();
     this.port = null;
   }
@@ -230,7 +237,16 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
       const timeout = setTimeout(() => {
         cleanup();
         cancel(port, requestId);
-        reject(new OpenGeniSiteBridgeError("timeout", "Site tool request timed out", true));
+        reject(
+          request.method === "call"
+            ? new OpenGeniSiteBridgeError(
+                "timeout",
+                "Site tool request timed out after execution may have started",
+                false,
+                true,
+              )
+            : new OpenGeniSiteBridgeError("timeout", "Site tool request timed out", true),
+        );
       }, timeoutMs);
       const abort = () => {
         cleanup();
@@ -287,16 +303,10 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
     if (this.closed) throw new OpenGeniSiteBridgeError("closed", "Site bridge is closed");
     if (this.port) return this.port;
     if (this.connecting) return await this.connecting;
-    const parentWindow = this.options.parentWindow ?? globalThis.window?.parent;
-    if (!parentWindow || parentWindow === globalThis.window) {
-      throw new OpenGeniSiteBridgeError(
-        "host_unavailable",
-        "OpenGeni Site client must run inside a hosted iframe",
-      );
-    }
     const channel = (this.options.createMessageChannel ?? (() => new MessageChannel()))();
     const timeoutMs = positiveTimeout(this.options.connectTimeoutMs ?? 10_000, "connectTimeoutMs");
     this.connecting = new Promise<MessagePort>((resolve, reject) => {
+      let active = true;
       const timeout = setTimeout(() => {
         cleanup();
         channel.port1.close();
@@ -316,24 +326,103 @@ class OpenGeniSiteBridgeTransport implements OpenGeniToolTransport {
         resolve(channel.port1);
       };
       const cleanup = () => {
+        active = false;
         clearTimeout(timeout);
         channel.port1.removeEventListener("message", onMessage);
       };
       channel.port1.addEventListener("message", onMessage);
       channel.port1.start();
-      parentWindow.postMessage(
-        {
-          type: OPENGENI_SITE_BRIDGE_CONNECT,
-          version: OPENGENI_SITE_BRIDGE_VERSION,
-        } satisfies OpenGeniSiteBridgeConnectMessage,
-        "*",
-        [channel.port2],
-      );
+      void this.bootstrap
+        .port()
+        .then((bootstrapPort) => {
+          if (!active) return;
+          if (this.closed) throw new OpenGeniSiteBridgeError("closed", "Site bridge is closed");
+          bootstrapPort.postMessage(
+            {
+              type: OPENGENI_SITE_BRIDGE_CONNECT,
+              version: OPENGENI_SITE_BRIDGE_VERSION,
+            } satisfies OpenGeniSiteBridgeConnectMessage,
+            [channel.port2],
+          );
+        })
+        .catch((error) => {
+          cleanup();
+          channel.port1.close();
+          reject(error);
+        });
     }).finally(() => {
       this.connecting = null;
     });
     return await this.connecting;
   }
+}
+
+type SiteBridgeBootstrap = {
+  port: () => Promise<MessagePort>;
+  close: () => void;
+};
+
+function createSiteBridgeBootstrap(options: OpenGeniSiteClientOptions): SiteBridgeBootstrap {
+  if (options.bootstrapPort) {
+    return {
+      port: async () => options.bootstrapPort!,
+      close: () => options.bootstrapPort?.close(),
+    };
+  }
+  const siteWindow = options.siteWindow ?? globalThis.window;
+  const parentWindow = options.parentWindow ?? siteWindow?.parent;
+  if (!siteWindow || !parentWindow || parentWindow === siteWindow) {
+    return {
+      port: async () => {
+        throw new OpenGeniSiteBridgeError(
+          "host_unavailable",
+          "OpenGeni Site client must run inside a hosted iframe",
+        );
+      },
+      close: () => undefined,
+    };
+  }
+  let settledPort: MessagePort | null = null;
+  let rejectBootstrap: ((reason?: unknown) => void) | null = null;
+  const onMessage = (event: MessageEvent<unknown>) => {
+    if (
+      event.source !== parentWindow ||
+      !isOpenGeniSiteBridgeReadyMessage(event.data) ||
+      event.ports.length !== 1
+    ) {
+      return;
+    }
+    cleanup();
+    settledPort = event.ports[0]!;
+    settledPort.start();
+    resolveBootstrap?.(settledPort);
+  };
+  let resolveBootstrap: ((port: MessagePort) => void) | null = null;
+  const cleanup = () => siteWindow.removeEventListener("message", onMessage as EventListener);
+  const port = new Promise<MessagePort>((resolve, reject) => {
+    resolveBootstrap = resolve;
+    rejectBootstrap = reject;
+    siteWindow.addEventListener("message", onMessage as EventListener);
+  });
+  void port.catch(() => undefined);
+  return {
+    port: async () => await port,
+    close: () => {
+      cleanup();
+      settledPort?.close();
+      rejectBootstrap?.(new OpenGeniSiteBridgeError("closed", "Site bridge is closed"));
+      resolveBootstrap = null;
+      rejectBootstrap = null;
+    },
+  };
+}
+
+function isOpenGeniSiteBridgeReadyMessage(value: unknown): value is OpenGeniSiteBridgeReadyMessage {
+  return (
+    isRecord(value) &&
+    value.type === OPENGENI_SITE_BRIDGE_READY &&
+    value.version === OPENGENI_SITE_BRIDGE_VERSION
+  );
 }
 
 function cancel(port: MessagePort, requestId: string): void {

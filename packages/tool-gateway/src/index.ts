@@ -17,6 +17,7 @@ import {
 } from "@opengeni/contracts";
 import {
   assertToolGatewayCatalogSize,
+  compareCanonicalStrings,
   digestCanonicalJson,
   digestToolGatewayCatalog,
 } from "./catalog";
@@ -460,7 +461,7 @@ function assertNoToolPathCollisions(paths: readonly (readonly string[])[]): void
 function compareToolPaths(left: readonly string[], right: readonly string[]): number {
   const length = Math.min(left.length, right.length);
   for (let index = 0; index < length; index += 1) {
-    const compared = left[index]!.localeCompare(right[index]!);
+    const compared = compareCanonicalStrings(left[index]!, right[index]!);
     if (compared !== 0) return compared;
   }
   return left.length - right.length;

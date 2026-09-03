@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, test } from "bun:test";
 import type { MCPServer } from "@openai/agents";
+import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { AccessGrant } from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import {
@@ -46,6 +47,7 @@ function preparedGateway(
     authorize?: ToolGatewayAuthorization;
     onPreflight?: () => void;
     onExecute?: (context: { transportMeta?: Record<string, unknown> | null }) => void;
+    executeError?: unknown;
   } = {},
 ): PreparedWorkspaceToolGateway {
   const { catalog, gateway } = createWorkspaceToolGateway({
@@ -83,6 +85,7 @@ function preparedGateway(
         execute: async (argumentsValue, context) => {
           options.onExecute?.(context);
           calls.push({ kind: context.caller.kind, argumentsValue });
+          if (options.executeError !== undefined) throw options.executeError;
           return {
             content: [{ type: "text", text: JSON.stringify({ count: 7 }) }],
             structuredContent: { count: 7 },
@@ -283,6 +286,47 @@ describe("workspace tool gateway adapters", () => {
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }
+  });
+
+  test("projects generated integration outcome uncertainty through HTTP and Site calls", async () => {
+    const sourceFailure = new IntegrationInvocationError(
+      "request_timeout",
+      "Integration request timed out",
+      "unknown",
+      false,
+    );
+    const prepared = preparedGateway([], "none", { executeError: sourceFailure });
+    const request = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "MAY-HAVE-RUN" },
+    };
+    const expected = {
+      status: 502,
+      code: "upstream_unavailable",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown", providerCode: "request_timeout" },
+    };
+    await expect(callWorkspaceToolGateway(prepared, grant(), request)).rejects.toMatchObject(
+      expected,
+    );
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        grant(),
+        {
+          ...request,
+          siteArtifactId: "44444444-4444-4444-8444-444444444444",
+          siteVersionId: "55555555-5555-4555-8555-555555555555",
+        },
+        {} as never,
+        undefined,
+        undefined,
+        async () => undefined,
+      ),
+    ).rejects.toMatchObject(expected);
   });
 
   test("does not advertise approval-required tools on MCP without an approval transport", async () => {

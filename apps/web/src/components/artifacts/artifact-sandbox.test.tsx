@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
-  openGeniSiteBridgePortForFrame,
+  openGeniSiteBridgePortFromBootstrap,
 } from "@opengeni/react/artifacts";
 import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
 
@@ -37,20 +37,15 @@ describe("published HTML artifacts", () => {
     expect(markup).toContain("v4");
   });
 
-  it("accepts a bridge only from the exact iframe window with one transferred port", () => {
-    const frameWindow = {} as Window;
-    const otherWindow = {} as Window;
+  it("accepts a tool port only through the parent-issued document bootstrap", () => {
     const port = {} as MessagePort;
     const connect = {
       type: OPENGENI_SITE_BRIDGE_CONNECT,
       version: OPENGENI_SITE_BRIDGE_VERSION,
     };
 
-    expect(openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [port])).toBe(port);
-    expect(openGeniSiteBridgePortForFrame(otherWindow, frameWindow, connect, [port])).toBeNull();
-    expect(openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [])).toBeNull();
-    expect(
-      openGeniSiteBridgePortForFrame(frameWindow, frameWindow, connect, [port, port]),
-    ).toBeNull();
+    expect(openGeniSiteBridgePortFromBootstrap(connect, [port])).toBe(port);
+    expect(openGeniSiteBridgePortFromBootstrap(connect, [])).toBeNull();
+    expect(openGeniSiteBridgePortFromBootstrap(connect, [port, port])).toBeNull();
   });
 });

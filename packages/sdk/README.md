@@ -504,7 +504,9 @@ iframe code. Sites do not use this approval sequence: the host projects only
 the active immutable version's requested identities, supplies the Site context
 on direct calls, and the server revalidates the active version and viewer's live
 authority. This direct path also applies to tools whose ordinary current-human
-catalog policy is `human`. Archived Sites receive no tool bridge.
+catalog policy is `human` only when a current human published that Site version;
+agent-authored versions cannot activate any non-`none` approval class. Archived Sites
+receive no tool bridge.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately

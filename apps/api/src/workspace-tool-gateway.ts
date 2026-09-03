@@ -9,6 +9,7 @@ import {
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
+import { IntegrationInvocationError } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import {
   FIRST_PARTY_MCP_TOOL_NAMES,
@@ -140,7 +141,7 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
 }
 
-async function prepareWorkspaceToolGatewayForGrant(
+export async function prepareWorkspaceToolGatewayForGrant(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
@@ -572,6 +573,16 @@ function throwWorkspaceToolGatewayHttpError(error: unknown): never {
   }
   if (error instanceof ToolGatewayApprovalRequiredError) {
     throw new HTTPException(409, { message: error.code, cause: error });
+  }
+  if (error instanceof IntegrationInvocationError && error.outcome === "unknown") {
+    throw new ApiHttpError(502, {
+      code: "upstream_unavailable",
+      message:
+        "The integration call ended without a confirmed provider result. Inspect the external system before retrying.",
+      retryable: false,
+      outcomeUnknown: true,
+      details: { code: "tool_outcome_unknown", providerCode: error.code },
+    });
   }
   throw error;
 }

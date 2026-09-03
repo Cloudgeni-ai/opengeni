@@ -176,7 +176,7 @@ export async function submitAndDispatchCodemodeCall(
     : operation.state === "running"
       ? "already_running"
       : "unavailable";
-  if (operation.state === "queued") {
+  if (codemodeOperationNeedsDispatch(operation)) {
     try {
       const reply = await deps.bus.request(
         codemodeDispatchSubject(authority.workspaceId, authority.attemptId),
@@ -205,6 +205,10 @@ export async function submitAndDispatchCodemodeCall(
     }
   }
   return CodemodeCallSubmission.parse({ operation, dispatch });
+}
+
+export function codemodeOperationNeedsDispatch(operation: CodemodeOperation): boolean {
+  return operation.state === "queued" || operation.state === "running";
 }
 
 export async function readCodemodeOperation(

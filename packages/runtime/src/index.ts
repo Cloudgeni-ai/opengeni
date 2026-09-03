@@ -1,6 +1,7 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import {
   createLocalMcpBridgeFromAdapters,
+  IntegrationInvocationError,
   type LocalMcpBridgeAdapter,
 } from "@opengeni/capabilities";
 import {
@@ -5263,6 +5264,15 @@ function isToolOutcomeUncertainMcpError(error: unknown): boolean {
   }
 }
 
+function isIntegrationInvocationOutcomeUnknownError(error: unknown): boolean {
+  try {
+    return error instanceof IntegrationInvocationError && error.outcome === "unknown";
+  } catch {
+    // Typed error recognition is observational. Preserve the source failure.
+    return false;
+  }
+}
+
 function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; text: string }> {
   let body: unknown;
   try {
@@ -6596,6 +6606,14 @@ export class PrefixedMcpServer implements MCPServer {
       // into a completed tool result: model execution fails loud, and Codemode
       // durably settles the operation as outcome_unknown.
       if (isRoutingMutationOutcomeUnknownError(error)) {
+        recordOutcome("outcome_uncertain");
+        throw error;
+      }
+      // Generated OpenAPI/GraphQL adapters explicitly distinguish a provider
+      // failure from an invocation whose external side effect may have begun.
+      // Preserve the latter across best-effort isolation so model execution
+      // fails loud and Codemode settles its durable journal outcome_unknown.
+      if (isIntegrationInvocationOutcomeUnknownError(error)) {
         recordOutcome("outcome_uncertain");
         throw error;
       }

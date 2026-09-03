@@ -45,6 +45,19 @@ ALTER TABLE "workspace_artifact_versions"
   VALIDATE CONSTRAINT "workspace_artifact_versions_content_chk";
 
 ALTER TABLE "workspace_artifact_events"
+  ADD COLUMN "request_digest" text;
+
+ALTER TABLE "workspace_artifact_events"
+  ADD CONSTRAINT "workspace_artifact_events_request_digest_chk"
+  CHECK (
+    "request_digest" IS NULL
+    OR "request_digest" ~ '^[0-9a-f]{64}$'
+  ) NOT VALID;
+
+ALTER TABLE "workspace_artifact_events"
+  VALIDATE CONSTRAINT "workspace_artifact_events_request_digest_chk";
+
+ALTER TABLE "workspace_artifact_events"
   DROP CONSTRAINT "workspace_artifact_events_type_chk";
 
 ALTER TABLE "workspace_artifact_events"

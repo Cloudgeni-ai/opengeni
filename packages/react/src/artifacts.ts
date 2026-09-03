@@ -18,7 +18,7 @@ export {
   PresentationProjectionEditor,
   PublishedHtmlArtifactFrame,
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
-  openGeniSiteBridgePortForFrame,
+  openGeniSiteBridgePortFromBootstrap,
   SpreadsheetArtifactSurface,
   SpreadsheetGrid,
   SpreadsheetProjectionGrid,

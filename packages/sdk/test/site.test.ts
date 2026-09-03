@@ -53,50 +53,46 @@ describe("OpenGeni Site client", () => {
   test("exposes direct typed tools over one parent-held MessagePort", async () => {
     const calls: OpenGeniSiteBridgeRequestMessage[] = [];
     const hostPorts: MessagePort[] = [];
-    const parentWindow = {
-      postMessage: (
-        message: OpenGeniSiteBridgeConnectMessage,
-        targetOrigin: string,
-        transfer: Transferable[],
-      ) => {
-        expect(message).toEqual({
-          type: "opengeni.site.connect",
-          version: OPENGENI_SITE_BRIDGE_VERSION,
-        });
-        expect(targetOrigin).toBe("*");
-        const port = transfer[0] as MessagePort;
-        hostPorts.push(port);
-        port.addEventListener("message", (event: MessageEvent<unknown>) => {
-          const request = event.data as OpenGeniSiteBridgeRequestMessage;
-          calls.push(request);
-          if (request.type !== OPENGENI_SITE_BRIDGE_REQUEST) return;
-          port.postMessage({
-            type: OPENGENI_SITE_BRIDGE_RESPONSE,
-            version: OPENGENI_SITE_BRIDGE_VERSION,
-            requestId: request.requestId,
-            ok: true,
-            value:
-              request.method === "catalog"
-                ? catalog
-                : {
-                    operationId: "00000000-0000-4000-8000-000000000003",
-                    catalogDigest: catalog.digest,
-                    result: {
-                      content: [{ type: "text", text: "Found one document" }],
-                      structuredContent: { documents: [{ id: "document-1" }] },
-                    },
-                  },
-          });
-        });
-        port.start();
+    const bootstrap = new MessageChannel();
+    bootstrap.port1.addEventListener("message", (bootstrapEvent: MessageEvent<unknown>) => {
+      const message = bootstrapEvent.data as OpenGeniSiteBridgeConnectMessage;
+      const port = bootstrapEvent.ports[0] as MessagePort;
+      expect(message).toEqual({
+        type: "opengeni.site.connect",
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      });
+      hostPorts.push(port);
+      port.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const request = event.data as OpenGeniSiteBridgeRequestMessage;
+        calls.push(request);
+        if (request.type !== OPENGENI_SITE_BRIDGE_REQUEST) return;
         port.postMessage({
-          type: OPENGENI_SITE_BRIDGE_READY,
+          type: OPENGENI_SITE_BRIDGE_RESPONSE,
           version: OPENGENI_SITE_BRIDGE_VERSION,
+          requestId: request.requestId,
+          ok: true,
+          value:
+            request.method === "catalog"
+              ? catalog
+              : {
+                  operationId: "00000000-0000-4000-8000-000000000003",
+                  catalogDigest: catalog.digest,
+                  result: {
+                    content: [{ type: "text", text: "Found one document" }],
+                    structuredContent: { documents: [{ id: "document-1" }] },
+                  },
+                },
         });
-      },
-    };
+      });
+      port.start();
+      port.postMessage({
+        type: OPENGENI_SITE_BRIDGE_READY,
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      });
+    });
+    bootstrap.port1.start();
     const client = createOpenGeniSiteClient({
-      parentWindow: parentWindow as unknown as Pick<Window, "postMessage">,
+      bootstrapPort: bootstrap.port2,
     });
 
     expect((client.tools as unknown as { then?: unknown }).then).toBeUndefined();
@@ -128,42 +124,40 @@ describe("OpenGeni Site client", () => {
     ).rejects.toThrow("Unsupported Site bridge request");
 
     client.close();
+    bootstrap.port1.close();
     for (const port of hostPorts) port.close();
   });
 
   test("preserves uncertain mutation settlement from the host bridge", async () => {
     const hostPorts: MessagePort[] = [];
+    const bootstrap = new MessageChannel();
+    bootstrap.port1.addEventListener("message", (bootstrapEvent: MessageEvent<unknown>) => {
+      const port = bootstrapEvent.ports[0] as MessagePort;
+      hostPorts.push(port);
+      port.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const request = event.data as OpenGeniSiteBridgeRequestMessage;
+        port.postMessage({
+          type: OPENGENI_SITE_BRIDGE_RESPONSE,
+          version: OPENGENI_SITE_BRIDGE_VERSION,
+          requestId: request.requestId,
+          ok: false,
+          error: {
+            code: "tool_outcome_unknown",
+            message: "Provider settlement is unknown",
+            retryable: false,
+            outcomeUnknown: true,
+          },
+        });
+      });
+      port.start();
+      port.postMessage({
+        type: OPENGENI_SITE_BRIDGE_READY,
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      });
+    });
+    bootstrap.port1.start();
     const client = createOpenGeniSiteClient({
-      parentWindow: {
-        postMessage: (
-          _message: OpenGeniSiteBridgeConnectMessage,
-          _targetOrigin: string,
-          transfer: Transferable[],
-        ) => {
-          const port = transfer[0] as MessagePort;
-          hostPorts.push(port);
-          port.addEventListener("message", (event: MessageEvent<unknown>) => {
-            const request = event.data as OpenGeniSiteBridgeRequestMessage;
-            port.postMessage({
-              type: OPENGENI_SITE_BRIDGE_RESPONSE,
-              version: OPENGENI_SITE_BRIDGE_VERSION,
-              requestId: request.requestId,
-              ok: false,
-              error: {
-                code: "tool_outcome_unknown",
-                message: "Provider settlement is unknown",
-                retryable: false,
-                outcomeUnknown: true,
-              },
-            });
-          });
-          port.start();
-          port.postMessage({
-            type: OPENGENI_SITE_BRIDGE_READY,
-            version: OPENGENI_SITE_BRIDGE_VERSION,
-          });
-        },
-      } as unknown as Pick<Window, "postMessage">,
+      bootstrapPort: bootstrap.port2,
     });
 
     await expect(client.tools.$catalog()).rejects.toMatchObject({
@@ -172,6 +166,46 @@ describe("OpenGeni Site client", () => {
       outcomeUnknown: true,
     });
     client.close();
+    bootstrap.port1.close();
+    for (const port of hostPorts) port.close();
+  });
+
+  test("marks a timed-out tool call as outcome unknown instead of retryable", async () => {
+    const bootstrap = new MessageChannel();
+    const hostPorts: MessagePort[] = [];
+    bootstrap.port1.addEventListener("message", (bootstrapEvent: MessageEvent<unknown>) => {
+      const port = bootstrapEvent.ports[0] as MessagePort;
+      hostPorts.push(port);
+      port.addEventListener("message", (event: MessageEvent<unknown>) => {
+        const request = event.data as OpenGeniSiteBridgeRequestMessage;
+        if (request.method !== "catalog") return;
+        port.postMessage({
+          type: OPENGENI_SITE_BRIDGE_RESPONSE,
+          version: OPENGENI_SITE_BRIDGE_VERSION,
+          requestId: request.requestId,
+          ok: true,
+          value: catalog,
+        });
+      });
+      port.start();
+      port.postMessage({
+        type: OPENGENI_SITE_BRIDGE_READY,
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      });
+    });
+    bootstrap.port1.start();
+    const client = createOpenGeniSiteClient({
+      bootstrapPort: bootstrap.port2,
+      requestTimeoutMs: 5,
+    });
+
+    await expect(client.tools["docs"]!["search"]!({ query: "roadmap" })).rejects.toMatchObject({
+      code: "timeout",
+      retryable: false,
+      outcomeUnknown: true,
+    });
+    client.close();
+    bootstrap.port1.close();
     for (const port of hostPorts) port.close();
   });
 });

@@ -54,6 +54,8 @@ export type PublishedHtmlArtifactToolBridge = {
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const bridgeRef = useRef(props.toolBridge);
+  const onFrameLoadRef = useRef<() => void>(() => undefined);
+  const frameLoadPendingRef = useRef(false);
   const toolBridgeEnabled = props.toolBridge !== undefined;
   useEffect(() => {
     bridgeRef.current = props.toolBridge;
@@ -61,13 +63,8 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
   useEffect(() => {
     if (!toolBridgeEnabled || typeof window === "undefined") return;
     const requests = new SiteBridgeRequestRegistry();
-    const onWindowMessage = (event: MessageEvent<unknown>) => {
-      const port = openGeniSiteBridgePortForFrame(
-        event.source,
-        frameRef.current?.contentWindow ?? null,
-        event.data,
-        event.ports,
-      );
+    const attachToolPort = (data: unknown, ports: readonly MessagePort[]) => {
+      const port = openGeniSiteBridgePortFromBootstrap(data, ports);
       if (!port) return;
       requests.replacePort(port);
       port.addEventListener("message", (portEvent: MessageEvent<unknown>) => {
@@ -124,12 +121,23 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
         version: OPENGENI_SITE_BRIDGE_VERSION,
       });
     };
-    window.addEventListener("message", onWindowMessage);
-    return () => {
-      window.removeEventListener("message", onWindowMessage);
-      requests.closeAll();
+    const documentLease = new SiteBridgeDocumentLease(attachToolPort, () => requests.closeAll());
+    const onFrameLoad = () => {
+      frameLoadPendingRef.current = false;
+      const frameWindow = frameRef.current?.contentWindow ?? null;
+      if (!frameWindow) return;
+      documentLease.load(frameWindow);
     };
-  }, [toolBridgeEnabled]);
+    onFrameLoadRef.current = onFrameLoad;
+    if (frameLoadPendingRef.current) {
+      frameLoadPendingRef.current = false;
+      onFrameLoad();
+    }
+    return () => {
+      onFrameLoadRef.current = () => undefined;
+      documentLease.close();
+    };
+  }, [props.html, toolBridgeEnabled]);
   return (
     <iframe
       ref={frameRef}
@@ -137,6 +145,10 @@ export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProp
       sandbox={PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}
       referrerPolicy="no-referrer"
       srcDoc={props.html}
+      onLoad={() => {
+        frameLoadPendingRef.current = true;
+        onFrameLoadRef.current();
+      }}
       className={props.className}
       style={props.style}
     />
@@ -188,15 +200,51 @@ export class SiteBridgeRequestRegistry {
   }
 }
 
-export function openGeniSiteBridgePortForFrame(
-  eventSource: MessageEventSource | null,
-  frameWindow: Window | null,
+export class SiteBridgeDocumentLease {
+  private loaded = false;
+  private bootstrapPort: MessagePort | null = null;
+
+  constructor(
+    private readonly attachToolPort: (data: unknown, ports: readonly MessagePort[]) => void,
+    private readonly closeActivePorts: () => void,
+    private readonly createMessageChannel: () => MessageChannel = () => new MessageChannel(),
+  ) {}
+
+  load(frameWindow: Pick<Window, "postMessage">): boolean {
+    if (this.loaded) {
+      this.close();
+      return false;
+    }
+    this.loaded = true;
+    const channel = this.createMessageChannel();
+    this.bootstrapPort = channel.port1;
+    channel.port1.addEventListener("message", (event: MessageEvent<unknown>) => {
+      this.attachToolPort(event.data, event.ports);
+    });
+    channel.port1.start();
+    frameWindow.postMessage(
+      {
+        type: OPENGENI_SITE_BRIDGE_READY,
+        version: OPENGENI_SITE_BRIDGE_VERSION,
+      },
+      "*",
+      [channel.port2],
+    );
+    return true;
+  }
+
+  close(): void {
+    this.bootstrapPort?.close();
+    this.bootstrapPort = null;
+    this.closeActivePorts();
+  }
+}
+
+export function openGeniSiteBridgePortFromBootstrap(
   data: unknown,
   ports: readonly MessagePort[],
 ): MessagePort | null {
-  if (!frameWindow || eventSource !== frameWindow || !isOpenGeniSiteBridgeConnectMessage(data)) {
-    return null;
-  }
+  if (!isOpenGeniSiteBridgeConnectMessage(data)) return null;
   return ports.length === 1 ? ports[0]! : null;
 }
 
