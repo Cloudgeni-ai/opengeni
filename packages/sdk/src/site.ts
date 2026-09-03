@@ -142,9 +142,14 @@ export function isOpenGeniSiteBridgeCancelMessage(
   );
 }
 
-/** Strip every host-only field before a tool call crosses the Site boundary. */
+type SiteToolCallRequestCandidate = ToolGatewayCallRequest & {
+  /** Internal host transport marker; never accepted from iframe code. */
+  siteApprovalBypass?: unknown;
+};
+
+/** Strip every host-only field and transport marker before a call crosses the Site boundary. */
 export function sanitizeOpenGeniSiteToolCallRequest(
-  value: ToolGatewayCallRequest,
+  value: SiteToolCallRequestCandidate,
 ): OpenGeniSiteToolCallRequest {
   return {
     ...(value.operationId === undefined ? {} : { operationId: value.operationId }),

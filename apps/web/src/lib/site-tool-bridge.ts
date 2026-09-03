@@ -77,8 +77,10 @@ export function createSiteToolBridge(input: {
           workspaceId: input.workspaceId,
           signal,
           request: {
-            ...toolRequest,
+            ...(toolRequest.operationId ? { operationId: toolRequest.operationId } : {}),
             catalogDigest: current.digest,
+            identity: toolRequest.identity,
+            arguments: toolRequest.arguments,
             siteArtifactId: input.artifactId,
             siteVersionId: input.siteVersionId,
           },

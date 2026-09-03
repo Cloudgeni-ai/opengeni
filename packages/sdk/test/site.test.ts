@@ -5,6 +5,7 @@ import {
   OPENGENI_SITE_BRIDGE_RESPONSE,
   OPENGENI_SITE_BRIDGE_VERSION,
   createOpenGeniSiteClient,
+  sanitizeOpenGeniSiteToolCallRequest,
   type OpenGeniSiteBridgeConnectMessage,
   type OpenGeniSiteBridgeRequestMessage,
 } from "../src/site";
@@ -31,6 +32,26 @@ const catalog: ToolGatewayCatalog = {
 };
 
 describe("OpenGeni Site client", () => {
+  test("strips host-only approval and Site transport authority", () => {
+    expect(
+      sanitizeOpenGeniSiteToolCallRequest({
+        operationId: "00000000-0000-4000-8000-000000000003",
+        catalogDigest: catalog.digest,
+        identity: catalog.entries[0]!.identity,
+        arguments: { query: "roadmap" },
+        approvalToken: `ogta_${"a".repeat(43)}`,
+        siteArtifactId: "00000000-0000-4000-8000-000000000004",
+        siteVersionId: "00000000-0000-4000-8000-000000000005",
+        siteApprovalBypass: true,
+      }),
+    ).toEqual({
+      operationId: "00000000-0000-4000-8000-000000000003",
+      catalogDigest: catalog.digest,
+      identity: catalog.entries[0]!.identity,
+      arguments: { query: "roadmap" },
+    });
+  });
+
   test("exposes direct typed tools over one parent-held MessagePort", async () => {
     const calls: OpenGeniSiteBridgeRequestMessage[] = [];
     const hostPorts: MessagePort[] = [];

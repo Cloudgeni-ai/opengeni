@@ -256,7 +256,9 @@ async function prepareWorkspaceToolGatewayForGrant(
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
         requireApproval: (entry, _caller, context) =>
-          entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+          entry.approval === "human" &&
+          context.transportMeta?.approvalConfirmed !== true &&
+          context.transportMeta?.siteApprovalBypass !== true,
         filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
       },
     },
@@ -283,9 +285,6 @@ export function workspaceToolGatewayDefinitionFilter(
     ? new Set(allowedIdentities.map(workspaceToolGatewayIdentityKey))
     : null;
   return (definition) => {
-    // Fail closed until a connection-backed provider exposes a side-effect-free
-    // credential/resource preflight ahead of one-shot approval consumption.
-    if (definition.connectionBacked && definition.approval === "human") return false;
     if (
       definition.identity.serverId === "opengeni" &&
       !allowedFirstPartyTools.has(definition.identity.toolName)
@@ -410,10 +409,17 @@ export async function callWorkspaceToolGateway(
             identity: request.identity,
           }
         : null;
+    if (siteContext) {
+      if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
+      await authorizeSiteTool(db, grant, siteContext);
+    }
     // Approval is adapter-owned, so prepare with an in-process provisional
-    // confirmation, then replace it with the actual capability decision before
-    // executing the same prepared call. No provider execution begins here.
-    const transportMeta = { approvalConfirmed: true };
+    // confirmation for direct current-human calls. An authorized Site receives
+    // a separate host-owned bypass that publisher-controlled code cannot set.
+    // Provider preflight can run here, but no provider request begins.
+    const transportMeta: Record<string, unknown> = siteContext
+      ? { siteApprovalBypass: true }
+      : { approvalConfirmed: true };
     const preparedCall = await prepared.toolGateway.prepareCall(
       {
         operationId,
@@ -424,10 +430,6 @@ export async function callWorkspaceToolGateway(
       },
       { transportMeta },
     );
-    if (siteContext) {
-      if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
-      await authorizeSiteTool(db, grant, siteContext);
-    }
     // An authorized active Site version is the transport-owned approval boundary:
     // its retained identity allowlist replaces per-invocation human confirmation.
     let approvalConfirmed = siteContext !== null;
@@ -447,7 +449,7 @@ export async function callWorkspaceToolGateway(
     if (approvalRequired && !approvalConfirmed) {
       throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
-    transportMeta.approvalConfirmed = approvalConfirmed;
+    if (!siteContext) transportMeta.approvalConfirmed = approvalConfirmed;
     const result = await preparedCall.execute();
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({

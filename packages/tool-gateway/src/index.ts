@@ -42,8 +42,12 @@ export type ToolGatewayCallContext = Pick<ToolGatewayExecutionContext, "transpor
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
-  /** In-process provider metadata; never enters the public catalog or its digest. */
-  connectionBacked?: boolean;
+  /** In-process provider preflight; never enters the public catalog or its digest. */
+  preflightCall?: (input: {
+    call: ToolGatewayCall;
+    entry: ToolGatewayCatalogEntryValue;
+    context: ToolGatewayCallContext;
+  }) => Promise<void> | void;
   /** In-process execution lifecycle; never enters the public catalog or its digest. */
   lifecycle?: ToolGatewayCallLifecycle;
   execute: (
@@ -97,6 +101,7 @@ export type ModelToolGatewayCall = {
 type CompiledDefinition = {
   entry: ToolGatewayCatalogEntryValue;
   execute: ToolGatewayDefinition["execute"];
+  preflightCall: ToolGatewayDefinition["preflightCall"];
   lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
   validateOutput: ValidateFunction<unknown> | null;
@@ -195,6 +200,13 @@ export class ToolGateway {
       caller,
     } satisfies ToolGatewayCall;
     await this.authorize?.({ call, entry: definition.entry });
+    if (definition.entry.approval === "human") {
+      await definition.preflightCall?.({
+        call,
+        entry: definition.entry,
+        context,
+      });
+    }
     const lifecycle = await definition.lifecycle?.prepare({
       call,
       entry: definition.entry,
@@ -262,13 +274,7 @@ export function prepareToolGatewayDefinitions(
   const paths = allocateToolPaths(definitions);
   const schemaValidators = createSchemaValidators();
   const compiled = definitions.map((definition, index): CompiledDefinition => {
-    const {
-      execute,
-      lifecycle,
-      codemodePath: _path,
-      connectionBacked: _connectionBacked,
-      ...entryInput
-    } = definition;
+    const { execute, preflightCall, lifecycle, codemodePath: _path, ...entryInput } = definition;
     const entry = ToolGatewayCatalogEntry.parse({
       ...entryInput,
       codemodePath: paths[index],
@@ -276,6 +282,7 @@ export function prepareToolGatewayDefinitions(
     return {
       entry,
       execute,
+      preflightCall,
       lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
       validateOutput: entry.outputSchema

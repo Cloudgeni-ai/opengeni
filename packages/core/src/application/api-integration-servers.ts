@@ -2,8 +2,11 @@ import {
   createGraphqlMcpServer,
   createOpenApiMcpServer,
   createPinnedIntegrationTransport,
+  directIntegrationTransport,
+  IntegrationInvocationError,
   type IntegrationCredentialResolver,
   type IntegrationInvocationAuthority,
+  type IntegrationTransport,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import type { ToolAuthNeededPayload } from "@opengeni/contracts";
@@ -48,26 +51,39 @@ export function buildApiIntegrationMcpServers(
     const credentialResolver = integration.connectionRef
       ? integrationCredentialResolver(input, integration)
       : undefined;
-    const server =
+    const buildServer = (serverTransport: IntegrationTransport) =>
       integration.revision.protocol === "openapi"
         ? createOpenApiMcpServer({
             revision: integration.revision,
-            transport,
+            transport: serverTransport,
             authority,
             ...(credentialResolver ? { credentialResolver } : {}),
           })
         : createGraphqlMcpServer({
             revision: integration.revision,
             endpoint: integration.baseUrl,
-            transport,
+            transport: serverTransport,
             authority,
             ...(credentialResolver ? { credentialResolver } : {}),
           });
+    const server = buildServer(transport);
+    const preflightServer = credentialResolver
+      ? buildServer(providerBlockingPreflightTransport)
+      : null;
     return {
       id: integration.serverId,
       server,
       ...(integration.connectionRef?.connectionId
         ? { resolvedConnectionId: integration.connectionRef.connectionId }
+        : {}),
+      ...(credentialResolver
+        ? {
+            preflightCall: async (
+              toolName: string,
+              args: Record<string, unknown>,
+              options?: { signal?: AbortSignal },
+            ) => await preflightApiIntegrationCall(preflightServer!, toolName, args, options),
+          }
         : {}),
     };
   });
@@ -75,6 +91,25 @@ export function buildApiIntegrationMcpServers(
 
 /** @deprecated Use buildApiIntegrationMcpServers. */
 export const buildApiIntegrationServersForTurn = buildApiIntegrationMcpServers;
+
+const providerBlockingPreflightTransport = directIntegrationTransport(async () => {
+  throw new Error("integration provider request blocked by preflight");
+});
+
+async function preflightApiIntegrationCall(
+  server: LocalMcpServerRegistration["server"],
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
+  try {
+    await server.callTool(toolName, args, null, options);
+  } catch (error) {
+    if (error instanceof IntegrationInvocationError && error.code === "request_failed") return;
+    throw error;
+  }
+  throw new Error("integration preflight unexpectedly crossed the provider request boundary");
+}
 
 function integrationCredentialResolver(
   input: BuildApiIntegrationServersInput,

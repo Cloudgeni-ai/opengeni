@@ -75,6 +75,51 @@ const authority = {
 };
 
 describe("installed API Integration worker adapters", () => {
+  test("preflights exact credentials and provider authorization without provider I/O", async () => {
+    const item = integration();
+    const resolvedDestinations: string[] = [];
+    let providerAuthorizations = 0;
+    let providerCalls = 0;
+    const settings = testSettings({
+      mcpServers: [
+        {
+          id: item.serverId,
+          name: item.name,
+          url: item.baseUrl,
+          allowedTools: item.allowedTools,
+          connectionRef: item.connectionRef!,
+        },
+      ],
+    });
+    const [registration] = buildApiIntegrationServersForTurn({
+      settings,
+      integrations: [item],
+      authority,
+      resolveCredential: async (request): Promise<ResolveConnectionCredentialResult> => {
+        resolvedDestinations.push(request.destinationUrl);
+        return {
+          status: "ok",
+          connectionId: item.connectionRef!.connectionId!,
+          headers: { Authorization: "Bearer preflight-only" },
+          authorizeProviderRequest: async () => {
+            providerAuthorizations += 1;
+            return true;
+          },
+        };
+      },
+      fetchImpl: async () => {
+        providerCalls += 1;
+        return Response.json({ items: [] });
+      },
+    });
+
+    await registration!.preflightCall!("list_items", {});
+
+    expect(resolvedDestinations).toEqual(["https://127.0.0.1/v1/items"]);
+    expect(providerAuthorizations).toBe(1);
+    expect(providerCalls).toBe(0);
+  });
+
   test("uses the exact attempt resolver, local MCP registry, and provider transport", async () => {
     const resolved: Array<{
       destinationUrl: string;
@@ -116,7 +161,11 @@ describe("installed API Integration worker adapters", () => {
           connectionId: item.connectionRef!.connectionId!,
           headers: { Authorization: "Bearer exact-attempt" },
           placements: [
-            { carrier: "header", name: "Authorization", value: "Bearer exact-attempt" },
+            {
+              carrier: "header",
+              name: "Authorization",
+              value: "Bearer exact-attempt",
+            },
             { carrier: "query", name: "api_key", value: "query-secret" },
             { carrier: "cookie", name: "session_key", value: "cookie-secret" },
           ],
@@ -296,7 +345,10 @@ describe("installed API Integration worker adapters", () => {
         connectionRef: item.connectionRef!,
       })),
     });
-    const resolutions: Array<{ serverId: string; connectionId: string | undefined }> = [];
+    const resolutions: Array<{
+      serverId: string;
+      connectionId: string | undefined;
+    }> = [];
     const localMcpServers = buildApiIntegrationServersForTurn({
       settings,
       integrations: [finance, sales],
@@ -309,7 +361,9 @@ describe("installed API Integration worker adapters", () => {
         return {
           status: "ok",
           connectionId: request.connectionRef.connectionId!,
-          headers: { Authorization: `Bearer ${request.connectionRef.connectionId}` },
+          headers: {
+            Authorization: `Bearer ${request.connectionRef.connectionId}`,
+          },
         };
       },
       fetchImpl: async () =>
@@ -341,7 +395,10 @@ describe("installed API Integration worker adapters", () => {
           serverId: finance.serverId,
           connectionId: finance.connectionRef!.connectionId,
         },
-        { serverId: sales.serverId, connectionId: sales.connectionRef!.connectionId },
+        {
+          serverId: sales.serverId,
+          connectionId: sales.connectionRef!.connectionId,
+        },
       ]);
     } finally {
       await prepared.close();

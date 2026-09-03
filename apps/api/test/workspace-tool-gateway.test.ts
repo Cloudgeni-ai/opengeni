@@ -41,7 +41,8 @@ function preparedGateway(
   approval: "human" | "none" = "none",
   options: {
     authorize?: ToolGatewayAuthorization;
-    onExecute?: () => void;
+    onPreflight?: () => void;
+    onExecute?: (context: { transportMeta?: Record<string, unknown> | null }) => void;
   } = {},
 ): PreparedWorkspaceToolGateway {
   const { catalog, gateway } = createWorkspaceToolGateway({
@@ -69,8 +70,15 @@ function preparedGateway(
         },
         source: "mcp",
         approval,
+        ...(options.onPreflight
+          ? {
+              preflightCall: async () => {
+                options.onPreflight?.();
+              },
+            }
+          : {}),
         execute: async (argumentsValue, context) => {
-          options.onExecute?.();
+          options.onExecute?.(context);
           calls.push({ kind: context.caller.kind, argumentsValue });
           return {
             content: [{ type: "text", text: JSON.stringify({ count: 7 }) }],
@@ -80,7 +88,9 @@ function preparedGateway(
       },
     ],
     requireApproval: (entry, _caller, context) =>
-      entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
+      entry.approval === "human" &&
+      context.transportMeta?.approvalConfirmed !== true &&
+      context.transportMeta?.siteApprovalBypass !== true,
     ...(options.authorize ? { authorize: options.authorize } : {}),
   });
   return {
@@ -116,7 +126,11 @@ async function policyCeilingGateway(
       async listTools() {
         return toolNames.map((toolName) => ({
           name: toolName,
-          inputSchema: { type: "object", properties: {}, additionalProperties: false },
+          inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+          },
         }));
       },
       async callTool(toolName) {
@@ -128,7 +142,10 @@ async function policyCeilingGateway(
   }));
   const prepared = await prepareWorkspaceToolGatewayTools(
     settings,
-    settings.mcpServers.map((server) => ({ kind: "mcp" as const, id: server.id })),
+    settings.mcpServers.map((server) => ({
+      kind: "mcp" as const,
+      id: server.id,
+    })),
     {
       accountId,
       workspaceId,
@@ -173,7 +190,10 @@ describe("workspace tool gateway adapters", () => {
 
     const server = buildWorkspaceToolGatewayMcpServer(prepared, access);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "workspace-tool-gateway-policy-test", version: "1" });
+    const client = new Client({
+      name: "workspace-tool-gateway-policy-test",
+      version: "1",
+    });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
@@ -211,12 +231,18 @@ describe("workspace tool gateway adapters", () => {
   });
 
   test("publishes and executes the same callable catalog through MCP and HTTP", async () => {
-    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const calls: Array<{
+      kind: string;
+      argumentsValue: Record<string, unknown>;
+    }> = [];
     const prepared = preparedGateway(calls);
     const access = grant();
     const server = buildWorkspaceToolGatewayMcpServer(prepared, access);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "workspace-tool-gateway-test", version: "1" });
+    const client = new Client({
+      name: "workspace-tool-gateway-test",
+      version: "1",
+    });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
@@ -244,7 +270,9 @@ describe("workspace tool gateway adapters", () => {
         identity: { serverId: "inventory", toolName: "lookup" },
         arguments: { sku: "SKU-2" },
       });
-      expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+      expect(response.result).toMatchObject({
+        structuredContent: { count: 7 },
+      });
       expect(calls).toEqual([
         { kind: "mcp", argumentsValue: { sku: "SKU-1" } },
         { kind: "http", argumentsValue: { sku: "SKU-2" } },
@@ -258,13 +286,19 @@ describe("workspace tool gateway adapters", () => {
     const prepared = preparedGateway([], "human");
     const server = buildWorkspaceToolGatewayMcpServer(prepared, grant());
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "workspace-tool-gateway-test", version: "1" });
+    const client = new Client({
+      name: "workspace-tool-gateway-test",
+      version: "1",
+    });
     await server.connect(serverTransport);
     await client.connect(clientTransport);
     try {
       expect((await client.listTools()).tools).toEqual([]);
       await expect(
-        client.callTool({ name: "inventory__lookup", arguments: { sku: "SKU-1" } }),
+        client.callTool({
+          name: "inventory__lookup",
+          arguments: { sku: "SKU-1" },
+        }),
       ).rejects.toThrow("Tool is not present in the active gateway catalog");
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
@@ -323,6 +357,9 @@ describe("workspace tool gateway adapters", () => {
       authorize: () => {
         order.push("authorize");
       },
+      onPreflight: () => {
+        order.push("preflight");
+      },
     });
     const access = grant();
     const issued: unknown[] = [];
@@ -351,7 +388,7 @@ describe("workspace tool gateway adapters", () => {
       operationId: response.operationId,
       identity: { serverId: "inventory", toolName: "lookup" },
     });
-    expect(order).toEqual(["authorize", "issue"]);
+    expect(order).toEqual(["authorize", "preflight", "issue"]);
   });
 
   test("preflights approval input before issuing a single-use capability", async () => {
@@ -404,11 +441,17 @@ describe("workspace tool gateway adapters", () => {
   });
 
   test("still requires approval for a human-classified non-Site HTTP call", async () => {
-    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const calls: Array<{
+      kind: string;
+      argumentsValue: Record<string, unknown>;
+    }> = [];
     const order: string[] = [];
     const prepared = preparedGateway(calls, "human", {
       authorize: () => {
         order.push("authorize");
+      },
+      onPreflight: () => {
+        order.push("preflight");
       },
       onExecute: () => {
         order.push("execute");
@@ -442,13 +485,58 @@ describe("workspace tool gateway adapters", () => {
     expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
     expect(consumed).toHaveLength(1);
     expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "HUMAN-1" } }]);
-    expect(order).toEqual(["authorize", "authorize", "consume", "execute"]);
+    expect(order).toEqual([
+      "authorize",
+      "preflight",
+      "authorize",
+      "preflight",
+      "consume",
+      "execute",
+    ]);
   });
 
   test("does not consume or issue approval when gateway authorization fails", async () => {
     const prepared = preparedGateway([], "human", {
       authorize: () => {
         throw new HTTPException(403, { message: "tool_not_authorized" });
+      },
+    });
+    const request = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "DENIED-1" },
+    };
+    let consumeCalls = 0;
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        grant(),
+        { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
+        {} as never,
+        async () => {
+          consumeCalls += 1;
+          return true;
+        },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(consumeCalls).toBe(0);
+
+    let issueCalls = 0;
+    await expect(
+      approveWorkspaceToolGatewayCall(prepared, grant(), {} as never, request, async () => {
+        issueCalls += 1;
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(issueCalls).toBe(0);
+  });
+
+  test("does not consume or issue approval when provider preflight fails", async () => {
+    const prepared = preparedGateway([], "human", {
+      onPreflight: () => {
+        throw new HTTPException(403, {
+          message: "provider_authorization_rejected",
+        });
       },
     });
     const request = {
@@ -499,8 +587,21 @@ describe("workspace tool gateway adapters", () => {
   });
 
   test("lets an authorized Site call its immutable allowlist without per-call approval", async () => {
-    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
-    const prepared = preparedGateway(calls, "human");
+    const calls: Array<{
+      kind: string;
+      argumentsValue: Record<string, unknown>;
+    }> = [];
+    const order: string[] = [];
+    let executeTransportMeta: Record<string, unknown> | null | undefined;
+    const prepared = preparedGateway(calls, "human", {
+      onPreflight: () => {
+        order.push("preflight");
+      },
+      onExecute: (context) => {
+        order.push("execute");
+        executeTransportMeta = context.transportMeta;
+      },
+    });
     const access = grant();
     const site = {
       siteArtifactId: "44444444-4444-4444-8444-444444444444",
@@ -508,6 +609,7 @@ describe("workspace tool gateway adapters", () => {
     };
     const authorizationChecks: unknown[] = [];
     const authorizeSiteTool = async (_db: never, _grant: AccessGrant, context: unknown) => {
+      order.push("site_authorize");
       authorizationChecks.push(context);
     };
     const request = {
@@ -538,6 +640,8 @@ describe("workspace tool gateway adapters", () => {
       },
     ]);
     expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SITE-1" } }]);
+    expect(order).toEqual(["site_authorize", "preflight", "execute"]);
+    expect(executeTransportMeta).toEqual({ siteApprovalBypass: true });
   });
 
   test("generates SDK declarations from the catalog exposed by the route adapter", () => {
@@ -586,7 +690,9 @@ describe("workspace tool gateway adapters", () => {
     expect(
       workspaceToolGatewaySettingsForGrant(
         settings,
-        grant({ permissions: ["workspace:read", "documents:search", "files:read"] }),
+        grant({
+          permissions: ["workspace:read", "documents:search", "files:read"],
+        }),
         [{ serverId: "docs", toolName: "search_documents" }],
       ).mcpServers.map((server) => server.id),
     ).toEqual(["docs"]);
@@ -597,9 +703,8 @@ describe("workspace tool gateway adapters", () => {
         inputSchema: { type: "object" },
         source: "mcp",
         approval: "human",
-        connectionBacked: true,
         execute: async () => ({ content: [] }),
       }),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

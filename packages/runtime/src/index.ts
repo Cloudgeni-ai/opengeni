@@ -3426,6 +3426,12 @@ export type LocalMcpServerRegistration = {
   server: MCPServer;
   /** Exact connection identity frozen while constructing the local adapter. */
   resolvedConnectionId?: string;
+  /** Provider-free argument/credential preflight for the current-human gateway. */
+  preflightCall?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
+  ) => Promise<void> | void;
 };
 
 export type ToolPreparationPhase =
@@ -3826,6 +3832,7 @@ export async function prepareAgentTools(
                 local.resolvedConnectionId,
               ),
               tool.eager !== true,
+              local.preflightCall,
             ),
             bestEffort: optional || Boolean(config.connectionRef),
             optional,
@@ -4551,7 +4558,14 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
-          ...(config.connectionRef ? { connectionBacked: true } : {}),
+          ...(server.hasCatalogCallPreflight()
+            ? {
+                preflightCall: async ({ call, context }) =>
+                  await server.preflightCatalogTool(toolName, call.arguments, {
+                    ...(context.signal ? { signal: context.signal } : {}),
+                  }),
+              }
+            : {}),
           execute: async (args, context) =>
             await server.executeCatalogTool(
               toolName,
@@ -6191,6 +6205,9 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly recoverySafeSetup = false,
     private readonly connectorAttachmentAuthority?: PrefixedMcpConnectorAttachmentAuthority,
     private modelToolSchemaAccountingDeferred = false,
+    private readonly catalogCallPreflight?: NonNullable<
+      LocalMcpServerRegistration["preflightCall"]
+    >,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6341,6 +6358,21 @@ export class PrefixedMcpServer implements MCPServer {
 
   unprefixedToolName(toolName: string): string {
     return this.unprefixToolName(toolName);
+  }
+
+  hasCatalogCallPreflight(): boolean {
+    return this.catalogCallPreflight !== undefined;
+  }
+
+  async preflightCatalogTool(
+    unprefixed: string,
+    args: Record<string, unknown>,
+    options?: { signal?: AbortSignal },
+  ): Promise<void> {
+    if (!this.isAllowed(unprefixed)) {
+      throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
+    }
+    await this.catalogCallPreflight?.(unprefixed, args, options);
   }
 
   private async loadAndFreezeTools(): Promise<RuntimeMcpTool[]> {
