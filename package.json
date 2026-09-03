@@ -66,6 +66,7 @@
     "bench:session-event-append": "bun scripts/bench-session-event-append.ts",
     "bench:agent-session-authorization": "bun scripts/bench-agent-session-authorization.ts",
     "bench:model-input-memory": "bun scripts/bench-model-input-memory.ts",
+    "bench:model-dispatch-preparation": "bun scripts/bench-model-dispatch-preparation.ts",
     "bench:long-turn-memory": "bun scripts/bench-long-turn-memory.ts",
     "bench:process-memory": "bun scripts/bench-process-memory.ts",
     "bench:observability-series": "bun scripts/bench-observability-series.ts",

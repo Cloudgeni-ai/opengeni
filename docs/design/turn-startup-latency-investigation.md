@@ -54,6 +54,45 @@ All synthetic calls use `codex/gpt-5.6-luna`, low reasoning, a managed Docker
 sandbox, no file resources, and the same `Reply with exactly ready.` prompt.
 Model/provider time is excluded from the pre-network comparisons.
 
+### Four-repository warm-sandbox root cause (2026-09-03)
+
+One staging turn spent 13.771 seconds in the broad model-request preparation
+phase. Sandbox resume, rig admission, and four repository clones had completed
+10.576 seconds before the provider request was dispatched. Provider response
+time is excluded from this finding.
+
+The remaining gap was repository-skill discovery in the SDK system-prompt path.
+Attaching four repositories declares ten search roots: workspace and each
+repository, with both `.agents/skills` and `.claude/skills`. The
+`WorkspaceSkillsCapability.instructions()` implementation inspected those roots
+through the routed sandbox only when the SDK rendered the first model prompt.
+The reads were sequential, so remote filesystem and first-route costs landed
+after the repository-ready event and directly blocked provider dispatch.
+
+The fix makes repository skill metadata part of repository readiness:
+
+- discovery runs on the already-pinned setup session immediately after clone;
+- the exact promise/result is shared with every SDK capability clone for that
+  agent, so first-call prompt rendering performs no sandbox reads;
+- independent root and frontmatter reads run concurrently on fallback paths;
+- connected machines and repository configurations without a platform clone
+  retain the safe live-discovery fallback.
+
+The repeatable `bench:model-dispatch-preparation` benchmark uses 267 history
+items (approximately 250k tokens), four repositories, ten skill roots, and a
+25-millisecond synthetic sandbox-read delay. Seven measured warm samples after
+one warm-up produced:
+
+| Path | First-call p50 | First-call p95 | Model-time directory probes |
+| --- | ---: | ---: | ---: |
+| Unprepared SDK provided session | 32.44 ms | 33.39 ms | 70 across 7 samples |
+| OpenGeni repository-prepared session | 5.61 ms | 7.19 ms | 0 across 7 samples |
+
+Repository setup, including the parallel discovery wave, measured 27.06 ms p50
+under the same synthetic delay. The important boundary is that post-repository
+model preparation is now CPU-only and approximately zero relative to the prior
+10.576-second routed-sandbox gap.
+
 ### Six interleaved samples per tool condition before the cache experiment
 
 | Phase | Minimal tools | Normal 80-tool UI surface | Normal penalty |
