@@ -391,6 +391,12 @@ const budgets = {
   // across 31 files. Advance only the raw whole-KiB envelope, retaining 1,778
   // bytes of headroom; gzip, file count, initial, per-file, lazy, and CSS caps
   // remain fixed.
+  // The sidebar-density head and untouched current main both measure 2,279,505
+  // raw bytes in the configured-API browser acceptance build. The prior
+  // 2,226-KiB envelope was therefore a stale baseline by 81 bytes. Advance only
+  // the policy-derived raw envelope to 2,228 KiB, retaining 1,967 bytes of
+  // headroom; gzip, file count, initial, per-file, lazy, and CSS caps remain
+  // fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
