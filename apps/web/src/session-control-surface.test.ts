@@ -123,6 +123,25 @@ describe("session control surface architecture", () => {
     expect(route).toContain("const projectSelection = newSessionProjectSelection(");
   });
 
+  test("keeps manual folder selection from retriggering launch selection", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    const selectionStart = route.indexOf("const selectedChannelIdRef = useRef(selectedChannelId);");
+    const selectionEnd = route.indexOf(
+      "useEffect(() => {\n    resetSessionView();",
+      selectionStart,
+    );
+    const selection = route.slice(selectionStart, selectionEnd);
+
+    expect(selectionStart).toBeGreaterThan(-1);
+    expect(selectionEnd).toBeGreaterThan(selectionStart);
+    expect(selection).toContain("const selectProject = useLatestCallback(");
+    expect(selection).toContain("const previousChannelId = selectedChannelIdRef.current;");
+    expect(selection).toContain("setSelectedProjectChannelId(channelId);");
+    expect(selection).not.toContain("const selectProject = useCallback(");
+    expect(selection).not.toContain("[defaultSandboxBackend, selectedChannelId, selectionHistory]");
+    expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
+  });
+
   test("keeps Variable Sets editable at create time and beside an established composer", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),

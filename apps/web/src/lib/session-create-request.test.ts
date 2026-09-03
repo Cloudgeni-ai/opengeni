@@ -485,7 +485,62 @@ describe("successful-create selection history", () => {
     });
   });
 
-  test("preserves explicit compute intent within a project that has no history", () => {
+  test("resets hydrated compute with unknown or different project provenance", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const projectB = "00000000-0000-4000-8000-000000000032";
+    const historyWithoutTargets = {
+      projects: history.projects.filter(
+        (candidate) => candidate.channelId !== null && candidate.channelId !== projectB,
+      ),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutTargets, null, {
+        channelId: undefined,
+        compute: hydratedCompute,
+      }),
+    ).toEqual({
+      channelId: null,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(
+        historyWithoutTargets,
+        projectB,
+        { channelId: project, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("remembered project history wins over hydrated compute with unknown provenance", () => {
+    expect(
+      newSessionProjectSelection(history, project, {
+        channelId: undefined,
+        compute: {
+          kind: "machine",
+          sandboxId: machineB,
+          folder: { kind: "path", path: "/workspace/unknown-project" },
+        },
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: {
+        kind: "machine",
+        sandboxId: machineA,
+        folder: { kind: "path", path: "/workspace/opengeni" },
+      },
+    });
+  });
+
+  test("preserves explicit compute intent with established same-project provenance", () => {
     const explicitDefaultSelection = {
       channelId: null,
       compute: {

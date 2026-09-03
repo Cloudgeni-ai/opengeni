@@ -213,6 +213,11 @@ function SessionsIndexRouteContent({
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
     launchChannelId ?? null,
   );
+  const selectedChannelIdRef = useRef(selectedChannelId);
+  const setSelectedProjectChannelId = useCallback((channelId: string | null) => {
+    selectedChannelIdRef.current = channelId;
+    setSelectedChannelId(channelId);
+  }, []);
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
   });
@@ -556,23 +561,21 @@ function SessionsIndexRouteContent({
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
   const [createComposerFocusGen, setCreateComposerFocusGen] = useState(0);
-  const selectProject = useCallback(
-    (channelId: string | null) => {
-      setSelectedChannelId(channelId);
-      setDraft((current) => {
-        const selection = newSessionProjectSelection(
-          selectionHistory,
-          channelId,
-          { channelId: selectedChannelId, compute: current.compute },
-          defaultSandboxBackend,
-        );
-        return selection.compute === current.compute
-          ? current
-          : { ...current, compute: selection.compute };
-      });
-    },
-    [defaultSandboxBackend, selectedChannelId, selectionHistory],
-  );
+  const selectProject = useLatestCallback((channelId: string | null) => {
+    const previousChannelId = selectedChannelIdRef.current;
+    setSelectedProjectChannelId(channelId);
+    setDraft((current) => {
+      const selection = newSessionProjectSelection(
+        selectionHistory,
+        channelId,
+        { channelId: previousChannelId, compute: current.compute },
+        defaultSandboxBackend,
+      );
+      return selection.compute === current.compute
+        ? current
+        : { ...current, compute: selection.compute };
+    });
+  });
 
   useEffect(() => {
     resetSessionView();
@@ -603,10 +606,10 @@ function SessionsIndexRouteContent({
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
     }
-    setSelectedChannelId(project.id);
+    selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft]);
+  }, [channelsQuery, projectNameDraft, selectProject]);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -717,11 +720,13 @@ function SessionsIndexRouteContent({
       const projectSelection = newSessionProjectSelection(
         history,
         channelId,
-        { channelId, compute: restored.compute },
+        // The durable draft does not identify which project its compute/path
+        // came from. Do not assign the launch target as invented provenance.
+        { channelId: undefined, compute: restored.compute },
         defaultSandboxBackend,
       );
       setSelectionHistory(history);
-      setSelectedChannelId(projectSelection.channelId);
+      setSelectedProjectChannelId(projectSelection.channelId);
       setDraft({ ...restored, compute: projectSelection.compute });
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
@@ -754,6 +759,7 @@ function SessionsIndexRouteContent({
       defaultFirstPartyMcpTools,
       defaultSandboxBackend,
       launchChannelId,
+      setSelectedProjectChannelId,
       workspaceDefaultToolIdsForHydration,
     ],
   );

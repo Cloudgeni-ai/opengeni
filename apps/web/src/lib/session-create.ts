@@ -96,7 +96,11 @@ export function rememberedProjectCompute(
 export function newSessionProjectSelection(
   history: NewSessionSelectionHistory,
   channelId: string | null,
-  currentSelection: { channelId: string | null; compute: ComputeTarget },
+  currentSelection: {
+    /** Undefined means the current compute came from a draft with unknown project provenance. */
+    channelId: string | null | undefined;
+    compute: ComputeTarget;
+  },
   defaultSandboxBackend?: SandboxBackend,
 ): { channelId: string | null; compute: ComputeTarget } {
   return {
