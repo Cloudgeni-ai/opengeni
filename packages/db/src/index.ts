@@ -302,6 +302,7 @@ import {
   or,
   sql,
   type SQL,
+  type SQLWrapper,
 } from "drizzle-orm";
 import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import {
@@ -35552,6 +35553,7 @@ export type SessionEventPage = {
 const POSTGRES_INT_MAX = 2_147_483_647;
 export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
 const SESSION_EVENT_DB_BATCH_SIZE = 64;
+const SESSION_EVENT_INTERACTIVE_PAGE_MAX = 255;
 
 type SessionEventProjectionRow = {
   id: string;
@@ -35576,6 +35578,10 @@ type SessionEventProjectionMetadataRow = {
   sequence: number;
   /** Conservative server-side size including columns omitted from the public event. */
   transferBytes: number;
+};
+
+type SessionEventProjectionSource = {
+  [Key in keyof SessionEventProjectionRow]: SQLWrapper;
 };
 
 /**
@@ -35610,9 +35616,17 @@ export async function listSessionEventPage(
     SESSION_EVENT_ENVELOPE_MAX_BYTES + 2,
     normalizeEventLimit(options.maxBytes, SESSION_EVENT_DB_PAGE_MAX_BYTES),
   );
+  // Interactive browser pages intentionally stop at 255 rows. Carry their
+  // one-row continuation lookahead in the same indexed query so latency is not
+  // multiplied by transaction-pool or cross-region round trips. Larger audit
+  // reads retain the smaller default batch to preserve their memory envelope.
+  const defaultBatchSize =
+    requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX
+      ? requestedLimit + 1
+      : SESSION_EVENT_DB_BATCH_SIZE;
   const batchSize = Math.max(
     1,
-    Math.min(256, normalizeEventLimit(options.batchSize, SESSION_EVENT_DB_BATCH_SIZE)),
+    Math.min(256, normalizeEventLimit(options.batchSize, defaultBatchSize)),
   );
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
@@ -35674,63 +35688,161 @@ export async function listSessionEventPage(
       let sourceRowsFullyConsumed = true;
       let databaseReadProjected = false;
       if (payloadMode === "full") {
-        // Plan the page from bounded metadata before selecting any canonical
-        // payload. row_to_json includes private storage columns omitted by the
-        // public event, so this conservatively bounds payload transfer without
-        // moving an oversized legacy value through postgres.js.
-        const metadataRows = await scopedDb
-          .select(sessionEventProjectionMetadataSelect())
-          .from(schema.sessionEvents)
-          .where(and(...filters))
-          .orderBy(ordering)
-          .limit(queryLimit);
-        sourceRowCount = metadataRows.length;
-        if (metadataRows.length === 0) break;
-
-        const exactIds: string[] = [];
-        let projectId: string | null = null;
-        let estimatedBytes = bytes;
-        for (const metadata of metadataRows) {
-          if (events.length + exactIds.length >= requestedLimit) {
+        if (
+          requestedLimit <= SESSION_EVENT_INTERACTIVE_PAGE_MAX &&
+          options.batchSize === undefined
+        ) {
+          const candidateRows = scopedDb.$with("session_event_page_candidates").as(
+            scopedDb
+              .select({
+                ...sessionEventProjectionSelect("full"),
+                transferBytes:
+                  sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`.as(
+                    "transfer_bytes",
+                  ),
+              })
+              .from(schema.sessionEvents)
+              .where(and(...filters))
+              .orderBy(ordering)
+              .limit(queryLimit),
+          );
+          const candidateOrdering =
+            options.authoritativeLatest || direction === "before"
+              ? sql`${candidateRows.sequence} desc`
+              : sql`${candidateRows.sequence} asc`;
+          const rankedRows = scopedDb.$with("session_event_page_ranked").as(
+            scopedDb
+              .select({
+                ...sessionEventProjectionSelect("full", {}, candidateRows),
+                transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
+                firstTransferBytes:
+                  sql<number>`first_value(${candidateRows.transferBytes}) over (order by ${candidateOrdering})`.as(
+                    "first_transfer_bytes",
+                  ),
+                rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
+                  "row_number",
+                ),
+                sourceRowCount: sql<number>`count(*) over ()::int`.as("source_row_count"),
+                cumulativeTransferBytes:
+                  sql<number>`sum(${candidateRows.transferBytes} + 1) over (order by ${candidateOrdering})`.as(
+                    "cumulative_transfer_bytes",
+                  ),
+              })
+              .from(candidateRows),
+          );
+          const remainingCount = Math.max(1, requestedLimit - events.length);
+          const availableTransferBytes = Math.max(
+            1,
+            maxBytes - bytes + (events.length === 0 ? 1 : 0),
+          );
+          const firstRowExceedsTransferBudget = sql<boolean>`
+            ${rankedRows.firstTransferBytes} + 1 > ${availableTransferBytes}`;
+          const boundedCumulativeTransferBytes = sql<number>`case
+            when ${firstRowExceedsTransferBudget}
+              then ${rankedRows.cumulativeTransferBytes}
+                - ${rankedRows.firstTransferBytes}
+                + ${SESSION_EVENT_ENVELOPE_MAX_BYTES}
+            else ${rankedRows.cumulativeTransferBytes}
+          end`;
+          const projectionCondition = sql<boolean>`${rankedRows.rowNumber} = 1
+            and ${firstRowExceedsTransferBudget}`;
+          const selectedRows = await scopedDb
+            .with(candidateRows, rankedRows)
+            .select({
+              ...sessionEventProjectionSelect(
+                "full",
+                {
+                  databaseReadProjection: projectionCondition,
+                  originalEventBytes: rankedRows.transferBytes,
+                },
+                rankedRows,
+              ),
+              sourceRowCount: rankedRows.sourceRowCount,
+              databaseReadProjected: projectionCondition.as("database_read_projected"),
+            })
+            .from(rankedRows)
+            .where(
+              and(
+                lte(rankedRows.rowNumber, remainingCount),
+                or(
+                  lte(boundedCumulativeTransferBytes, availableTransferBytes),
+                  eq(rankedRows.rowNumber, 1),
+                ),
+              ),
+            )
+            .orderBy(asc(rankedRows.rowNumber));
+          sourceRowCount = Number(selectedRows[0]?.sourceRowCount ?? 0);
+          rows = selectedRows.map(
+            ({ sourceRowCount: _sourceRowCount, databaseReadProjected: _projected, ...row }) => row,
+          );
+          sourceRowsFullyConsumed = rows.length >= sourceRowCount;
+          databaseReadProjected = selectedRows.some((row) => row.databaseReadProjected);
+          if (databaseReadProjected) {
+            fullPayloadsExact = false;
+          }
+          if (!sourceRowsFullyConsumed) {
             hasMore = true;
-            truncatedBy = "count";
-            break;
+            truncatedBy = rows.length >= remainingCount ? "count" : "bytes";
           }
-          const separatorBytes = events.length + exactIds.length === 0 ? 0 : 1;
-          const transferBytes = Number(metadata.transferBytes);
-          if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
-            if (events.length === 0 && exactIds.length === 0) {
-              projectId = metadata.id;
-            } else {
-              hasMore = true;
-              truncatedBy = "bytes";
-            }
-            break;
-          }
-          exactIds.push(metadata.id);
-          estimatedBytes += separatorBytes + transferBytes;
-        }
-        sourceRowsFullyConsumed =
-          exactIds.length + (projectId === null ? 0 : 1) >= metadataRows.length;
-
-        if (projectId !== null) {
-          rows = await scopedDb
-            .select(sessionEventProjectionSelect("full", { databaseReadProjection: true }))
-            .from(schema.sessionEvents)
-            .where(and(...filters, eq(schema.sessionEvents.id, projectId)))
-            .orderBy(ordering)
-            .limit(1);
-          fullPayloadsExact = false;
-          databaseReadProjected = true;
-        } else if (exactIds.length > 0) {
-          rows = await scopedDb
-            .select(sessionEventProjectionSelect("full"))
-            .from(schema.sessionEvents)
-            .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
-            .orderBy(ordering)
-            .limit(exactIds.length);
         } else {
-          rows = [];
+          // Plan the page from bounded metadata before selecting any canonical
+          // payload. row_to_json includes private storage columns omitted by the
+          // public event, so this conservatively bounds payload transfer without
+          // moving an oversized legacy value through postgres.js.
+          const metadataRows = await scopedDb
+            .select(sessionEventProjectionMetadataSelect())
+            .from(schema.sessionEvents)
+            .where(and(...filters))
+            .orderBy(ordering)
+            .limit(queryLimit);
+          sourceRowCount = metadataRows.length;
+          if (metadataRows.length === 0) break;
+
+          const exactIds: string[] = [];
+          let projectId: string | null = null;
+          let estimatedBytes = bytes;
+          for (const metadata of metadataRows) {
+            if (events.length + exactIds.length >= requestedLimit) {
+              hasMore = true;
+              truncatedBy = "count";
+              break;
+            }
+            const separatorBytes = events.length + exactIds.length === 0 ? 0 : 1;
+            const transferBytes = Number(metadata.transferBytes);
+            if (estimatedBytes + separatorBytes + transferBytes > maxBytes) {
+              if (events.length === 0 && exactIds.length === 0) {
+                projectId = metadata.id;
+              } else {
+                hasMore = true;
+                truncatedBy = "bytes";
+              }
+              break;
+            }
+            exactIds.push(metadata.id);
+            estimatedBytes += separatorBytes + transferBytes;
+          }
+          sourceRowsFullyConsumed =
+            exactIds.length + (projectId === null ? 0 : 1) >= metadataRows.length;
+
+          if (projectId !== null) {
+            rows = await scopedDb
+              .select(sessionEventProjectionSelect("full", { databaseReadProjection: true }))
+              .from(schema.sessionEvents)
+              .where(and(...filters, eq(schema.sessionEvents.id, projectId)))
+              .orderBy(ordering)
+              .limit(1);
+            fullPayloadsExact = false;
+            databaseReadProjected = true;
+          } else if (exactIds.length > 0) {
+            rows = await scopedDb
+              .select(sessionEventProjectionSelect("full"))
+              .from(schema.sessionEvents)
+              .where(and(...filters, inArray(schema.sessionEvents.id, exactIds)))
+              .orderBy(ordering)
+              .limit(exactIds.length);
+          } else {
+            rows = [];
+          }
         }
       } else {
         rows = await scopedDb
@@ -35811,27 +35923,28 @@ function sessionEventProjectionMetadataSelect() {
 
 function sessionEventProjectionSelect(
   payloadMode: SessionEventPayloadMode = "full",
-  options: { databaseReadProjection?: boolean } = {},
+  options: { databaseReadProjection?: boolean | SQL; originalEventBytes?: SQLWrapper } = {},
+  source: SessionEventProjectionSource = schema.sessionEvents,
 ) {
   const typeInvalid = sql`(
-    octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
-    or position(E'\\n' in ${schema.sessionEvents.type}) > 0
-    or position(E'\\r' in ${schema.sessionEvents.type}) > 0
+    octet_length(${source.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
+    or position(E'\\n' in ${source.type}) > 0
+    or position(E'\\r' in ${source.type}) > 0
   )`;
   const clientEventIdInvalid = sql`(
-    ${schema.sessionEvents.clientEventId} is not null
-    and octet_length(${schema.sessionEvents.clientEventId})
+    ${source.clientEventId} is not null
+    and octet_length(${source.clientEventId})
       > ${SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES}
   )`;
   const turnAssociationInvalid = sql`(
-    ${schema.sessionEvents.turnAssociation} is not null
-    and ${schema.sessionEvents.turnAssociation} not in (
+    ${source.turnAssociation} is not null
+    and ${source.turnAssociation} not in (
       'current', 'late_rejected', 'duplicate'
     )
   )`;
   const duplicateReasonInvalid = sql`(
-    ${schema.sessionEvents.duplicateReason} is not null
-    and octet_length(${schema.sessionEvents.duplicateReason})
+    ${source.duplicateReason} is not null
+    and octet_length(${source.duplicateReason})
       > ${SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES}
   )`;
   const envelopeInvalid = sql`(
@@ -35840,48 +35953,48 @@ function sessionEventProjectionSelect(
   )`;
   const projectedType = sql<string>`case
     when ${typeInvalid} then 'session.event.envelope_omitted'
-    else ${schema.sessionEvents.type}
+    else ${source.type}
   end`;
   const projectedClientEventId = sql<string | null>`case
-    when ${clientEventIdInvalid} then left(${schema.sessionEvents.clientEventId}, 256)
-    else ${schema.sessionEvents.clientEventId}
+    when ${clientEventIdInvalid} then left(${source.clientEventId}, 256)
+    else ${source.clientEventId}
   end`;
   const projectedTurnAssociation = sql<string | null>`case
     when ${turnAssociationInvalid} then null
-    else ${schema.sessionEvents.turnAssociation}
+    else ${source.turnAssociation}
   end`;
   const projectedDuplicateReason = sql<string | null>`case
-    when ${duplicateReasonInvalid} then left(${schema.sessionEvents.duplicateReason}, 1024)
-    else ${schema.sessionEvents.duplicateReason}
+    when ${duplicateReasonInvalid} then left(${source.duplicateReason}, 1024)
+    else ${source.duplicateReason}
   end`;
   const projectedEnvelopeFields = sql`(
     '[]'::jsonb
     || case when ${typeInvalid} then jsonb_build_array(jsonb_build_object(
       'field', 'type',
-      'originalBytes', octet_length(${schema.sessionEvents.type}),
+      'originalBytes', octet_length(${source.type}),
       'deliveredBytes', octet_length(${projectedType})
     )) else '[]'::jsonb end
     || case when ${clientEventIdInvalid} then jsonb_build_array(jsonb_build_object(
       'field', 'clientEventId',
-      'originalBytes', octet_length(${schema.sessionEvents.clientEventId}),
+      'originalBytes', octet_length(${source.clientEventId}),
       'deliveredBytes', octet_length(${projectedClientEventId})
     )) else '[]'::jsonb end
     || case when ${turnAssociationInvalid} then jsonb_build_array(jsonb_build_object(
       'field', 'turnAssociation',
-      'originalBytes', octet_length(${schema.sessionEvents.turnAssociation}),
+      'originalBytes', octet_length(${source.turnAssociation}),
       'deliveredBytes', 0
     )) else '[]'::jsonb end
     || case when ${duplicateReasonInvalid} then jsonb_build_array(jsonb_build_object(
       'field', 'duplicateReason',
-      'originalBytes', octet_length(${schema.sessionEvents.duplicateReason}),
+      'originalBytes', octet_length(${source.duplicateReason}),
       'deliveredBytes', octet_length(${projectedDuplicateReason})
     )) else '[]'::jsonb end
   )`;
   const projectedPayload = sql<unknown>`case
     when ${envelopeInvalid} then jsonb_build_object(
       'preview', '[legacy event envelope normalized at bounded database read boundary]',
-      'originalEventBytes', octet_length(row_to_json(${schema.sessionEvents})::text),
-      'originalType', left(${schema.sessionEvents.type}, 64),
+      'originalEventBytes', ${options.originalEventBytes ?? sql`octet_length(row_to_json(${schema.sessionEvents})::text)`},
+      'originalType', left(${source.type}, 64),
       'envelopeProjection', jsonb_build_object(
         'truncated', true,
         'surface', 'database_read_projection',
@@ -35889,42 +36002,48 @@ function sessionEventProjectionSelect(
       ),
       'fullEvidence', jsonb_build_object('available', false, 'reason', 'not_retained')
     )
-    else opengeni_private.project_session_event_payload(${schema.sessionEvents.payload})
+    else opengeni_private.project_session_event_payload(${source.payload})
   end`;
   const databaseReadProjectedPayload = sql<unknown>`case
     when ${envelopeInvalid} then ${projectedPayload}
     else jsonb_build_object(
       'preview', jsonb_build_object(
-        'head', left(${schema.sessionEvents.payload}::text, 2048),
+        'head', left(${source.payload}::text, 2048),
         'omission', '[middle payload bytes omitted at bounded database read boundary]',
-        'tail', right(${schema.sessionEvents.payload}::text, 2048)
+        'tail', right(${source.payload}::text, 2048)
       ),
       'truncation', jsonb_build_object(
         'truncated', true,
         'surface', 'database_read_projection',
         'reason', 'payload_bytes_exceeded',
-        'originalBytes', octet_length(${schema.sessionEvents.payload}::text),
+        'originalBytes', octet_length(${source.payload}::text),
         'deliveredBytes', 0,
-        'omittedBytes', octet_length(${schema.sessionEvents.payload}::text),
+        'omittedBytes', octet_length(${source.payload}::text),
         'estimatedOriginalTokens', ceil(
-          octet_length(${schema.sessionEvents.payload}::text) / 4.0
+          octet_length(${source.payload}::text) / 4.0
         )::integer,
         'estimatedDeliveredTokens', 0,
         'fullEvidence', jsonb_build_object('available', false, 'reason', 'not_retained'),
         'details', jsonb_build_array(jsonb_build_object(
           'path', '$',
           'kind', 'object',
-          'originalBytes', octet_length(${schema.sessionEvents.payload}::text)
+          'originalBytes', octet_length(${source.payload}::text)
         ))
       )
     )
   end`;
   const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
+  const databaseReadProjection = options.databaseReadProjection ?? false;
   const selectedPayload =
     payloadMode === "full"
-      ? options.databaseReadProjection
-        ? databaseReadProjectedPayload
-        : schema.sessionEvents.payload
+      ? databaseReadProjection === false
+        ? sql<unknown>`${source.payload}`
+        : databaseReadProjection === true
+          ? databaseReadProjectedPayload
+          : sql<unknown>`case
+            when ${databaseReadProjection} then ${databaseReadProjectedPayload}
+            else ${source.payload}
+          end`
       : payloadMode === "none"
         ? sql<unknown>`jsonb_build_object(
           '_monitoring', jsonb_build_object(
@@ -35947,36 +36066,63 @@ function sessionEventProjectionSelect(
         end`;
 
   return {
-    id: schema.sessionEvents.id,
-    workspaceId: schema.sessionEvents.workspaceId,
-    sessionId: schema.sessionEvents.sessionId,
-    sequence: schema.sessionEvents.sequence,
+    id: sql<string>`${source.id}`.as("id"),
+    workspaceId: sql<string>`${source.workspaceId}`.as("workspace_id"),
+    sessionId: sql<string>`${source.sessionId}`.as("session_id"),
+    sequence: sql<number>`${source.sequence}`.as("sequence"),
     type:
-      payloadMode === "full" && !options.databaseReadProjection
-        ? schema.sessionEvents.type
-        : projectedType,
-    payload: selectedPayload,
+      payloadMode === "full" && databaseReadProjection === false
+        ? sql<string>`${source.type}`.as("type")
+        : payloadMode === "full" && databaseReadProjection !== true
+          ? sql<string>`case
+            when ${databaseReadProjection} then ${projectedType}
+            else ${source.type}
+          end`.as("type")
+          : projectedType.as("type"),
+    payload: selectedPayload.as("payload"),
     payloadCodecVersion:
-      payloadMode === "full" && !options.databaseReadProjection
-        ? schema.sessionEvents.payloadCodecVersion
-        : sql<number | null>`null`,
-    occurredAt: schema.sessionEvents.occurredAt,
+      payloadMode === "full" && databaseReadProjection === false
+        ? sql<number | null>`${source.payloadCodecVersion}`.as("payload_codec_version")
+        : payloadMode === "full" && databaseReadProjection !== true
+          ? sql<number | null>`case
+            when ${databaseReadProjection} then null
+            else ${source.payloadCodecVersion}
+          end`.as("payload_codec_version")
+          : sql<number | null>`null`.as("payload_codec_version"),
+    occurredAt: sql<Date>`${source.occurredAt}`.as("occurred_at"),
     clientEventId:
-      payloadMode === "full" && !options.databaseReadProjection
-        ? schema.sessionEvents.clientEventId
-        : projectedClientEventId,
-    turnId: schema.sessionEvents.turnId,
-    turnGeneration: schema.sessionEvents.turnGeneration,
-    turnAttemptId: schema.sessionEvents.turnAttemptId,
+      payloadMode === "full" && databaseReadProjection === false
+        ? sql<string | null>`${source.clientEventId}`.as("client_event_id")
+        : payloadMode === "full" && databaseReadProjection !== true
+          ? sql<string | null>`case
+            when ${databaseReadProjection} then ${projectedClientEventId}
+            else ${source.clientEventId}
+          end`.as("client_event_id")
+          : projectedClientEventId.as("client_event_id"),
+    turnId: sql<string | null>`${source.turnId}`.as("turn_id"),
+    turnGeneration: sql<number | null>`${source.turnGeneration}`.as("turn_generation"),
+    turnAttemptId: sql<string | null>`${source.turnAttemptId}`.as("turn_attempt_id"),
     turnAssociation:
-      payloadMode === "full" && !options.databaseReadProjection
-        ? schema.sessionEvents.turnAssociation
-        : projectedTurnAssociation,
-    duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
+      payloadMode === "full" && databaseReadProjection === false
+        ? sql<string | null>`${source.turnAssociation}`.as("turn_association")
+        : payloadMode === "full" && databaseReadProjection !== true
+          ? sql<string | null>`case
+            when ${databaseReadProjection} then ${projectedTurnAssociation}
+            else ${source.turnAssociation}
+          end`.as("turn_association")
+          : projectedTurnAssociation.as("turn_association"),
+    duplicateOfEventId: sql<string | null>`${source.duplicateOfEventId}`.as(
+      "duplicate_of_event_id",
+    ),
     duplicateReason:
-      payloadMode === "full" && !options.databaseReadProjection
-        ? schema.sessionEvents.duplicateReason
-        : projectedDuplicateReason,
+      payloadMode === "full" && databaseReadProjection === false
+        ? sql<string | null>`${source.duplicateReason}`.as("duplicate_reason")
+        : payloadMode === "full" && databaseReadProjection !== true
+          ? sql<string | null>`case
+            when ${databaseReadProjection} then ${projectedDuplicateReason}
+            else ${source.duplicateReason}
+          end`.as("duplicate_reason")
+          : projectedDuplicateReason.as("duplicate_reason"),
   };
 }
 
