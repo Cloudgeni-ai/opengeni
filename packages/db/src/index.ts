@@ -58508,13 +58508,22 @@ export async function evaluateGoalContinuation(
               "context_compaction_failed",
             )
           : false;
-        // A provider could not produce a durable checkpoint for the latest
-        // inference. Re-running the unchanged active history autonomously only
-        // repeats the same failure. Keep the active goal intact but inert until
-        // a human/API prompt, agent Steer instruction, or explicit Compact
-        // attempt creates newer truth. Ordinary internal updates stay pending;
-        // this never creates queue work or consumes counters.
-        if (contextCompactionFailure) {
+        const codexFailoverExhausted = latestFinished
+          ? await turnHasFailureCodeTx(
+              tx as unknown as Database,
+              input.workspaceId,
+              input.sessionId,
+              latestFinished.id,
+              "codex_credential_failover_exhausted",
+            )
+          : false;
+        // Some terminal failures make unchanged autonomous input unsafe:
+        // checkpoint failure would repeat the same inference without durable
+        // state, while bounded Codex failover exhaustion would create a fresh
+        // turn and reset the per-turn account budget. Keep the active goal
+        // intact but inert until newer human/API/machine work creates truth.
+        // This never creates queue work or consumes continuation counters.
+        if (contextCompactionFailure || codexFailoverExhausted) {
           return { decision: "none" } as const;
         }
         // `autoContinuations` counts only CONSECUTIVE synthesized continuations
@@ -58924,6 +58933,22 @@ export async function materializeGoalContinuation(
           ))
         ) {
           return { action: "queue", events: [] } as const;
+        }
+
+        // A bounded Codex rotation walk is terminal for this exact accepted
+        // input. Do not let the invariant-repair path below manufacture a new
+        // goal wake from equal revisions: that synthesized turn would reset
+        // the per-turn failover budget. New pending input already won above,
+        // and a later externally driven turn becomes the newest finished truth.
+        if (
+          await latestFinishedTurnHasFailureCodeTx(
+            tx,
+            input.workspaceId,
+            input.sessionId,
+            "codex_credential_failover_exhausted",
+          )
+        ) {
+          return { action: "none", events: [] } as const;
         }
 
         // A hold whose deadline has just passed is due now: the evaluation

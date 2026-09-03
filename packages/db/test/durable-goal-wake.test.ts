@@ -16,6 +16,7 @@ import {
   createDb,
   createSession,
   ensureCodexRotationSettings,
+  evaluateGoalContinuation,
   getSessionGoalWithContinuation,
   holdSessionGoalContinuationWithEvent,
   initializeSessionStartAtomically,
@@ -1045,11 +1046,50 @@ describe("durable active-goal wake", () => {
       usage: 0,
       events: 0,
     });
-    expect((await materialize(ctx)).action).not.toBe("continue");
+    expect(
+      await evaluateGoalContinuation(client.db, {
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+      }),
+    ).toEqual({ decision: "none" });
+    expect(await materialize(ctx)).toEqual({ action: "none", events: [] });
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 0,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
     expect(
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.status,
     ).toBe("active");
+
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          subjectId: ctx.grant.subjectId,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "new work after bounded Codex failover exhaustion",
+          resources: [],
+          reasoningEffortFallback: "low",
+          source: "user",
+        }),
+      ),
+    );
+    expect(
+      await evaluateGoalContinuation(client.db, {
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+      }),
+    ).toEqual({ decision: "queue" });
+    expect((await materialize(ctx)).action).toBe("queue");
   });
 
   test("concurrent evaluators and a lost COMMIT response materialize one update, event, and usage row", async () => {
