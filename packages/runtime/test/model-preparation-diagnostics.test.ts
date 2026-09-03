@@ -60,6 +60,11 @@ describe("model preparation diagnostics", () => {
         });
         markModelPreparationFirstSandboxOperation(0.001);
         recordModelPreparationMeasurement({
+          phase: "sandbox_first_routed_provider_operation",
+          outcome: "completed",
+          durationSeconds: 0.001,
+        });
+        recordModelPreparationMeasurement({
           phase: "repository_skill_discovery",
           outcome: "completed",
           durationSeconds: 0.01,
@@ -76,6 +81,7 @@ describe("model preparation diagnostics", () => {
     expect(measurements.map(({ phase }) => phase)).toEqual([
       "runner_before_mcp_tools",
       "mcp_tools_snapshot",
+      "sandbox_first_routed_provider_operation",
       "mcp_tools_before_repository_skill_discovery",
       "repository_skill_discovery",
       "repository_skill_discovery_before_input_filter",
@@ -85,6 +91,14 @@ describe("model preparation diagnostics", () => {
       outcome: "completed",
       count: 10,
     });
+    const discoverySeconds = measurements.find(
+      ({ phase }) => phase === "repository_skill_discovery",
+    )!.durationSeconds;
+    const routedSandboxSeconds = measurements.find(
+      ({ phase }) => phase === "sandbox_first_routed_provider_operation",
+    )!.durationSeconds;
+    expect(discoverySeconds).toBeLessThan(0.01);
+    expect(discoverySeconds + routedSandboxSeconds).toBeLessThanOrEqual(0.0105);
     expect(
       measurements.some(
         ({ phase }) =>

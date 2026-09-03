@@ -54,6 +54,7 @@ type ModelPreparationObservation = {
   startedAt: number;
   mcpToolsEndedAt?: number;
   repositorySkillDiscoveryEndedAt?: number;
+  firstSandboxOperationStartedAt?: number;
   firstSandboxOperationEndedAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
@@ -138,6 +139,7 @@ export function markModelPreparationFirstSandboxOperation(durationSeconds: numbe
     if (!observation || observation.firstSandboxOperationEndedAt !== undefined) return;
     const endedAt = performance.now();
     const startedAt = endedAt - Math.max(0, durationSeconds) * 1_000;
+    observation.firstSandboxOperationStartedAt = startedAt;
     observation.firstSandboxOperationEndedAt = endedAt;
     if (!observation.runnerGapRecorded) {
       observation.runnerGapRecorded = true;
@@ -159,6 +161,7 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
 
     const endedAt = performance.now();
     const startedAt = endedAt - measurement.durationSeconds * 1_000;
+    let reportedMeasurement = measurement;
     if (measurement.phase === "mcp_tools_snapshot") {
       if (!observation.runnerGapRecorded) {
         observation.runnerGapRecorded = true;
@@ -208,6 +211,24 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
           });
         }
       }
+      if (
+        observation.firstSandboxOperationStartedAt !== undefined &&
+        observation.firstSandboxOperationEndedAt !== undefined
+      ) {
+        // Repository discovery retains its wall-clock boundaries for the
+        // surrounding gaps, but its published leaf must exclude the first
+        // routed operation, whose provisioning and provider work are emitted
+        // separately by the worker.
+        const overlapMs = Math.max(
+          0,
+          Math.min(endedAt, observation.firstSandboxOperationEndedAt) -
+            Math.max(startedAt, observation.firstSandboxOperationStartedAt),
+        );
+        reportedMeasurement = {
+          ...measurement,
+          durationSeconds: Math.max(0, measurement.durationSeconds - overlapMs / 1_000),
+        };
+      }
       observation.repositorySkillDiscoveryEndedAt = endedAt;
     } else if (measurement.phase.startsWith("input_filter_")) {
       if (
@@ -244,7 +265,7 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
         });
       }
     }
-    observation.observer(measurement);
+    observation.observer(reportedMeasurement);
   } catch {
     // Diagnostics must never affect model preparation or provider dispatch.
   }
