@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { codexDefinitiveFailureDisposition } from "../src/activities/agent-turn/failure-settlement";
+import {
+  codexCapacityWaitFailurePayload,
+  codexCredentialFailoverLimit,
+  codexDefinitiveFailureDisposition,
+} from "../src/activities/agent-turn/failure-settlement";
 
 const base = {
   rotationEnabled: true,
@@ -80,5 +84,36 @@ describe("definitive Codex credential failure disposition", () => {
         }),
       ).toBe("terminal");
     }
+  });
+});
+
+describe("definitive Codex failure settlement helpers", () => {
+  test("non-usage-limit quota codes retain quota semantics in durable waits", () => {
+    expect(
+      codexCapacityWaitFailurePayload({
+        failureKind: "quota",
+        usageLimit: null,
+        cooldownSeconds: 3600,
+        detail: "provider returned insufficient_quota",
+        allAccounts: false,
+      }),
+    ).toEqual({
+      error:
+        "Your ChatGPT/Codex subscription usage limit has been reached. Access resets in about 1h. You can switch this session to a different model in the meantime, or wait for the limit to reset.",
+      code: "codex_usage_limit_reached",
+      detail: "provider returned insufficient_quota",
+      retryable: false,
+    });
+  });
+
+  test("allocator-disabled rows do not enlarge the same-turn failover budget", () => {
+    expect(
+      codexCredentialFailoverLimit([
+        { allocatorEnabled: true },
+        { allocatorEnabled: true },
+        ...Array.from({ length: 20 }, () => ({ allocatorEnabled: false })),
+      ]),
+    ).toBe(1);
+    expect(codexCredentialFailoverLimit([{ allocatorEnabled: true }])).toBe(1);
   });
 });

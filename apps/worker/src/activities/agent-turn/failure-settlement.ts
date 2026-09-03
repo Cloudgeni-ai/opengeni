@@ -107,6 +107,13 @@ export type TurnFailureDeps = {
 
 export type CodexDefinitiveFailureDisposition = "failover" | "wait" | "terminal";
 
+type CodexCapacityWaitFailurePayload = {
+  error: string;
+  code: string;
+  detail?: string;
+  retryable: false;
+};
+
 /**
  * Pure policy for a definitive serving-credential refusal. A policy-constrained
  * account and an all-unavailable pool wait for the same selected capacity to
@@ -139,6 +146,58 @@ export function codexDefinitiveFailureDisposition(input: {
     return "wait";
   }
   return "terminal";
+}
+
+/**
+ * Bound one turn to the alternate credentials that policy actually permits.
+ * The effective account list is already workspace/organization scoped;
+ * allocator-disabled rows must not enlarge the retry budget. The database
+ * requires a positive bound even though one-account paths never fail over.
+ */
+export function codexCredentialFailoverLimit(
+  accounts: ReadonlyArray<{ allocatorEnabled: boolean }>,
+): number {
+  const allocatableAccounts = accounts.filter((account) => account.allocatorEnabled).length;
+  return Math.max(1, allocatableAccounts - 1);
+}
+
+/** Build the durable waiter payload without collapsing quota refusals into 403. */
+export function codexCapacityWaitFailurePayload(input: {
+  failureKind: "auth" | "forbidden" | "rate_limit" | "quota";
+  usageLimit: { resetsInSeconds: number | null } | null;
+  cooldownSeconds: number | null;
+  detail: string;
+  allAccounts: boolean;
+}): CodexCapacityWaitFailurePayload {
+  if (input.failureKind === "quota") {
+    return codexUsageLimitFailurePayload(
+      input.usageLimit ?? { resetsInSeconds: input.cooldownSeconds },
+      input.detail,
+      input.allAccounts ? { allAccounts: true } : undefined,
+    );
+  }
+  if (input.failureKind === "rate_limit") {
+    return {
+      error: "The serving Codex subscription is temporarily rate limited.",
+      code: "codex_account_rate_limited",
+      detail: input.detail,
+      retryable: false,
+    };
+  }
+  if (input.failureKind === "auth") {
+    return {
+      error: "The serving Codex account requires reconnection.",
+      code: "codex_relogin_required",
+      detail: "the same accepted turn is waiting for the selected account to recover",
+      retryable: false,
+    };
+  }
+  return {
+    error: "The serving Codex account is not authorized for this request.",
+    code: "codex_account_forbidden",
+    detail: "the same accepted turn is waiting for the selected account to recover",
+    retryable: false,
+  };
 }
 
 export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgentTurnResult> {
@@ -713,6 +772,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         decisionCredentialId: decision.kind === "active" ? decision.credentialId : null,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
       });
+      const maxFailovers = codexCredentialFailoverLimit(accounts);
 
       if (
         statePersisted &&
@@ -729,7 +789,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           holderId: leases.codex.holderId,
           generation: leases.codex.generation,
           expectedRedispatches: attempt.redispatchesAtDispatch,
-          maxFailovers: Math.max(1, accounts.length),
+          maxFailovers,
           recoveryPayload: {
             triggerEventId: attempt.triggerEventId!,
             reason: "codex_credential_failover",
@@ -785,7 +845,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             retryable: false,
             recovery: "user_message",
             failoverCount: settlement.failoverCount,
-            maxFailovers: Math.max(1, accounts.length),
+            maxFailovers,
           };
           if (
             !(await eventing.settle!({
@@ -826,32 +886,18 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           Boolean(rotation?.rotationEnabled) &&
           pinDisposition !== "manual" &&
           decision.kind === "allCapped";
-        const failurePayload = usageLimit
-          ? codexUsageLimitFailurePayload(
-              usageLimit,
-              error instanceof Error ? error.message : String(error),
-              allAccounts ? { allAccounts: true } : undefined,
-            )
-          : codexCredentialFailure.kind === "rate_limit"
-            ? {
-                error: "The serving Codex subscription is temporarily rate limited.",
-                code: "codex_account_rate_limited",
-                detail: "the same accepted turn is waiting for eligible credential capacity",
-                retryable: false,
-              }
-            : codexCredentialFailure.kind === "auth"
-              ? {
-                  error: "The serving Codex account requires reconnection.",
-                  code: "codex_relogin_required",
-                  detail: "the same accepted turn is waiting for the selected account to recover",
-                  retryable: false,
-                }
-              : {
-                  error: "The serving Codex account is not authorized for this request.",
-                  code: "codex_account_forbidden",
-                  detail: "the same accepted turn is waiting for the selected account to recover",
-                  retryable: false,
-                };
+        const failurePayload = codexCapacityWaitFailurePayload({
+          failureKind: codexCredentialFailure.kind,
+          usageLimit,
+          cooldownSeconds: codexCredentialFailure.cooldownSeconds,
+          detail:
+            codexCredentialFailure.kind === "quota"
+              ? error instanceof Error
+                ? error.message
+                : String(error)
+              : "the same accepted turn is waiting for eligible credential capacity",
+          allAccounts,
+        });
         const armed = await armCodexCapacityWait(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,

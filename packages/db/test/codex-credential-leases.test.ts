@@ -1446,6 +1446,50 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(preemptions?.count).toBe(1);
   });
 
+  test("failover settlement stops when the persisted alternate budget is exhausted", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "bounded-failover-a");
+    await connectCredential(ws!, "bounded-failover-b");
+    const turnId = await seedTurn(ws!, 1);
+    const lease = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
+    const [turn] = await admin<{ session_id: string }[]>`
+      update session_turns
+      set metadata = jsonb_build_object('codexCredentialFailovers', 1)
+      where id = ${turnId}
+      returning session_id`;
+
+    const settled = await settleCodexCredentialFailover(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: turn!.session_id,
+      turnId,
+      attemptId,
+      holderId: lease.holderId!,
+      generation: lease.generation!,
+      expectedRedispatches: 0,
+      maxFailovers: 1,
+      recoveryPayload: { reason: "must-not-exceed-alternate-budget" },
+    });
+    expect(settled).toEqual({ action: "limit_exceeded", failoverCount: 2, events: [] });
+
+    const [unchanged] = await admin<
+      { turn_status: string; attempt_state: string; lease_count: number }[]
+    >`
+      select t.status as turn_status, a.state as attempt_state,
+             (select count(*)::int from codex_credential_leases l
+              where l.workspace_id = t.workspace_id and l.turn_id = t.id) as lease_count
+      from session_turns t
+      join session_turn_attempts a on a.id = t.active_attempt_id
+      where t.id = ${turnId}`;
+    expect(unchanged).toEqual({
+      turn_status: "running",
+      attempt_state: "running",
+      lease_count: 1,
+    });
+  });
+
   test("cross-replica refresh lock spends one rotating refresh token", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
