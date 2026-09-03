@@ -279,7 +279,11 @@ drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
 a pre-0394 worker would treat the newly admitted activation mode as an ambient
 workspace Skill, so none may remain live or restart after the cutover. Postgres
-and Garage PVCs remain attached. Database migrations
+and Garage PVCs remain attached. Migration 0401 likewise requires a complete
+API and worker drain and
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_codex_unconditional_credential_leasing`;
+it removes the temporary Codex allocator cutover columns, so pre-0401 binaries
+must never run or restart after commit. Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.
 

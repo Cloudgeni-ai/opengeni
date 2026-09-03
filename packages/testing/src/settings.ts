@@ -187,7 +187,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     lazyToolSearchEnabled: false,
-    codexCredentialLeasingEnabled: false,
     codexFleetPolicyShadowEnabled: false,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,

@@ -53,7 +53,6 @@ let dbB: Database;
 
 const settings = testSettings({
   codexSubscriptionEnabled: true,
-  codexCredentialLeasingEnabled: true,
   environmentsEncryptionKey: Buffer.alloc(32, 7).toString("base64"),
 });
 
@@ -219,26 +218,31 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
-  test("legacy and lease defaults stay off until an explicit settings cutover", async () => {
+  test("rotation defaults off while every selected turn still receives a durable lease", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
     await ensureCodexRotationSettings(dbA, ws!.accountId, ws!.workspaceId);
-    const [row] = await admin<{ rotation_enabled: boolean; lease_rotation_enabled: boolean }[]>`
-      select rotation_enabled, lease_rotation_enabled
+    const [row] = await admin<{ rotation_enabled: boolean }[]>`
+      select rotation_enabled
       from codex_rotation_settings where workspace_id = ${ws!.workspaceId}`;
-    expect(row).toEqual({ rotation_enabled: false, lease_rotation_enabled: false });
+    expect(row).toEqual({ rotation_enabled: false });
     await ensureCodexRotationSettings(dbA, ws!.accountId, ws!.workspaceId);
-    const [preserved] = await admin<
-      { rotation_enabled: boolean; lease_rotation_enabled: boolean }[]
-    >`
-      select rotation_enabled, lease_rotation_enabled
+    const [preserved] = await admin<{ rotation_enabled: boolean }[]>`
+      select rotation_enabled
       from codex_rotation_settings where workspace_id = ${ws!.workspaceId}`;
-    expect(preserved).toEqual({ rotation_enabled: false, lease_rotation_enabled: false });
-    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: true });
-    const [cutOver] = await admin<{ rotation_enabled: boolean; lease_rotation_enabled: boolean }[]>`
-      select rotation_enabled, lease_rotation_enabled
-      from codex_rotation_settings where workspace_id = ${ws!.workspaceId}`;
-    expect(cutOver).toEqual({ rotation_enabled: true, lease_rotation_enabled: true });
+    expect(preserved).toEqual({ rotation_enabled: false });
+
+    const credentialId = await connectCredential(ws!, "rotation-off-active");
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+    const turnId = await seedTurn(ws!, 1);
+    const leased = await acquire(dbA, ws!, turnId);
+    expect(leased).toMatchObject({
+      credentialId,
+      rotationEnabled: false,
+      reused: false,
+    });
+    expect(leased.holderId).not.toBeNull();
+    expect(leased.generation).toBe(1);
   });
 
   test("40 concurrent turns across two replica pools spread evenly over four credentials", async () => {
@@ -287,8 +291,8 @@ describe("credential allocator atomic Codex credential allocation", () => {
       ) returning id`;
     await admin`
       insert into organization_codex_rotation_settings (
-        account_id, active_credential_id, rotation_enabled, lease_rotation_enabled
-      ) values (${wsA!.accountId}, ${credential!.id}, true, true)`;
+        account_id, active_credential_id, rotation_enabled
+      ) values (${wsA!.accountId}, ${credential!.id}, true)`;
     const turnA = await seedTurn(wsA!, 1);
     const turnB = await seedTurn(wsB!, 1);
 
@@ -357,23 +361,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       "injected auth failure",
     );
     expect(await workspaceCodexSubscriptionActive(dbB, settings, ws!.workspaceId)).toBe(true);
-    expect(
-      await workspaceCodexSubscriptionActive(
-        dbB,
-        { ...settings, codexCredentialLeasingEnabled: false },
-        ws!.workspaceId,
-      ),
-    ).toBe(false);
-
-    // The deployment flag alone must not change admission during a rolling
-    // update. An existing rotation-enabled row with its lease bit still false
-    // uses the exact legacy pointer predicate and therefore remains false here.
-    await admin`
-      update codex_rotation_settings
-      set rotation_enabled = true, lease_rotation_enabled = false
-      where workspace_id = ${ws!.workspaceId}`;
-    expect(await workspaceCodexSubscriptionActive(dbB, settings, ws!.workspaceId)).toBe(false);
-    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: true });
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
     expect(await workspaceCodexSubscriptionActive(dbB, settings, ws!.workspaceId)).toBe(true);
   });
 

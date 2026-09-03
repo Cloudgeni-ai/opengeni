@@ -9,7 +9,6 @@ import {
   type CodexCapacityWakeTarget,
   type CodexCapacitySelectionContext,
 } from "@opengeni/db";
-import type { Settings } from "@opengeni/config";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
@@ -87,12 +86,10 @@ export async function signalPendingCodexCapacityWakeTargets(
 
 export function codexCapacityDecision(
   context: CodexCapacitySelectionContext,
-  settings: Settings,
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
   const now = new Date();
   const selected = selectCodexCredentialLeaseForTurn({
     context,
-    leasingEnabled: settings.codexCredentialLeasingEnabled,
     sessionId: context.sessionId,
     sessionPinnedCredentialId: context.sessionPinnedCredentialId,
     sessionPinSource: context.sessionPinSource,
@@ -253,7 +250,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
         waiterId: input.waiterId,
         generation: input.generation,
       },
-      (context) => codexCapacityDecision(context, resolved.settings),
+      (context) => codexCapacityDecision(context),
     );
     if (result.events.length > 0) {
       try {

@@ -1,6 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { CodexCapacitySelectionContext, CodexLeaseAccountStatus } from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
 import {
   codexCapacityDecision,
   refreshCodexUsageAndRepairCapacityWaiters,
@@ -48,7 +47,6 @@ describe("Codex capacity availability diagnostics", () => {
       ],
       activeCredentialId: null,
       rotationEnabled: true,
-      leaseRotationEnabled: true,
       rotationStrategy: "most_remaining",
       existingCredentialId: null,
       policyScope: null,
@@ -60,14 +58,7 @@ describe("Codex capacity availability diagnostics", () => {
       policyHash: null,
     };
 
-    expect(
-      codexCapacityDecision(
-        context,
-        testSettings({
-          codexCredentialLeasingEnabled: true,
-        }),
-      ),
-    ).toMatchObject({
+    expect(codexCapacityDecision(context)).toMatchObject({
       kind: "available",
       credentialId: "healthy",
       diagnostic: { connectedCount: 3, eligibleCount: 1 },
@@ -85,7 +76,6 @@ describe("Codex capacity availability diagnostics", () => {
       ],
       activeCredentialId: "cooling",
       rotationEnabled: true,
-      leaseRotationEnabled: true,
       rotationStrategy: "most_remaining",
       existingCredentialId: null,
       policyScope: null,
@@ -97,19 +87,16 @@ describe("Codex capacity availability diagnostics", () => {
       policyHash: null,
     };
 
-    expect(codexCapacityDecision(base, testSettings())).toMatchObject({
+    expect(codexCapacityDecision(base)).toMatchObject({
       kind: "unavailable",
       earliestResetAt: resetAt,
       resetKind: "bounded_refresh",
     });
     expect(
-      codexCapacityDecision(
-        {
-          ...base,
-          accounts: [account("cooling", { exhaustedUntil: resetAt, exhaustedKind: "rate_limit" })],
-        },
-        testSettings(),
-      ),
+      codexCapacityDecision({
+        ...base,
+        accounts: [account("cooling", { exhaustedUntil: resetAt, exhaustedKind: "rate_limit" })],
+      }),
     ).toMatchObject({
       kind: "unavailable",
       earliestResetAt: resetAt,
@@ -126,7 +113,6 @@ describe("Codex capacity availability diagnostics", () => {
       ],
       activeCredentialId: "active-capped",
       rotationEnabled: false,
-      leaseRotationEnabled: false,
       rotationStrategy: "sharded",
       existingCredentialId: null,
       policyScope: null,
@@ -138,14 +124,7 @@ describe("Codex capacity availability diagnostics", () => {
       policyHash: null,
     };
 
-    expect(
-      codexCapacityDecision(
-        context,
-        testSettings({
-          codexCredentialLeasingEnabled: true,
-        }),
-      ),
-    ).toMatchObject({
+    expect(codexCapacityDecision(context)).toMatchObject({
       kind: "unavailable",
       earliestResetAt: resetAt,
       resetKind: "authoritative",

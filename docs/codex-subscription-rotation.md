@@ -35,8 +35,8 @@ organization credential row.
 
 ## Atomic selection and fairness
 
-When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
-`acquireCodexCredentialLease` before model/tool preparation:
+Every Codex turn calls `acquireCodexCredentialLease` before model/tool
+preparation. Leasing is execution ownership, not a rotation feature flag:
 
 1. Start one RLS-scoped Postgres transaction, resolve the workspace's effective
    source, and materialize/lock its serialization row with `FOR UPDATE`:
@@ -55,7 +55,7 @@ When `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=true`, every Codex turn calls
    allocation may an optional downstream policy filter the candidate rows. Run
    the strategy and revalidate its chosen id against that resulting set.
 5. Upsert the unique `(workspace_id, turn_id)` lease and increment the selected
-   credential's server-held fairness cursor. The legacy active pointer advances
+   credential's server-held fairness cursor. The active pointer advances
    in the same transaction only when the selector allows it; manual pins and
    sharded policy homes explicitly veto pointer movement.
 
@@ -90,8 +90,11 @@ CAS inside the rotation-row-first capacity-mutation transaction, so a stale
 sharding decision cannot overwrite a concurrent manual pin. Policy pins are
 ignored and lazily cleared outside the active `sharded` strategy. A live
 same-turn lease is reused before either pin policy or future membership
-filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
-and `drain_then_next` remain explicit sticky product policies.
+filtering, so cache policy never moves in-flight work. With
+`rotation_enabled=false`, new allocations may use only the active account; if
+that account is capped or cooling, the same turn enters durable capacity wait
+even when another account is healthy. With `rotation_enabled=true`, eligible
+alternates may serve a new or recovered turn.
 
 Named pool membership is intentionally not a credential allocator concept. The generic
 `CodexCredentialLeasePolicyScopeResolver<TPolicyScope>`,
@@ -306,6 +309,13 @@ explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
 bounded by pool size so a malformed classification cannot walk forever; a stale
 holder cannot quarantine a credential or settle the turn.
 
+If no alternate is eligible, or rotation/manual-pin policy forbids leaving the
+selected account, the quarantined holder arms the same durable capacity waiter
+used by proactive admission. Quota/rate-limit cooldowns, reconnects, status
+repairs, allocator changes, and rotation-policy changes wake that exact turn.
+An auth/forbidden refusal is terminal only when the pool is truly empty or has
+no allocatable account to wait for.
+
 Ambiguous failures never walk the pool because a partial stream may already have
 performed tools or consumed allowance. Every terminal failure path reconciles
 conversation truth before marking the turn failed, so a later user revival does
@@ -322,43 +332,34 @@ new-allocation policy.
 
 ## Rollout and rollback
 
-Migration `0053_codex_credential_leases.sql` is additive. It creates the
-lease table and fairness columns, strengthens workspace reference
-integrity, and adds a separate `lease_rotation_enabled` cutover bit. Both that bit
-and the legacy `rotation_enabled` column keep a database default of `false`, so a
-schema-first migration or an older binary can never opt a workspace into mixed-mode
-rotation. First-connect code also leaves the new bit false. An explicit settings
-write updates both generations only after the compatible fleet is ready.
-
-The deployment flag, legacy user-intent bit, and workspace cutover bit are all
-required for leasing. With the deployment flag off, or unless both
-`rotation_enabled=true` and `lease_rotation_enabled=true`, a new worker preserves
-the old binary's exact pin/legacy-rotation policy and leaves the lease table plus
-fairness cursors inert. The supported settings write keeps both database bits in
-sync; a torn/manual legacy write fails closed. This makes the database row the
-atomic fleet-wide cutover—process-local environment changes alone never split a
-workspace between allocators.
+Migration `0053_codex_credential_leases.sql` introduced the additive lease
+table, fairness columns, and temporary mixed-version cutover bits. Migration
+`0401_codex_unconditional_credential_leasing.sql` is the maintenance activation
+that retires those temporary bits. After 0400, the lease protocol is
+unconditional and `rotation_enabled` is only the user-owned account-selection
+policy described above.
 
 Safe rollout order:
 
-1. Apply the migration and deploy the compatible revision with
-   `OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED=false`.
-2. Wait until every API/worker replica is on that revision. Mixed old/new workers
-   still use the same legacy pin/rotation policy and never touch the lease table.
-3. Enable the deployment flag and wait for that same immutable revision/config to
-   finish rolling out. Workspace cutover bits remain false, so this restart is
-   still legacy-only.
-4. Through the normal workspace-admin settings path, explicitly enable rotation
-   for the controlled staging workspace. This sets `rotation_enabled` and
-   `lease_rotation_enabled` together; all compatible replicas switch atomically on
-   the database row. Prove concurrent distribution and exhaustion recovery, then
-   repeat the same controlled workspace cutover in production.
+1. Build and pin one 0401-aware image digest. Confirm that API, control-worker,
+   and turn-worker deployments all reference that same candidate.
+2. Drain every pre-0401 API, control-worker, and turn-worker. Select
+   `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_codex_unconditional_credential_leasing`
+   and confirm the maintenance preflight only after the drain is complete.
+3. Apply migration 0401, provision the runtime role, and start only the pinned
+   0401-aware image. Never restart a pre-0401 binary against this schema.
+4. Verify that both rotation tables no longer contain
+   `lease_rotation_enabled`, every running Codex turn has an exact
+   `(workspace_id, turn_id)` lease, rotation-on recovers the same turn on an
+   eligible alternate, and rotation-off enters `waiting_capacity` when the
+   active account is capped despite a healthy alternate.
 
-Immediate workspace rollback is clearing `lease_rotation_enabled` (the normal
-rotation-off settings write clears both generations). Do that before rolling the
-deployment flag back to `false`; every replica immediately returns to the legacy
-path without a schema rollback. The additive table/columns remain inert. An older
-binary is also compatible with the additive schema.
+Migration 0401 is forward-only. There is no environment or database switch back
+to the legacy allocator. If an application defect appears after commit, keep the
+0401 schema and deploy a corrected 0401-aware image. `rotation_enabled=false`
+may temporarily constrain a workspace or organization pool to its active account,
+but leasing and holder/generation fencing remain mandatory. A pre-0401 image is
+not a valid rollback target because it still reads the removed cutover column.
 
 Migration `0383_codex_cooldown_reconciliation.sql` is rolling. It adds typed
 cooldown provenance and an independent revision. During mixed-version rollout,

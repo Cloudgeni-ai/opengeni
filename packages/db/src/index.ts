@@ -22163,7 +22163,7 @@ export async function ensureOrganizationCodexRotationSettings(
   await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
     await scopedDb
       .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .values({ accountId: input.organizationId })
       .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
   });
 }
@@ -22190,7 +22190,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
     );
     await scopedDb
       .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .values({ accountId: input.organizationId })
       .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
     const [settings] = await scopedDb
       .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
@@ -22348,7 +22348,6 @@ export async function getOrganizationCodexRotationSettings(
       .select({
         activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
       })
       .from(schema.organizationCodexRotationSettings)
@@ -22415,7 +22414,6 @@ export async function updateOrganizationCodexRotationSettings(
     const [current] = await scopedDb
       .select({
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
       })
       .from(schema.organizationCodexRotationSettings)
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
@@ -22426,20 +22424,16 @@ export async function updateOrganizationCodexRotationSettings(
       .update(schema.organizationCodexRotationSettings)
       .set({
         rotationEnabled: input.rotationEnabled,
-        leaseRotationEnabled: input.rotationEnabled,
         updatedAt: new Date(),
       })
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
       .returning({
         activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
       });
     if (!row) return null;
-    const changed =
-      current.rotationEnabled !== input.rotationEnabled ||
-      current.leaseRotationEnabled !== input.rotationEnabled;
+    const changed = current.rotationEnabled !== input.rotationEnabled;
     const wakeTargets = changed
       ? await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
           accountId: input.organizationId,
@@ -23236,7 +23230,7 @@ export async function getCodexCredentialStatus(
  */
 export async function workspaceCodexSubscriptionActive(
   db: Database,
-  settings: Pick<Settings, "codexSubscriptionEnabled" | "codexCredentialLeasingEnabled">,
+  settings: Pick<Settings, "codexSubscriptionEnabled">,
   workspaceId: string,
 ): Promise<boolean> {
   if (!settings.codexSubscriptionEnabled) {
@@ -23257,45 +23251,9 @@ export async function workspaceCodexSubscriptionActive(
       return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
         const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
         if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
-        const [rotation] =
-          pool.source.effectiveSource === "organization"
-            ? await scopedDb
-                .select({
-                  rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-                  leaseRotationEnabled:
-                    schema.organizationCodexRotationSettings.leaseRotationEnabled,
-                })
-                .from(schema.organizationCodexRotationSettings)
-                .where(
-                  eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId),
-                )
-                .for("update")
-                .limit(1)
-            : await scopedDb
-                .select({
-                  rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-                  leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
-                })
-                .from(schema.codexRotationSettings)
-                .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-                .for("update")
-                .limit(1);
-        const leaseCutoverEnabled = Boolean(
-          settings.codexCredentialLeasingEnabled &&
-          rotation?.rotationEnabled &&
-          rotation.leaseRotationEnabled,
-        );
-        if (!leaseCutoverEnabled) {
-          // Process flag alone is not a cutover. Mixed old/new workers must use
-          // the exact legacy active-pointer predicate until the synchronized DB
-          // bits are true; the row lock makes this admission decision atomic
-          // with the admin settings write.
-          const status = await getCodexCredentialStatusScoped(scopedDb, workspaceId);
-          return status?.status === "active";
-        }
-        // After cutover the workspace-global pointer is a UI/manual cursor, not
-        // the health of the pool. A broken pointer must not hide another healthy
-        // account and prevent the worker from reaching the lease selector.
+        // Provider admission is pool-aware even when rotation is disabled. The
+        // active pointer governs allocation policy, not whether the connected
+        // subscription provider exists for billing and routing.
         const [row] = await scopedDb
           .select({ id: schema.codexSubscriptionCredentials.id })
           .from(schema.codexSubscriptionCredentials)
@@ -23344,7 +23302,7 @@ const CODEX_ACTIVE_READ_RETRY_MS = 50;
  */
 export async function isCodexBilledTurn(input: {
   db: Database;
-  settings: Pick<Settings, "codexSubscriptionEnabled" | "codexCredentialLeasingEnabled">;
+  settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
   /**
@@ -23461,8 +23419,6 @@ export type CodexCredentialLeaseSelectionContext<
   accounts: CodexLeaseAccountStatus[];
   activeCredentialId: string | null;
   rotationEnabled: boolean;
-  /** Workspace cutover fence. False means the additive lease table stays inert. */
-  leaseRotationEnabled: boolean;
   rotationStrategy: string;
   /** A still-live idempotent lease for this SAME turn, if one exists. */
   existingCredentialId: string | null;
@@ -23728,15 +23684,15 @@ export async function acquireCodexCredentialLease<
       if (organizationSource) {
         await tx.execute(sql`
           insert into organization_codex_rotation_settings
-            (account_id, lease_rotation_enabled)
-          values (${input.accountId}, false)
+            (account_id)
+          values (${input.accountId})
           on conflict (account_id) do nothing
         `);
       } else {
         await tx.execute(sql`
           insert into codex_rotation_settings
-            (account_id, workspace_id, lease_rotation_enabled)
-          values (${input.accountId}, ${input.workspaceId}, false)
+            (account_id, workspace_id)
+          values (${input.accountId}, ${input.workspaceId})
           on conflict (workspace_id) do nothing
         `);
       }
@@ -23744,11 +23700,9 @@ export async function acquireCodexCredentialLease<
         ? await tx.execute(sql<{
             active_credential_id: string | null;
             rotation_enabled: boolean;
-            lease_rotation_enabled: boolean;
             rotation_strategy: string;
           }>`
-            select active_credential_id, rotation_enabled,
-                   lease_rotation_enabled, rotation_strategy
+            select active_credential_id, rotation_enabled, rotation_strategy
             from organization_codex_rotation_settings
             where account_id = ${input.accountId}
             for update
@@ -23756,11 +23710,9 @@ export async function acquireCodexCredentialLease<
         : await tx.execute(sql<{
             active_credential_id: string | null;
             rotation_enabled: boolean;
-            lease_rotation_enabled: boolean;
             rotation_strategy: string;
           }>`
-        select active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select active_credential_id, rotation_enabled, rotation_strategy
         from codex_rotation_settings
         where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
         for update
@@ -23790,37 +23742,25 @@ export async function acquireCodexCredentialLease<
       const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
       const activeCredentialId = settingsRow.active_credential_id;
       const rotationEnabled = settingsRow.rotation_enabled;
-      // Fail closed on a torn/manual legacy write. The user-intent bit and the
-      // revision-aware cutover bit are synchronized by the supported API; both
-      // must remain true before the additive allocator may touch lease state.
-      const leaseRotationEnabled =
-        settingsRow.rotation_enabled && settingsRow.lease_rotation_enabled;
       const rotationStrategy = settingsRow.rotation_strategy;
 
-      // The per-workspace bit is the atomic cutover fence. Until an operator or
-      // explicit settings write enables it, a migration-compatible worker keeps
-      // the lease table/cursors completely inert and follows the legacy policy.
-      if (leaseRotationEnabled) {
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where workspace_id = ${input.workspaceId} and leased_until <= now()
-        `);
-      }
-      const existingRows = leaseRotationEnabled
-        ? await tx.execute(
-            sql<{
-              credential_id: string;
-              holder_id: string;
-              generation: number;
-            }>`
-              select credential_id, holder_id, generation from codex_credential_leases
-              where workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-                and leased_until > now()
-              limit 1
-            `,
-          )
-        : [];
+      await tx.execute(sql`
+        delete from codex_credential_leases
+        where workspace_id = ${input.workspaceId} and leased_until <= now()
+      `);
+      const existingRows = await tx.execute(
+        sql<{
+          credential_id: string;
+          holder_id: string;
+          generation: number;
+        }>`
+          select credential_id, holder_id, generation from codex_credential_leases
+          where workspace_id = ${input.workspaceId}
+            and turn_id = ${input.turnId}
+            and leased_until > now()
+          limit 1
+        `,
+      );
       const existingCredentialId = existingRows[0]?.credential_id ?? null;
 
       const allAccounts = disabledSource
@@ -23840,7 +23780,6 @@ export async function acquireCodexCredentialLease<
         accounts,
         activeCredentialId,
         rotationEnabled,
-        leaseRotationEnabled,
         rotationStrategy,
         existingCredentialId,
         policyScope,
@@ -23870,7 +23809,7 @@ export async function acquireCodexCredentialLease<
         selected = select(selectionContext(accounts, unavailableDiagnostics));
       }
       if (selected.credentialId === null) {
-        if (leaseRotationEnabled && existingCredentialId !== null) {
+        if (existingCredentialId !== null) {
           await tx.execute(sql`
             delete from codex_credential_leases
             where workspace_id = ${input.workspaceId} and turn_id = ${input.turnId}
@@ -23901,41 +23840,6 @@ export async function acquireCodexCredentialLease<
 
       const advanceActivePointer =
         input.advanceActivePointer && selected.advanceActivePointer !== false;
-
-      // Compatible-but-not-cut-over workers may still run the legacy rotation
-      // policy under this same workspace-row lock. They can advance the active
-      // pointer, but never create a lease or mutate fairness cursors.
-      if (!leaseRotationEnabled) {
-        if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
-          if (organizationSource) {
-            await tx.execute(sql`
-              update organization_codex_rotation_settings
-              set active_credential_id = ${selected.credentialId}, updated_at = now()
-              where account_id = ${input.accountId}
-            `);
-          } else {
-            await tx.execute(sql`
-              update codex_rotation_settings
-              set active_credential_id = ${selected.credentialId}, updated_at = now()
-              where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-            `);
-          }
-        }
-        return {
-          decision: selected.decision,
-          accounts,
-          activeCredentialId,
-          rotationEnabled,
-          rotationStrategy,
-          credentialId: selected.credentialId,
-          reused: false,
-          holderId: null,
-          generation: null,
-          leasedUntil: null,
-          unavailableDiagnostics,
-          advanceActivePointer,
-        };
-      }
 
       const reused = existingCredentialId === selected.credentialId;
       const leaseRows = await tx.execute(
@@ -24159,7 +24063,6 @@ async function lockExistingCodexRotationSettingsForCapacity(
   source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   activeCredentialId: string | null;
   rotationEnabled: boolean;
-  leaseRotationEnabled: boolean;
   rotationStrategy: string;
 } | null> {
   const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
@@ -24170,11 +24073,9 @@ async function lockExistingCodexRotationSettingsForCapacity(
           account_id: string;
           active_credential_id: string | null;
           rotation_enabled: boolean;
-          lease_rotation_enabled: boolean;
           rotation_strategy: string;
         }>`
-        select account_id, active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select account_id, active_credential_id, rotation_enabled, rotation_strategy
         from organization_codex_rotation_settings
         where account_id = ${source.accountId}
         for update
@@ -24183,11 +24084,9 @@ async function lockExistingCodexRotationSettingsForCapacity(
           account_id: string;
           active_credential_id: string | null;
           rotation_enabled: boolean;
-          lease_rotation_enabled: boolean;
           rotation_strategy: string;
         }>`
-        select account_id, active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select account_id, active_credential_id, rotation_enabled, rotation_strategy
         from codex_rotation_settings
         where workspace_id = ${workspaceId}
         for update
@@ -24199,7 +24098,6 @@ async function lockExistingCodexRotationSettingsForCapacity(
         source: source.effectiveSource,
         activeCredentialId: row.active_credential_id,
         rotationEnabled: row.rotation_enabled,
-        leaseRotationEnabled: row.rotation_enabled && row.lease_rotation_enabled,
         rotationStrategy: row.rotation_strategy,
       }
     : null;
@@ -25082,7 +24980,6 @@ export async function reconcileCodexCapacityWait<
           accounts: filtered.accounts,
           activeCredentialId: rotation.activeCredentialId,
           rotationEnabled: rotation.rotationEnabled,
-          leaseRotationEnabled: rotation.leaseRotationEnabled,
           rotationStrategy: rotation.rotationStrategy,
           existingCredentialId: null,
           policyScope,
@@ -27698,10 +27595,8 @@ export async function recordCodexAccountUsageWithWakeTargets(
 
 export type CodexRotationSettings = {
   activeCredentialId: string | null;
-  /** Legacy selector bit; old binaries only understand this field. */
+  /** False keeps new allocations on the active account; true permits pool failover. */
   rotationEnabled: boolean;
-  /** New allocator cutover bit; ignored safely by old binaries. */
-  leaseRotationEnabled: boolean;
   rotationStrategy: string; // P1: 'most_remaining' (unused)
 };
 
@@ -27794,7 +27689,6 @@ export async function getCodexRotationSettings(
             .select({
               activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
               rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-              leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
               rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
             })
             .from(schema.organizationCodexRotationSettings)
@@ -27804,7 +27698,6 @@ export async function getCodexRotationSettings(
             .select({
               activeCredentialId: schema.codexRotationSettings.activeCredentialId,
               rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-              leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
               rotationStrategy: schema.codexRotationSettings.rotationStrategy,
             })
             .from(schema.codexRotationSettings)
@@ -27826,7 +27719,6 @@ export async function ensureCodexRotationSettings(
       .values({
         accountId,
         workspaceId,
-        leaseRotationEnabled: false,
       })
       .onConflictDoNothing({
         target: [schema.codexRotationSettings.workspaceId],
@@ -27970,56 +27862,6 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
   );
 }
 
-/**
- * P3 reactive-rotation boundedness (Finding 1b): the number of CONSECUTIVE rotated
- * 429-failover turns since the session last had a SUCCESSFUL turn. Counts
- * `turn.failed` events carrying the `rotated` marker that occurred AFTER the most
- * recent `turn.completed` event (the natural reset anchor — any successful turn
- * moves the anchor past every prior failover, so the streak resets to 0). The
- * reactive 429 catch consults this to bound its otherwise-0-delay re-dispatch:
- * once the streak exceeds ~(connected accounts + margin) the path degrades to a
- * fixed positive idle instead of another hot re-dispatch (invariant 4: NO THRASH),
- * covering the double-fault where a cooldown write did not persist AND the 429
- * carried no usage headers. Derived from persisted events so it is correct across
- * the Temporal re-dispatch (each failover is a NEW turn, but its event survives).
- */
-export async function countConsecutiveReactiveRotations(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [lastOk] = await scopedDb
-      .select({ sequence: schema.sessionEvents.sequence })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, workspaceId),
-          eq(schema.sessionEvents.sessionId, sessionId),
-          eq(schema.sessionEvents.type, "turn.completed"),
-        ),
-      )
-      .orderBy(desc(schema.sessionEvents.sequence))
-      .limit(1);
-    const conditions = [
-      eq(schema.sessionEvents.workspaceId, workspaceId),
-      eq(schema.sessionEvents.sessionId, sessionId),
-      eq(schema.sessionEvents.type, "turn.failed"),
-      sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
-    ];
-    if (lastOk) {
-      conditions.push(sql`${schema.sessionEvents.sequence} > ${lastOk.sequence}`);
-    }
-    const [{ rotated } = { rotated: 0 }] = await scopedDb
-      .select({
-        rotated: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessionEvents)
-      .where(and(...conditions));
-    return Number(rotated);
-  });
-}
-
 /** The supported rotation strategies (P3). */
 export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
@@ -28058,10 +27900,6 @@ export async function updateCodexRotationSettings(
     const set: Record<string, unknown> = { updatedAt: new Date() };
     if (patch.rotationEnabled !== undefined) {
       set.rotationEnabled = patch.rotationEnabled;
-      // A manual toggle owns both generations. Turning rotation off must also
-      // disable the allocator-only default; turning it on keeps current and old
-      // binaries consistent with explicit user intent.
-      set.leaseRotationEnabled = patch.rotationEnabled;
     }
     if (patch.rotationStrategy !== undefined) {
       set.rotationStrategy = patch.rotationStrategy;
@@ -28073,7 +27911,6 @@ export async function updateCodexRotationSettings(
       .returning({
         activeCredentialId: schema.codexRotationSettings.activeCredentialId,
         rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.codexRotationSettings.rotationStrategy,
       });
     return row ?? null;

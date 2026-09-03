@@ -913,6 +913,11 @@ Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits
 run that reconciliation through bounded control-plane refreshes.
+Every Codex turn owns one durable credential lease before provider work. The
+lease protocol is unconditional execution fencing; `rotation_enabled` only
+decides whether a new or recovered turn may leave the active account. Rotation
+off therefore waits on a capped active account instead of using a healthy
+alternate, while rotation on may recover the same checkpointed turn elsewhere.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),

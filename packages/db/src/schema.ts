@@ -1420,7 +1420,6 @@ export const organizationCodexRotationSettings = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     activeCredentialId: uuid("active_credential_id"),
     rotationEnabled: boolean("rotation_enabled").notNull().default(false),
-    leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
     rotationStrategy: text("rotation_strategy").notNull().default("sharded"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3502,14 +3501,10 @@ export const codexRotationSettings = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     activeCredentialId: uuid("active_credential_id"),
-    // Legacy selector bit. Keep false as the DB default forever: an old worker
-    // only understands this column, so a schema-first rollout or binary
-    // rollback must never make it enter the non-atomic rotation path.
+    // User-owned account-selection policy. When false, every new turn may lease
+    // only the active credential and waits if that credential is unavailable.
+    // When true, the allocator may choose another eligible account.
     rotationEnabled: boolean("rotation_enabled").notNull().default(false),
-    // Revision-aware allocator cutover. Only migration-compatible API/worker
-    // code reads this bit; old binaries safely ignore it and keep the legacy
-    // pin/rotation policy.
-    leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
     rotationStrategy: text("rotation_strategy").notNull().default("sharded"), // sharded-rotation policy: legacy residue; behavior is always sharded
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

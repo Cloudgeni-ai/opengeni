@@ -3,12 +3,9 @@ import {
   acquireCodexCredentialLease,
   armCodexCapacityWait,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  getCodexRotationSettings,
-  listCodexAccountStatuses,
   getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPinInTransaction,
-  setActiveCodexCredential,
   withSessionCodexCapacityMutation,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
@@ -123,7 +120,6 @@ export async function selectCodexTurnCapacity(
       const selectForTurn = (context: CodexCredentialLeaseSelectionContext) =>
         selectCodexCredentialLeaseForTurn({
           context,
-          leasingEnabled: settings.codexCredentialLeasingEnabled,
           sessionId: input.sessionId,
           sessionPinnedCredentialId: sessionPin,
           sessionPinSource,
@@ -131,12 +127,24 @@ export async function selectCodexTurnCapacity(
           now: new Date(),
         });
 
-      // Rollout/rollback path is intentionally table-inert. With the flag off,
-      // old and new workers both use legacy pin > active-pointer selection and
-      // neither reads nor writes the additive lease/cursor schema.
-      let leased: CodexCredentialLeaseResult<RotationDecision>;
-      let leaseAcquisitionStartedAtMs: number | null = null;
-      if (settings.codexCredentialLeasingEnabled) {
+      let leaseAcquisitionStartedAtMs = performance.now();
+      let leased: CodexCredentialLeaseResult<RotationDecision> = await acquireCodexCredentialLease(
+        db,
+        {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          turnId,
+          holderId,
+          advanceActivePointer: sessionPin === null,
+        },
+        selectForTurn,
+      );
+      if (leased.decision.kind === "allCapped") {
+        // Bounded self-heal of stale usage cache, then ONE new atomic selection.
+        await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
+          signalCodexCapacityWorkflow,
+          wakeSessionWorkflow,
+        });
         leaseAcquisitionStartedAtMs = performance.now();
         leased = await acquireCodexCredentialLease(
           db,
@@ -149,96 +157,6 @@ export async function selectCodexTurnCapacity(
           },
           selectForTurn,
         );
-      } else {
-        const [rotation, accounts] = await Promise.all([
-          getCodexRotationSettings(db, input.workspaceId),
-          listCodexAccountStatuses(db, input.workspaceId),
-        ]);
-        const leaseAccounts = accounts.map((account) => ({
-          ...account,
-          activeLeaseCount: 0,
-          selectionCount: 0,
-          lastSelectedAt: null,
-        }));
-        const activeCredentialId = rotation?.activeCredentialId ?? null;
-        const selected = selectForTurn({
-          accounts: leaseAccounts,
-          activeCredentialId,
-          rotationEnabled: rotation?.rotationEnabled ?? false,
-          leaseRotationEnabled: false,
-          rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-          existingCredentialId: null,
-          policyScope: null,
-          unavailableDiagnostics: [],
-        });
-        leased = {
-          ...selected,
-          accounts: leaseAccounts,
-          activeCredentialId,
-          rotationEnabled: rotation?.rotationEnabled ?? false,
-          rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-          reused: false,
-          holderId: null,
-          generation: null,
-          leasedUntil: null,
-          unavailableDiagnostics: [],
-          advanceActivePointer: selected.advanceActivePointer !== false,
-        };
-      }
-      if (leased.decision.kind === "allCapped") {
-        // Bounded self-heal of stale usage cache, then ONE new atomic selection.
-        await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
-          signalCodexCapacityWorkflow,
-          wakeSessionWorkflow,
-        });
-        if (settings.codexCredentialLeasingEnabled) {
-          leaseAcquisitionStartedAtMs = performance.now();
-          leased = await acquireCodexCredentialLease(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              turnId,
-              holderId,
-              advanceActivePointer: sessionPin === null,
-            },
-            selectForTurn,
-          );
-        } else {
-          const [rotation, accounts] = await Promise.all([
-            getCodexRotationSettings(db, input.workspaceId),
-            listCodexAccountStatuses(db, input.workspaceId),
-          ]);
-          const leaseAccounts = accounts.map((account) => ({
-            ...account,
-            activeLeaseCount: 0,
-            selectionCount: 0,
-            lastSelectedAt: null,
-          }));
-          const selected = selectForTurn({
-            accounts: leaseAccounts,
-            activeCredentialId: rotation?.activeCredentialId ?? null,
-            rotationEnabled: rotation?.rotationEnabled ?? false,
-            leaseRotationEnabled: false,
-            rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-            existingCredentialId: null,
-            policyScope: null,
-            unavailableDiagnostics: [],
-          });
-          leased = {
-            ...selected,
-            accounts: leaseAccounts,
-            activeCredentialId: rotation?.activeCredentialId ?? null,
-            rotationEnabled: rotation?.rotationEnabled ?? false,
-            rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-            reused: false,
-            holderId: null,
-            generation: null,
-            leasedUntil: null,
-            unavailableDiagnostics: [],
-            advanceActivePointer: selected.advanceActivePointer !== false,
-          };
-        }
       }
       const rotationDecision = leased.decision;
       const selectedPinDisposition = classifyCodexPin({
@@ -311,15 +229,6 @@ export async function selectCodexTurnCapacity(
           { signalCodexCapacityWorkflow, wakeSessionWorkflow },
           pinMutation.wakeTargets,
         );
-      }
-      if (
-        !settings.codexCredentialLeasingEnabled &&
-        leased.advanceActivePointer &&
-        sessionPin === null &&
-        rotationDecision.kind === "active" &&
-        rotationDecision.moved
-      ) {
-        await setActiveCodexCredential(db, input.workspaceId, rotationDecision.credentialId);
       }
       providerTurn.effectiveCodexCredentialId = leased.credentialId;
       leases.codex.generation = leased.generation;

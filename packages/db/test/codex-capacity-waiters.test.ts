@@ -50,7 +50,6 @@ let claimDb: Database;
 
 const settings = testSettings({
   codexSubscriptionEnabled: true,
-  codexCredentialLeasingEnabled: true,
   environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
 });
 
@@ -770,8 +769,8 @@ describe("durable Codex capacity waits", () => {
       ) returning id`;
     await admin`
       insert into organization_codex_rotation_settings (
-        account_id, active_credential_id, rotation_enabled, lease_rotation_enabled
-      ) values (${account!.id}, ${credential!.id}, true, true)`;
+        account_id, active_credential_id, rotation_enabled
+      ) values (${account!.id}, ${credential!.id}, true)`;
     const firstScenario = await seedScenario(workspaces[0]!);
     const secondScenario = await seedScenario(workspaces[1]!);
     const firstWait = await arm(firstScenario);

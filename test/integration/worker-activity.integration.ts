@@ -1100,7 +1100,6 @@ describe("worker activities integration", () => {
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
-        codexCredentialLeasingEnabled: true,
       }),
       db: dbClient.db,
       bus,
