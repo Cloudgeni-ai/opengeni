@@ -993,7 +993,89 @@ describe("integrations.sh MCP endpoint probe", () => {
       status: "real",
       reason: "auth_challenge",
       httpStatus: 401,
+      oauthDiscovery: "oauth_discovery_broken",
     });
+  });
+
+  test("classifies OAuth challenges with the shared runtime discovery resolver", async () => {
+    const probe = async (
+      mcpUrl: string,
+      challenge: string,
+      responses: Record<string, { status?: number; body?: Record<string, unknown> }>,
+    ) =>
+      await probeMcpEndpoint(mcpUrl, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url === mcpUrl) {
+            return new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": challenge },
+            });
+          }
+          const response = responses[url];
+          if (!response) return new Response("not found", { status: 404 });
+          return response.body
+            ? Response.json(response.body, { status: response.status ?? 200 })
+            : new Response("not found", { status: response.status ?? 404 });
+        },
+      });
+
+    await expect(
+      probe("https://modern.example/mcp", 'Bearer resource_metadata="https://modern.example/prm"', {
+        "https://modern.example/prm": {
+          body: {
+            resource: "urn:modern:mcp",
+            authorization_servers: ["https://auth.modern.example/tenant"],
+          },
+        },
+        "https://auth.modern.example/.well-known/oauth-authorization-server/tenant": {
+          body: {
+            issuer: "https://auth.modern.example/tenant",
+            authorization_endpoint: "https://auth.modern.example/authorize",
+            token_endpoint: "https://auth.modern.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_rfc9728" });
+
+    await expect(
+      probe("https://legacy.example/mcp", 'Bearer error="invalid_token"', {
+        "https://legacy.example/.well-known/oauth-authorization-server": {
+          body: {
+            issuer: "https://legacy.example",
+            authorization_endpoint: "https://legacy.example/authorize",
+            token_endpoint: "https://legacy.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_legacy_same_origin_metadata" });
+
+    await expect(probe("https://defaults.example/mcp", "Bearer", {})).resolves.toMatchObject({
+      oauthDiscovery: "oauth_legacy_default_endpoints_unverified",
+    });
+
+    await expect(
+      probe("https://profile.example/mcp", "Bearer", {
+        "https://profile.example/.well-known/oauth-authorization-server": {
+          body: {
+            issuer: "https://auth.profile.example",
+            authorization_endpoint: "https://auth.profile.example/authorize",
+            token_endpoint: "https://auth.profile.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_requires_profile" });
+
+    await expect(
+      probe("https://broken.example/mcp", 'Bearer resource_metadata="https://broken.example/prm"', {
+        "https://broken.example/prm": {
+          body: { scopes_supported: ["documents:read"] },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_discovery_broken" });
   });
 
   test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {

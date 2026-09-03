@@ -2,6 +2,16 @@ import type {
   CatalogIntegrationRow,
   NormalizedCatalogSnapshot,
 } from "./import-integrations-catalog";
+import {
+  McpOAuthDiscoveryError,
+  OAUTH_MAX_RESPONSE_BYTES,
+  parseMcpOAuthChallenge,
+  readResponseJsonBounded,
+  resolveMcpOAuthDiscovery,
+  validateHttpUrl,
+  type McpOAuthDiscoveryClassification,
+  type McpOAuthMetadataFetchResult,
+} from "../packages/network/src/index";
 
 export type CatalogProbeStatus = "real" | "junk" | "unverified";
 export type CatalogProbeReason =
@@ -21,6 +31,7 @@ export type CatalogProbeOutcome = {
   reason: CatalogProbeReason;
   httpStatus?: number;
   detail?: string;
+  oauthDiscovery?: McpOAuthDiscoveryClassification;
 };
 
 export type CatalogProbeFetch = (input: string | URL, init?: RequestInit) => Promise<Response>;
@@ -204,7 +215,28 @@ export async function probeMcpEndpoint(
       }),
       signal: controller.signal,
     });
-    return classifyProbeResponse(response, await safeResponseText(response));
+    const outcome = classifyProbeResponse(response, await safeResponseText(response));
+    if (outcome.reason !== "auth_challenge") {
+      return outcome;
+    }
+    const challenge = parseMcpOAuthChallenge(response.headers.get("www-authenticate"));
+    try {
+      const discovery = await resolveMcpOAuthDiscovery({
+        resourceUrl: url,
+        challenge,
+        fetchMetadata: ({ url: metadataUrl }) =>
+          fetchCatalogOAuthMetadata(metadataUrl, fetchImpl, controller.signal),
+        validateEndpoint: (rawUrl, label) => validateHttpUrl(rawUrl, { label }),
+        canonicalizeResource: canonicalCatalogOAuthResource,
+      });
+      return { ...outcome, oauthDiscovery: discovery.classification };
+    } catch (error) {
+      return {
+        ...outcome,
+        oauthDiscovery:
+          error instanceof McpOAuthDiscoveryError ? error.classification : "oauth_discovery_broken",
+      };
+    }
   } catch (error) {
     if (isAbortError(error)) {
       return { status: "unverified", reason: "timeout" };
@@ -221,7 +253,10 @@ export async function probeMcpEndpoint(
 
 export function classifyProbeResponse(response: Response, body: string): CatalogProbeOutcome {
   const httpStatus = response.status;
-  if ((httpStatus === 401 || httpStatus === 403) && hasAuthChallenge(response.headers)) {
+  if (
+    (httpStatus === 401 || httpStatus === 403) &&
+    parseMcpOAuthChallenge(response.headers.get("www-authenticate")).scheme
+  ) {
     return { status: "real", reason: "auth_challenge", httpStatus };
   }
   if (httpStatus === 404 || httpStatus === 410) {
@@ -268,8 +303,56 @@ function withProbeMetadata(
             status: outcome.status,
             reason: outcome.reason,
             httpStatus: outcome.httpStatus ?? null,
+            ...(outcome.oauthDiscovery ? { oauthDiscovery: outcome.oauthDiscovery } : {}),
           },
   };
+}
+
+async function fetchCatalogOAuthMetadata(
+  url: string,
+  fetchImpl: CatalogProbeFetch,
+  signal: AbortSignal,
+): Promise<McpOAuthMetadataFetchResult> {
+  const response = await fetchImpl(url, {
+    headers: { accept: "application/json" },
+    signal,
+  });
+  if (response.status === 404 || response.status === 410) {
+    await response.body?.cancel().catch(() => undefined);
+    return { status: "absent", url, httpStatus: response.status };
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`OAuth metadata endpoint returned HTTP ${response.status}`);
+  }
+  const payload = await readResponseJsonBounded<unknown>(
+    response,
+    OAUTH_MAX_RESPONSE_BYTES,
+    "catalog OAuth metadata response",
+    { signal },
+  );
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("catalog OAuth metadata response was not a JSON object");
+  }
+  return { status: "present", url, document: payload as Record<string, unknown> };
+}
+
+function canonicalCatalogOAuthResource(rawResource: string): string {
+  const trimmed = rawResource.trim();
+  if (!trimmed) throw new Error("OAuth resource was empty");
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      url.hash = "";
+      return validateHttpUrl(url.toString(), { label: "OAuth resource" });
+    }
+    return trimmed;
+  } catch (error) {
+    if (error instanceof TypeError) {
+      throw new Error("OAuth resource was invalid", { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function safeResponseText(response: Response): Promise<string> {
@@ -278,10 +361,6 @@ async function safeResponseText(response: Response): Promise<string> {
   } catch {
     return "";
   }
-}
-
-function hasAuthChallenge(headers: Headers): boolean {
-  return !!(headers.get("www-authenticate") || headers.get("www-authenticate".toLowerCase()));
 }
 
 function looksLikeSse(text: string): boolean {
