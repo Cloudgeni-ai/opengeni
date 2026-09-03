@@ -2534,7 +2534,6 @@ export function buildOpenGeniAgent(
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
       options.approvedToolCallId,
-      options.mcpServers,
     );
     installAttemptConnectorActionPolicy(
       agent as unknown as ApprovalCapableAgent,
@@ -2671,7 +2670,6 @@ export function buildOpenGeniAgent(
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
     options.approvedToolCallId,
-    options.mcpServers,
   );
   installAttemptConnectorActionPolicy(
     agent as unknown as ApprovalCapableAgent,
@@ -2794,7 +2792,6 @@ type ApprovalCapableAgent = {
 function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
-  hasAttemptGateway: (serverId: string) => boolean,
   connectorActionPolicy?: ConnectorActionPolicyHooks,
   approvedToolCallId?: string,
 ): void {
@@ -2876,11 +2873,6 @@ function installMcpApprovalPolicy(
           if (!callId) {
             throw new Error("Connector action was not executed: missing durable call identity");
           }
-          if (!hasAttemptGateway(policy.serverId)) {
-            throw new Error(
-              "Approval-gated MCP action was not executed: exact attempt gateway is unavailable",
-            );
-          }
           if (policy.connectorBacked) {
             const approvalConfirmed =
               approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
@@ -2917,13 +2909,7 @@ function installMcpApprovalPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(
-        cloned,
-        policies,
-        hasAttemptGateway,
-        connectorActionPolicy,
-        approvedToolCallId,
-      );
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy, approvedToolCallId);
       return cloned;
     };
   }
@@ -3148,7 +3134,6 @@ function applyMcpApprovalPolicy(
   connectorActionPolicy?: ConnectorActionPolicyHooks,
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
   approvedToolCallId?: string,
-  mcpServers: readonly MCPServer[] = [],
 ): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
@@ -3177,17 +3162,9 @@ function applyMcpApprovalPolicy(
   if (policies.length === 0) {
     return;
   }
-  const hasAttemptGateway = (serverId: string): boolean =>
-    mcpServers.some(
-      (server) =>
-        server instanceof PrefixedMcpServer &&
-        server.registryId === serverId &&
-        server.hasAttemptToolEnvironment(),
-    );
   installMcpApprovalPolicy(
     agent as unknown as ApprovalCapableAgent,
     policies,
-    hasAttemptGateway,
     connectorActionPolicy,
     approvedToolCallId,
   );
@@ -6452,10 +6429,6 @@ export class PrefixedMcpServer implements MCPServer {
     this.attemptToolSubjectId = subjectId;
   }
 
-  hasAttemptToolEnvironment(): boolean {
-    return this.attemptToolEnvironment !== null;
-  }
-
   unprefixedToolName(toolName: string): string {
     return this.unprefixToolName(toolName);
   }
@@ -6570,6 +6543,14 @@ export class PrefixedMcpServer implements MCPServer {
           ...(meta === undefined ? {} : { transportMeta: meta }),
           ...(options?.signal ? { signal: options.signal } : {}),
         });
+      }
+      // Approval wrappers install this private host context before entering the
+      // SDK MCP call. Check the live physical server here: a deferred proxy can
+      // be published before this exact server receives its attempt environment.
+      if (activeModelToolInvocation(toolName)) {
+        throw new Error(
+          "Approval-gated MCP action was not executed: exact attempt gateway is unavailable",
+        );
       }
       const result = await this.executeCatalogTool(unprefixed, cleanArgs ?? {}, meta, options);
       return result;

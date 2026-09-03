@@ -3008,16 +3008,120 @@ describe("runtime event normalization", () => {
         if (!tool || tool.type !== "function") throw new Error("legacy MCP tool missing");
         const input = { query: "must-use-gateway" };
         expect(await tool.needsApproval(new RunContext(), input, "legacy-no-gateway")).toBe(true);
-        await expect(
-          tool.invoke(new RunContext(), JSON.stringify(input), {
-            toolCall: { callId: "legacy-no-gateway" },
-          } as any),
-        ).rejects.toThrow("exact attempt gateway is unavailable");
+        const result = await tool.invoke(new RunContext(), JSON.stringify(input), {
+          toolCall: { callId: "legacy-no-gateway" },
+        } as any);
+        expect(result).toMatchObject({ isError: true });
+        expect(JSON.stringify(result)).toContain("exact attempt gateway is unavailable");
         expect(policyPhases).toEqual(["prepare"]);
         expect(mcp.calls).toEqual([]);
       } finally {
         await prepared.close();
         mcp.close();
+      }
+    });
+
+    test("approval-gated deferred MCP execution uses the gateway bound after agent construction", async () => {
+      let releaseDeferred!: () => void;
+      const deferredConnect = new Promise<void>((resolve) => {
+        releaseDeferred = resolve;
+      });
+      const providerCalls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+      const deferred: MCPServer = {
+        name: "deferred-docs",
+        cacheToolsList: false,
+        async connect() {
+          await deferredConnect;
+        },
+        async close() {},
+        async listTools() {
+          return [
+            {
+              name: "search_documents",
+              description: "Search documents",
+              inputSchema: {
+                type: "object" as const,
+                properties: { query: { type: "string" } },
+                required: ["query"],
+                additionalProperties: false,
+              },
+            },
+          ];
+        },
+        async callTool(toolName, args) {
+          providerCalls.push({ tool: toolName, args: args ?? {} });
+          return [{ type: "text", text: "found" }];
+        },
+        async callToolResult(toolName, args) {
+          providerCalls.push({ tool: toolName, args: args ?? {} });
+          return { content: [{ type: "text", text: "found" }] };
+        },
+        async invalidateToolsCache() {},
+      };
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: "https://docs.invalid/mcp",
+            cacheToolsList: false,
+            requireApproval: true,
+          },
+        ],
+      });
+      const policyPhases: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => {
+          policyPhases.push("prepare");
+          return { managed: true, decision: "ask" };
+        },
+        begin: async () => {
+          policyPhases.push("begin");
+          return { allowed: true, managed: true, requestId: "deferred-request" };
+        },
+        complete: async ({ outcome }) => {
+          policyPhases.push(`complete:${outcome}`);
+        },
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        deferNonEagerUntilToolDemand: true,
+        localMcpServers: [{ id: "docs", server: deferred }],
+        connectorActionPolicy: hooks,
+      });
+      const agent = buildOpenGeniAgent(settings, [], {
+        mcpServers: prepared.mcpServers,
+        connectorActionPolicy: hooks,
+      });
+
+      try {
+        releaseDeferred();
+        await prepared.ready;
+        const [tool] = (await agent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!tool || tool.type !== "function") throw new Error("deferred MCP tool missing");
+        const input = { query: "network policy" };
+        const callId = "deferred-approved-call";
+        expect(await tool.needsApproval(new RunContext(), input, callId)).toBe(true);
+
+        await expect(
+          tool.invoke(new RunContext(), JSON.stringify(input), {
+            toolCall: { callId },
+          } as any),
+        ).resolves.toBeDefined();
+        expect(providerCalls).toEqual([{ tool: "search_documents", args: input }]);
+        expect(policyPhases).toEqual(["prepare", "begin", "complete:completed"]);
+      } finally {
+        releaseDeferred();
+        await prepared.close();
       }
     });
 
