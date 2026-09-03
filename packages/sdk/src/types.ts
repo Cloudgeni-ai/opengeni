@@ -124,8 +124,6 @@ export type ToolGatewayApprovalRequest = {
   catalogDigest: string;
   identity: ToolGatewayIdentity;
   arguments: Record<string, unknown>;
-  siteArtifactId?: string | undefined;
-  siteVersionId?: string | undefined;
 };
 
 export type ToolGatewayApprovalResponse = {

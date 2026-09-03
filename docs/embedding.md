@@ -258,10 +258,11 @@ The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
 boolean: the authenticated parent first creates a five-minute, hash-only,
 single-use approval capability bound to the current human, operation, catalog,
 identity, and arguments, then presents that token on the exact matching call.
-Every Site call follows the same parent-owned confirmation path regardless of
-the ordinary tool approval classification, with the capability also bound to
-the exact immutable Site version. The opaque-origin Site iframe never receives
-the token. External MCP clients use the aggregate workspace MCP route;
+Sites use a different host-owned boundary: an active immutable Site version may
+call its retained tool identities directly without per-call approval, while the
+parent intersects that allowlist with the viewer's live catalog and the API
+revalidates the active version on every call. The opaque-origin Site iframe
+never receives a token. External MCP clients use the aggregate workspace MCP route;
 deployments may opt into its resource-bound OAuth authorization server as
 documented in `docs/deployment.md`. Because that MCP adapter has no
 server-verifiable one-shot approval exchange, it omits tools classified for
@@ -272,10 +273,10 @@ Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
 `contentWindow`. It intersects the retained identities with the viewer's live
-gateway, owns approval UI, and aborts pending calls when the Site reloads,
-stops, navigates, replaces its bridge port, or unmounts. Duplicate live request
-ids are rejected, archived Sites receive no bridge, and no credential, cookie,
-API URL, workspace id, or parent DOM authority crosses into
+gateway, dispatches allowed calls directly, and aborts pending calls when the
+Site reloads, stops, navigates, replaces its bridge port, or unmounts. Duplicate
+live request ids are rejected, archived Sites receive no bridge, and no
+credential, cookie, API URL, workspace id, or parent DOM authority crosses into
 publisher-controlled code.
 
 ### Session Authorization

@@ -479,11 +479,11 @@ await tools.$call(identity, input, {
 ```
 
 Do not request approval capabilities speculatively or expose them to Site
-iframe code. A Site host performs this sequence after its parent-owned
-confirmation dialog resolves for every invocation, including tools whose
-ordinary catalog policy is `none` or `policy`, and supplies host-only
-`site: { artifactId, versionId }` context so the server binds the capability to
-the exact immutable version. Archived Sites receive no tool bridge.
+iframe code. Sites do not use this approval sequence: the host projects only
+the active immutable version's requested identities, supplies the Site context
+on direct calls, and the server revalidates the active version and viewer's live
+authority. This direct path also applies to tools whose ordinary current-human
+catalog policy is `human`. Archived Sites receive no tool bridge.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately

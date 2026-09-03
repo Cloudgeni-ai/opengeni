@@ -11,7 +11,6 @@ import {
 import type {
   ToolGatewayCallRequest,
   ToolGatewayCallResponse,
-  ToolGatewayApprovalResponse,
   ToolGatewayCatalog,
   ToolGatewayDeclarationsResponse,
 } from "@opengeni/sdk";
@@ -43,17 +42,14 @@ export type PublishedHtmlArtifactToolBridge = {
     request: ToolGatewayCallRequest,
     options: { signal: AbortSignal },
   ) => Promise<ToolGatewayCallResponse>;
-  approve: (
-    request: ToolGatewayCallRequest & { operationId: string },
-    options: { signal: AbortSignal },
-  ) => Promise<ToolGatewayApprovalResponse>;
   declarations?: (options: { signal: AbortSignal }) => Promise<ToolGatewayDeclarationsResponse>;
 };
 
 /**
  * Render exact published HTML in an opaque-origin iframe. Artifact scripts,
- * external resources, forms, popups, and downloads work without granting
- * parent-origin authority, shared cookies/storage, or top-level navigation.
+ * external resources, forms, popups, downloads, and the host-filtered tool
+ * bridge work without granting parent-origin authority, shared cookies/storage,
+ * or top-level navigation.
  */
 export function PublishedHtmlArtifactFrame(props: PublishedHtmlArtifactFrameProps) {
   const frameRef = useRef<HTMLIFrameElement | null>(null);

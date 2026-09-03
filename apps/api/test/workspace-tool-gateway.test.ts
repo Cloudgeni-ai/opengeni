@@ -211,6 +211,38 @@ describe("workspace tool gateway adapters", () => {
     });
   });
 
+  test("still requires approval for a human-classified non-Site HTTP call", async () => {
+    const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
+    const prepared = preparedGateway(calls, "human");
+    const access = grant();
+    const request = {
+      operationId: "33333333-3333-4333-8333-333333333333",
+      catalogDigest: prepared.toolGatewayCatalog.digest,
+      identity: { serverId: "inventory", toolName: "lookup" },
+      arguments: { sku: "HUMAN-1" },
+    };
+
+    await expect(callWorkspaceToolGateway(prepared, access, request)).rejects.toMatchObject({
+      status: 409,
+    });
+
+    const consumed: unknown[] = [];
+    const response = await callWorkspaceToolGateway(
+      prepared,
+      access,
+      { ...request, approvalToken: `ogta_${"a".repeat(43)}` },
+      {} as never,
+      async (_db, input) => {
+        consumed.push(input);
+        return true;
+      },
+    );
+
+    expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+    expect(consumed).toHaveLength(1);
+    expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "HUMAN-1" } }]);
+  });
+
   test("returns a typed retryable conflict when approval uses a stale catalog", async () => {
     const prepared = preparedGateway([], "human");
     await expect(
@@ -228,9 +260,9 @@ describe("workspace tool gateway adapters", () => {
     });
   });
 
-  test("requires viewer approval for every Site call and binds it to the exact Site version", async () => {
+  test("lets an authorized Site call its immutable allowlist without per-call approval", async () => {
     const calls: Array<{ kind: string; argumentsValue: Record<string, unknown> }> = [];
-    const prepared = preparedGateway(calls, "none");
+    const prepared = preparedGateway(calls, "human");
     const access = grant();
     const site = {
       siteArtifactId: "44444444-4444-4444-8444-444444444444",
@@ -248,46 +280,25 @@ describe("workspace tool gateway adapters", () => {
       ...site,
     };
 
-    await expect(
-      callWorkspaceToolGateway(
-        prepared,
-        access,
-        request,
-        {} as never,
-        async () => false,
-        undefined,
-        authorizeSiteTool as never,
-      ),
-    ).rejects.toMatchObject({ status: 409 });
-
-    const issued: unknown[] = [];
-    const approval = await approveWorkspaceToolGatewayCall(
-      prepared,
-      access,
-      {} as never,
-      request,
-      async (_db, input) => {
-        issued.push(input);
-      },
-      undefined,
-      authorizeSiteTool as never,
-    );
-    expect(issued[0]).toMatchObject({ siteVersionId: site.siteVersionId });
-
     const response = await callWorkspaceToolGateway(
       prepared,
       access,
-      { ...request, approvalToken: approval.approvalToken },
+      request,
       {} as never,
-      async (_db, input) => {
-        expect(input).toMatchObject({ siteVersionId: site.siteVersionId });
-        return true;
+      async () => {
+        throw new Error("Site calls must not consume approval capabilities");
       },
       undefined,
       authorizeSiteTool as never,
     );
     expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
-    expect(authorizationChecks).toHaveLength(3);
+    expect(authorizationChecks).toEqual([
+      {
+        siteArtifactId: site.siteArtifactId,
+        siteVersionId: site.siteVersionId,
+        identity: request.identity,
+      },
+    ]);
     expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SITE-1" } }]);
   });
 

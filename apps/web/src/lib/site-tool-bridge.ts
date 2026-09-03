@@ -30,7 +30,6 @@ export function createSiteToolBridge(input: {
   callTool?: SiteToolCaller;
 }): PublishedHtmlArtifactToolBridge {
   const allowed = new Set(input.requestedTools.map(toolIdentityKey));
-  const approvedCatalogDigests = new Map<string, string>();
   const callTool = input.callTool ?? callWorkspaceTool;
   let projectedCatalog: ToolGatewayCatalog | null = null;
 
@@ -68,70 +67,30 @@ export function createSiteToolBridge(input: {
 
   return {
     catalog: async ({ signal }) => await loadCatalog({ signal }),
-    approve: async (toolRequest, { signal }) => {
-      requireAllowedIdentity(allowed, toolRequest.identity);
-
-      const approveAgainstCurrentCatalog = async (): Promise<{
-        catalog: ToolGatewayCatalog;
-        response: Awaited<ReturnType<OpenGeniWorkspaceTools["$approve"]>>;
-      }> => {
-        const catalog = await loadCatalog({ signal, refresh: true });
-        requireEnabledIdentity(catalog, toolRequest.identity);
-        const response = await input.workspaceTools.$approve(
-          toolRequest.identity,
-          toolRequest.arguments,
-          {
-            operationId: toolRequest.operationId,
-            site: { artifactId: input.artifactId, versionId: input.siteVersionId },
-            signal,
-          },
-        );
-        return { catalog, response };
-      };
-
-      let approved: Awaited<ReturnType<typeof approveAgainstCurrentCatalog>>;
-      try {
-        approved = await approveAgainstCurrentCatalog();
-      } catch (error) {
-        if (!isCatalogStaleApiError(error)) throw error;
-        projectedCatalog = null;
-        approved = await approveAgainstCurrentCatalog();
-      }
-      approvedCatalogDigests.clear();
-      approvedCatalogDigests.set(toolRequest.operationId, approved.catalog.digest);
-      return approved.response;
-    },
     call: async (toolRequest, { signal }) => {
       requireAllowedIdentity(allowed, toolRequest.identity);
-      const approvedCatalogDigest = approvedCatalogDigests.get(toolRequest.operationId ?? "");
-      const current = approvedCatalogDigest ? null : await loadCatalog({ signal });
-      if (current) requireEnabledIdentity(current, toolRequest.identity);
-      const catalogDigest = approvedCatalogDigest ?? current?.digest;
-      if (!catalogDigest) throw new Error("Site tool approval is no longer available");
 
-      try {
+      const callAgainstCurrentCatalog = async (refresh = false) => {
+        const current = await loadCatalog({ signal, refresh });
+        requireEnabledIdentity(current, toolRequest.identity);
         return await callTool({
           workspaceId: input.workspaceId,
           signal,
           request: {
             ...toolRequest,
-            catalogDigest,
+            catalogDigest: current.digest,
             siteArtifactId: input.artifactId,
             siteVersionId: input.siteVersionId,
           },
         });
+      };
+
+      try {
+        return await callAgainstCurrentCatalog();
       } catch (error) {
-        if (isCatalogStaleApiError(error)) {
-          projectedCatalog = null;
-          try {
-            await loadCatalog({ signal, refresh: true });
-          } catch {
-            projectedCatalog = null;
-          }
-        }
-        throw error;
-      } finally {
-        if (toolRequest.operationId) approvedCatalogDigests.delete(toolRequest.operationId);
+        if (!isCatalogStaleApiError(error)) throw error;
+        projectedCatalog = null;
+        return await callAgainstCurrentCatalog(true);
       }
     },
   };

@@ -20,7 +20,7 @@ export const ARTIFACT_EDIT_TOOLS = [
   "artifacts_publish",
 ] as const satisfies readonly FirstPartyMcpToolName[];
 
-const ARTIFACT_RUNTIME_CONTRACT = `Sites publish as one self-contained compiled HTML document in an opaque-origin sandboxed iframe. JavaScript, event handlers, forms, network requests, popups, and downloads work. The Site cannot access OpenGeni credentials, parent-page DOM/storage, same-origin authority, or top-level navigation. When workspace tools are needed, request only their exact gateway identities and use createOpenGeniSiteClient from @opengeni/sdk/site; the parent host keeps workspace identity and credentials outside the iframe and handles approval-required calls. Prefer @opengeni/react components and the workspace design system for the source app.`;
+const ARTIFACT_RUNTIME_CONTRACT = `Sites publish as one self-contained compiled HTML document in an opaque-origin sandboxed iframe. JavaScript, event handlers, forms, network requests, popups, and downloads work. The Site cannot access OpenGeni credentials, parent-page DOM/storage, same-origin authority, or top-level navigation. When workspace tools are needed, request only their exact gateway identities and use createOpenGeniSiteClient from @opengeni/sdk/site; the active immutable version's requested identities are its direct-call allowlist, while the parent keeps workspace identity and credentials outside the iframe and intersects that allowlist with the viewer's live authority. Prefer @opengeni/react components and the workspace design system for the source app.`;
 
 export function artifactCreateOpeningMessage(): string {
   return "Help me build a workspace Site.";

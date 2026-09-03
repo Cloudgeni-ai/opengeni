@@ -41,11 +41,6 @@ beforeAll(async () => {
       account_id uuid not null references managed_accounts(id) on delete cascade,
       unique (id, account_id)
     );
-    create table workspace_artifact_versions (
-      id uuid primary key,
-      workspace_id uuid not null references workspaces(id) on delete cascade,
-      unique (workspace_id, id)
-    );
   `);
   await admin.begin(async (transaction) => {
     await transaction.unsafe(source);
@@ -70,8 +65,7 @@ describe("migration 0402 tool gateway approval capabilities", () => {
     expect(source).not.toContain('"approval_token"');
     expect(source).toContain('"operation_id" uuid NOT NULL');
     expect(source).toContain('"arguments_digest" text NOT NULL');
-    expect(source).toContain('"site_version_id" uuid');
-    expect(source).toContain('"tool_gateway_approval_capabilities_site_version_fk"');
+    expect(source).not.toContain('"site_version_id"');
     expect(source).toContain('length("tool_name") BETWEEN 1 AND 512');
     expect(source).toContain("interval '10 minutes'");
     expect(source).toContain(

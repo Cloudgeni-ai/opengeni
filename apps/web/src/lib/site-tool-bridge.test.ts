@@ -33,7 +33,7 @@ function catalog(digestCharacter: string, includeTool = true): ToolGatewayCatalo
             description: "Looks up inventory",
             inputSchema: { type: "object" },
             source: "mcp",
-            approval: "none",
+            approval: "human",
           },
         ]
       : [],
@@ -56,29 +56,17 @@ function staleCatalogError(): OpenGeniApiError {
   );
 }
 
-describe("Site tool bridge catalog refresh", () => {
-  test("retries stale approval and calls with the newly approved catalog digest", async () => {
-    const catalogs = [catalog("a"), catalog("b"), catalog("c")];
+describe("Site tool bridge direct calls", () => {
+  test("calls an allowed live tool directly with host-owned Site context", async () => {
     const catalogCalls: Array<boolean | undefined> = [];
-    let approvalCalls = 0;
     let callRequest: Record<string, unknown> | null = null;
-    const workspaceTools = {
-      $catalog: async (options?: { refresh?: boolean }) => {
-        catalogCalls.push(options?.refresh);
-        return catalogs.shift() ?? catalog("c");
-      },
-      $approve: async () => {
-        approvalCalls += 1;
-        if (approvalCalls === 1) throw staleCatalogError();
-        return {
-          operationId,
-          approvalToken: `ogta_${"x".repeat(43)}`,
-          expiresAt: "2026-09-02T00:05:00.000Z",
-        };
-      },
-    } as unknown as OpenGeniWorkspaceTools;
     const bridge = createSiteToolBridge({
-      workspaceTools,
+      workspaceTools: {
+        $catalog: async (options?: { refresh?: boolean }) => {
+          catalogCalls.push(options?.refresh);
+          return catalog("a");
+        },
+      } as unknown as OpenGeniWorkspaceTools,
       workspaceId,
       artifactId,
       siteVersionId,
@@ -93,56 +81,84 @@ describe("Site tool bridge catalog refresh", () => {
       },
     });
 
-    expect((await bridge.catalog({ signal })).digest).toBe("a".repeat(64));
-    const approval = await bridge.approve(
-      {
-        operationId,
-        catalogDigest: "a".repeat(64),
-        identity,
-        arguments: { sku: "SKU-1" },
-      },
-      { signal },
-    );
     await bridge.call(
       {
         operationId,
-        approvalToken: approval.approvalToken,
-        catalogDigest: "a".repeat(64),
+        catalogDigest: "f".repeat(64),
         identity,
         arguments: { sku: "SKU-1" },
       },
       { signal },
     );
 
-    expect(catalogCalls).toEqual([undefined, true, true]);
-    expect(approvalCalls).toBe(2);
+    expect(catalogCalls).toEqual([undefined]);
     expect(callRequest).toMatchObject({
-      catalogDigest: "c".repeat(64),
+      catalogDigest: "a".repeat(64),
       siteArtifactId: artifactId,
       siteVersionId,
     });
+    expect(callRequest).not.toHaveProperty("approvalToken");
   });
 
-  test("stops the retry when the refreshed catalog no longer exposes the Site tool", async () => {
-    const catalogs = [catalog("a"), catalog("b"), catalog("c", false)];
-    let approvalCalls = 0;
+  test("refreshes and retries when a call loses a catalog race", async () => {
+    const catalogs = [catalog("a"), catalog("b")];
+    const catalogCalls: Array<boolean | undefined> = [];
+    const callDigests: string[] = [];
     const bridge = createSiteToolBridge({
       workspaceTools: {
-        $catalog: async () => catalogs.shift() ?? catalog("c", false),
-        $approve: async () => {
-          approvalCalls += 1;
-          throw staleCatalogError();
+        $catalog: async (options?: { refresh?: boolean }) => {
+          catalogCalls.push(options?.refresh);
+          return catalogs.shift() ?? catalog("b");
         },
       } as unknown as OpenGeniWorkspaceTools,
       workspaceId,
       artifactId,
       siteVersionId,
       requestedTools: [identity],
+      callTool: async (input) => {
+        callDigests.push(input.request.catalogDigest);
+        if (callDigests.length === 1) throw staleCatalogError();
+        return {
+          operationId,
+          catalogDigest: input.request.catalogDigest,
+          result: { content: [{ type: "text", text: "ok" }] },
+        } as ToolGatewayCallResponse;
+      },
     });
 
-    await bridge.catalog({ signal });
+    await bridge.call(
+      {
+        operationId,
+        catalogDigest: "a".repeat(64),
+        identity,
+        arguments: { sku: "SKU-1" },
+      },
+      { signal },
+    );
+
+    expect(catalogCalls).toEqual([undefined, true]);
+    expect(callDigests).toEqual(["a".repeat(64), "b".repeat(64)]);
+  });
+
+  test("does not retry when the refreshed catalog no longer exposes the Site tool", async () => {
+    const catalogs = [catalog("a"), catalog("b", false)];
+    let callCount = 0;
+    const bridge = createSiteToolBridge({
+      workspaceTools: {
+        $catalog: async () => catalogs.shift() ?? catalog("b", false),
+      } as unknown as OpenGeniWorkspaceTools,
+      workspaceId,
+      artifactId,
+      siteVersionId,
+      requestedTools: [identity],
+      callTool: async () => {
+        callCount += 1;
+        throw staleCatalogError();
+      },
+    });
+
     await expect(
-      bridge.approve(
+      bridge.call(
         {
           operationId,
           catalogDigest: "a".repeat(64),
@@ -152,57 +168,6 @@ describe("Site tool bridge catalog refresh", () => {
         { signal },
       ),
     ).rejects.toThrow("This requested tool is not enabled in the workspace");
-    expect(approvalCalls).toBe(1);
-  });
-
-  test("refreshes both catalog caches when the approved call races another catalog change", async () => {
-    const catalogs = [catalog("a"), catalog("b"), catalog("c")];
-    const catalogCalls: Array<boolean | undefined> = [];
-    const bridge = createSiteToolBridge({
-      workspaceTools: {
-        $catalog: async (options?: { refresh?: boolean }) => {
-          catalogCalls.push(options?.refresh);
-          return catalogs.shift() ?? catalog("c");
-        },
-        $approve: async () => ({
-          operationId,
-          approvalToken: `ogta_${"x".repeat(43)}`,
-          expiresAt: "2026-09-02T00:05:00.000Z",
-        }),
-      } as unknown as OpenGeniWorkspaceTools,
-      workspaceId,
-      artifactId,
-      siteVersionId,
-      requestedTools: [identity],
-      callTool: async () => {
-        throw staleCatalogError();
-      },
-    });
-
-    await bridge.catalog({ signal });
-    const approval = await bridge.approve(
-      {
-        operationId,
-        catalogDigest: "a".repeat(64),
-        identity,
-        arguments: { sku: "SKU-1" },
-      },
-      { signal },
-    );
-    await expect(
-      bridge.call(
-        {
-          operationId,
-          approvalToken: approval.approvalToken,
-          catalogDigest: "a".repeat(64),
-          identity,
-          arguments: { sku: "SKU-1" },
-        },
-        { signal },
-      ),
-    ).rejects.toBeInstanceOf(OpenGeniApiError);
-
-    expect(catalogCalls).toEqual([undefined, true, true]);
-    expect((await bridge.catalog({ signal })).digest).toBe("c".repeat(64));
+    expect(callCount).toBe(1);
   });
 });

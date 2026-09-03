@@ -388,11 +388,13 @@ export async function callWorkspaceToolGateway(
           }
         : null;
     if (entry && siteContext) {
-      if (!db) throw new HTTPException(409, { message: "tool_gateway_approval_required" });
+      if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
       await authorizeSiteTool(db, grant, siteContext);
     }
-    let approvalConfirmed = false;
-    const approvalRequired = entry?.approval === "human" || siteContext !== null;
+    // An authorized active Site version is the transport-owned approval boundary:
+    // its retained identity allowlist replaces per-invocation human confirmation.
+    let approvalConfirmed = siteContext !== null;
+    const approvalRequired = entry?.approval === "human" && siteContext === null;
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -403,7 +405,6 @@ export async function callWorkspaceToolGateway(
         catalogDigest: request.catalogDigest,
         identity: request.identity,
         argumentsDigest: digestCanonicalJson(request.arguments),
-        ...(siteContext ? { siteVersionId: siteContext.siteVersionId } : {}),
       });
     }
     if (approvalRequired && !approvalConfirmed) {
@@ -452,7 +453,6 @@ export async function approveWorkspaceToolGatewayCall(
   input: unknown,
   issueApproval: typeof issueToolGatewayApproval = issueToolGatewayApproval,
   observability?: Observability,
-  authorizeSiteTool: AuthorizeWorkspaceSiteTool = requireWorkspaceSiteToolAuthorization,
 ) {
   const request = ToolGatewayApprovalRequest.parse(input);
   if (request.catalogDigest !== prepared.toolGatewayCatalog.digest) {
@@ -464,17 +464,7 @@ export async function approveWorkspaceToolGatewayCall(
       candidate.identity.toolName === request.identity.toolName,
   );
   if (!entry) throw new HTTPException(404, { message: "tool_not_found" });
-  const siteContext =
-    request.siteArtifactId && request.siteVersionId
-      ? {
-          siteArtifactId: request.siteArtifactId,
-          siteVersionId: request.siteVersionId,
-          identity: request.identity,
-        }
-      : null;
-  if (siteContext) {
-    await authorizeSiteTool(db, grant, siteContext);
-  } else if (entry.approval !== "human") {
+  if (entry.approval !== "human") {
     throw new HTTPException(422, { message: "tool_does_not_require_human_approval" });
   }
   const observation = startWorkspaceToolGatewayObservation(observability, {
@@ -494,7 +484,6 @@ export async function approveWorkspaceToolGatewayCall(
       catalogDigest: request.catalogDigest,
       identity: request.identity,
       argumentsDigest: digestCanonicalJson(request.arguments),
-      ...(siteContext ? { siteVersionId: siteContext.siteVersionId } : {}),
       expiresAt,
     });
   } catch (error) {

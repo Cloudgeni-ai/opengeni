@@ -342,12 +342,8 @@ export const ToolGatewayApprovalRequest = z
     catalogDigest: sha256,
     identity: ToolGatewayIdentity,
     arguments: jsonObject,
-    /** Host-owned Site context. Site calls require approval regardless of generic tool policy. */
-    siteArtifactId: z.string().uuid().optional(),
-    siteVersionId: z.string().uuid().optional(),
   })
-  .strict()
-  .superRefine(requireCompleteSiteToolContext);
+  .strict();
 export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalRequest>;
 
 export const ToolGatewayApprovalResponse = z

@@ -1,6 +1,6 @@
 -- deployment-mode: rolling
--- Current-human HTTP and Site tool calls use hash-only, single-use approval
--- capabilities instead of trusting a caller-provided approval boolean.
+-- Current-human HTTP tool calls use hash-only, single-use approval capabilities
+-- instead of trusting a caller-provided approval boolean.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -15,16 +15,12 @@ CREATE TABLE "tool_gateway_approval_capabilities" (
   "server_id" text NOT NULL,
   "tool_name" text NOT NULL,
   "arguments_digest" text NOT NULL,
-  "site_version_id" uuid,
   "expires_at" timestamptz NOT NULL,
   "consumed_at" timestamptz,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "tool_gateway_approval_capabilities_workspace_account_fk"
     FOREIGN KEY ("workspace_id", "account_id")
     REFERENCES "workspaces"("id", "account_id") ON DELETE CASCADE,
-  CONSTRAINT "tool_gateway_approval_capabilities_site_version_fk"
-    FOREIGN KEY ("workspace_id", "site_version_id")
-    REFERENCES "workspace_artifact_versions"("workspace_id", "id") ON DELETE CASCADE,
   CONSTRAINT "tool_gateway_approval_capabilities_token_hash_chk"
     CHECK ("token_hash" ~ '^[0-9a-f]{64}$'),
   CONSTRAINT "tool_gateway_approval_capabilities_catalog_digest_chk"

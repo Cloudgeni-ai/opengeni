@@ -1,7 +1,7 @@
 <!-- docs-refs: record -->
 
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
-> September 1, 2026 and resolved on September 2, 2026. Code wins where the
+> September 1, 2026 and resolved on September 3, 2026. Code wins where the
 > implementation later differs.
 
 # Workspace HTML Sites
@@ -47,9 +47,11 @@ model.
 Artifact HTML is publisher-controlled active content. The opaque origin blocks
 parent DOM, cookie, and storage access, but the current renderer deliberately
 allows scripts, external resources, forms, popups, and outbound network
-requests. Opening an artifact therefore must not disclose an OpenGeni credential
-or silently grant API or tool authority. Authenticated Site capabilities require
-an additional explicit trust and capability boundary described below.
+requests. Opening an artifact therefore must not disclose an OpenGeni
+credential or grant broader API authority. Publishing an immutable Site version
+with requested tool identities explicitly authorizes that active version to
+invoke those identities without per-call prompts, subject to the current
+viewer still having live workspace and connection authority.
 
 The finished runtime is one self-contained HTML document. Each immutable
 version retains its complete traversal-free source bundle and exact requested
@@ -207,11 +209,10 @@ The parent resolves every call through the current human's live workspace tool
 gateway. That gateway rebuilds the enabled first-party and integration catalog,
 resolves personal/workspace connection authority through the existing broker,
 validates the catalog digest and input, and invokes the same executor as model
-and Codemode calls. Every Site invocation opens the stock parent-owned
-confirmation dialog, including tools whose ordinary catalog policy is `none` or
-`policy`; only the resulting authenticated current-human HTTP call carries the
-server-issued one-shot approval capability bound to that immutable Site version.
-Site code cannot approve itself.
+and Codemode calls. The active immutable version's retained tool identities are
+the Site's direct-call allowlist. Calls within that live intersection execute
+without a confirmation dialog or approval capability, including tools whose
+ordinary current-human catalog policy is `human`.
 
 This avoids version-scoped bearer issuance entirely. Membership, permission,
 connection, logout, and catalog changes are observed by the parent's ordinary
@@ -311,21 +312,18 @@ extraction and an additional public adapter, not a replacement tool platform.
    tools OpenGeni already gives an agent. It must assemble configured external
    integrations as well as first-party tools and call the existing executor,
    not duplicate provider implementations.
-4. Add an explicit artifact trust and capability grant plus browser-usable
-   runtime authentication or parent mediation. The server must positively link
-   grant creation and refresh to the live managed-human login, bind the grant to
-   the exact artifact version and approved API/tool allowlist, and revoke it on
-   trust, login, membership, permission, or connection changes. A plain
-   delegated bearer that merely claims the human's subject id is insufficient:
-   current access code deliberately refuses delegated bearers the canonical
-   managed-human stamp and personal-connection authority. The host-owned MCP
-   authority path is also a different concern: it lets an embedding host supply
-   connector authority; it does not establish viewer consent for publisher-
-   controlled code or safely expose the human's authority inside the iframe.
-5. Define direct-human approval and durable operation semantics for UI tool
-   calls. Retries of mutating calls need the same no-duplicate and
-   outcome-unknown guarantees as Codemode without pretending that the call
-   belongs to an agent attempt.
+4. Add an explicit immutable requested-tool allowlist plus parent mediation.
+   The server must positively link every Site call to the exact active artifact
+   version, intersect it with the live managed-human gateway, and revoke access
+   immediately on archive, version replacement, logout, membership, permission,
+   connection, or catalog changes. A plain delegated bearer that merely claims
+   the human's subject id is insufficient: current access code deliberately
+   refuses delegated bearers the canonical managed-human stamp and personal-
+   connection authority. No artifact-readable credential or Site-specific
+   bearer is issued.
+5. Keep generic direct-human approval and durable operation semantics for
+   ordinary non-Site UI tool calls. Sites use their immutable requested-tool
+   allowlist directly and do not enter that per-call approval flow.
 
 No new Linear, Slack, GitHub, provider credential, MCP transport, artifact host,
 or React session implementation is required.
@@ -361,11 +359,10 @@ catalog changed after the Site was built.
    digest, canonical identity, and arguments over the transferred port.
 4. The parent rejects identities outside the immutable requested set and sends
    the call through the authenticated workspace HTTP adapter.
-5. Every invocation stops at a stock parent-owned confirmation dialog. The
-   parent shows bounded canonical arguments and destructive intent, then obtains
-   a server-issued one-shot capability bound to the exact operation, arguments,
-   identity, viewer, and immutable Site version; MCP and Site code cannot
-   silently provide it.
+5. The parent dispatches an allowed call directly without a confirmation dialog
+   or approval capability. The API verifies that the artifact is active, the
+   version is still current, and the exact identity remains in that version's
+   retained requested-tool set.
 6. The API rebuilds the current-human gateway from live enabled first-party and
    integration servers, validates digest/input/authorization, resolves current
    connections, and calls the same executor closures as model and Codemode.
@@ -388,9 +385,8 @@ catalog changed after the Site was built.
 - Site authority is parent-mediated and limited twice: the immutable version's
   retained requested identities and the viewer's live workspace gateway.
 - Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
-  approval policy. The Site adapter applies mandatory per-invocation viewer
-  confirmation through the same one-shot capability mechanism, not a parallel
-  approval store or consent framework.
+  approval policy. The Site adapter bypasses per-invocation approval after the
+  host and API verify the active immutable version's direct-call allowlist.
 - Codemode keeps its exact-attempt durable operation journal and recovery
   semantics. Direct current-human calls carry caller-generated operation ids;
   provider-specific idempotency/outcome handling remains in the canonical

@@ -1080,11 +1080,13 @@ journal, sandbox delivery, and recovery semantics. The current-human gateway
 rebuilds live authority for each request. Browser callers use
 `client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
 parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
-credentials nor workspace routing context. Every Site invocation is confirmed
-in the parent and enforced again with a one-shot capability bound to the current
-viewer, operation, arguments, catalog, identity, and immutable Site version;
-archived Sites receive no bridge. Provider construction is permission-filtered
-and resource-filtered before any connection or `tools/list` traffic.
+credentials nor workspace routing context. The active immutable Site version's
+retained tool identities are its direct-call allowlist: the parent intersects
+them with the current viewer's live gateway, and the API revalidates the exact
+active version and identity on every call. Sites do not use per-invocation
+approval prompts or approval capabilities; archived Sites receive no bridge.
+Provider construction is permission-filtered and resource-filtered before any
+connection or `tools/list` traffic.
 
 External MCP clients may use the opt-in OAuth authorization server. Its public
 metadata and dynamic registration lead to an authorization-code flow with
@@ -1097,7 +1099,8 @@ refresh and access token in that family. OAuth bearer tokens are never accepted
 as REST credentials. Because MCP currently has no server-verifiable one-shot
 human approval capability, the MCP projection omits entries classified for
 human approval and rejects direct calls to their projected names; those entries
-remain available through the current-human HTTP/SDK and Site approval paths.
+remain available through the current-human HTTP/SDK approval path and the Site
+direct-call path.
 
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit

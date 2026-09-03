@@ -43,14 +43,15 @@ network-policy rules prevent direct API access and every declared hop overwrites
 or appends the forwarding chain. A missing or shorter chain fails back to the
 server-owned transport peer.
 
-Current-human HTTP/SDK calls classified for human approval and every Site call
-use the ordinary API database and require migration
-`0402_tool_gateway_approval_capabilities.sql`. No additional secret or service
-is required. The API stores only a token hash, binds each capability to the
-current human and exact call, additionally binds Site consent to the immutable
-Site version, expires it after five minutes, and consumes it once. Issuance
-opportunistically removes bounded expired/consumed rows. Existing database
-readiness therefore covers this path.
+Current-human HTTP/SDK calls classified for human approval use the ordinary API
+database and require migration `0402_tool_gateway_approval_capabilities.sql`.
+No additional secret or service is required. The API stores only a token hash,
+binds each capability to the current human and exact call, expires it after five
+minutes, and consumes it once. Issuance opportunistically removes bounded
+expired/consumed rows. Existing database readiness therefore covers this path.
+Site calls do not use this approval store: their active immutable version's
+requested identities are intersected with the current viewer's live gateway and
+revalidated by the API on every direct call.
 
 Refresh-token rotation is family-fenced. Reuse of any known revoked generation
 atomically revokes every descendant refresh and access token before returning

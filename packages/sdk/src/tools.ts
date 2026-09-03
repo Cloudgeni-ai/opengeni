@@ -14,8 +14,6 @@ export type OpenGeniToolCallOptions = {
   operationId?: string;
   signal?: AbortSignal;
   refreshCatalog?: boolean;
-  /** Host-owned context for a governed Site invocation. */
-  site?: { artifactId: string; versionId: string };
   /** Server-issued, single-use capability returned by `$approve`. */
   approvalToken?: string;
 };
@@ -51,7 +49,6 @@ export type OpenGeniWorkspaceTools = OpenGeniGeneratedTools &
       options?: {
         operationId?: string;
         signal?: AbortSignal;
-        site?: { artifactId: string; versionId: string };
       },
     ) => Promise<ToolGatewayApprovalResponse>;
     readonly $declarations: (options?: {
@@ -129,12 +126,6 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         catalogDigest: current.digest,
         identity,
         arguments: argumentsValue,
-        ...(options.site
-          ? {
-              siteArtifactId: options.site.artifactId,
-              siteVersionId: options.site.versionId,
-            }
-          : {}),
         ...(options.approvalToken ? { approvalToken: options.approvalToken } : {}),
       };
       const response = await this.transport.requestJson<ToolGatewayCallResponse>(
@@ -159,7 +150,6 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       options: {
         operationId?: string;
         signal?: AbortSignal;
-        site?: { artifactId: string; versionId: string };
       } = {},
     ): Promise<ToolGatewayApprovalResponse> => {
       const current = await catalog(options.signal ? { signal: options.signal } : {});
@@ -168,12 +158,6 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
         catalogDigest: current.digest,
         identity,
         arguments: argumentsValue,
-        ...(options.site
-          ? {
-              siteArtifactId: options.site.artifactId,
-              siteVersionId: options.site.versionId,
-            }
-          : {}),
       };
       return await this.transport.requestJson<ToolGatewayApprovalResponse>(
         "POST",

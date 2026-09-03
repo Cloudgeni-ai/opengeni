@@ -3645,7 +3645,6 @@ export const toolGatewayApprovalCapabilities = pgTable(
     serverId: text("server_id").notNull(),
     toolName: text("tool_name").notNull(),
     argumentsDigest: text("arguments_digest").notNull(),
-    siteVersionId: uuid("site_version_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3655,11 +3654,6 @@ export const toolGatewayApprovalCapabilities = pgTable(
       name: "tool_gateway_approval_capabilities_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
-    }).onDelete("cascade"),
-    siteVersion: foreignKey({
-      name: "tool_gateway_approval_capabilities_site_version_fk",
-      columns: [table.workspaceId, table.siteVersionId],
-      foreignColumns: [workspaceArtifactVersions.workspaceId, workspaceArtifactVersions.id],
     }).onDelete("cascade"),
     operation: uniqueIndex("tool_gateway_approval_capabilities_operation_uq").on(
       table.workspaceId,
