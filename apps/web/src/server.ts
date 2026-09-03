@@ -7,6 +7,13 @@ const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
 const REVALIDATE_CACHE_CONTROL = "no-cache";
 const SHORT_CACHE_CONTROL = "public, max-age=3600";
 const DEMO_API_PREFIX = "/demo-api";
+const SETUP_ACCOUNT_PATH = "/setup-account";
+const SETUP_TOKEN_PARAMETER = "token";
+const SETUP_TOKEN_MAX_LENGTH = 2_048;
+const SETUP_ACCOUNT_RESPONSE_HEADERS = {
+  "referrer-policy": "no-referrer",
+  "x-robots-tag": "noindex, nofollow",
+} as const;
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -49,6 +56,9 @@ export function createWebHandler(
       });
     }
 
+    const setupAccountRedirect = redirectSetupAccountQueryBearer(url);
+    if (setupAccountRedirect) return setupAccountRedirect;
+
     let pathname: string;
     try {
       pathname = decodeURIComponent(url.pathname);
@@ -72,8 +82,39 @@ export function createWebHandler(
     if (pathname.startsWith("/assets/") || pathname.startsWith("/react-demo/")) {
       return new Response("Not Found", { status: 404 });
     }
+    if (pathname === SETUP_ACCOUNT_PATH) {
+      return serveFile(request, indexPath, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
+    }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
   };
+}
+
+/**
+ * Normalize the mail-compatible query bearer into the browser-only fragment
+ * before serving application HTML or loading assets. The query is accepted
+ * only on the exact setup route, must be singular and bounded, and is removed
+ * even when malformed so it is never reflected indefinitely.
+ */
+function redirectSetupAccountQueryBearer(url: URL): Response | null {
+  if (url.pathname !== SETUP_ACCOUNT_PATH || !url.searchParams.has(SETUP_TOKEN_PARAMETER)) {
+    return null;
+  }
+  const candidates = url.searchParams.getAll(SETUP_TOKEN_PARAMETER);
+  const candidate = candidates.length === 1 ? candidates[0] : null;
+  const location = new URL(url);
+  location.searchParams.delete(SETUP_TOKEN_PARAMETER);
+  location.hash = "";
+  if (candidate && candidate.length <= SETUP_TOKEN_MAX_LENGTH) {
+    location.hash = new URLSearchParams({ [SETUP_TOKEN_PARAMETER]: candidate }).toString();
+  }
+  return new Response(null, {
+    status: 302,
+    headers: {
+      ...SETUP_ACCOUNT_RESPONSE_HEADERS,
+      "cache-control": "no-store",
+      location: location.toString(),
+    },
+  });
 }
 
 async function proxyDemoApi(
@@ -224,7 +265,12 @@ function cacheControlFor(pathname: string): string {
   return SHORT_CACHE_CONTROL;
 }
 
-async function serveFile(request: Request, path: string, cacheControl: string): Promise<Response> {
+async function serveFile(
+  request: Request,
+  path: string,
+  cacheControl: string,
+  extraHeaders?: HeadersInit,
+): Promise<Response> {
   const source = Bun.file(path);
   if (!(await source.exists())) {
     return new Response("Not Found", { status: 404 });
@@ -236,6 +282,7 @@ async function serveFile(request: Request, path: string, cacheControl: string): 
   const encoded = acceptsGzip && (await gzip.exists()) ? gzip : null;
   const body = encoded ?? source;
   const headers = new Headers({
+    ...Object.fromEntries(new Headers(extraHeaders)),
     "cache-control": cacheControl,
     "content-type": source.type || "application/octet-stream",
     vary: "Accept-Encoding",

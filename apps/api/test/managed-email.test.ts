@@ -73,7 +73,7 @@ describe("managed email transport", () => {
           role: "viewer",
         },
       ],
-      setupUrl: "https://opengeni.test/setup-account#token=secret-bearer",
+      setupUrl: "https://opengeni.test/setup-account?token=secret-bearer",
     });
     expect(rendered.subject).toBe("You're invited to join R&D <Labs> on OpenGeni");
     expect(rendered.text).toContain("Ada <Admin>");

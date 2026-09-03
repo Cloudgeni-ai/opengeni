@@ -682,7 +682,8 @@ describe("organization membership routes", () => {
 
       const setupUrl = failedMessage.text.match(/Accept invitation to .*: (https?:\/\/\S+)/)?.[1];
       expect(setupUrl).toBeTruthy();
-      const token = new URL(setupUrl!).hash.slice("#token=".length);
+      const token = new URL(setupUrl!).searchParams.get("token");
+      expect(token).toBeTruthy();
       const previewApp = new Hono();
       registerManagedOnboardingRoutes(previewApp, {
         settings: managedSettings,
@@ -694,7 +695,7 @@ describe("organization membership routes", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ token: decodeURIComponent(token) }),
+          body: JSON.stringify({ token }),
         },
       );
       expect(previewResponse.status).toBe(200);

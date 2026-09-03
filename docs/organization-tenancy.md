@@ -700,6 +700,20 @@ setup link. Provider availability is deliberately not part of that
 configuration precondition; the durable journal records the resulting delivery
 outcome.
 
+Email links carry the bearer in a bounded `token` query parameter because mail
+security and click-tracking gateways may discard URL fragments. The production
+web handler accepts that parameter only on the exact `/setup-account` route,
+returns a no-store/no-referrer same-origin redirect that moves it into the URL
+fragment, and serves the setup shell under the same response protections. The
+SPA continues to accept setup authority only from the fragment and scrubs it
+before API work or durable browser storage. Malformed, duplicate, and oversized
+query values are removed without being reflected. Edge and ingress access logs
+must not retain query strings for this route: the managed Helm chart renders a
+dedicated exact ingress-nginx location with access logging disabled, and any
+external edge must provide an equivalent policy. The database still stores
+only the bearer digest and the completion path remains single-use and
+expiry-bounded.
+
 `POST /v1/auth/organization-setup/preview` accepts the same signed-out bearer
 under the setup abuse limiter and returns only its frozen safe invitation
 projection. Pending previews include organization, invited name/email, role,

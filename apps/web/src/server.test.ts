@@ -33,6 +33,47 @@ describe("production web handler", () => {
     expect(await route.text()).toContain("OpenGeni");
   });
 
+  test("moves a mail-compatible setup bearer into a no-store browser fragment", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root);
+    const redirect = await handler(
+      new Request("https://example.test/setup-account?preview=1&token=secret-bearer"),
+    );
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get("location")).toBe(
+      "https://example.test/setup-account?preview=1#token=secret-bearer",
+    );
+    expect(redirect.headers.get("cache-control")).toBe("no-store");
+    expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(redirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+
+    const shell = await handler(
+      new Request("https://example.test/setup-account#token=secret-bearer"),
+    );
+    expect(shell.status).toBe(200);
+    expect(shell.headers.get("cache-control")).toBe("no-store");
+    expect(shell.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(shell.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    expect(await shell.text()).toContain("OpenGeni");
+  });
+
+  test("scrubs ambiguous or oversized setup query bearers without reflecting them", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root);
+    const ambiguous = await handler(
+      new Request("https://example.test/setup-account?token=first&token=second&preview=1"),
+    );
+    expect(ambiguous.status).toBe(302);
+    expect(ambiguous.headers.get("location")).toBe("https://example.test/setup-account?preview=1");
+    const oversizedToken = "x".repeat(2_049);
+    const oversized = await handler(
+      new Request(`https://example.test/setup-account?token=${oversizedToken}`),
+    );
+    expect(oversized.status).toBe(302);
+    expect(oversized.headers.get("location")).toBe("https://example.test/setup-account");
+    expect(oversized.headers.get("location")).not.toContain(oversizedToken);
+  });
+
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
     const root = await fixture();
     const handler = createWebHandler(root);

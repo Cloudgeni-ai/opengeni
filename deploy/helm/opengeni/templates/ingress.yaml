@@ -33,6 +33,52 @@ spec:
           {{- end }}
     {{- end }}
 {{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.setupAccountIngress.enabled .Values.web.enabled (eq .Values.config.OPENGENI_PRODUCT_ACCESS_MODE "managed") }}
+---
+# A dedicated exact setup route keeps the mail-compatible query bearer out of
+# ingress-nginx access logs. The web process immediately redirects that query
+# bearer into a browser-only fragment under no-store/no-referrer headers.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-setup-account
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  {{- with .Values.ingress.setupAccountIngress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    {{- $host := . }}
+    {{- $hasWebRoute := false }}
+    {{- range .paths }}
+    {{- if eq .service "web" }}
+    {{- $hasWebRoute = true }}
+    {{- end }}
+    {{- end }}
+    {{- if $hasWebRoute }}
+    - host: {{ $host.host | quote }}
+      http:
+        paths:
+          - path: /setup-account
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-web
+                port:
+                  name: http
+    {{- end }}
+    {{- end }}
+{{- end }}
 {{- if and .Values.ingress.enabled .Values.ingress.publicIngress.enabled (or .Values.api.enabled .Values.web.enabled) }}
 ---
 # A SECOND Ingress for the SAME host(s) that exposes ONLY the

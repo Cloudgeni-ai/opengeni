@@ -1012,6 +1012,15 @@ ingress:
           pathType: Prefix
           service: api
   tls: []
+  # Managed invitation emails use a query bearer because mail security
+  # gateways may discard URL fragments. A separate exact route lets
+  # ingress-nginx disable access logging before the web process redirects the
+  # bearer into a browser-only fragment. Non-NGINX ingress controllers must
+  # supply an equivalent no-query-log annotation or edge policy.
+  setupAccountIngress:
+    enabled: true
+    annotations:
+      nginx.ingress.kubernetes.io/enable-access-log: "false"
   # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
   # unauthenticated-by-design public paths. Used by edge-gated deployments
   # (e.g. the preview environment, whose primary Ingress sits behind nginx

@@ -67,7 +67,7 @@ describe("managed organization onboarding", () => {
     expect(first.token).not.toBe(first.digest);
     expect(first.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(first.url).toBe(
-      `http://opengeni.test/setup-account#token=${encodeURIComponent(first.token)}`,
+      `http://opengeni.test/setup-account?token=${encodeURIComponent(first.token)}`,
     );
     const fingerprint = await organizationUserSetupRequestFingerprint(settings, {
       tokenDigest: first.digest,

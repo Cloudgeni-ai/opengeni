@@ -62,7 +62,10 @@ export async function deriveOrganizationUserSetupToken(
   const token = base64Url(new Uint8Array(signature));
   const digest = await sha256Hex(token);
   const url = new URL("/setup-account", requiredPublicBaseUrl(settings));
-  url.hash = new URLSearchParams({ token }).toString();
+  // Email security gateways routinely wrap links and may discard URL
+  // fragments. The production web handler accepts this bounded query bearer
+  // only long enough to redirect it into the fragment before loading the SPA.
+  url.searchParams.set("token", token);
   return { token, digest, url: url.toString() };
 }
 

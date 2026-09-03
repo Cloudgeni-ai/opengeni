@@ -574,8 +574,16 @@ configuration validation requires the provider key. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
-bearers are stable HMAC identities and the browser receives them only in the
-email URL fragment.
+bearers are stable HMAC identities. Email links place the bearer in a bounded
+query parameter so mail security gateways preserve it; the production web
+handler immediately returns a no-store/no-referrer same-origin redirect into a
+browser fragment before loading the SPA. The setup shell is also no-store and
+no-referrer, and the SPA scrubs the fragment before API work. Configure edge
+and ingress access logging not to retain query strings for `/setup-account`.
+The managed Helm chart renders a dedicated exact ingress-nginx location with
+access logging disabled; deployments using another ingress or an additional
+edge must enforce the equivalent policy there. The database continues to retain
+only the bearer digest.
 
 The API records a durable attempt and `provider_started` marker before provider
 I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
