@@ -44,7 +44,7 @@ import {
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { ToolResultSpill } from "./tool-result-spill";
-import { createTurnCredentialLeases } from "./credential-leases";
+import { codexCredentialLeaseHolderId, createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
@@ -191,6 +191,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       once: true,
     });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
+    const activityExecutionId =
+      activityContext?.info.currentAttemptScheduledTimestampMs ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
@@ -263,6 +265,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
     });
+    leases.codex.holderId = codexCredentialLeaseHolderId(input, dispatchId, activityExecutionId);
 
     const sandboxRuntime = createSandboxTurnRuntime({
       input,
@@ -370,7 +373,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         billingState,
         sandboxState,
         eventing,
-        leases,
         media,
         claimedResult,
         acknowledgeLostAttemptOwnership,

@@ -50,7 +50,6 @@ import {
   recordTurnStartupMilestone,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
-import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
 
@@ -91,7 +90,6 @@ export type ClaimTurnDeps = {
   billingState: BillingState;
   sandboxState: SandboxRuntimeState;
   eventing: EventingState;
-  leases: ReturnType<typeof createTurnCredentialLeases>;
   media: ReturnType<typeof createTurnMediaArtifacts>;
   claimedResult: ClaimedResult;
   acknowledgeLostAttemptOwnership: () => void;
@@ -155,7 +153,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
     billingState,
     sandboxState,
     eventing,
-    leases,
     media,
     claimedResult,
     acknowledgeLostAttemptOwnership,
@@ -376,7 +373,6 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const producerId = turnAttemptProducerId(input, attempt.turnId);
   // Fold the same durable attempt identity into positional usage source keys.
   // A retry dedupes; a re-dispatch cannot collide with the prior attempt.
-  leases.codex.holderId = dispatchId;
   const modelUsageDispatchId = input.attemptId;
   const claimedModelUsageSourceKeys = new Set<string>();
   const emittedModelUsageSourceKeys = new Set<string>();

@@ -60,6 +60,15 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    credential's server-held fairness cursor. The active pointer advances
    in the same transaction only when the selector allows it; manual pins and
    sharded policy homes explicitly veto pointer movement.
+
+The Codex worker holder is execution-unique: it includes the workflow run,
+durable turn-attempt UUID, dispatch id, and Temporal's server-assigned activity
+execution identity. `generation` is an additional in-row replacement fence,
+not the sole owner identity. Expired rows may be reaped before a successor
+acquires the same turn and starts at generation `1`; the successor still cannot
+be touched by a stale worker because heartbeat, release, quarantine, and
+settlement all carry the non-reused holder identity.
+
 6. On the first allocator decision, write the bounded accepted allocator policy
    snapshot to the locked turn row in the same transaction, even when the
    decision has no credential and the caller must enter a capacity wait. New

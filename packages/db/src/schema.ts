@@ -3565,9 +3565,12 @@ export const codexCredentialLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     credentialId: uuid("credential_id").notNull(),
     turnId: uuid("turn_id").notNull(),
-    // Temporal activity execution fence. A successor dispatch for the same
-    // durable turn replaces holderId and increments generation atomically;
-    // stale/zombie heartbeats and releases must match both values.
+    // Temporal activity execution fence. The worker holder includes the
+    // workflow run, durable attempt, dispatch id, and server-assigned activity
+    // execution identity. A successor dispatch for the same durable turn
+    // replaces holderId and increments generation atomically; stale/zombie
+    // heartbeats and releases must match both values. Generation may restart
+    // at 1 after an expired row is reaped, so holder identity cannot be reused.
     holderId: text("holder_id").notNull(),
     generation: integer("generation").notNull().default(1),
     leasedUntil: timestamp("leased_until", { withTimezone: true }).notNull(),

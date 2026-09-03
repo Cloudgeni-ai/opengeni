@@ -12,6 +12,7 @@ import {
   selectCodexCredentialLeaseForTurn,
   type RotationDecision,
 } from "../../../apps/worker/src/activities/codex-rotation";
+import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/credential-leases";
 import * as schema from "../src/schema";
 import {
   acquireCodexCredentialLease,
@@ -1473,6 +1474,73 @@ describe("credential allocator atomic Codex credential allocation", () => {
     expect(staleSettlement.action).toBe("stale");
     expect(
       await heartbeatCodexCredentialLease(
+        dbB,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        successor.holderId!,
+        successor.generation!,
+      ),
+    ).toBe(true);
+  });
+
+  test("a reaped lease rejects stale heartbeat and release when the activity id is reused", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "aba-before");
+    await connectCredential(ws!, "aba-after");
+    const turnId = await seedTurn(ws!, 1);
+    const firstFence = await attemptFenceForTurn(turnId);
+    const firstHolderId = codexCredentialLeaseHolderId(firstFence, "runAgentTurn", 100);
+    const first = await acquire(dbA, ws!, turnId, 300_000, firstHolderId);
+
+    // Simulate worker death and expiry before the recovery workflow acquires
+    // the same durable turn. Reaping removes the row, so the successor's
+    // generation is intentionally allowed to restart at 1.
+    await admin`
+      update codex_credential_leases
+      set leased_until = now() - interval '1 second'
+      where turn_id = ${turnId}`;
+    await startRecoveryAttempt(ws!, turnId);
+    const successorFence = await attemptFenceForTurn(turnId);
+    const successorHolderId = codexCredentialLeaseHolderId(successorFence, "runAgentTurn", 101);
+    const successor = await acquire(dbB, ws!, turnId, 300_000, successorHolderId);
+
+    expect(first.generation).toBe(1);
+    expect(successor.generation).toBe(1);
+    expect(successor.holderId).not.toBe(first.holderId);
+    expect(
+      await heartbeatCodexCredentialLease(
+        dbA,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        first.holderId!,
+        first.generation!,
+      ),
+    ).toBe(false);
+    expect(
+      await releaseCodexCredentialLease(
+        dbA,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        first.holderId!,
+        first.generation!,
+      ),
+    ).toBe(false);
+    expect(
+      await heartbeatCodexCredentialLease(
+        dbB,
+        ws!.accountId,
+        ws!.workspaceId,
+        turnId,
+        successor.holderId!,
+        successor.generation!,
+      ),
+    ).toBe(true);
+    expect(
+      await releaseCodexCredentialLease(
         dbB,
         ws!.accountId,
         ws!.workspaceId,
