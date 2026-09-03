@@ -967,9 +967,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       });
       expect(deniedInheritedPublish.isError).toBe(true);
       expect(objectPutCount).toBe(putsBeforeInheritedPublish);
-      const rollbackCurrentResponse = await request(
-        grant,
-        ["artifacts:publish", "documents:search"],
+      const rollbackCurrentResponse = await requestAsCanonicalLocalHuman(
         `${base}/${rollbackSeed.artifact.id}/versions`,
         {
           method: "POST",

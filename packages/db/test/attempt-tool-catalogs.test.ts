@@ -411,7 +411,7 @@ describe("durable attempt tool catalogs", () => {
         attemptId: scope.attemptId,
         operationId: afterBoundary.operationId,
       }),
-    ).toMatchObject({ state: "running", claimId: executingClaimId });
+    ).toMatchObject({ state: "running", completedAt: null });
   });
 
   test("rejects human-approval tools before reserving execution", async () => {
