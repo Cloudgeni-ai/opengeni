@@ -181,6 +181,7 @@ import {
   type SessionBranchPage,
 } from "@/lib/session-branch-cache";
 import { cn } from "@/lib/utils";
+import { composerLaunchSearchForChannel } from "@/lib/composer-launch";
 import type { Channel, Session } from "@/types";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
@@ -194,7 +195,7 @@ function isModifiedNavigationClick(
 export function NewSessionLink(props: {
   className?: string;
   "aria-label"?: string;
-  channelId?: string;
+  channelId?: string | null;
   children: ReactNode;
 }) {
   const rail = useRail();
@@ -203,7 +204,7 @@ export function NewSessionLink(props: {
     <Link
       to="/workspaces/$workspaceId/sessions"
       params={{ workspaceId: rail.workspaceId }}
-      search={props.channelId ? { channelId: props.channelId } : {}}
+      search={composerLaunchSearchForChannel(props.channelId)}
       aria-label={props["aria-label"]}
       aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
       className={props.className}
@@ -2678,7 +2679,7 @@ function SessionGroup(props: {
             <Tooltip>
               <TooltipTrigger asChild>
                 <NewSessionLink
-                  channelId={props.channelId ?? undefined}
+                  channelId={props.channelId}
                   aria-label={`New chat in ${props.label}`}
                   className="absolute right-0.5 top-1/2 z-10 flex size-6 -translate-y-1/2 items-center justify-center rounded bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover/section:opacity-100 pointer-coarse:right-0 pointer-coarse:size-9 pointer-coarse:opacity-100"
                 >

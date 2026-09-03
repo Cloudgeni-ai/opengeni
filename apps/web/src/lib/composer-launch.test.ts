@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  composerLaunchChannelId,
   composerLaunchSearchAfterPolicyApply,
+  composerLaunchSearchForChannel,
   composerLaunchSearchKey,
   parseComposerLaunchSearch,
+  resolveComposerLaunchChannelId,
 } from "./composer-launch";
 
 describe("parseComposerLaunchSearch", () => {
@@ -38,6 +41,33 @@ describe("parseComposerLaunchSearch", () => {
         channelId: "not-a-folder-id",
       }),
     ).toEqual({});
+  });
+
+  test("keeps an explicit Default-folder launch distinct from an ordinary new session", () => {
+    const ordinary = parseComposerLaunchSearch({});
+    const defaultFolder = parseComposerLaunchSearch({ channelId: "default" });
+
+    expect(composerLaunchChannelId(ordinary)).toBeUndefined();
+    expect(composerLaunchChannelId(defaultFolder)).toBeNull();
+    expect(
+      resolveComposerLaunchChannelId(
+        composerLaunchChannelId(defaultFolder),
+        "00000000-0000-4000-8000-0000000000b2",
+      ),
+    ).toBeNull();
+    expect(
+      resolveComposerLaunchChannelId(
+        composerLaunchChannelId(ordinary),
+        "00000000-0000-4000-8000-0000000000b2",
+      ),
+    ).toBe("00000000-0000-4000-8000-0000000000b2");
+    expect(composerLaunchSearchForChannel(undefined)).toEqual({});
+    expect(composerLaunchSearchForChannel(null)).toEqual({ channelId: "default" });
+    expect(
+      composerLaunchChannelId(
+        composerLaunchSearchForChannel("00000000-0000-4000-8000-0000000000a1"),
+      ),
+    ).toBe("00000000-0000-4000-8000-0000000000a1");
   });
 
   test("key and leftover search helpers", () => {

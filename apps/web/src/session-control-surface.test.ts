@@ -107,6 +107,13 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
+  test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
+    const rail = await source("components/rail/session-list.tsx");
+    expect(rail).toContain("search={composerLaunchSearchForChannel(props.channelId)}");
+    expect(rail).toContain("channelId={props.channelId}");
+    expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
+  });
+
   test("keeps Variable Sets editable at create time and beside an established composer", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),

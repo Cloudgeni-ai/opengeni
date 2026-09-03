@@ -90,7 +90,9 @@ import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
+  composerLaunchChannelId,
   composerLaunchSearchKey,
+  resolveComposerLaunchChannelId,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
 import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
@@ -204,8 +206,9 @@ function SessionsIndexRouteContent({
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  const launchChannelId = composerLaunchChannelId(launch);
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
-    launch.channelId ?? null,
+    launchChannelId ?? null,
   );
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
@@ -554,12 +557,13 @@ function SessionsIndexRouteContent({
     resetSessionView();
   }, [resetSessionView, workspaceId]);
 
-  // Folder-launch links preselect their destination, while the ordinary New
-  // session entry starts in Recents. Keep the selection local so choosing a
-  // folder does not turn the composer URL into application state.
+  // Folder-launch links preselect their exact destination, including Default,
+  // while the ordinary New session entry starts in Recents. Keep the selection
+  // local so choosing a folder does not turn the composer URL into application
+  // state.
   useEffect(() => {
-    setSelectedChannelId(launch.channelId ?? null);
-  }, [launch.channelId]);
+    setSelectedChannelId(launchChannelId ?? null);
+  }, [launchChannelId]);
 
   useEffect(() => {
     if (
@@ -684,7 +688,10 @@ function SessionsIndexRouteContent({
         defaultFirstPartyMcpTools,
         defaultSandboxBackend,
       );
-      const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
+      const channelId = resolveComposerLaunchChannelId(
+        launchChannelId,
+        history.projects[0]?.channelId ?? null,
+      );
       const rememberedCompute = rememberedProjectCompute(history, channelId, defaultSandboxBackend);
       setSelectionHistory(history);
       setSelectedChannelId(channelId);
@@ -719,7 +726,7 @@ function SessionsIndexRouteContent({
       githubRepos,
       defaultFirstPartyMcpTools,
       defaultSandboxBackend,
-      launch.channelId,
+      launchChannelId,
       workspaceDefaultToolIdsForHydration,
     ],
   );
