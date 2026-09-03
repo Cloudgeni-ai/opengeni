@@ -446,7 +446,12 @@ async function findMatchingPendingInvitation(
       (invitation) =>
         invitation.status === "pending" &&
         invitation.organizationId === preview.organizationId &&
-        normalizeEmail(invitation.targetEmail) === normalizeEmail(preview.targetEmail),
+        normalizeEmail(invitation.targetEmail) === normalizeEmail(preview.targetEmail) &&
+        invitation.role === preview.organizationRole &&
+        sameStringSet(
+          invitation.initialWorkspaceIds,
+          preview.sharedWorkspaceAccess.map((workspace) => workspace.workspaceId),
+        ),
     );
     if (match) return match;
     const nextCursor = page.nextCursor ?? undefined;
@@ -457,6 +462,17 @@ async function findMatchingPendingInvitation(
     cursor = nextCursor;
   } while (cursor !== undefined);
   return null;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const leftValues = new Set(left);
+  const rightValues = new Set(right);
+  return (
+    leftValues.size === left.length &&
+    rightValues.size === right.length &&
+    [...leftValues].every((value) => rightValues.has(value))
+  );
 }
 
 function normalizeEmail(value: string): string {
