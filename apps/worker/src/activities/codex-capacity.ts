@@ -276,7 +276,9 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
       return { action: "stale" };
     }
-    if (input.cause === "timer" && current.nextCheckAt.getTime() <= Date.now()) {
+    const boundedRefreshAttempted =
+      input.cause === "timer" && current.nextCheckAt.getTime() <= Date.now();
+    if (boundedRefreshAttempted) {
       // This is a bounded secret-safe control-plane quota refresh. It creates no
       // turn, model call, user message, schedule, or entitlement action.
       await refreshCapacityMetadata(resolved, input.workspaceId);
@@ -289,6 +291,7 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
         sessionId: input.sessionId,
         waiterId: input.waiterId,
         generation: input.generation,
+        boundedRefreshAttempted,
       },
       (context) => codexCapacityDecision(context),
     );

@@ -132,6 +132,47 @@ describe("Codex capacity availability diagnostics", () => {
     });
   });
 
+  test("allocator-disabled policy selections stay unavailable despite a healthy alternate", () => {
+    const accounts = [
+      account("selected-disabled", { allocatorEnabled: false }),
+      account("healthy-alternate"),
+    ];
+    const base: CodexCapacitySelectionContext = {
+      accounts,
+      activeCredentialId: "selected-disabled",
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-disabled-selection",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: "healthy-alternate",
+      policyHash: null,
+    };
+
+    expect(codexCapacityDecision(base)).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: null,
+      resetKind: "bounded_refresh",
+      diagnostic: { connectedCount: 2, allocatorEnabledCount: 1 },
+    });
+    expect(
+      codexCapacityDecision({
+        ...base,
+        rotationEnabled: true,
+        sessionPinnedCredentialId: "selected-disabled",
+        sessionPinSource: "manual",
+      }),
+    ).toMatchObject({
+      kind: "unavailable",
+      earliestResetAt: null,
+      resetKind: "bounded_refresh",
+      diagnostic: { connectedCount: 2, allocatorEnabledCount: 1 },
+    });
+  });
+
   test("committed capacity targets prefer typed signals and retain generic outbox delivery", async () => {
     const target = {
       accountId: "account",

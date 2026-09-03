@@ -17,7 +17,7 @@ import {
   isCodexCredentialEligible,
   selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
-  type RotationDecision,
+  type CodexTurnLeaseDecision,
 } from "../codex-rotation";
 import {
   codexFleetShadowDecisionMetricLabelsV1,
@@ -130,17 +130,18 @@ export async function selectCodexTurnCapacity(
         });
 
       let leaseAcquisitionStartedAtMs = performance.now();
-      let leased: CodexCredentialLeaseResult<RotationDecision> = await acquireCodexCredentialLease(
-        db,
-        {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          turnId,
-          holderId,
-          advanceActivePointer: sessionPin === null,
-        },
-        selectForTurn,
-      );
+      let leased: CodexCredentialLeaseResult<CodexTurnLeaseDecision> =
+        await acquireCodexCredentialLease(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            turnId,
+            holderId,
+            advanceActivePointer: sessionPin === null,
+          },
+          selectForTurn,
+        );
       if (leased.decision.kind === "allCapped") {
         // Bounded self-heal of stale usage cache, then ONE new atomic selection.
         await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
@@ -247,7 +248,7 @@ export async function selectCodexTurnCapacity(
 
       const actualOutcome = providerTurn.effectiveCodexCredentialId
         ? "selected"
-        : rotationDecision.kind === "allCapped"
+        : rotationDecision.kind === "allCapped" || rotationDecision.kind === "allocatorDisabled"
           ? "waiting"
           : "none";
       const actualReason = providerTurn.effectiveCodexCredentialId
@@ -260,7 +261,9 @@ export async function selectCodexTurnCapacity(
               : "active"
         : rotationDecision.kind === "allCapped"
           ? "all_capped"
-          : "none";
+          : rotationDecision.kind === "allocatorDisabled"
+            ? "allocator_disabled"
+            : "none";
       const fencedInFlight = leased.reused;
       const shadowResult = await publishCodexFleetShadowDecisionV1({
         enabled: settings.codexFleetPolicyShadowEnabled,
@@ -343,7 +346,8 @@ export async function selectCodexTurnCapacity(
       if (
         providerTurn.effectiveCodexCredentialId === null &&
         leased.accounts.length > 0 &&
-        leased.accounts.every((account) => !account.allocatorEnabled) &&
+        (rotationDecision.kind === "allocatorDisabled" ||
+          leased.accounts.every((account) => !account.allocatorEnabled)) &&
         turnId
       ) {
         if (turn.source === "compaction") {
@@ -390,9 +394,15 @@ export async function selectCodexTurnCapacity(
             earliestResetAt: null,
             resetKind: "bounded_refresh",
             failurePayload: {
-              error: "All connected Codex subscriptions are disabled for new allocations.",
+              error:
+                rotationDecision.kind === "allocatorDisabled"
+                  ? "The policy-selected Codex subscription is disabled for new allocations."
+                  : "All connected Codex subscriptions are disabled for new allocations.",
               code: "codex_allocator_disabled",
-              detail: "waiting for a credential to be re-enabled, reconnected, or added",
+              detail:
+                rotationDecision.kind === "allocatorDisabled"
+                  ? "waiting for the selected credential to be re-enabled or the account-selection policy to change"
+                  : "waiting for a credential to be re-enabled, reconnected, or added",
             },
           },
         );

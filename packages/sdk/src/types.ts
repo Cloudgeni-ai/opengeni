@@ -2076,7 +2076,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {

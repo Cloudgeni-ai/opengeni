@@ -924,6 +924,22 @@ describe("credential allocator pin and rotation policy", () => {
     expect(selected.credentialId).toBe("a");
   });
 
+  test("an allocator-disabled manual pin waits instead of becoming a relogin failure", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: context([leasedAcct("a", { allocatorEnabled: false }), leasedAcct("b")]),
+      sessionId: "manual-disabled",
+      sessionPinSource: "manual",
+      sessionPinnedCredentialId: "a",
+      sessionLastCredentialId: "a",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allocatorDisabled", credentialId: "a" },
+      advanceActivePointer: false,
+    });
+  });
+
   test("a 99%-used manual pin remains usable and never waits or switches early", () => {
     const selected = selectCodexCredentialLeaseForTurn({
       context: context([leasedAcct("a", { primaryUsedPercent: 99 }), leasedAcct("b")]),
@@ -1040,6 +1056,25 @@ describe("credential allocator pin and rotation policy", () => {
     expect(selected).toEqual({
       credentialId: null,
       decision: { kind: "allCapped", earliestResetAt: resetAt },
+      advanceActivePointer: false,
+    });
+  });
+
+  test("rotation false waits on an allocator-disabled active pointer", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: {
+        ...context([leasedAcct("a", { allocatorEnabled: false }), leasedAcct("b")]),
+        rotationEnabled: false,
+      },
+      sessionId: "rotation-off-disabled",
+      sessionPinSource: null,
+      sessionPinnedCredentialId: null,
+      sessionLastCredentialId: "b",
+      now: NOW,
+    });
+    expect(selected).toEqual({
+      credentialId: null,
+      decision: { kind: "allocatorDisabled", credentialId: "a" },
       advanceActivePointer: false,
     });
   });

@@ -113,13 +113,34 @@ describe("definitive Codex failure settlement helpers", () => {
 
   test("allocator-disabled rows do not enlarge the same-turn failover budget", () => {
     expect(
-      codexCredentialFailoverLimit([
-        { allocatorEnabled: true },
-        { allocatorEnabled: true },
-        ...Array.from({ length: 20 }, () => ({ allocatorEnabled: false })),
-      ]),
+      codexCredentialFailoverLimit(
+        [
+          { id: "serving", allocatorEnabled: true },
+          { id: "alternate", allocatorEnabled: true },
+          ...Array.from({ length: 20 }, (_, index) => ({
+            id: `disabled-${index}`,
+            allocatorEnabled: false,
+          })),
+        ],
+        "serving",
+      ),
     ).toBe(1);
-    expect(codexCredentialFailoverLimit([{ allocatorEnabled: true }])).toBe(1);
+    expect(
+      codexCredentialFailoverLimit([{ id: "serving", allocatorEnabled: true }], "serving"),
+    ).toBe(1);
+  });
+
+  test("an allocator-disabled serving credential preserves every enabled alternate", () => {
+    expect(
+      codexCredentialFailoverLimit(
+        [
+          { id: "serving", allocatorEnabled: false },
+          { id: "alternate-b", allocatorEnabled: true },
+          { id: "alternate-c", allocatorEnabled: true },
+        ],
+        "serving",
+      ),
+    ).toBe(2);
   });
 });
 

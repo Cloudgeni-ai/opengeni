@@ -24825,6 +24825,8 @@ export async function reconcileCodexCapacityWait<
     waiterId: string;
     generation: number;
     now?: Date;
+    /** True only after the caller performed the due bounded metadata refresh. */
+    boundedRefreshAttempted?: boolean;
   },
   decide: (
     context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
@@ -24992,14 +24994,23 @@ export async function reconcileCodexCapacityWait<
           policyHash: waiter.policyHash,
         });
         if (decision.kind === "unavailable") {
+          const boundedRefreshAdvanced =
+            decision.resetKind === "bounded_refresh" && input.boundedRefreshAttempted === true;
           const refreshAttempt =
-            decision.resetKind === "bounded_refresh" ? waiter.refreshAttempt + 1 : 0;
-          const nextCheckAt = nextCodexCapacityCheckAt(
-            decision.earliestResetAt,
-            decision.resetKind,
-            refreshAttempt,
-            now,
-          );
+            decision.resetKind === "bounded_refresh"
+              ? waiter.refreshAttempt + (boundedRefreshAdvanced ? 1 : 0)
+              : 0;
+          const nextCheckAt =
+            decision.resetKind === "bounded_refresh" &&
+            !boundedRefreshAdvanced &&
+            waiter.resetKind === "bounded_refresh"
+              ? waiter.nextCheckAt
+              : nextCodexCapacityCheckAt(
+                  decision.earliestResetAt,
+                  decision.resetKind,
+                  refreshAttempt,
+                  now,
+                );
           const [updated] = await tx
             .update(schema.codexCapacityWaiters)
             .set({

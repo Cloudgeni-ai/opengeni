@@ -345,7 +345,7 @@ new-allocation policy.
 Migration `0053_codex_credential_leases.sql` introduced the additive lease
 table, fairness columns, and temporary mixed-version cutover bits. Migration
 `0401_codex_unconditional_credential_leasing.sql` is the maintenance activation
-that retires those temporary bits. After 0400, the lease protocol is
+that retires those temporary bits. After 0401, the lease protocol is
 unconditional and `rotation_enabled` is only the user-owned account-selection
 policy described above.
 

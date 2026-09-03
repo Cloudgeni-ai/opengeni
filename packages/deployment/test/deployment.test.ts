@@ -477,6 +477,9 @@ describe("deployment contract", () => {
       expect(commands).toContain("wait --for=delete pod");
       expect(plan.notes.join("\n")).toContain(cutover);
       expect(plan.notes.join("\n")).toContain("applications-disabled revision");
+      if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
+        expect(plan.notes.join("\n")).toContain("migration 0401");
+      }
     }
 
     const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);

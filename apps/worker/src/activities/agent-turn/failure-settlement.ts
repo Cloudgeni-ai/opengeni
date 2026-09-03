@@ -155,10 +155,14 @@ export function codexDefinitiveFailureDisposition(input: {
  * requires a positive bound even though one-account paths never fail over.
  */
 export function codexCredentialFailoverLimit(
-  accounts: ReadonlyArray<{ allocatorEnabled: boolean }>,
+  accounts: ReadonlyArray<{ id: string; allocatorEnabled: boolean }>,
+  servingCredentialId: string,
 ): number {
   const allocatableAccounts = accounts.filter((account) => account.allocatorEnabled).length;
-  return Math.max(1, allocatableAccounts - 1);
+  const servingIsAllocatable = accounts.some(
+    (account) => account.id === servingCredentialId && account.allocatorEnabled,
+  );
+  return Math.max(1, allocatableAccounts - (servingIsAllocatable ? 1 : 0));
 }
 
 /** Build the durable waiter payload without collapsing quota refusals into 403. */
@@ -797,7 +801,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         decisionCredentialId: decision.kind === "active" ? decision.credentialId : null,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
       });
-      const maxFailovers = codexCredentialFailoverLimit(accounts);
+      const maxFailovers = codexCredentialFailoverLimit(
+        accounts,
+        providerTurn.effectiveCodexCredentialId,
+      );
 
       if (
         statePersisted &&

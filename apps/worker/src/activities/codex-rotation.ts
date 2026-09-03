@@ -113,9 +113,17 @@ export type RotationDecision =
   // No connected accounts at all (preserves today's relogin-fail path).
   | { kind: "none" };
 
+export type CodexTurnLeaseDecision =
+  | RotationDecision
+  // The user's manual pin or rotation-off active pointer names a connected row
+  // that is disabled for NEW allocations. This is policy-constrained capacity,
+  // not a disconnected-account relogin failure: the accepted turn must wait
+  // until the row is re-enabled or the governing policy changes.
+  | { kind: "allocatorDisabled"; credentialId: string };
+
 export type CodexTurnLeaseSelection = {
   credentialId: string | null;
-  decision: RotationDecision;
+  decision: CodexTurnLeaseDecision;
   /** Policy/manual homes never move the workspace-global legacy pointer. */
   advanceActivePointer?: boolean;
 };
@@ -545,8 +553,15 @@ export function selectCodexCredentialLeaseForTurn(args: {
   // same-turn lease already returned above before this admission filter.
   if (pinDisposition === "manual" && args.sessionPinnedCredentialId) {
     const pinned = accounts.find((account) => account.id === args.sessionPinnedCredentialId);
-    if (!pinned?.allocatorEnabled) {
+    if (!pinned) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!pinned.allocatorEnabled) {
+      return {
+        credentialId: null,
+        decision: { kind: "allocatorDisabled", credentialId: pinned.id },
+        advanceActivePointer: false,
+      };
     }
     if (isCodexCredentialHealthy(pinned, args.now)) {
       return {
@@ -606,8 +621,15 @@ export function selectCodexCredentialLeaseForTurn(args: {
     const active = activeCredentialId
       ? accounts.find((account) => account.id === activeCredentialId)
       : undefined;
-    if (!active?.allocatorEnabled) {
+    if (!active) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!active.allocatorEnabled) {
+      return {
+        credentialId: null,
+        decision: { kind: "allocatorDisabled", credentialId: active.id },
+        advanceActivePointer: false,
+      };
     }
     if (!isCodexCredentialHealthy(active, args.now)) {
       return {

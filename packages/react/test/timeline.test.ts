@@ -203,6 +203,26 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
+  test("projects allocator-disabled policy waits without exposing credential identity", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      actualOutcome: "waiting",
+      actualCandidateKey: null,
+      actualReason: "allocator_disabled",
+    });
+    expect(JSON.stringify(item)).not.toContain("credential-secret");
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [

@@ -552,8 +552,8 @@ it to an ordinary queue signal, so the workflow interrupts the hold and processe
 the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
-run. With workspace-local leasing enabled, the worker atomically selects and
-leases a credential under the workspace rotation-row lock; concurrent replicas
+run. The worker always selects and leases a credential atomically under the
+workspace rotation-row lock; concurrent replicas
 therefore observe earlier reservations. A second 401, 403, explicit quota, or
 429 can quarantine that credential and requeue the same durable turn after a
 conversation-truth checkpoint. Network/5xx/invalid-content/partial-stream
@@ -571,9 +571,10 @@ sentence "The model is currently at capacity due to high demand..."; isolated
 streams, and unrelated errors never walk the pool. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-When every allocator-enabled Codex credential is unavailable, this recovery
-boundary becomes a durable capacity wait for the current logical turn, whether
-or not the session has an active goal. The worker atomically closes the exact
+When the policy-selected credential is allocator-disabled, or every
+allocator-enabled Codex credential is unavailable, this recovery boundary
+becomes a durable capacity wait for the current logical turn, whether or not the
+session has an active goal. The worker atomically closes the exact
 attempt with outcome `waiting_capacity`, leaves the turn and session
 nonterminal with the same active-turn pointer, and stores one session-scoped
 waiter fenced by blocked turn generation, accepted policy hash, and the
