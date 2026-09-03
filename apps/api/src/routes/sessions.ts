@@ -108,6 +108,7 @@ import {
   getRetainedProcess,
   getSandbox,
   getSession,
+  readActiveSandbox,
   deleteSessionTreeIfQuiescent,
   getSessionEvent,
   getSessionForSubject,
@@ -219,6 +220,7 @@ import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
+  resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
 } from "@opengeni/runtime/sandbox";
@@ -3281,6 +3283,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         getEnrollment(db, grant, activeSandbox.enrollmentId),
         getLiveEnrollmentConnection(db, grant, activeSandbox.enrollmentId),
       ]);
+      const reportedWorkspaceRoot = liveConnection?.workspaceRoot ?? enrollment?.workspaceRoot;
+      const effectiveWorkspaceRoot = reportedWorkspaceRoot
+        ? resolveConnectedMachineWorkspaceRoot(reportedWorkspaceRoot, session.workingDir)
+        : null;
       let probeResponded = false;
       if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
@@ -3289,7 +3295,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           connectionInstanceId: liveConnection.connectionInstanceId,
           // Capability negotiation only pings, so a pre-root agent may still
           // report upgrade guidance without exposing a false filesystem root.
-          workspaceRoot: liveConnection.workspaceRoot ?? "/",
+          workspaceRoot: effectiveWorkspaceRoot ?? liveConnection.workspaceRoot ?? "/",
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,
@@ -3305,7 +3311,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...commonNegotiation,
         os: enrollment?.os ?? session.sandboxOs,
         leaseEpoch: session.activeEpoch,
-        enrollment,
+        enrollment:
+          enrollment && effectiveWorkspaceRoot
+            ? { ...enrollment, workspaceRoot: effectiveWorkspaceRoot }
+            : enrollment,
         probeResponded,
       });
     } else {
@@ -3354,17 +3363,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...capabilities,
       FileSystem: {
         ...capabilities.FileSystem,
-        root: selectBackend(
-          (selfhostedActive
-            ? "selfhosted"
-            : activeSandbox?.kind === "modal"
-              ? "modal"
-              : session.sandboxBackend === "selfhosted" &&
-                  settings.sandboxBackend !== "selfhosted" &&
-                  settings.sandboxBackend !== "none"
-                ? settings.sandboxBackend
-                : session.sandboxBackend) as SandboxBackend,
-        ).workspaceRoot,
+        root: selfhostedActive
+          ? capabilities.FileSystem.root
+          : selectBackend(
+              (activeSandbox?.kind === "modal"
+                ? "modal"
+                : session.sandboxBackend === "selfhosted" &&
+                    settings.sandboxBackend !== "selfhosted" &&
+                    settings.sandboxBackend !== "none"
+                  ? settings.sandboxBackend
+                  : session.sandboxBackend) as SandboxBackend,
+            ).workspaceRoot,
       },
       Git: {
         ...capabilities.Git,
@@ -3380,6 +3389,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...responseCapabilities,
         DesktopStream: { ...capabilities.DesktopStream, ...wire },
       };
+    }
+    if (selfhostedActive) {
+      const currentPointer = await readActiveSandbox(db, workspaceId, sessionId);
+      if (
+        !currentPointer ||
+        currentPointer.activeSandboxId !== session.activeSandboxId ||
+        currentPointer.activeEpoch !== session.activeEpoch ||
+        currentPointer.workingDir !== session.workingDir
+      ) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "sandbox route changed while capabilities were being negotiated; retry",
+          retryable: true,
+        });
+      }
     }
     return c.json(responseCapabilities);
   });

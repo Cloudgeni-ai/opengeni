@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   SandboxChannelAService,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAUnavailableError,
@@ -984,6 +985,102 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(
       svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
     ).rejects.toThrow(/outside the workspace root/);
+  });
+
+  test("Windows drive and UNC namespaces stay canonical while provider paths stay relative", async () => {
+    for (const fixture of [
+      {
+        root: "C:/work/repo",
+        inside: String.raw`c:\work\repo\src\app.ts`,
+        canonical: "C:/work/repo/src/app.ts",
+        outside: "D:/secrets/token.txt",
+      },
+      {
+        root: "//server/share/repo",
+        inside: String.raw`\\SERVER\SHARE\repo\src\app.ts`,
+        canonical: "//SERVER/SHARE/repo/src/app.ts",
+        outside: "//server/other/secrets/token.txt",
+      },
+    ]) {
+      const requested: string[] = [];
+      const listed: string[] = [];
+      const svc = new SandboxChannelAService({
+        workspaceRoot: fixture.root,
+        providerPathMode: "workspace-relative",
+        session: {
+          listDir: async ({ path }) => {
+            listed.push(path);
+            return [
+              {
+                name: "app.ts",
+                path: fixture.canonical,
+                type: "file" as const,
+              },
+            ];
+          },
+          readFile: async ({ path }) => {
+            requested.push(path);
+            return new TextEncoder().encode("ok");
+          },
+        },
+      });
+
+      const listing = await svc.fsList({
+        path: fixture.root,
+        depth: 1,
+        maxEntries: 20,
+        includeHidden: true,
+      });
+      expect(listing.root.path).toBe(fixture.root);
+      expect(listing.root.children?.[0]?.path).toBe(fixture.canonical);
+      expect(listed).toEqual(["."]);
+
+      const read = await svc.fsRead({
+        path: fixture.inside,
+        encoding: "utf8",
+        maxBytes: 16,
+      });
+      expect(read.path).toBe(fixture.canonical);
+      expect(requested).toEqual(["src/app.ts"]);
+      await expect(
+        svc.fsRead({ path: fixture.outside, encoding: "utf8", maxBytes: 16 }),
+      ).rejects.toThrow(/outside the workspace root/);
+    }
+  });
+
+  test("a stale capability filesystem identity fails as a retryable route conflict", async () => {
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/srv/project",
+      leaseEpoch: 7,
+      session: {
+        readFile: async () => new TextEncoder().encode("ok"),
+      },
+    });
+
+    await expect(
+      svc.fsRead({
+        path: "/srv/project/app.ts",
+        encoding: "utf8",
+        maxBytes: 16,
+        route: { epoch: 6, root: "/srv/project" },
+      }),
+    ).rejects.toBeInstanceOf(ChannelAFileSystemRouteChangedError);
+    await expect(
+      svc.fsRead({
+        path: "/srv/project/app.ts",
+        encoding: "utf8",
+        maxBytes: 16,
+        route: { epoch: 7, root: "/srv/previous" },
+      }),
+    ).rejects.toMatchObject({ retryable: true });
+
+    const read = await svc.fsRead({
+      path: "/srv/project/app.ts",
+      encoding: "utf8",
+      maxBytes: 16,
+      route: { epoch: 7, root: "/srv/project" },
+    });
+    expect(read.content).toBe("ok");
   });
 
   test("reads an internal symlink but rejects an escaping symlink", async () => {
