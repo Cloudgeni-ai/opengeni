@@ -49,9 +49,18 @@ already reports its absolute launch root; OpenGeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
-`/workspace` has no special meaning on a machine. Durable artifact receipts and
-`sandbox:` UI links may still use their provider-independent `/workspace/...`
-identity, projected to cwd-relative paths when shown to the model.
+`/workspace` has no special meaning on a machine.
+
+The Files surface advertises that effective path as `FileSystem.root`, including
+Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
+in the same namespace and sends the negotiated `{ epoch, root }` identity with
+each list, read, or mutation. The API validates that the path remains beneath
+the advertised root, pins the request to the first resolved active route, and
+uses a contained workspace-relative path for machine execution. Responses keep
+the canonical host-native spelling; a route or root change returns a retryable
+conflict instead of a misleading outside-workspace validation error or a read
+from a different target. Provider-independent artifact receipts may still use
+their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
