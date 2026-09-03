@@ -138,6 +138,7 @@ describe("migration 0053 (Codex credential leases)", () => {
       const workflowRunId = `run:${attemptId}`;
       await admin.begin(async (transaction) => {
         await transaction`set constraints all deferred`;
+        await transaction`select set_config('opengeni.session_inference_claim', '1', true)`;
         await transaction`
           update session_turns
           set status = 'running', execution_generation = 1,
@@ -150,6 +151,10 @@ describe("migration 0053 (Codex credential leases)", () => {
                 )
               )
           where id = ${turnId}`;
+        await transaction`
+          update sessions
+          set status = 'running', active_turn_id = ${turnId}, updated_at = now()
+          where id = ${sessionId}`;
         await transaction`
           insert into session_turn_attempts (
             id, account_id, workspace_id, session_id, turn_id, execution_generation,
