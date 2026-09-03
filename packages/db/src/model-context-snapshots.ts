@@ -109,6 +109,17 @@ export async function getLatestSessionModelContext(
           snapshot: schema.sessionAttemptModelContextSnapshots.snapshot,
         })
         .from(schema.sessionAttemptModelContextSnapshots)
+        .innerJoin(
+          schema.sessionTurns,
+          and(
+            eq(schema.sessionTurns.id, schema.sessionAttemptModelContextSnapshots.turnId),
+            eq(
+              schema.sessionTurns.workspaceId,
+              schema.sessionAttemptModelContextSnapshots.workspaceId,
+            ),
+            eq(schema.sessionTurns.sessionId, schema.sessionAttemptModelContextSnapshots.sessionId),
+          ),
+        )
         .where(
           and(
             eq(schema.sessionAttemptModelContextSnapshots.workspaceId, input.workspaceId),
@@ -116,7 +127,8 @@ export async function getLatestSessionModelContext(
           ),
         )
         .orderBy(
-          desc(schema.sessionAttemptModelContextSnapshots.capturedAt),
+          desc(schema.sessionTurns.position),
+          desc(schema.sessionAttemptModelContextSnapshots.executionGeneration),
           desc(schema.sessionAttemptModelContextSnapshots.requestIndex),
         )
         .limit(1);

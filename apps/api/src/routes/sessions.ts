@@ -4353,6 +4353,7 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (suffix === "/model-context" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }
