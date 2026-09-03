@@ -192,7 +192,7 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
               jsonb_build_object(
                 'id', ${`activity:${attemptId}`}::text,
                 'generation', ${executionGeneration}::int,
-                'triggerEventId', ${turn.trigger_event_id}
+                'triggerEventId', ${turn.trigger_event_id}::uuid
               ),
               true
             ),
