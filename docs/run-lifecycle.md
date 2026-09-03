@@ -533,9 +533,15 @@ catalog before creating its durable operation. A mismatch returns the stable
 `codemode_catalog_stale` code; the client may then refresh once, re-resolve the
 identity/path, and retry with the same operation id. It never performs that
 recovery after an operation exists or after an ambiguous transport failure.
-Worker dispatch performs catalog, identity, approval, input-schema, and
-authorization preflight before writing the execution-start marker, so invalid
-arguments settle as a known failure instead of `outcome_unknown`. A client
+Worker dispatch performs catalog, identity, approval, input-schema,
+authorization, and argument-sensitive connector-policy prepare before writing
+the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
+connector authority therefore settle before the provider executor can run.
+After the marker, the prepared gateway call performs durable connector begin at
+the executor boundary and completes the same request as `completed`,
+`not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
+gateway lifecycle; the model SDK wrapper only projects Ask into the ordinary
+human-approval interruption and marks the exact approved call id on resume. A client
 `AbortSignal` is observer-only: it stops HTTP/polling waits but creates no server
 cancellation authority. Attempt/turn interruption remains the sole cancellation
 boundary and still drains or closes journaled work under the existing lifecycle.
@@ -1430,10 +1436,14 @@ reinterpretation, or blind replay of an ambiguous operation.
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn
-and approval id before invocation. The approved transition admits the provider
-once; a replay after execution started is recorded as outcome-unknown, and a
-replay after completion is rejected as already executed. Recovery may therefore
-re-enter the SDK approval step without issuing the MCP request again.
+and approval id before invocation. For connection-backed tools, argument-sensitive
+prepare, begin, and completion are owned by the canonical attempt gateway used by
+both model MCP and Codemode. Dedicated GitHub and Google Drive adapters classify
+provider outcomes but do not register a second policy lifecycle. The approved
+transition admits the provider once; a replay after execution started is recorded
+as outcome-unknown, and a replay after completion is rejected as already executed.
+Recovery may therefore re-enter the SDK approval step without issuing the MCP
+request again.
 
 Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
 operation receipts bind the exact accepted turn, attempt, execution generation,

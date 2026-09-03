@@ -52,6 +52,7 @@ import {
   compactMcpResultCustomDataRunState,
   composeAgentInstructions,
   ConnectorActionBindingRejectedError,
+  ConnectorActionExecutionError,
   configureRuntimeMetricsHooks,
   connectMcpServersInBatches,
   coreInstructions,
@@ -2129,9 +2130,6 @@ describe("runtime event normalization", () => {
         cacheToolsList: false,
         ...(input.legacyApproval ? { requireApproval: true as const } : {}),
       };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
-        { kind: "mcp", id: "docs" },
-      ]);
       const calls: string[] = [];
       const hooks: ConnectorActionPolicyHooks = {
         prepare: async (call) => {
@@ -2173,8 +2171,24 @@ describe("runtime event normalization", () => {
           },
         ],
       });
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        resolveCredential: async () => ({
+          status: "ok",
+          connectionId: "connection-1",
+          headers: { authorization: "Bearer connector-token" },
+        }),
+        connectorActionPolicy: hooks,
+      });
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
+        resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
         connectorActionPolicy: hooks,
       });
       return { agent, calls, mcp, prepared };
@@ -2202,6 +2216,7 @@ describe("runtime event normalization", () => {
           { tool: "search_documents", args: { query: "needle" } },
         ]);
         expect(fixture.calls).toEqual([
+          "prepare:call-allow:needle",
           "prepare:call-allow:needle",
           "begin:call-allow:needle",
           "complete:request-1:completed",
@@ -2236,11 +2251,11 @@ describe("runtime event normalization", () => {
               `call-${connectorDecision}`,
             ),
           ).toBe(connectorDecision === "ask");
-          await expect(
-            tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
+          expect(
+            await tool.invoke(new RunContext(), JSON.stringify({ query: "top-secret-query" }), {
               toolCall: { callId: `call-${connectorDecision}` },
             } as any),
-          ).rejects.toThrow("Connector action was not executed");
+          ).toMatchObject({ isError: true });
           expect(fixture.mcp.calls).toHaveLength(0);
         } finally {
           await fixture.prepared.close();
@@ -2279,9 +2294,9 @@ describe("runtime event normalization", () => {
         if (!tool || tool.type !== "function") throw new Error("connector tool missing");
         const details = { toolCall: { callId: "call-retry" } } as any;
         await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details);
-        await expect(
-          tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
-        ).rejects.toThrow("already_executed");
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify({ query: "once" }), details),
+        ).toMatchObject({ isError: true });
         expect(fixture.mcp.calls).toHaveLength(1);
       } finally {
         await fixture.prepared.close();
@@ -2291,6 +2306,32 @@ describe("runtime event normalization", () => {
 
     test("attempt-local connector binding applies durable policy by exact model name", async () => {
       const executions: Record<string, unknown>[] = [];
+      const calls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async (call) => {
+          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).title)}`);
+          return { managed: true, decision: "ask" };
+        },
+        begin: async (call) => {
+          calls.push(`begin:${call.approvalId}:${String((call.arguments as any).title)}`);
+          return { allowed: true, managed: true, requestId: "request-drive" };
+        },
+        complete: async ({ requestId, outcome }) => {
+          calls.push(`complete:${requestId}:${outcome}`);
+        },
+      };
+      const bindings = [
+        {
+          modelName: "drive_publish",
+          call: (approvalId: string, arguments_: unknown) => ({
+            approvalId,
+            connectionId: "connection-drive",
+            serverId: "drive",
+            toolName: "publish",
+            arguments: arguments_,
+          }),
+        },
+      ];
       const prepared = await prepareAgentTools(testSettings(), [], {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -2298,6 +2339,8 @@ describe("runtime event normalization", () => {
         turnId: "44444444-4444-4444-8444-444444444444",
         attemptId: "55555555-5555-4555-8555-555555555555",
         executionGeneration: 1,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: bindings,
         attemptToolDefinitions: [
           {
             identity: { serverId: "drive", toolName: "publish" },
@@ -2317,35 +2360,10 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const calls: string[] = [];
-      const hooks: ConnectorActionPolicyHooks = {
-        prepare: async (call) => {
-          calls.push(`prepare:${call.approvalId}:${String((call.arguments as any).title)}`);
-          return { managed: true, decision: "ask" };
-        },
-        begin: async (call) => {
-          calls.push(`begin:${call.approvalId}:${String((call.arguments as any).title)}`);
-          return { allowed: true, managed: true, requestId: "request-drive" };
-        },
-        complete: async ({ requestId, outcome }) => {
-          calls.push(`complete:${requestId}:${outcome}`);
-        },
-      };
       const agent = buildOpenGeniAgent(testSettings(), [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
-        attemptConnectorActionBindings: [
-          {
-            modelName: "drive_publish",
-            call: (approvalId, arguments_) => ({
-              approvalId,
-              connectionId: "connection-drive",
-              serverId: "drive",
-              toolName: "publish",
-              arguments: arguments_,
-            }),
-          },
-        ],
+        attemptConnectorActionBindings: bindings,
       });
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
@@ -2363,8 +2381,39 @@ describe("runtime event normalization", () => {
         expect(executions).toEqual([{ title: "Quarterly" }]);
         expect(calls).toEqual([
           "prepare:call-drive:Quarterly",
+          "prepare:call-drive:Quarterly",
           "begin:call-drive:Quarterly",
           "complete:request-drive:completed",
+        ]);
+
+        const resumedAgent = buildOpenGeniAgent(testSettings(), [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          attemptConnectorActionBindings: bindings,
+          approvedToolCallId: "call-drive-resumed",
+        });
+        const [resumedTool] = (await resumedAgent.getMcpTools(new RunContext())).filter(
+          (candidate) => candidate.type === "function" && candidate.name === "drive_publish",
+        );
+        if (!resumedTool || resumedTool.type !== "function") {
+          throw new Error("resumed attempt connector tool missing");
+        }
+        expect(
+          await resumedTool.invoke(new RunContext(), JSON.stringify({ title: "Resumed" }), {
+            toolCall: { callId: "call-drive-resumed" },
+          } as any),
+        ).toBeDefined();
+        expect(
+          await resumedTool.invoke(new RunContext(), JSON.stringify({ title: "Wrong call" }), {
+            toolCall: { callId: "call-drive-other" },
+          } as any),
+        ).toMatchObject({ isError: true });
+        expect(executions).toEqual([{ title: "Quarterly" }, { title: "Resumed" }]);
+        expect(calls.slice(-4)).toEqual([
+          "prepare:call-drive-resumed:Resumed",
+          "begin:call-drive-resumed:Resumed",
+          "complete:request-drive:completed",
+          "prepare:call-drive-other:Wrong call",
         ]);
       } finally {
         await prepared.close();
@@ -2373,6 +2422,30 @@ describe("runtime event normalization", () => {
 
     test("attempt-local connector binding rejection becomes a tool error", async () => {
       const executions: Record<string, unknown>[] = [];
+      const policyCalls: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => {
+          policyCalls.push("prepare");
+          return { managed: false, decision: "unmanaged" };
+        },
+        begin: async () => {
+          policyCalls.push("begin");
+          return { allowed: true, managed: false };
+        },
+        complete: async () => {
+          policyCalls.push("complete");
+        },
+      };
+      const bindings = [
+        {
+          modelName: "github_app__repository_get",
+          call: () => {
+            throw new ConnectorActionBindingRejectedError(
+              "repository is outside accepted resources",
+            );
+          },
+        },
+      ];
       const prepared = await prepareAgentTools(testSettings(), [], {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -2380,6 +2453,8 @@ describe("runtime event normalization", () => {
         turnId: "44444444-4444-4444-8444-444444444444",
         attemptId: "55555555-5555-4555-8555-555555555555",
         executionGeneration: 1,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: bindings,
         attemptToolDefinitions: [
           {
             identity: { serverId: "github_app", toolName: "repository_get" },
@@ -2399,33 +2474,10 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const policyCalls: string[] = [];
-      const hooks: ConnectorActionPolicyHooks = {
-        prepare: async () => {
-          policyCalls.push("prepare");
-          return { managed: false, decision: "unmanaged" };
-        },
-        begin: async () => {
-          policyCalls.push("begin");
-          return { allowed: true, managed: false };
-        },
-        complete: async () => {
-          policyCalls.push("complete");
-        },
-      };
       const agent = buildOpenGeniAgent(testSettings(), [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
-        attemptConnectorActionBindings: [
-          {
-            modelName: "github_app__repository_get",
-            call: () => {
-              throw new ConnectorActionBindingRejectedError(
-                "repository is outside accepted resources",
-              );
-            },
-          },
-        ],
+        attemptConnectorActionBindings: bindings,
       });
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
@@ -2446,50 +2498,9 @@ describe("runtime event normalization", () => {
             JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
             { toolCall: { callId: "call-rejected" } } as any,
           ),
-        ).toEqual({
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "Connector action was not executed because its arguments are outside this turn's accepted authority.",
-            },
-          ],
-        });
+        ).toMatchObject({ isError: true });
         expect(executions).toEqual([]);
         expect(policyCalls).toEqual([]);
-
-        const bugAgent = buildOpenGeniAgent(testSettings(), [], {
-          mcpServers: prepared.mcpServers,
-          connectorActionPolicy: hooks,
-          attemptConnectorActionBindings: [
-            {
-              modelName: "github_app__repository_get",
-              call: () => {
-                throw new Error("unexpected binding bug");
-              },
-            },
-          ],
-        });
-        const [bugTool] = (await bugAgent.getMcpTools(new RunContext())).filter(
-          (candidate) =>
-            candidate.type === "function" && candidate.name === "github_app__repository_get",
-        );
-        if (!bugTool || bugTool.type !== "function")
-          throw new Error("attempt connector tool missing");
-        await expect(
-          bugTool.needsApproval(
-            new RunContext(),
-            { repository: "Cloudgeni-ai/not-accepted" },
-            "call-bug",
-          ),
-        ).rejects.toThrow("unexpected binding bug");
-        await expect(
-          bugTool.invoke(
-            new RunContext(),
-            JSON.stringify({ repository: "Cloudgeni-ai/not-accepted" }),
-            { toolCall: { callId: "call-bug" } } as any,
-          ),
-        ).rejects.toThrow("unexpected binding bug");
       } finally {
         await prepared.close();
       }
@@ -2497,6 +2508,39 @@ describe("runtime event normalization", () => {
 
     test("attempt-local connector bindings preserve unmanaged read execution", async () => {
       const executions: Record<string, unknown>[] = [];
+      let managed = false;
+      const completed: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () =>
+          managed
+            ? { managed: true, decision: "allow" }
+            : { managed: false, decision: "unmanaged" },
+        begin: async () =>
+          managed
+            ? { allowed: true, managed: true, requestId: "request-read" }
+            : { allowed: true, managed: false },
+        complete: async ({ outcome }) => {
+          completed.push(outcome);
+        },
+      };
+      const bindings = [
+        {
+          modelName: "github_app__repository_get",
+          resultOutcome: (output: unknown) => {
+            const row = output as { _meta?: { testConnectorOutcome?: unknown } };
+            return row._meta?.testConnectorOutcome === "not_executed"
+              ? ("not_executed" as const)
+              : null;
+          },
+          call: (approvalId: string, arguments_: unknown) => ({
+            approvalId,
+            connectionId: "github-app:71",
+            serverId: "github_app",
+            toolName: "repository_get",
+            arguments: arguments_,
+          }),
+        },
+      ];
       const prepared = await prepareAgentTools(testSettings(), [], {
         accountId: "11111111-1111-4111-8111-111111111111",
         workspaceId: "22222222-2222-4222-8222-222222222222",
@@ -2504,6 +2548,8 @@ describe("runtime event normalization", () => {
         turnId: "44444444-4444-4444-8444-444444444444",
         attemptId: "55555555-5555-4555-8555-555555555555",
         executionGeneration: 1,
+        connectorActionPolicy: hooks,
+        attemptConnectorActionBindings: bindings,
         attemptToolDefinitions: [
           {
             identity: { serverId: "github_app", toolName: "repository_get" },
@@ -2536,40 +2582,10 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      let managed = false;
-      const completed: string[] = [];
-      const hooks: ConnectorActionPolicyHooks = {
-        prepare: async () =>
-          managed
-            ? { managed: true, decision: "allow" }
-            : { managed: false, decision: "unmanaged" },
-        begin: async () =>
-          managed
-            ? { allowed: true, managed: true, requestId: "request-read" }
-            : { allowed: true, managed: false },
-        complete: async ({ outcome }) => {
-          completed.push(outcome);
-        },
-      };
       const agent = buildOpenGeniAgent(testSettings(), [], {
         mcpServers: prepared.mcpServers,
         connectorActionPolicy: hooks,
-        attemptConnectorActionBindings: [
-          {
-            modelName: "github_app__repository_get",
-            resultOutcome: (output) => {
-              const row = output as { _meta?: { testConnectorOutcome?: unknown } };
-              return row._meta?.testConnectorOutcome === "not_executed" ? "not_executed" : null;
-            },
-            call: (approvalId, arguments_) => ({
-              approvalId,
-              connectionId: "github-app:71",
-              serverId: "github_app",
-              toolName: "repository_get",
-              arguments: arguments_,
-            }),
-          },
-        ],
+        attemptConnectorActionBindings: bindings,
       });
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
@@ -2594,14 +2610,156 @@ describe("runtime event normalization", () => {
         expect(executions).toEqual([{ repository: "Cloudgeni-ai/opengeni" }]);
         expect(completed).toEqual([]);
         managed = true;
-        await expect(
-          tool.invoke(new RunContext(), JSON.stringify({ repository: "fail-before-provider" }), {
-            toolCall: { callId: "call-not-executed" },
-          } as any),
-        ).rejects.toThrow("Attempt connector action was not executed");
+        expect(
+          await tool.invoke(
+            new RunContext(),
+            JSON.stringify({ repository: "fail-before-provider" }),
+            {
+              toolCall: { callId: "call-not-executed" },
+            } as any,
+          ),
+        ).toMatchObject({ isError: true });
         expect(completed).toEqual(["not_executed"]);
       } finally {
         await prepared.close();
+      }
+    });
+
+    test("Codemode uses the canonical connector prepare, begin, and completion lifecycle", async () => {
+      const prepareFixture = async (
+        decision: "allow" | "ask" | "block",
+        policyAvailable = true,
+      ) => {
+        const events: string[] = [];
+        const hooks: ConnectorActionPolicyHooks = {
+          prepare: async (call) => {
+            events.push(`prepare:${call.approvalId}`);
+            return { managed: true, decision };
+          },
+          begin: async (call) => {
+            events.push(`begin:${call.approvalId}`);
+            return {
+              allowed: true,
+              managed: true,
+              requestId: `request:${call.approvalId}`,
+            };
+          },
+          complete: async ({ requestId, outcome }) => {
+            events.push(`complete:${requestId}:${outcome}`);
+          },
+        };
+        const bindings = [
+          {
+            modelName: "connector_execute",
+            call: (approvalId: string, arguments_: unknown) => ({
+              approvalId,
+              connectionId: "connection-1",
+              serverId: "connector",
+              toolName: "execute",
+              arguments: arguments_,
+            }),
+          },
+        ];
+        const prepared = await prepareAgentTools(testSettings(), [], {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          ...(policyAvailable ? { connectorActionPolicy: hooks } : {}),
+          attemptConnectorActionBindings: bindings,
+          attemptToolDefinitions: [
+            {
+              identity: { serverId: "connector", toolName: "execute" },
+              modelName: "connector_execute",
+              inputSchema: {
+                type: "object",
+                properties: { outcome: { type: "string", enum: ["completed", "uncertain"] } },
+                required: ["outcome"],
+                additionalProperties: false,
+              },
+              source: "mcp",
+              approval: "policy",
+              execute: async (args, context) => {
+                events.push(`execute:${context.operationId}`);
+                if (args.outcome === "uncertain") {
+                  throw new ConnectorActionExecutionError(
+                    "provider request may have started",
+                    "uncertain",
+                  );
+                }
+                return { content: [{ type: "text", text: "completed" }] };
+              },
+            },
+          ],
+        });
+        const call = (operationId: string, outcome: "completed" | "uncertain") => ({
+          operationId,
+          catalogDigest: prepared.attemptToolCatalog!.digest,
+          identity: { serverId: "connector", toolName: "execute" },
+          arguments: { outcome },
+          caller: { kind: "codemode" as const, subjectId: "agent:test" },
+        });
+        return { call, events, prepared };
+      };
+
+      for (const decision of ["ask", "block"] as const) {
+        const fixture = await prepareFixture(decision);
+        try {
+          const operationId =
+            decision === "ask"
+              ? "66666666-6666-4666-8666-666666666661"
+              : "66666666-6666-4666-8666-666666666662";
+          await expect(
+            fixture.prepared.attemptToolEnvironment!.prepareCall(
+              fixture.call(operationId, "completed"),
+            ),
+          ).rejects.toThrow(decision === "ask" ? "approval" : "blocked");
+          expect(fixture.events).toEqual([`prepare:${operationId}`]);
+        } finally {
+          await fixture.prepared.close();
+        }
+      }
+
+      const unavailable = await prepareFixture("allow", false);
+      try {
+        await expect(
+          unavailable.prepared.attemptToolEnvironment!.prepareCall(
+            unavailable.call("66666666-6666-4666-8666-666666666663", "completed"),
+          ),
+        ).rejects.toThrow("policy is unavailable");
+        expect(unavailable.events).toEqual([]);
+      } finally {
+        await unavailable.prepared.close();
+      }
+
+      const allowed = await prepareFixture("allow");
+      try {
+        const completed = await allowed.prepared.attemptToolEnvironment!.prepareCall(
+          allowed.call("66666666-6666-4666-8666-666666666664", "completed"),
+        );
+        expect(allowed.events).toEqual(["prepare:66666666-6666-4666-8666-666666666664"]);
+        await completed.execute();
+        expect(allowed.events).toEqual([
+          "prepare:66666666-6666-4666-8666-666666666664",
+          "begin:66666666-6666-4666-8666-666666666664",
+          "execute:66666666-6666-4666-8666-666666666664",
+          "complete:request:66666666-6666-4666-8666-666666666664:completed",
+        ]);
+
+        const uncertain = await allowed.prepared.attemptToolEnvironment!.prepareCall(
+          allowed.call("66666666-6666-4666-8666-666666666665", "uncertain"),
+        );
+        await expect(uncertain.execute()).rejects.toThrow("provider request may have started");
+        expect(allowed.events.slice(-4)).toEqual([
+          "prepare:66666666-6666-4666-8666-666666666665",
+          "begin:66666666-6666-4666-8666-666666666665",
+          "execute:66666666-6666-4666-8666-666666666665",
+          "complete:request:66666666-6666-4666-8666-666666666665:uncertain",
+        ]);
+      } finally {
+        await allowed.prepared.close();
       }
     });
 
@@ -2758,18 +2916,6 @@ describe("runtime event normalization", () => {
           mcpServers: [serverConfig],
         });
         const resolverCalls: ResolveConnectionCredentialInput[] = [];
-        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
-          workspaceId: "22222222-2222-4222-8222-222222222222",
-          credentialSubjectId: initiatingSubjectId,
-          resolveCredential: async (request) => {
-            resolverCalls.push(request);
-            return {
-              status: "ok",
-              connectionId,
-              headers: { authorization: "Bearer broker-token" },
-            };
-          },
-        });
         let approved = decision !== "ask";
         const policyCalls: Array<{
           phase: "prepare" | "begin";
@@ -2812,6 +2958,24 @@ describe("runtime event normalization", () => {
             completions.push(completion);
           },
         };
+        const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+          accountId: "11111111-1111-4111-8111-111111111111",
+          workspaceId: "22222222-2222-4222-8222-222222222222",
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          turnId: "44444444-4444-4444-8444-444444444444",
+          attemptId: "55555555-5555-4555-8555-555555555555",
+          executionGeneration: 1,
+          credentialSubjectId: initiatingSubjectId,
+          resolveCredential: async (request) => {
+            resolverCalls.push(request);
+            return {
+              status: "ok",
+              connectionId,
+              headers: { authorization: "Bearer broker-token" },
+            };
+          },
+          connectorActionPolicy: hooks,
+        });
         const agent = buildOpenGeniAgent(settings, [], {
           mcpServers: prepared.mcpServers,
           resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
@@ -2850,7 +3014,7 @@ describe("runtime event normalization", () => {
             { toolCall: { callId: `call-${decision}` } } as any,
           );
           if (decision === "block") {
-            await expect(invocation).rejects.toThrow("Connector action was not executed: blocked");
+            expect(await invocation).toMatchObject({ isError: true });
             expect(mcp.calls).toHaveLength(0);
             expect(completions).toEqual([]);
           } else {
@@ -2862,7 +3026,9 @@ describe("runtime event normalization", () => {
               { requestId: `request-${decision}`, outcome: "completed" },
             ]);
           }
-          expect(policyCalls.map(({ phase }) => phase)).toEqual(["prepare", "begin"]);
+          expect(policyCalls.map(({ phase }) => phase)).toEqual(
+            decision === "block" ? ["prepare", "prepare"] : ["prepare", "prepare", "begin"],
+          );
           expect(
             policyCalls.every(
               ({ call }) =>
@@ -2879,23 +3045,18 @@ describe("runtime event normalization", () => {
       }
     });
 
-    test("connection-backed tools fail closed when no resolved identity reaches policy", async () => {
+    test("connection-backed tools fail closed when durable policy is unavailable", async () => {
       const mcp = startTestMcpServer();
-      const baseConfig = {
-        id: "docs",
-        name: "Personal Documents",
-        url: mcp.url,
-        cacheToolsList: false,
-      };
-      const prepared = await prepareAgentTools(testSettings({ mcpServers: [baseConfig] }), [
-        { kind: "mcp", id: "docs" },
-      ]);
       const settings = testSettings({
         sandboxBackend: "none",
         mcpServers: [
           {
-            ...baseConfig,
+            id: "docs",
+            name: "Personal Documents",
+            url: mcp.url,
+            cacheToolsList: false,
             connectionRef: {
+              connectionId: "11111111-1111-4111-8111-111111111111",
               providerDomain: "example.test",
               kind: "oauth2",
               subjectScope: "subject",
@@ -2903,19 +3064,23 @@ describe("runtime event normalization", () => {
           },
         ],
       });
-      const hooks: ConnectorActionPolicyHooks = {
-        prepare: async () => ({ managed: true, decision: "block" }),
-        begin: async () => ({
-          allowed: false,
-          managed: true,
-          requestId: "request-missing",
-          reason: "blocked",
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        credentialSubjectId: "subject-a",
+        resolveCredential: async () => ({
+          status: "ok",
+          connectionId: "11111111-1111-4111-8111-111111111111",
+          headers: { authorization: "Bearer connector-token" },
         }),
-        complete: async () => {},
-      };
+      });
       const agent = buildOpenGeniAgent(settings, [], {
         mcpServers: prepared.mcpServers,
-        connectorActionPolicy: hooks,
+        resolvedMcpConnectionIds: prepared.resolvedMcpConnectionIds,
       });
       try {
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
@@ -2923,14 +3088,14 @@ describe("runtime event normalization", () => {
             candidate.type === "function" && candidate.name === "docs__search_documents",
         );
         if (!tool || tool.type !== "function") throw new Error("connector tool missing");
-        await expect(
-          tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
-        ).rejects.toThrow("missing its resolved connection identity");
-        await expect(
-          tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
+        expect(
+          await tool.needsApproval(new RunContext(), { query: "blocked" }, "call-missing"),
+        ).toBe(false);
+        expect(
+          await tool.invoke(new RunContext(), JSON.stringify({ query: "blocked" }), {
             toolCall: { callId: "call-missing" },
           } as any),
-        ).rejects.toThrow("missing its resolved connection identity");
+        ).toMatchObject({ isError: true });
         expect(mcp.calls).toHaveLength(0);
       } finally {
         await prepared.close();
@@ -7225,6 +7390,11 @@ describe("runtime event normalization", () => {
   test("routes every official-Gmail turn through the REST bridge, never the hosted preview MCP", async () => {
     const resolved: ResolveConnectionCredentialInput[] = [];
     const fetched: string[] = [];
+    const connectorActionPolicy: ConnectorActionPolicyHooks = {
+      prepare: async () => ({ managed: false, decision: "unmanaged" }),
+      begin: async () => ({ allowed: true, managed: false }),
+      complete: async () => {},
+    };
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -7251,6 +7421,7 @@ describe("runtime event normalization", () => {
         turnId: "44444444-4444-4444-8444-444444444444",
         attemptId: "55555555-5555-4555-8555-555555555555",
         executionGeneration: 1,
+        connectorActionPolicy,
         credentialSubjectId: "subject-a",
         resolveCredential: async (input) => {
           resolved.push(input);

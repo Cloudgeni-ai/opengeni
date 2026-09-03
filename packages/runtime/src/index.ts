@@ -13,6 +13,7 @@ import {
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
 import {
+  AttemptToolApprovalRequiredError,
   AttemptToolEnvironment,
   createAttemptToolEnvironment,
   parseVerifiedAttemptToolCatalog,
@@ -24,6 +25,7 @@ import {
   createWorkspaceToolGateway,
   type ToolGateway,
   type ToolGatewayAuthorization,
+  type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 import {
@@ -203,6 +205,7 @@ import {
   CODEX_ORIGINATOR,
   codexAppsSanitizingFetch,
 } from "@opengeni/codex";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
 
@@ -1569,6 +1572,17 @@ export class ConnectorActionBindingRejectedError extends Error {
   override readonly name = "ConnectorActionBindingRejectedError";
 }
 
+/** Typed failure proving the connector provider boundary was not crossed. */
+export class ConnectorActionExecutionError extends Error {
+  override readonly name = "ConnectorActionExecutionError";
+  readonly connectorActionOutcome: "not_executed" | "uncertain";
+
+  constructor(message: string, outcome: "not_executed" | "uncertain", options: ErrorOptions = {}) {
+    super(message, options);
+    this.connectorActionOutcome = outcome;
+  }
+}
+
 /** Exact private binding for one attempt-local model tool backed by a connector action. */
 export type AttemptConnectorActionBinding = {
   modelName: string;
@@ -1576,6 +1590,14 @@ export type AttemptConnectorActionBinding = {
   /** Trusted in-process result classifier; remote connectors must not set this. */
   resultOutcome?: (output: unknown) => "not_executed" | "uncertain" | null;
 };
+
+type ModelConnectorActionInvocation = {
+  modelName: string;
+  operationId: string;
+  approvalConfirmed: boolean;
+};
+
+const modelConnectorActionInvocation = new AsyncLocalStorage<ModelConnectorActionInvocation>();
 
 export type BuildAgentOptions = {
   model?: Model;
@@ -1711,6 +1733,8 @@ export type BuildAgentOptions = {
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   /** Private connector identities for exact-name attempt-local model tools. */
   attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
+  /** Exact open-suffix call the current human approved before this agent was rebuilt. */
+  approvedToolCallId?: string;
   // Workspace Memory V1 working-set block, resolved by the worker per turn.
   // Composed after the workspace persona/CORE/codemode substrate and before
   // per-session instructions. Omitted/blank ⇒ byte-identical instructions.
@@ -2437,11 +2461,13 @@ export function buildOpenGeniAgent(
       settings,
       options.connectorActionPolicy,
       options.resolvedMcpConnectionIds,
+      options.approvedToolCallId,
     );
     installAttemptConnectorActionPolicy(
       agent as unknown as ApprovalCapableAgent,
       options.attemptConnectorActionBindings ?? [],
       options.connectorActionPolicy,
+      options.approvedToolCallId,
     );
     installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
     return agent;
@@ -2570,11 +2596,13 @@ export function buildOpenGeniAgent(
     settings,
     options.connectorActionPolicy,
     options.resolvedMcpConnectionIds,
+    options.approvedToolCallId,
   );
   installAttemptConnectorActionPolicy(
     agent as unknown as ApprovalCapableAgent,
     options.attemptConnectorActionBindings ?? [],
     options.connectorActionPolicy,
+    options.approvedToolCallId,
   );
   installInteractionInterventionPolicy(agent as unknown as ApprovalCapableAgent);
   return agent;
@@ -2689,7 +2717,9 @@ function installMcpApprovalPolicy(
   agent: ApprovalCapableAgent,
   policies: McpApprovalPolicy[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
+  approvedToolCallId?: string,
 ): void {
+  const approvalRequiredCallIds = new Set<string>();
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
@@ -2706,10 +2736,7 @@ function installMcpApprovalPolicy(
       const originalInvoke = tool.invoke.bind(tool);
       const legacyApproval =
         !policy.connectorBacked && mcpToolRequiresApproval(policy.requireApproval, unprefixed);
-      const durableManaged = Boolean(
-        connectorActionPolicy && (policy.connectorBacked || legacyApproval),
-      );
-      if (!durableManaged && !legacyApproval) {
+      if (!policy.connectorBacked && !legacyApproval) {
         return tool;
       }
       const connectorCall = (approvalId: string, args: unknown): ConnectorActionToolCall => {
@@ -2733,32 +2760,52 @@ function installMcpApprovalPolicy(
           parsedInput: Parameters<typeof originalNeedsApproval>[1],
           callId: Parameters<typeof originalNeedsApproval>[2],
         ) => {
-          if (durableManaged && !callId) {
+          if (!connectorActionPolicy) {
+            return (
+              mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
+              (await originalNeedsApproval(runContext, parsedInput, callId))
+            );
+          }
+          if (!callId) {
             throw new Error("Connector action is missing its durable approval identity");
           }
-          const preparation = durableManaged
-            ? await connectorActionPolicy!.prepare(connectorCall(callId!, parsedInput))
-            : ({ managed: false, decision: "unmanaged" } as const);
+          const preparation = await connectorActionPolicy.prepare(
+            connectorCall(callId, parsedInput),
+          );
           if (preparation.managed && preparation.decision === "block") {
+            approvalRequiredCallIds.delete(callId);
             return false;
           }
           const approvalRequired =
             mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
             (await originalNeedsApproval(runContext, parsedInput, callId));
-          return (preparation.managed && preparation.decision === "ask") || approvalRequired;
+          const requiresApproval =
+            (preparation.managed && preparation.decision === "ask") || approvalRequired;
+          if (requiresApproval) approvalRequiredCallIds.add(callId);
+          else approvalRequiredCallIds.delete(callId);
+          return requiresApproval;
         },
         invoke: async (runContext, input, details) => {
-          if (legacyApproval && !connectorActionPolicy) {
+          if (!connectorActionPolicy && !policy.connectorBacked) {
             throw new Error(
               "Approval-gated MCP action was not executed: durable execution policy is unavailable",
             );
           }
-          if (!durableManaged) {
-            return await originalInvoke(runContext, input, details);
-          }
           const callId = details?.toolCall?.callId;
           if (!callId) {
             throw new Error("Connector action was not executed: missing durable call identity");
+          }
+          if (policy.connectorBacked) {
+            const approvalConfirmed =
+              approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
+            return await runWithModelConnectorActionInvocation(
+              {
+                modelName: tool.name,
+                operationId: callId,
+                approvalConfirmed,
+              },
+              async () => await originalInvoke(runContext, input, details),
+            );
           }
           let parsedInput: unknown;
           try {
@@ -2795,23 +2842,25 @@ function installMcpApprovalPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy);
+      installMcpApprovalPolicy(cloned, policies, connectorActionPolicy, approvedToolCallId);
       return cloned;
     };
   }
 }
 
 /**
- * Apply durable connector policy to exact-name, attempt-local tools. Their
- * private connection binding is host-owned and intentionally absent from the
- * frozen model/Codemode catalog and tool arguments.
+ * Project connector Ask into the model SDK approval protocol for exact-name,
+ * attempt-local tools. The gateway owns prepare/begin/complete; this wrapper
+ * only carries the exact approved SDK call id into that host-only lifecycle.
  */
 function installAttemptConnectorActionPolicy(
   agent: ApprovalCapableAgent,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
+  approvedToolCallId?: string,
 ): void {
   if (bindings.length === 0) return;
+  const approvalRequiredCallIds = new Set<string>();
   const byModelName = new Map<string, AttemptConnectorActionBinding>();
   for (const binding of bindings) {
     if (byModelName.has(binding.modelName)) {
@@ -2836,7 +2885,7 @@ function installAttemptConnectorActionPolicy(
           callId: Parameters<typeof originalNeedsApproval>[2],
         ) => {
           if (!connectorActionPolicy) {
-            throw new Error("Attempt connector action policy is unavailable");
+            return await originalNeedsApproval(runContext, parsedInput, callId);
           }
           if (!callId) {
             throw new Error("Attempt connector action is missing its durable approval identity");
@@ -2850,82 +2899,36 @@ function installAttemptConnectorActionPolicy(
             // provider can run. A model can name a repository outside the
             // accepted turn resources; that is an ordinary rejected tool call,
             // not an Agents SDK lifecycle failure.
+            approvalRequiredCallIds.delete(callId);
             return false;
           }
           const preparation = await connectorActionPolicy.prepare(call);
-          if (!preparation.managed || preparation.decision === "block") return false;
-          return (
+          if (!preparation.managed || preparation.decision === "block") {
+            approvalRequiredCallIds.delete(callId);
+            return false;
+          }
+          const requiresApproval =
             preparation.decision === "ask" ||
-            (await originalNeedsApproval(runContext, parsedInput, callId))
-          );
+            (await originalNeedsApproval(runContext, parsedInput, callId));
+          if (requiresApproval) approvalRequiredCallIds.add(callId);
+          else approvalRequiredCallIds.delete(callId);
+          return requiresApproval;
         },
         invoke: async (runContext, input, details) => {
-          if (!connectorActionPolicy) {
-            throw new Error("Attempt connector action policy is unavailable");
-          }
           const callId = details?.toolCall?.callId;
           if (!callId) {
             throw new Error("Attempt connector action was not executed: missing durable identity");
           }
-          let parsedInput: unknown;
-          try {
-            parsedInput = JSON.parse(input) as unknown;
-          } catch {
-            throw new Error("Attempt connector action was not executed: malformed tool input");
-          }
-          let call: ConnectorActionToolCall;
-          try {
-            call = binding.call(callId, parsedInput);
-          } catch (error) {
-            if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text" as const,
-                  text: "Connector action was not executed because its arguments are outside this turn's accepted authority.",
-                },
-              ],
-            };
-          }
-          const admission = await connectorActionPolicy.begin(call);
-          if (!admission.allowed) {
-            throw new Error(`Attempt connector action was not executed: ${admission.reason}`);
-          }
-          if (!admission.managed) return await originalInvoke(runContext, input, details);
-          try {
-            const output = await originalInvoke(runContext, input, details);
-            const returnedOutcome = binding.resultOutcome?.(output) ?? null;
-            if (returnedOutcome) {
-              await connectorActionPolicy.complete({
-                requestId: admission.requestId,
-                outcome: returnedOutcome,
-              });
-              throw new ConnectorActionReturnedFailure(returnedOutcome);
-            }
-            await connectorActionPolicy.complete({
-              requestId: admission.requestId,
-              outcome: "completed",
-            });
-            return output;
-          } catch (error) {
-            const outcome =
-              error instanceof ConnectorActionReturnedFailure
-                ? error.outcome
-                : connectorActionOutcome(error);
-            if (!(error instanceof ConnectorActionReturnedFailure)) {
-              await connectorActionPolicy.complete({
-                requestId: admission.requestId,
-                outcome,
-              });
-            }
-            throw new Error(
-              outcome === "not_executed"
-                ? "Attempt connector action was not executed"
-                : "Attempt connector action outcome is uncertain; inspect provider state before retrying",
-              { cause: error },
-            );
-          }
+          const approvalConfirmed =
+            approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
+          return await runWithModelConnectorActionInvocation(
+            {
+              modelName: tool.name,
+              operationId: callId,
+              approvalConfirmed,
+            },
+            async () => await originalInvoke(runContext, input, details),
+          );
         },
       };
     });
@@ -2934,15 +2937,14 @@ function installAttemptConnectorActionPolicy(
   if (originalClone) {
     agent.clone = (config: unknown) => {
       const cloned = originalClone(config);
-      installAttemptConnectorActionPolicy(cloned, bindings, connectorActionPolicy);
+      installAttemptConnectorActionPolicy(
+        cloned,
+        bindings,
+        connectorActionPolicy,
+        approvedToolCallId,
+      );
       return cloned;
     };
-  }
-}
-
-class ConnectorActionReturnedFailure extends Error {
-  constructor(readonly outcome: "not_executed" | "uncertain") {
-    super(`Connector action returned ${outcome}`);
   }
 }
 
@@ -2956,6 +2958,20 @@ function connectorActionOutcome(error: unknown): "not_executed" | "uncertain" {
     return "not_executed";
   }
   return "uncertain";
+}
+
+function runWithModelConnectorActionInvocation<T>(
+  invocation: ModelConnectorActionInvocation,
+  execute: () => T,
+): T {
+  return modelConnectorActionInvocation.run(invocation, execute);
+}
+
+function activeModelConnectorActionInvocation(
+  modelName: string,
+): ModelConnectorActionInvocation | null {
+  const invocation = modelConnectorActionInvocation.getStore();
+  return invocation?.modelName === modelName ? invocation : null;
 }
 
 /**
@@ -3014,28 +3030,19 @@ function applyMcpApprovalPolicy(
   settings: Settings,
   connectorActionPolicy?: ConnectorActionPolicyHooks,
   resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
+  approvedToolCallId?: string,
 ): void {
   const policies: McpApprovalPolicy[] = settings.mcpServers
     .filter(
       (server) =>
-        Boolean(connectorActionPolicy && server.connectionRef) ||
+        Boolean(server.connectionRef) ||
         server.requireApproval === true ||
         (Array.isArray(server.requireApproval) && server.requireApproval.length > 0),
     )
     .map((server) => {
-      const staticConnectionId = server.connectionRef?.connectionId ?? null;
       const connectionId = (): string | null => {
-        const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
-        if (
-          staticConnectionId &&
-          resolvedConnectionId &&
-          staticConnectionId !== resolvedConnectionId
-        ) {
-          throw new Error("MCP connection identity changed between configuration and preparation");
-        }
         return (
-          resolvedConnectionId ??
-          staticConnectionId ??
+          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
           (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
         );
       };
@@ -3056,7 +3063,20 @@ function applyMcpApprovalPolicy(
     agent as unknown as ApprovalCapableAgent,
     policies,
     connectorActionPolicy,
+    approvedToolCallId,
   );
+}
+
+function resolvedMcpConnectionId(
+  server: Settings["mcpServers"][number],
+  resolvedMcpConnectionIds?: ReadonlyMap<string, string>,
+): string | null {
+  const staticConnectionId = server.connectionRef?.connectionId ?? null;
+  const resolvedConnectionId = resolvedMcpConnectionIds?.get(server.id) ?? null;
+  if (staticConnectionId && resolvedConnectionId && staticConnectionId !== resolvedConnectionId) {
+    throw new Error("MCP connection identity changed between configuration and preparation");
+  }
+  return resolvedConnectionId ?? staticConnectionId;
 }
 
 /**
@@ -3405,6 +3425,10 @@ export type PrepareToolsOptions = {
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
+  /** Attempt-bound connector policy installed into the canonical gateway lifecycle. */
+  connectorActionPolicy?: ConnectorActionPolicyHooks;
+  /** Private connector identities for exact-name attempt-local tools. */
+  attemptConnectorActionBindings?: readonly AttemptConnectorActionBinding[];
   /** Build a current-human workspace gateway from the same prepared provider set. */
   workspaceToolGateway?: {
     generation?: number;
@@ -4001,7 +4025,13 @@ export async function prepareAgentTools(
       attemptToolEnvironment = await measureToolPreparationPhase(
         options,
         "attempt_catalog_build",
-        async () => await prepareAttemptToolEnvironment(activeMcpServers, registry, options),
+        async () =>
+          await prepareAttemptToolEnvironment(
+            activeMcpServers,
+            registry,
+            resolvedMcpConnectionIds,
+            options,
+          ),
       );
       if (attemptToolEnvironment && localToolServer) {
         localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
@@ -4205,24 +4235,31 @@ function attemptToolScope(options: PrepareToolsOptions): AttemptToolScope | null
 async function prepareAttemptToolEnvironment(
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   options: PrepareToolsOptions,
 ): Promise<AttemptToolEnvironment | null> {
   const scope = attemptToolScope(options);
   if (!scope) return null;
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const definitions: AttemptToolDefinition[] = [
-    ...prepared.definitions.map((definition) => ({
-      ...definition,
-      execute: wrapAttemptToolExecute(
-        async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+  const definitions = installAttemptConnectorActionGatewayLifecycle(
+    [
+      ...prepared.definitions.map((definition) => ({
+        ...definition,
+        execute: wrapAttemptToolExecute(
+          async (argumentsValue, context) => await definition.execute(argumentsValue, context),
+          options.spillOversizedModelToolResult,
+        ),
+      })),
+      ...wrapAttemptToolDefinitions(
+        options.attemptToolDefinitions ?? [],
         options.spillOversizedModelToolResult,
       ),
-    })),
-    ...wrapAttemptToolDefinitions(
-      options.attemptToolDefinitions ?? [],
-      options.spillOversizedModelToolResult,
-    ),
-  ];
+    ],
+    registry,
+    resolvedMcpConnectionIds,
+    options.attemptConnectorActionBindings ?? [],
+    options.connectorActionPolicy,
+  );
   const environment = createAttemptToolEnvironment({
     scope,
     generation: options.attemptToolCatalogGeneration ?? 1,
@@ -4234,6 +4271,141 @@ async function prepareAttemptToolEnvironment(
     server.bindAttemptToolEnvironment(environment, subjectId);
   }
   return environment;
+}
+
+function installAttemptConnectorActionGatewayLifecycle(
+  definitions: readonly AttemptToolDefinition[],
+  registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
+  resolvedMcpConnectionIds: ReadonlyMap<string, string>,
+  bindings: readonly AttemptConnectorActionBinding[],
+  connectorActionPolicy?: ConnectorActionPolicyHooks,
+): AttemptToolDefinition[] {
+  const byModelName = new Map<string, AttemptConnectorActionBinding>();
+  for (const binding of bindings) {
+    if (byModelName.has(binding.modelName)) {
+      throw new Error(`Duplicate attempt connector action binding: ${binding.modelName}`);
+    }
+    byModelName.set(binding.modelName, binding);
+  }
+  return definitions.map((definition) => {
+    const binding = byModelName.get(definition.modelName);
+    const config = registry.get(definition.identity.serverId);
+    if (!binding && !config?.connectionRef) return definition;
+    if (definition.lifecycle) {
+      throw new Error(`Connector action tool already owns a lifecycle: ${definition.modelName}`);
+    }
+    const call = binding
+      ? binding.call
+      : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => {
+          const connectionId = resolvedMcpConnectionId(config!, resolvedMcpConnectionIds);
+          if (!connectionId) {
+            throw new ConnectorActionExecutionError(
+              "Connector action was not executed: missing its resolved connection identity",
+              "not_executed",
+            );
+          }
+          return {
+            approvalId,
+            connectionId,
+            serverId: definition.identity.serverId,
+            toolName: definition.identity.toolName,
+            arguments: arguments_,
+          };
+        };
+    return {
+      ...definition,
+      lifecycle: connectorActionGatewayLifecycle({
+        modelName: definition.modelName,
+        call,
+        ...(binding?.resultOutcome ? { resultOutcome: binding.resultOutcome } : {}),
+        ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
+      }),
+    };
+  });
+}
+
+function connectorActionGatewayLifecycle(input: {
+  modelName: string;
+  call: AttemptConnectorActionBinding["call"];
+  resultOutcome?: AttemptConnectorActionBinding["resultOutcome"];
+  connectorActionPolicy?: ConnectorActionPolicyHooks;
+}): ToolGatewayCallLifecycle {
+  return {
+    prepare: async ({ call }) => {
+      if (!input.connectorActionPolicy) {
+        throw new ConnectorActionExecutionError(
+          "Connector action was not executed: durable execution policy is unavailable",
+          "not_executed",
+        );
+      }
+      const modelInvocation =
+        call.caller.kind === "model" ? activeModelConnectorActionInvocation(input.modelName) : null;
+      let connectorCall: ConnectorActionToolCall;
+      try {
+        connectorCall = input.call(
+          modelInvocation?.operationId ?? call.operationId,
+          call.arguments,
+        );
+      } catch (error) {
+        if (!(error instanceof ConnectorActionBindingRejectedError)) throw error;
+        throw new ConnectorActionExecutionError(
+          "Connector action was not executed because its arguments are outside this turn's accepted authority.",
+          "not_executed",
+          { cause: error },
+        );
+      }
+      const preparation = await input.connectorActionPolicy.prepare(connectorCall);
+      if (preparation.managed && preparation.decision === "block") {
+        throw new ConnectorActionExecutionError(
+          "Connector action was not executed: blocked",
+          "not_executed",
+        );
+      }
+      if (
+        preparation.managed &&
+        preparation.decision === "ask" &&
+        modelInvocation?.approvalConfirmed !== true
+      ) {
+        throw new AttemptToolApprovalRequiredError();
+      }
+      let requestId: string | null = null;
+      return {
+        begin: async () => {
+          const admission = await input.connectorActionPolicy!.begin(connectorCall);
+          if (!admission.allowed) {
+            throw new ConnectorActionExecutionError(
+              `Connector action was not executed: ${admission.reason}`,
+              "not_executed",
+            );
+          }
+          requestId = admission.managed ? admission.requestId : null;
+        },
+        complete: async (settlement) => {
+          if (!requestId) return;
+          if (settlement.outcome === "failed") {
+            await input.connectorActionPolicy!.complete({
+              requestId,
+              outcome: connectorActionOutcome(settlement.error),
+            });
+            return;
+          }
+          const returnedOutcome = input.resultOutcome?.(settlement.result) ?? null;
+          await input.connectorActionPolicy!.complete({
+            requestId,
+            outcome: returnedOutcome ?? "completed",
+          });
+          if (returnedOutcome) {
+            throw new ConnectorActionExecutionError(
+              returnedOutcome === "not_executed"
+                ? "Connector action was not executed"
+                : "Connector action outcome is uncertain; inspect provider state before retrying",
+              returnedOutcome,
+            );
+          }
+        },
+      };
+    },
+  };
 }
 
 async function prepareWorkspaceToolGatewayEnvironment(

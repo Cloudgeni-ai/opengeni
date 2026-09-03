@@ -200,12 +200,17 @@ startup choice. Approval/human-input resumes and editable-artifact turns remain
 fully prepared because continuation requires their exact prior execution/catalog
 identity.
 
-For model MCP execution, the worker also supplies attempt-bound connector policy
-hooks to the runtime. The runtime wraps converted MCP function tools and every
-sandbox clone, evaluates approval before interruption, rechecks durable
-admission immediately before invocation, and commits completion or uncertainty
-afterward. This wrapper does not change tool selection, connector visibility,
-the shared Codemode catalog/executor, or Slack interaction progress delivery.
+The worker supplies attempt-bound connector policy hooks to the runtime before
+the attempt catalog is frozen. The canonical gateway lifecycle evaluates exact
+arguments during prepare, before Codemode's execution-start marker; performs
+durable begin at the actual executor boundary; and settles completed versus
+not-executed or uncertain afterward. Model MCP and Codemode therefore share the
+same connection-backed policy path. The model SDK wrapper remains only the
+ordinary human-approval projection for Ask and propagates the exact approved
+call id on resume. Dedicated provider adapters may classify their result or
+thrown failure, but do not run a second connector-policy lifecycle. None of this
+changes tool selection, connector visibility, request-time credential/live
+authority checks, or Slack interaction progress delivery.
 
 ## Dedicated-read invariant
 

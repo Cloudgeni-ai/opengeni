@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  AttemptToolApprovalRequiredError,
   codemodeDispatchSubject,
   createAttemptToolEnvironment,
   decodeCodemodeDispatchAck,
@@ -46,6 +47,7 @@ afterAll(async () => {
 async function fixture(
   execute: (signal: AbortSignal | undefined) => Promise<string>,
   inputSchema: AttemptToolDefinition["inputSchema"] = { type: "object" },
+  lifecycle?: AttemptToolDefinition["lifecycle"],
 ) {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
@@ -105,6 +107,7 @@ async function fixture(
         inputSchema,
         source: "docs",
         approval: "none",
+        ...(lifecycle ? { lifecycle } : {}),
         execute: async (_arguments, context) => ({
           content: [{ type: "text", text: await execute(context.signal) }],
         }),
@@ -341,6 +344,62 @@ describe("CodemodeAttemptDispatcher", () => {
         "agent.toolCall.created",
         "agent.toolCall.output",
       ]);
+    } finally {
+      await dispatcher.close();
+    }
+  });
+
+  test("fails connector approval during prepare before marking execution started", async () => {
+    if (!available) return;
+    let executions = 0;
+    const { scope, environment } = await fixture(
+      async () => {
+        executions += 1;
+        return "unreachable";
+      },
+      { type: "object" },
+      {
+        prepare: async () => {
+          throw new AttemptToolApprovalRequiredError();
+        },
+      },
+    );
+    const operationId = crypto.randomUUID();
+    await submitCodemodeOperation(client.db, {
+      ...scope,
+      call: {
+        operationId,
+        catalogDigest: environment.catalog.digest,
+        identity: { serverId: "docs", toolName: "search" },
+        arguments: {},
+        caller: { kind: "codemode", subjectId: "sandbox:test" },
+      },
+    });
+    const bus = new MemoryEventBus();
+    const dispatcher = new CodemodeAttemptDispatcher(client.db, bus, environment, scope);
+    dispatcher.start();
+    try {
+      expect(
+        decodeCodemodeDispatchAck(
+          (
+            await bus.request(
+              codemodeDispatchSubject(scope.workspaceId, scope.attemptId),
+              encodeCodemodeDispatchRequest({
+                version: 1,
+                operationId,
+                catalogDigest: environment.catalog.digest,
+              }),
+              { timeoutMs: 1_000 },
+            )
+          ).data,
+        ).status,
+      ).toBe("accepted");
+      expect(await waitForTerminal(scope, operationId)).toMatchObject({
+        state: "failed",
+        errorCode: "approval_required",
+        executionStartedAt: null,
+      });
+      expect(executions).toBe(0);
     } finally {
       await dispatcher.close();
     }

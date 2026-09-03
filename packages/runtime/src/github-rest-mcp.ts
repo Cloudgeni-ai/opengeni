@@ -52,10 +52,6 @@ export type GitHubRestMcpServerOptions = {
     write: boolean;
     forceRefresh: boolean;
   }) => Promise<GitHubRestResolvedAuthority>;
-  completeCodemodeAction?: (input: {
-    operationId: string;
-    outcome: "completed" | "not_executed" | "uncertain";
-  }) => Promise<void>;
   fetchImpl?: FetchLike;
 };
 
@@ -358,9 +354,6 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : null;
     try {
       const output = await this.execute(toolName, args ?? {});
-      if (operationId) {
-        await this.options.completeCodemodeAction?.({ operationId, outcome: "completed" });
-      }
       return {
         content: [{ type: "text", text: JSON.stringify(output) }],
         structuredContent: output,
@@ -368,7 +361,6 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
     } catch (error) {
       if (error instanceof GitHubRestMutationOutcomeUnknownError) {
         if (operationId) {
-          await this.options.completeCodemodeAction?.({ operationId, outcome: "uncertain" });
           throw error;
         }
         return connectorErrorResult(error, "uncertain");
@@ -376,13 +368,9 @@ export class GitHubRestMcpServer implements LocalMcpBridgeServer {
       if (githubRestToolIsMutation(toolName)) {
         const mutationError = new GitHubRestMutationNotExecutedError(safeErrorMessage(error));
         if (operationId) {
-          await this.options.completeCodemodeAction?.({ operationId, outcome: "not_executed" });
           throw mutationError;
         }
         return connectorErrorResult(mutationError, "not_executed");
-      }
-      if (operationId) {
-        await this.options.completeCodemodeAction?.({ operationId, outcome: "not_executed" });
       }
       return {
         isError: true,
@@ -856,7 +844,8 @@ export function githubRestConnectorActionOutcome(
 ): "not_executed" | "uncertain" | null {
   const row = objectRecord(output);
   const outcome = objectRecord(row._meta)[CONNECTOR_OUTCOME_META_KEY];
-  return outcome === "not_executed" || outcome === "uncertain" ? outcome : null;
+  if (outcome === "not_executed" || outcome === "uncertain") return outcome;
+  return row.isError === true ? "not_executed" : null;
 }
 
 function connectorErrorResult(

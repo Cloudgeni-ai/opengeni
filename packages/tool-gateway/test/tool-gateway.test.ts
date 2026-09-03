@@ -97,6 +97,82 @@ describe("ToolGateway", () => {
     ).resolves.toMatchObject({ structuredContent: { ok: true } });
   });
 
+  test("owns prepare, execution-boundary begin, and terminal lifecycle settlement", async () => {
+    const phases: string[] = [];
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          lifecycle: {
+            prepare: ({ call }) => {
+              phases.push(`prepare:${String(call.arguments.query)}`);
+              return {
+                begin: () => {
+                  phases.push("begin");
+                },
+                complete: ({ outcome }) => {
+                  phases.push(`complete:${outcome}`);
+                },
+              };
+            },
+          },
+          execute: async (argumentsValue, context) => {
+            phases.push("execute");
+            return await definition.execute(argumentsValue, context);
+          },
+        },
+      ],
+    });
+    expect(catalog.entries[0]).not.toHaveProperty("lifecycle");
+    const prepared = await gateway.prepareCall({
+      operationId: crypto.randomUUID(),
+      catalogDigest: catalog.digest,
+      identity: definition.identity,
+      arguments: { query: "ordered" },
+      caller: { kind: "codemode", subjectId: "agent:test" },
+    });
+    expect(phases).toEqual(["prepare:ordered"]);
+    await expect(prepared.execute()).resolves.toMatchObject({ structuredContent: { ok: true } });
+    expect(phases).toEqual(["prepare:ordered", "begin", "execute", "complete:completed"]);
+  });
+
+  test("fails lifecycle preparation before begin or executor dispatch", async () => {
+    const phases: string[] = [];
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          lifecycle: {
+            prepare: () => {
+              phases.push("prepare");
+              throw new Error("policy unavailable");
+            },
+          },
+          execute: async () => {
+            phases.push("execute");
+            return { content: [{ type: "text", text: "unreachable" }] };
+          },
+        },
+      ],
+    });
+    await expect(
+      gateway.prepareCall({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: "blocked" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("policy unavailable");
+    expect(phases).toEqual(["prepare"]);
+  });
+
   test("verifies catalog integrity independently of creation time", () => {
     const first = createWorkspaceToolGateway({
       accountId: "11111111-1111-4111-8111-111111111111",

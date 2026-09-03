@@ -37,9 +37,13 @@ export type ToolGatewayExecutionContext = {
   signal?: AbortSignal;
 };
 
+export type ToolGatewayCallContext = Pick<ToolGatewayExecutionContext, "transportMeta" | "signal">;
+
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
+  /** In-process execution lifecycle; never enters the public catalog or its digest. */
+  lifecycle?: ToolGatewayCallLifecycle;
   execute: (
     args: Record<string, unknown>,
     context: ToolGatewayExecutionContext,
@@ -59,6 +63,26 @@ export type ToolGatewayCall = {
   caller: ToolGatewayCaller;
 };
 
+export type ToolGatewayCallSettlement =
+  | { outcome: "completed"; result: ToolGatewayResultValue }
+  | { outcome: "failed"; error: unknown };
+
+export type PreparedToolGatewayCallLifecycle = {
+  /** Cross the side-effect boundary immediately before the executor closure. */
+  begin?: () => Promise<void> | void;
+  /** Settle the side-effect lifecycle after a returned result or thrown failure. */
+  complete?: (settlement: ToolGatewayCallSettlement) => Promise<void> | void;
+};
+
+export type ToolGatewayCallLifecycle = {
+  /** Argument-sensitive preflight. Throwing here guarantees the executor never runs. */
+  prepare: (input: {
+    call: ToolGatewayCall;
+    entry: ToolGatewayCatalogEntryValue;
+    context: ToolGatewayCallContext;
+  }) => Promise<PreparedToolGatewayCallLifecycle | void> | PreparedToolGatewayCallLifecycle | void;
+};
+
 export type ModelToolGatewayCall = {
   operationId?: string;
   modelName: string;
@@ -71,6 +95,7 @@ export type ModelToolGatewayCall = {
 type CompiledDefinition = {
   entry: ToolGatewayCatalogEntryValue;
   execute: ToolGatewayDefinition["execute"];
+  lifecycle: ToolGatewayCallLifecycle | undefined;
   validateInput: ValidateFunction<unknown>;
   validateOutput: ValidateFunction<unknown> | null;
 };
@@ -130,20 +155,14 @@ export class ToolGateway {
 
   async call(
     input: ToolGatewayCall,
-    context: {
-      transportMeta?: Record<string, unknown> | null;
-      signal?: AbortSignal;
-    } = {},
+    context: ToolGatewayCallContext = {},
   ): Promise<ToolGatewayResultValue> {
     return await (await this.prepareCall(input, context)).execute();
   }
 
   async prepareCall(
     input: ToolGatewayCall,
-    context: {
-      transportMeta?: Record<string, unknown> | null;
-      signal?: AbortSignal;
-    } = {},
+    context: ToolGatewayCallContext = {},
   ): Promise<PreparedToolGatewayCall> {
     const request = ToolGatewayCallRequest.parse({
       operationId: input.operationId,
@@ -174,28 +193,41 @@ export class ToolGateway {
       caller,
     } satisfies ToolGatewayCall;
     await this.authorize?.({ call, entry: definition.entry });
+    const lifecycle = await definition.lifecycle?.prepare({
+      call,
+      entry: definition.entry,
+      context,
+    });
     return {
       call,
       entry: definition.entry,
       execute: async () => {
-        const result = ToolGatewayResult.parse(
-          await definition.execute(request.arguments, {
-            operationId,
-            caller,
-            ...(context.transportMeta === undefined
-              ? {}
-              : { transportMeta: context.transportMeta }),
-            ...(context.signal === undefined ? {} : { signal: context.signal }),
-          }),
-        );
-        if (!result.isError && definition.validateOutput) {
-          const outputMatchesSchema =
-            result.structuredContent !== undefined &&
-            definition.validateOutput(result.structuredContent);
-          if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-            throw new ToolGatewayOutputValidationError();
+        await lifecycle?.begin?.();
+        let result: ToolGatewayResultValue;
+        try {
+          result = ToolGatewayResult.parse(
+            await definition.execute(request.arguments, {
+              operationId,
+              caller,
+              ...(context.transportMeta === undefined
+                ? {}
+                : { transportMeta: context.transportMeta }),
+              ...(context.signal === undefined ? {} : { signal: context.signal }),
+            }),
+          );
+          if (!result.isError && definition.validateOutput) {
+            const outputMatchesSchema =
+              result.structuredContent !== undefined &&
+              definition.validateOutput(result.structuredContent);
+            if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
+              throw new ToolGatewayOutputValidationError();
+            }
           }
+        } catch (error) {
+          await lifecycle?.complete?.({ outcome: "failed", error });
+          throw error;
         }
+        await lifecycle?.complete?.({ outcome: "completed", result });
         return result;
       },
     };
@@ -228,7 +260,7 @@ export function prepareToolGatewayDefinitions(
   const paths = allocateToolPaths(definitions);
   const schemaValidators = createSchemaValidators();
   const compiled = definitions.map((definition, index): CompiledDefinition => {
-    const { execute, codemodePath: _path, ...entryInput } = definition;
+    const { execute, lifecycle, codemodePath: _path, ...entryInput } = definition;
     const entry = ToolGatewayCatalogEntry.parse({
       ...entryInput,
       codemodePath: paths[index],
@@ -236,6 +268,7 @@ export function prepareToolGatewayDefinitions(
     return {
       entry,
       execute,
+      lifecycle,
       validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
       validateOutput: entry.outputSchema
         ? compileCatalogSchema(schemaValidators, entry.outputSchema)

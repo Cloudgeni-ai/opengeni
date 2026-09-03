@@ -57,9 +57,12 @@ await app.getByRole("button", { name: "1" }).invoke();
 
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced
-by the shared attempt executor. Catalog, approval, authorization, and input
-validation complete before the durable execution-start marker; invalid
-arguments therefore settle as a known failure, never `outcome_unknown`.
+by the shared attempt executor. Catalog, approval, authorization, input
+validation, and argument-sensitive connector-policy prepare complete before the
+durable execution-start marker. The prepared call performs connector begin at
+the executor boundary and completion afterward, so model MCP and Codemode share
+one lifecycle while invalid, blocked, Ask, or unavailable-policy calls settle
+before provider execution.
 
 `CodemodeCallOptions.signal` cancels only the caller's HTTP/polling observation.
 It does not request server cancellation and cannot prove that an operation

@@ -34,6 +34,7 @@ import {
   digestCanonicalJson,
   prepareToolGatewayDefinitions,
   type PreparedToolGatewayCall,
+  type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
 
@@ -55,6 +56,8 @@ export type AttemptToolExecutionContext = {
 export type AttemptToolDefinition = Omit<AttemptToolCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
+  /** In-process execution lifecycle shared by model MCP and Codemode. */
+  lifecycle?: ToolGatewayCallLifecycle;
   execute: (
     args: Record<string, unknown>,
     context: AttemptToolExecutionContext,
