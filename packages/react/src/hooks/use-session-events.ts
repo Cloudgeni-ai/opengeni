@@ -78,10 +78,6 @@ export type UseSessionEventsResult = {
 // server's one-row continuation lookahead. A large total session must never
 // turn one lazy page into dozens of sequential database round trips.
 const SESSION_HISTORY_PAGE_SIZE = 255;
-const INITIAL_TAIL_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
-const OLDER_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
-const NEWER_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
-const OLDEST_PAGE_SIZE = SESSION_HISTORY_PAGE_SIZE;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
@@ -414,7 +410,7 @@ export function useSessionEvents(
           // reader actually scrolls up (the sentinel drives loadOlder).
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
-            pageSize: INITIAL_TAIL_PAGE_SIZE,
+            pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
             maxFetches: INITIAL_FETCH_CAP,
             signal: controller.signal,
@@ -559,7 +555,7 @@ export function useSessionEvents(
         try {
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before,
-            pageSize: OLDER_PAGE_SIZE,
+            pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
           });
@@ -664,7 +660,7 @@ export function useSessionEvents(
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: 0,
-        pageSize: OLDEST_PAGE_SIZE,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
       });
@@ -733,7 +729,7 @@ export function useSessionEvents(
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: afterSequence,
-        pageSize: NEWER_PAGE_SIZE,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
       });
