@@ -13,6 +13,9 @@ describe("managed setup-account ingress", () => {
     const ingress = await source("../templates/ingress.yaml");
 
     expect(values).toContain("OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: fragment");
+    expect(values).toContain(
+      'OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "false"',
+    );
     expect(ingress).toContain(
       '.Values.ingress.setupAccountIngress.enabled .Values.web.enabled (eq .Values.config.OPENGENI_PRODUCT_ACCESS_MODE "managed") (gt (len $setupAccountHosts) 0)',
     );
@@ -65,6 +68,24 @@ describe("managed setup-account ingress", () => {
       expect(setupIngress(localMode)).toBeUndefined();
     },
   );
+
+  test.skipIf(!Bun.which("helm"))(
+    "fails query transport closed until controller/edge error-log sanitization is confirmed",
+    async () => {
+      const hosts = [host("app.example.test", [path("/", "web")])];
+      await expect(renderIngresses(hosts, { tokenTransport: "query" })).rejects.toThrow(
+        /QUERY_EDGE_SANITIZATION_CONFIRMED/,
+      );
+      expect(
+        setupIngress(
+          await renderIngresses(hosts, {
+            tokenTransport: "query",
+            queryEdgeSanitizationConfirmed: true,
+          }),
+        ),
+      ).toBeDefined();
+    },
+  );
 });
 
 type Ingress = {
@@ -95,6 +116,8 @@ async function renderIngresses(
   options: {
     productAccessMode?: "local" | "managed";
     setupAnnotations?: Record<string, string>;
+    tokenTransport?: "fragment" | "query";
+    queryEdgeSanitizationConfirmed?: boolean;
   } = {},
 ): Promise<Ingress[]> {
   const helm = Bun.which("helm");
@@ -104,7 +127,14 @@ async function renderIngresses(
   await Bun.write(
     valuesPath,
     JSON.stringify({
-      config: { OPENGENI_PRODUCT_ACCESS_MODE: options.productAccessMode ?? "managed" },
+      config: {
+        OPENGENI_PRODUCT_ACCESS_MODE: options.productAccessMode ?? "managed",
+        OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT:
+          options.tokenTransport ?? "fragment",
+        OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: String(
+          options.queryEdgeSanitizationConfirmed ?? false,
+        ),
+      },
       ingress: {
         enabled: true,
         hosts,

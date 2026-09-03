@@ -51,6 +51,8 @@ const managedSettings = testSettings({
   productAccessMode: "managed",
   publicBaseUrl: "http://opengeni.test",
   betterAuthSecret: "organization-membership-route-secret-at-least-32-bytes",
+  organizationUserSetupEmailTokenTransport: "query",
+  organizationUserSetupQueryEdgeSanitizationConfirmed: true,
 });
 
 beforeAll(async () => {
@@ -682,7 +684,9 @@ describe("organization membership routes", () => {
 
       const setupUrl = failedMessage.text.match(/Accept invitation to .*: (https?:\/\/\S+)/)?.[1];
       expect(setupUrl).toBeTruthy();
-      const token = new URL(setupUrl!).searchParams.get("token");
+      const parsedSetupUrl = new URL(setupUrl!);
+      expect(parsedSetupUrl.hash).toBe("");
+      const token = parsedSetupUrl.searchParams.get("token");
       expect(token).toBeTruthy();
       const previewApp = new Hono();
       registerManagedOnboardingRoutes(previewApp, {

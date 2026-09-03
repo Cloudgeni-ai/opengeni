@@ -30,21 +30,6 @@ export function takeBootstrappedSetupAccountToken(target: Window): string | null
     : null;
 }
 
-export function setupAccountQueryRedirectLocation(url: URL): string | null {
-  if (url.pathname !== SETUP_ACCOUNT_PATH || !url.searchParams.has(SETUP_TOKEN_PARAMETER)) {
-    return null;
-  }
-  const candidates = url.searchParams.getAll(SETUP_TOKEN_PARAMETER);
-  const candidate = candidates.length === 1 ? candidates[0] : null;
-  url.searchParams.delete(SETUP_TOKEN_PARAMETER);
-  const search = url.searchParams.toString();
-  const fragment =
-    candidate && isCanonicalSetupAccountToken(candidate)
-      ? new URLSearchParams({ [SETUP_TOKEN_PARAMETER]: candidate }).toString()
-      : "";
-  return `${SETUP_ACCOUNT_PATH}${search ? `?${search}` : ""}${fragment ? `#${fragment}` : ""}`;
-}
-
 export function setupAccountTokenFromUrl(value: string): {
   token: string | null;
   scrubbedPath: string;

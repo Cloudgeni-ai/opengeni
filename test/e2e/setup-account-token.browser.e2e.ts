@@ -44,7 +44,7 @@ describe("setup-account query-token compatibility", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("consumes a query bearer under generic Vite serving without URL or Referer persistence", async () => {
+  test("scrubs query authority before subrequests and rejects query/fragment ambiguity", async () => {
     const leakedReferrers: string[] = [];
     const previewBodies: unknown[] = [];
     page.on("request", (request) => {
@@ -70,9 +70,11 @@ describe("setup-account query-token compatibility", () => {
       });
     });
 
-    await page.goto(`${webBaseUrl}/setup-account?token=${SETUP_TOKEN}&preview=1`, {
+    const response = await page.goto(`${webBaseUrl}/setup-account?token=${SETUP_TOKEN}&preview=1`, {
       waitUntil: "domcontentloaded",
     });
+    expect(response?.status()).toBe(200);
+    expect(response?.url()).toBe(`${webBaseUrl}/setup-account?token=${SETUP_TOKEN}&preview=1`);
     await page
       .getByRole("heading", { name: "Join Compatibility Organization" })
       .waitFor({ timeout: 30_000 });
@@ -85,6 +87,20 @@ describe("setup-account query-token compatibility", () => {
         (body) => JSON.stringify(body) === JSON.stringify({ token: SETUP_TOKEN }),
       ),
     ).toBe(true);
+    expect(leakedReferrers).toEqual([]);
+
+    const conflictingToken = "B".repeat(43);
+    const previewCount = previewBodies.length;
+    const conflictResponse = await page.goto(
+      `${webBaseUrl}/setup-account?token=${SETUP_TOKEN}#token=${conflictingToken}`,
+      { waitUntil: "domcontentloaded" },
+    );
+    expect(conflictResponse?.status()).toBe(200);
+    await page.getByText("This link is incomplete").waitFor({ timeout: 30_000 });
+    expect(page.url()).toBe(`${webBaseUrl}/setup-account`);
+    expect(previewBodies).toHaveLength(previewCount);
+    expect(await page.locator("body").textContent()).not.toContain(SETUP_TOKEN);
+    expect(await page.locator("body").textContent()).not.toContain(conflictingToken);
     expect(leakedReferrers).toEqual([]);
   });
 });

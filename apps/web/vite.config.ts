@@ -1,4 +1,3 @@
-import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,10 +6,6 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import {
-  SETUP_ACCOUNT_RESPONSE_HEADERS,
-  setupAccountQueryRedirectLocation,
-} from "./src/setup-account-token";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,29 +16,21 @@ const browserExtensionArchive = path.resolve(
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
+const SETUP_ACCOUNT_BOOTSTRAP_START = '<script id="opengeni-setup-account-bootstrap">';
+const REFERRER_META = '<meta name="referrer" content="no-referrer" />';
 
-function redirectSetupAccountQueryBearer(
-  request: IncomingMessage,
-  response: ServerResponse,
-  next: () => void,
-): void {
-  if (request.method !== "GET" && request.method !== "HEAD") return next();
-  let location: string | null;
-  try {
-    location = setupAccountQueryRedirectLocation(
-      new URL(request.url ?? "/", "http://opengeni.invalid"),
-    );
-  } catch {
-    return next();
-  }
-  if (!location) return next();
-  response.statusCode = 302;
-  response.setHeader("cache-control", "no-store");
-  for (const [name, value] of Object.entries(SETUP_ACCOUNT_RESPONSE_HEADERS)) {
-    response.setHeader(name, value);
-  }
-  response.setHeader("location", location);
-  response.end();
+function prioritizeSetupAccountBootstrap(html: string): string {
+  const scriptStart = html.indexOf(SETUP_ACCOUNT_BOOTSTRAP_START);
+  if (scriptStart < 0) throw new Error("setup-account bootstrap is missing from index.html");
+  const scriptEnd = html.indexOf("</script>", scriptStart);
+  if (scriptEnd < 0) throw new Error("setup-account bootstrap is unterminated");
+  const bootstrap = html.slice(scriptStart, scriptEnd + "</script>".length);
+  const withoutBootstrap = `${html.slice(0, scriptStart)}${html.slice(scriptEnd + "</script>".length)}`;
+  const referrerStart = withoutBootstrap.indexOf(REFERRER_META);
+  if (referrerStart < 0)
+    throw new Error("setup-account referrer policy is missing from index.html");
+  const withoutProtectedHead = `${withoutBootstrap.slice(0, referrerStart)}${withoutBootstrap.slice(referrerStart + REFERRER_META.length)}`;
+  return withoutProtectedHead.replace("<head>", `<head>${REFERRER_META}${bootstrap}`);
 }
 
 export default defineConfig({
@@ -232,15 +219,6 @@ export default defineConfig({
     tailwindcss(),
     safeReactHmrPlugin(),
     {
-      name: "setup-account-query-bearer-redirect",
-      configureServer(server) {
-        server.middlewares.use(redirectSetupAccountQueryBearer);
-      },
-      configurePreviewServer(server) {
-        server.middlewares.use(redirectSetupAccountQueryBearer);
-      },
-    },
-    {
       name: "opengeni-browser-extension-archive",
       configureServer(server) {
         server.middlewares.use("/opengeni-browser-extension.tar", async (_request, response) => {
@@ -272,7 +250,11 @@ export default defineConfig({
       name: "compact-index-html",
       transformIndexHtml: {
         order: "post",
-        handler: (html) => html.replace(/>\s+</g, "><").trim(),
+        // Vite and React inject dev-client scripts at head-prepend even when
+        // the source bootstrap appears first. Reorder the final transformed
+        // document so setup authority is scrubbed before those subrequests in
+        // dev, preview, and production builds.
+        handler: (html) => prioritizeSetupAccountBootstrap(html).replace(/>\s+</g, "><").trim(),
       },
     },
   ],

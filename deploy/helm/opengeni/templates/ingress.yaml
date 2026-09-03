@@ -1,3 +1,6 @@
+{{- if and (eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (ne (toString .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED) "true") }}
+{{- fail "config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED must be true before enabling setup-account query transport" }}
+{{- end }}
 {{- $setupAccountHosts := list }}
 {{- range .Values.ingress.hosts }}
   {{- $host := . }}
@@ -48,10 +51,10 @@ spec:
 {{- end }}
 {{- if and .Values.ingress.enabled .Values.ingress.setupAccountIngress.enabled .Values.web.enabled (eq .Values.config.OPENGENI_PRODUCT_ACCESS_MODE "managed") (gt (len $setupAccountHosts) 0) }}
 ---
-# A dedicated exact setup route keeps the mail-compatible query bearer out of
-# ingress-nginx access logs and request traces. The web process immediately
-# redirects that query bearer into a browser-only fragment under
-# no-store/no-referrer headers.
+# A dedicated exact setup route suppresses ingress-nginx access logs and request
+# traces. It does not sanitize the controller error_log; query activation is
+# separately gated on an operator-proven controller/edge policy. The protected
+# HTML shell scrubs query/fragment authority in its first inline head script.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

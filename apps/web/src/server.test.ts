@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -34,34 +34,27 @@ describe("production web handler", () => {
     expect(await route.text()).toContain("OpenGeni");
   });
 
-  test("moves a mail-compatible setup bearer into a no-store browser fragment", async () => {
+  test("serves the protected setup shell so the head bootstrap can inspect query and fragment", async () => {
     const root = await fixture();
     const handler = createWebHandler(root);
-    const redirect = await handler(
+    const shell = await handler(
       new Request(`https://example.test/setup-account?preview=1&token=${VALID_SETUP_TOKEN}`),
     );
-    expect(redirect.status).toBe(302);
-    expect(redirect.headers.get("location")).toBe(
-      `/setup-account?preview=1#token=${VALID_SETUP_TOKEN}`,
-    );
-    expect(redirect.headers.get("cache-control")).toBe("no-store");
-    expect(redirect.headers.get("referrer-policy")).toBe("no-referrer");
-    expect(redirect.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-
-    const shell = await handler(
-      new Request(`https://example.test/setup-account#token=${VALID_SETUP_TOKEN}`),
-    );
     expect(shell.status).toBe(200);
+    expect(shell.headers.get("location")).toBeNull();
     expect(shell.headers.get("cache-control")).toBe("no-store");
     expect(shell.headers.get("referrer-policy")).toBe("no-referrer");
     expect(shell.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-    expect(await shell.text()).toContain("OpenGeni");
-  });
+    const html = await shell.text();
+    expect(html).toContain("__OPENGENI_SETUP_ACCOUNT_TOKEN__");
+    expect(html.indexOf('id="opengeni-setup-account-bootstrap"')).toBeLessThan(
+      html.indexOf('<link rel="icon"'),
+    );
+    expect(html.indexOf('id="opengeni-setup-account-bootstrap"')).toBeLessThan(
+      html.indexOf('script type="module"'),
+    );
 
-  test("keeps the setup redirect relative behind TLS termination", async () => {
-    const root = await fixture();
-    const handler = createWebHandler(root);
-    const redirect = await handler(
+    const tlsTerminatedShell = await handler(
       new Request(`http://web-internal:3000/setup-account?token=${VALID_SETUP_TOKEN}`, {
         headers: {
           host: "public.example.test",
@@ -70,35 +63,8 @@ describe("production web handler", () => {
         },
       }),
     );
-    expect(redirect.status).toBe(302);
-    expect(redirect.headers.get("location")).toBe(`/setup-account#token=${VALID_SETUP_TOKEN}`);
-    expect(redirect.headers.get("location")).not.toContain("http://");
-    expect(redirect.headers.get("location")).not.toContain("web-internal");
-  });
-
-  test("scrubs malformed, ambiguous, or oversized setup query bearers without reflecting them", async () => {
-    const root = await fixture();
-    const handler = createWebHandler(root);
-    const ambiguous = await handler(
-      new Request("https://example.test/setup-account?token=first&token=second&preview=1"),
-    );
-    expect(ambiguous.status).toBe(302);
-    expect(ambiguous.headers.get("location")).toBe("/setup-account?preview=1");
-    const oversizedToken = "x".repeat(2_049);
-    const oversized = await handler(
-      new Request(`https://example.test/setup-account?token=${oversizedToken}`),
-    );
-    expect(oversized.status).toBe(302);
-    expect(oversized.headers.get("location")).toBe("/setup-account");
-    expect(oversized.headers.get("location")).not.toContain(oversizedToken);
-    for (const malformedToken of ["not-base64url", "has space", "line%0Abreak", "A".repeat(42)]) {
-      const malformed = await handler(
-        new Request(`https://example.test/setup-account?preview=1&token=${malformedToken}`),
-      );
-      expect(malformed.status).toBe(302);
-      expect(malformed.headers.get("location")).toBe("/setup-account?preview=1");
-      expect(malformed.headers.get("location")).not.toContain(malformedToken);
-    }
+    expect(tlsTerminatedShell.status).toBe(200);
+    expect(tlsTerminatedShell.headers.get("location")).toBeNull();
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
@@ -354,7 +320,10 @@ async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "opengeni-web-handler-"));
   roots.push(root);
   await mkdir(join(root, "assets"), { recursive: true });
-  await Bun.write(join(root, "index.html"), "<!doctype html><title>OpenGeni</title>");
+  await Bun.write(
+    join(root, "index.html"),
+    await readFile(new URL("../index.html", import.meta.url), "utf8"),
+  );
   await Bun.write(join(root, "assets/app-abc123.js"), "export const ready = true;\n");
   await Bun.write(
     join(root, "assets/app-abc123.js.gz"),

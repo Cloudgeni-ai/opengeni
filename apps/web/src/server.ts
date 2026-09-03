@@ -1,11 +1,7 @@
 import { readFileSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
-import {
-  SETUP_ACCOUNT_PATH,
-  SETUP_ACCOUNT_RESPONSE_HEADERS,
-  setupAccountQueryRedirectLocation,
-} from "./setup-account-token";
+import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "0.0.0.0";
@@ -55,9 +51,6 @@ export function createWebHandler(
       });
     }
 
-    const setupAccountRedirect = redirectSetupAccountQueryBearer(url);
-    if (setupAccountRedirect) return setupAccountRedirect;
-
     let pathname: string;
     try {
       pathname = decodeURIComponent(url.pathname);
@@ -86,28 +79,6 @@ export function createWebHandler(
     }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
   };
-}
-
-/**
- * Normalize the mail-compatible query bearer into the browser-only fragment
- * before serving application HTML or loading assets. The query is accepted
- * only on the exact setup route, must be singular and bounded, and is removed
- * even when malformed so it is never reflected indefinitely.
- */
-function redirectSetupAccountQueryBearer(url: URL): Response | null {
-  const location = setupAccountQueryRedirectLocation(url);
-  if (!location) return null;
-  // Keep the redirect same-origin without trusting the backend request scheme
-  // or Host header. TLS-terminating proxies commonly present an internal HTTP
-  // URL here even though the browser used HTTPS.
-  return new Response(null, {
-    status: 302,
-    headers: {
-      ...SETUP_ACCOUNT_RESPONSE_HEADERS,
-      "cache-control": "no-store",
-      location,
-    },
-  });
 }
 
 async function proxyDemoApi(

@@ -387,6 +387,7 @@ beforeAll(async () => {
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
     organizationUserSetupEmailTokenTransport: "query",
+    organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
   });
   const api = createApp({

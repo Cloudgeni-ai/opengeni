@@ -206,6 +206,8 @@ describe("migration 0351 organization user setup delivery", () => {
       sharedWorkspaceAccess: [
         { workspaceId: workspace.id, workspaceName: "Invited Engineering", role: "member" },
       ],
+      setupTokenTransport: null,
+      payloadDigest: null,
     });
     expect(
       await claimOrganizationUserSetupDelivery(client.db, {
@@ -226,6 +228,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: first.claimHolderId,
       tokenDigest,
       payloadDigest,
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds: 60,
     });
@@ -301,6 +304,8 @@ describe("migration 0351 organization user setup delivery", () => {
     if (!retry.claimed) throw new Error("retry setup delivery was not claimed");
     expect(retry.delivery.id).toBe(first.delivery.id);
     expect(retry.providerKey).toBe(first.providerKey);
+    expect(retry.setupTokenTransport).toBe("fragment");
+    expect(retry.payloadDigest).toBe(payloadDigest);
     await expectSqlState(
       () =>
         prepareOrganizationUserSetupDelivery(client!.db, {
@@ -311,6 +316,23 @@ describe("migration 0351 organization user setup delivery", () => {
           claimHolderId: retry.claimHolderId,
           tokenDigest,
           payloadDigest: "9".repeat(64),
+          setupTokenTransport: "fragment",
+          providerIdempotencyScope,
+          providerIdempotencyRetentionSeconds,
+        }),
+      "23505",
+    );
+    await expectSqlState(
+      () =>
+        prepareOrganizationUserSetupDelivery(client!.db, {
+          organizationId,
+          actorSubjectId: administratorSubject,
+          deliveryId: retry.delivery.id,
+          attemptId: retry.attemptId,
+          claimHolderId: retry.claimHolderId,
+          tokenDigest,
+          payloadDigest,
+          setupTokenTransport: "query",
           providerIdempotencyScope,
           providerIdempotencyRetentionSeconds,
         }),
@@ -324,6 +346,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: retry.claimHolderId,
       tokenDigest,
       payloadDigest,
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds,
     });
@@ -375,6 +398,7 @@ describe("migration 0351 organization user setup delivery", () => {
           claimHolderId: preProviderMismatch.claimHolderId,
           tokenDigest,
           payloadDigest: "8".repeat(64),
+          setupTokenTransport: "fragment",
           providerIdempotencyScope,
           providerIdempotencyRetentionSeconds,
         }),
@@ -390,6 +414,7 @@ describe("migration 0351 organization user setup delivery", () => {
           claimHolderId: preProviderMismatch.claimHolderId,
           tokenDigest,
           payloadDigest,
+          setupTokenTransport: "fragment",
           providerIdempotencyScope: "other-provider-v1:other-account",
           providerIdempotencyRetentionSeconds,
         }),
@@ -456,6 +481,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: withinProviderWindow.claimHolderId,
       tokenDigest,
       payloadDigest,
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds,
     });
@@ -589,6 +615,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: crashRecovery.claimHolderId,
       tokenDigest: "e".repeat(64),
       payloadDigest: "f".repeat(64),
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds,
     });
@@ -685,6 +712,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: acceptedClaim.claimHolderId,
       tokenDigest: "3".repeat(64),
       payloadDigest: "4".repeat(64),
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds,
     });
@@ -775,6 +803,7 @@ describe("migration 0351 organization user setup delivery", () => {
         claimHolderId: lockRace.claimHolderId,
         tokenDigest: "1".repeat(64),
         payloadDigest: "2".repeat(64),
+        setupTokenTransport: "fragment",
         providerIdempotencyScope,
         providerIdempotencyRetentionSeconds,
       });
@@ -821,6 +850,7 @@ describe("migration 0351 organization user setup delivery", () => {
       claimHolderId: race.claimHolderId,
       tokenDigest: "c".repeat(64),
       payloadDigest: "d".repeat(64),
+      setupTokenTransport: "fragment",
       providerIdempotencyScope,
       providerIdempotencyRetentionSeconds,
     });
@@ -869,14 +899,27 @@ describe("migration 0351 organization user setup delivery", () => {
     });
 
     const [stored] = await shared.admin<
-      Array<{ tokenDigest: string; payloadDigest: string; attemptCount: number; attempts: number }>
+      Array<{
+        tokenDigest: string;
+        payloadDigest: string;
+        setupTokenTransport: string;
+        attemptCount: number;
+        attempts: number;
+      }>
     >`
       select delivery.token_digest as "tokenDigest",
         delivery.payload_digest as "payloadDigest",
+        delivery.setup_token_transport as "setupTokenTransport",
         delivery.attempt_count as "attemptCount",
         (select count(*)::int from organization_user_setup_delivery_attempts attempt
           where attempt.delivery_id = delivery.id) as attempts
       from organization_user_setup_deliveries delivery where delivery.id = ${first.delivery.id}`;
-    expect(stored).toEqual({ tokenDigest, payloadDigest, attemptCount: 4, attempts: 4 });
+    expect(stored).toEqual({
+      tokenDigest,
+      payloadDigest,
+      setupTokenTransport: "fragment",
+      attemptCount: 4,
+      attempts: 4,
+    });
   });
 });

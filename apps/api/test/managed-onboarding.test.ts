@@ -34,6 +34,7 @@ const settings = testSettings({
   publicBaseUrl: "http://opengeni.test",
   betterAuthSecret: "managed-onboarding-test-secret-at-least-32-bytes",
   organizationUserSetupEmailTokenTransport: "query",
+  organizationUserSetupQueryEdgeSanitizationConfirmed: true,
 });
 
 beforeAll(async () => {

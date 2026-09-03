@@ -4,12 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
     <meta name="referrer" content="no-referrer" />
-    <script>
-      // Vite/dev and generic static servers do not run the production web
-      // handler. Normalize setup authority before any subresource can inherit
-      // a query-bearing Referer, then hand the singular canonical token to the
-      // SPA once through non-enumerable process memory. Keep this parser in
-      // lockstep with src/setup-account-token.ts.
+    <script id="opengeni-setup-account-bootstrap">
+      // Normalize setup authority in the browser because HTTP servers never
+      // receive URL fragments. This must remain the first executable head
+      // content so query and fragment can be rejected together and scrubbed
+      // before any subresource can inherit a query-bearing Referer. Hand the
+      // singular canonical token to the SPA once through non-enumerable process
+      // memory. Keep this parser in lockstep with src/setup-account-token.ts.
       (() => {
         if (window.location.pathname !== "/setup-account") return;
         const query = new URLSearchParams(window.location.search);
