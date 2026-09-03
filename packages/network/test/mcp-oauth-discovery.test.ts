@@ -78,6 +78,16 @@ describe("MCP OAuth discovery", () => {
       resourceMetadata: "",
       scope: [],
     });
+    for (const header of ["Bearer,", ", Bearer", "Bearer,,Basic"]) {
+      expect(parseMcpOAuthChallenge(header)).toEqual({ scheme: "bearer", scope: [] });
+    }
+    for (const header of ["Bearer resource_metadata=", "Bearer, resource_metadata="]) {
+      expect(parseMcpOAuthChallenge(header)).toEqual({
+        scheme: "bearer",
+        resourceMetadata: "",
+        scope: [],
+      });
+    }
   });
 
   test("prefers RFC 9728 protected resource metadata and binds provenance", async () => {
@@ -178,6 +188,28 @@ describe("MCP OAuth discovery", () => {
       classification: "oauth_discovery_broken",
       stage: "protected_resource_metadata",
     });
+
+    for (const header of ["Bearer resource_metadata=", "Bearer, resource_metadata="]) {
+      await expect(
+        resolveMcpOAuthDiscovery({
+          resourceUrl,
+          challenge: parseMcpOAuthChallenge(header),
+          fetchMetadata: metadataFetcher({
+            "https://mcp.example.test/.well-known/oauth-authorization-server": {
+              issuer: "https://mcp.example.test",
+              authorization_endpoint: "https://mcp.example.test/authorize",
+              token_endpoint: "https://mcp.example.test/token",
+              code_challenge_methods_supported: ["S256"],
+            },
+          }),
+          validateEndpoint,
+          canonicalizeResource,
+        }),
+      ).rejects.toMatchObject({
+        classification: "oauth_discovery_broken",
+        stage: "protected_resource_metadata",
+      });
+    }
   });
 
   test("treats malformed PRM as broken instead of trying legacy discovery", async () => {

@@ -198,6 +198,9 @@ function parseOAuthChallenge(challenge: {
   parameterParts: string[];
 }): McpOAuthChallenge {
   const scheme = challenge.scheme.toLowerCase() as "bearer" | "oauth";
+  const resourceMetadataPresent = challenge.parameterParts.some((part) =>
+    /^resource_metadata\s*=/i.test(part.trim()),
+  );
   const paramsText = challenge.parameterParts.join(",");
   const params: Record<string, string> = {};
   const re = /([a-zA-Z_][a-zA-Z0-9_-]*)\s*=\s*("(?:[^"\\]|\\.)*"|[^,\s]+)/g;
@@ -211,10 +214,12 @@ function parseOAuthChallenge(challenge: {
   return {
     scheme,
     scope: params.scope ? params.scope.split(/\s+/).filter(Boolean) : [],
-    ...("resource_metadata" in params ? { resourceMetadata: params.resource_metadata } : {}),
+    ...(resourceMetadataPresent ? { resourceMetadata: params.resource_metadata ?? "" } : {}),
     ...(params.error ? { error: params.error } : {}),
   };
 }
+
+const MAX_EMPTY_AUTHENTICATE_LIST_ELEMENTS = 8;
 
 function parseAuthenticateChallenges(
   header: string,
@@ -222,9 +227,14 @@ function parseAuthenticateChallenges(
   const segments = splitAuthenticateHeader(header);
   if (!segments) return null;
   const challenges: Array<{ scheme: string; parameterParts: string[] }> = [];
+  let emptyElements = 0;
   for (const segment of segments) {
     const trimmed = segment.trim();
-    if (!trimmed) return null;
+    if (!trimmed) {
+      emptyElements += 1;
+      if (emptyElements > MAX_EMPTY_AUTHENTICATE_LIST_ELEMENTS) return null;
+      continue;
+    }
     const token = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+/.exec(trimmed)?.[0];
     if (!token) return null;
     let cursor = token.length;
