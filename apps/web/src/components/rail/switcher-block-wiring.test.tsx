@@ -3,15 +3,45 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 
+import type { Workspace } from "@/types";
+
 const workspaceId = "11111111-1111-4111-8111-111111111111";
+const accountId = "22222222-2222-4222-8222-222222222222";
 const managedUserId = "user-one";
 let emailVerified = true;
 let collapsed = false;
+const workspace = {
+  id: workspaceId,
+  accountId,
+  kind: "personal",
+  name: "Personal workspace",
+  inferenceControl: { state: "active" },
+} as Workspace;
+
+mock.module("@tanstack/react-router", () => ({
+  Link: ({ children }: { children: ReactNode }) => <a href="#organization">{children}</a>,
+}));
 
 mock.module("@/context", () => ({
   useAppContext: () => ({
     clientConfig: { auth: { mode: "managedSession" } },
     authSession: { user: { id: managedUserId, emailVerified } },
+    accessContext: {
+      mode: "managed",
+      subjectId: `user:${managedUserId}`,
+      accountGrants: [
+        {
+          accountId,
+          subjectId: `user:${managedUserId}`,
+          permissions: ["workspace:create"],
+          metadata: { accountName: "CloudGeni" },
+        },
+      ],
+      workspaceGrants: [],
+      defaultAccountId: accountId,
+      defaultWorkspaceId: workspaceId,
+    },
+    workspaces: [workspace],
     managedSelfContext: {
       identity: {
         credentialGeneration: 1,
@@ -21,12 +51,15 @@ mock.module("@/context", () => ({
       memberships: [
         {
           id: "membership-one",
-          organizationId: "22222222-2222-4222-8222-222222222222",
+          organizationId: accountId,
           status: "active",
           personalWorkspaceId: workspaceId,
         },
       ],
     },
+    captureWorkspaceInvocation: () => ({ workspaceId, revision: 1 }),
+    ownsWorkspaceInvocation: () => true,
+    createWorkspace: async () => null,
   }),
 }));
 
@@ -36,29 +69,6 @@ mock.module("@/components/rail/rail-context", () => ({
     collapsed,
     openWorkspace: () => undefined,
   }),
-}));
-
-mock.module("@/components/rail/workspace-switcher", () => ({
-  WorkspaceSwitcherMenu: ({
-    workspaceId: selectedWorkspaceId,
-    collapsed: menuCollapsed,
-    onCreateOrganization,
-  }: {
-    workspaceId: string;
-    collapsed: boolean;
-    onCreateOrganization?: () => void;
-  }) => (
-    <button
-      type="button"
-      data-testid="production-workspace-menu"
-      data-workspace-id={selectedWorkspaceId}
-      data-collapsed={String(menuCollapsed)}
-      data-can-create-organization={String(onCreateOrganization !== undefined)}
-      onClick={onCreateOrganization}
-    >
-      Workspace menu
-    </button>
-  ),
 }));
 
 mock.module("@/components/rail/create-organization-dialog", () => ({
@@ -95,19 +105,42 @@ async function render(node: ReactNode) {
   };
 }
 
+function workspaceMenuTrigger(container: HTMLElement): HTMLButtonElement {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]');
+  if (!trigger) throw new Error("Missing production workspace menu trigger");
+  return trigger;
+}
+
+async function openMenu(trigger: HTMLButtonElement) {
+  await act(async () => {
+    trigger.dispatchEvent(
+      new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+    );
+    await Promise.resolve();
+  });
+}
+
+function menuItem(label: string): HTMLElement | null {
+  return (
+    Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+      (candidate) => candidate.textContent?.trim() === label,
+    ) ?? null
+  );
+}
+
 describe("SwitcherBlock production workspace menu wiring", () => {
-  test("forwards the route and opens organization creation for an eligible user", async () => {
+  test("opens organization creation through the real menu for an eligible user", async () => {
     const rendered = await render(<SwitcherBlock />);
     try {
-      const menu = rendered.container.querySelector<HTMLButtonElement>(
-        '[data-testid="production-workspace-menu"]',
-      );
-      expect(menu?.dataset.workspaceId).toBe(workspaceId);
-      expect(menu?.dataset.collapsed).toBe("false");
-      expect(menu?.dataset.canCreateOrganization).toBe("true");
+      const trigger = workspaceMenuTrigger(rendered.container);
+      expect(trigger.getAttribute("aria-label")).toContain("Personal workspace");
+      await openMenu(trigger);
+
+      const createOrganization = menuItem("New organization…");
+      expect(createOrganization).not.toBeNull();
 
       await act(async () => {
-        menu?.click();
+        createOrganization?.click();
         await Promise.resolve();
       });
       expect(
@@ -122,11 +155,8 @@ describe("SwitcherBlock production workspace menu wiring", () => {
     emailVerified = false;
     const rendered = await render(<SwitcherBlock />);
     try {
-      const menu = rendered.container.querySelector<HTMLButtonElement>(
-        '[data-testid="production-workspace-menu"]',
-      );
-      expect(menu?.dataset.canCreateOrganization).toBe("false");
-      await act(async () => menu?.click());
+      await openMenu(workspaceMenuTrigger(rendered.container));
+      expect(menuItem("New organization…")).toBeNull();
       expect(
         rendered.container.querySelector('[data-testid="create-organization-dialog"]'),
       ).toBeNull();
