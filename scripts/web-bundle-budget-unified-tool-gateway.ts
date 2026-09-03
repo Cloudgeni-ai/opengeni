@@ -11,10 +11,10 @@ export {
 
 /**
  * Exact unified-tool-gateway browser graph on the September 3, 2026
- * setup-account/current-main merge tree. The dynamic tool client remains behind
+ * session-wait/current-main merge tree. The dynamic tool client remains behind
  * its first-call import, so catalog and invocation implementation bytes stay lazy.
  */
-export const UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT = 2_284_408;
+export const UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT = 2_285_636;
 export const UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET = wholeKibEnvelope(
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
 );

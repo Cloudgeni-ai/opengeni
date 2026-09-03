@@ -8,6 +8,7 @@ import {
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
   SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
+  SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -497,10 +498,11 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications only for a supported exact maintenance cutover", () => {
+  test("drains applications for every supported exact maintenance cutover", () => {
     for (const maintenanceCutover of [
       MODEL_CATALOG_MAINTENANCE_CUTOVER,
       SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
+      SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
       MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
     ]) {
       const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {

@@ -104,9 +104,9 @@ import {
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
-  holdSessionGoalContinuationWithEvent,
-  SESSION_GOAL_HOLD_MAX_SECONDS,
-  SESSION_GOAL_HOLD_MIN_SECONDS,
+  waitForSessionInputWithEvent,
+  SESSION_INPUT_WAIT_MAX_SECONDS,
+  SESSION_INPUT_WAIT_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -241,6 +241,7 @@ import {
   type FleetServices,
   type RunOnOp,
 } from "@opengeni/core";
+import { getSessionBackgroundCommand } from "@opengeni/db/session-background-commands";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -438,7 +439,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
+  wait_for_input: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -512,6 +513,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Blocking wait inside a running turn: the live attempt's own session is the
   // self target, so the tool exists only for session-scoped grants.
   session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
+  command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
@@ -821,8 +823,11 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // Goal tools require goals:manage (in the default first-party permission set).
-  if (sessionId !== null && can("goals:manage")) {
+  // PolicyMcpServer applies each tool's own permission contract. Register this
+  // mixed group for every session so session-level wait_for_input remains
+  // available with sessions:control even when goals:manage is intentionally
+  // absent.
+  if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && options.workspaceMemoryEnabled === true) {
@@ -2587,6 +2592,12 @@ function registerGoalTools(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
   );
+  const inputWaitReasonSchema = boundedGoalToolString(2 * 1024, "session input wait reason").refine(
+    (value) => value.trim().length > 0,
+    {
+      message: "session input wait reason must not be blank",
+    },
+  );
   server.registerTool(
     "goal_set",
     {
@@ -2745,38 +2756,36 @@ function registerGoalTools(
   );
 
   server.registerTool(
-    "goal_wait",
+    "wait_for_input",
     {
       description:
-        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists its absolute deadline, and timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Always end your turn immediately after the tool succeeds. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
-        reason: goalRationale,
-        untilSeconds: z4
+        reason: inputWaitReasonSchema,
+        timeoutSeconds: z4
           .number()
           .int()
-          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
-          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+          .min(SESSION_INPUT_WAIT_MIN_SECONDS)
+          .max(SESSION_INPUT_WAIT_MAX_SECONDS),
         idempotencyKey: z4.string().uuid().optional(),
       },
     },
-    async ({ reason, untilSeconds, idempotencyKey }) => {
-      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+    async ({ reason, timeoutSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
       const context = exactAgentCommandContext(grant, sessionId);
-      // Without a caller-supplied key the operation is idempotent per (goal
-      // target, turn, exact arguments): a replacement attempt replaying the
-      // same call receives the stored result instead of re-stamping the hold,
-      // while a genuinely new same-turn wait (different reason/deadline) is a
-      // new operation whose later hold wins.
       const operationKey =
         idempotencyKey ??
-        `goal-wait:${context.callerTurnId}:${createHash("sha256")
-          .update(JSON.stringify({ reason, untilSeconds }))
+        `wait-for-input:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, timeoutSeconds }))
           .digest("hex")
           .slice(0, 32)}`;
-      const { goal, events, operationId, replay, untilAt } =
-        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+      const { events, operationId, replay, deadlineAt } = await waitForSessionInputWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
           reason,
-          untilSeconds,
+          timeoutSeconds,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2788,16 +2797,16 @@ function registerGoalTools(
             },
             operationKey,
           },
-        });
+        },
+      );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
       return json({
-        status: "held",
-        goalId: goal.id,
-        untilAt,
+        status: "waiting_for_input",
+        deadlineAt,
         operationId,
         replay,
         nextAction:
-          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+          "End your turn now. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
       });
     },
   );
@@ -4861,7 +4870,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer, or a background-command result), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for one short wait inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works. Do not immediately repeat it after timedOut=true unless new evidence suggests completion within one more window; for long or uncertain waits call wait_for_input once and end the turn. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the default and returns on turn lifecycle, agent.message.completed, terminal background commands, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, background commands, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4961,6 +4970,127 @@ function registerWorkspaceOrchestrationTools(
         );
       },
     );
+
+    if (callerSessionId !== null) {
+      server.registerTool(
+        "command_wait",
+        {
+          description: `Wait briefly for one background command owned by this session to settle, without provider-specific polling or write_stdin loops. The durable command row is authoritative. This returns immediately when the command is already terminal or otherwise waits up to maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) for its session.command.finished event or other pending input for this session. timedOut=true never cancels the command. Do not immediately repeat command_wait after a timeout unless new evidence suggests completion within one more window; for long or uncertain work call wait_for_input once and end the turn.`,
+          inputSchema: {
+            commandId: z4.string().uuid(),
+            maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
+          },
+        },
+        async ({ commandId, maxWaitSeconds }, extra) => {
+          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+          const initialSession = await requireSession(deps.db, grant.workspaceId, callerSessionId);
+          let command = await getSessionBackgroundCommand(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: callerSessionId,
+            commandId,
+          });
+          if (!command) throw new Error("Background command not found in this session");
+
+          const terminal = () => command?.state === "exited" || command?.state === "lost";
+          let waitResult: Awaited<ReturnType<typeof waitForSessionChanges>> | null = null;
+          if (!terminal()) {
+            waitResult = await waitForSessionChanges({
+              targets: [{ sessionId: callerSessionId, afterSequence: initialSession.lastSequence }],
+              ownSessionId: callerSessionId,
+              maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+              targetEventTypes: ["session.command.finished"],
+              targetEventMatches: (event) => {
+                const payload = event.payload;
+                return (
+                  payload !== null &&
+                  typeof payload === "object" &&
+                  !Array.isArray(payload) &&
+                  (payload as Record<string, unknown>).commandId === commandId
+                );
+              },
+              signal: extra?.signal,
+              source: {
+                readTargetEvents: async (target) => {
+                  const page = await listSessionEventPage(
+                    deps.db,
+                    grant.workspaceId,
+                    target.sessionId,
+                    {
+                      after: target.afterSequence,
+                      direction: "after",
+                      limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                      payloadMode: "full",
+                      includeTypes: ["session.command.finished"],
+                      maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+                    },
+                  );
+                  return { events: page.events, hasMore: page.hasMore };
+                },
+                readOwnPendingUpdateKinds: async () =>
+                  (
+                    await listOutstandingSessionSystemUpdates(
+                      deps.db,
+                      grant.workspaceId,
+                      callerSessionId,
+                    )
+                  ).map((update) => update.kind),
+                subscribe: (targetSessionId, onEvents) =>
+                  deps.bus.subscribe(grant.workspaceId, targetSessionId, onEvents),
+              },
+            });
+          }
+
+          command =
+            (await getSessionBackgroundCommand(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+              commandId,
+            })) ?? command;
+          const isTerminal = terminal();
+          const ownPendingUpdateKinds = (
+            await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, callerSessionId)
+          ).map((update) => update.kind);
+          const ownPendingUpdates = ownPendingUpdateKinds.length;
+          if (waitResult) {
+            // A bounded wait may cross a host/session revocation boundary. The
+            // durable command and pending-input reads above are not returned
+            // until the target is authorized again at the response boundary.
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+          }
+          const timedOut =
+            (waitResult?.timedOut ?? false) && !isTerminal && ownPendingUpdates === 0;
+          return json({
+            command,
+            terminal: isTerminal,
+            waitedMs: waitResult?.waitedMs ?? 0,
+            timedOut,
+            aborted: waitResult?.aborted ?? false,
+            liveFanout: waitResult?.liveFanout ?? true,
+            ownPendingUpdates,
+            ownPendingUpdateKinds,
+            ...(isTerminal
+              ? {
+                  outputLocator: {
+                    eventType: "sandbox.command.output.delta",
+                    commandId,
+                  },
+                }
+              : {}),
+            nextAction: isTerminal
+              ? ownPendingUpdates > 0
+                ? "End this turn to receive the queued command result or other machine input."
+                : "The command is terminal; inspect output events only if more detail is needed."
+              : ownPendingUpdates > 0
+                ? "End this turn to receive pending machine input."
+                : waitResult?.timedOut
+                  ? "Do not immediately repeat this short wait without new completion evidence; use wait_for_input for a long or uncertain wait."
+                  : "The wait was aborted; follow the newer session control or input.",
+          });
+        },
+      );
+    }
   }
 
   if (can("sessions:create") && sessionCreateVisible) {

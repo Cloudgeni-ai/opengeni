@@ -9,11 +9,11 @@ import {
 
 describe("unified tool gateway web bundle budget", () => {
   test("retains the lazy unified-tool-gateway browser envelope", () => {
-    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT).toBe(2_284_408);
-    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET).toBe(2232 * KIB);
+    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT).toBe(2_285_636);
+    expect(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET).toBe(2234 * KIB);
     expect(
       UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET - UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
-    ).toBe(1_160);
+    ).toBe(1_980);
     expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET);
   });
 });

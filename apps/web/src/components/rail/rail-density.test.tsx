@@ -69,27 +69,34 @@ async function render(node: ReactNode) {
   return { container, root };
 }
 
-function workspaceDisclosure(container: HTMLElement): HTMLButtonElement {
+function exploreDisclosure(container: HTMLElement): HTMLButtonElement {
   const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-    (candidate) => candidate.textContent?.trim() === "Workspace",
+    (candidate) => candidate.textContent?.trim() === "Explore",
   );
-  if (!button) throw new Error("Missing Workspace disclosure");
+  if (!button) throw new Error("Missing Explore disclosure");
+  return button;
+}
+
+function showLessButton(container: HTMLElement): HTMLButtonElement {
+  const button = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent?.trim() === "Show less",
+  );
+  if (!button) throw new Error("Missing Show less control");
   return button;
 }
 
 describe("session-first rail density", () => {
-  test("defaults short viewports to compact shortcuts and persists the user's choice", async () => {
-    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
+  test("defaults desktop shortcuts open and remembers when the user collapses them", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
     const first = await render(<PrimaryNav />);
     try {
-      const disclosure = workspaceDisclosure(first.container);
-      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
-
-      await act(async () => disclosure.click());
-      expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+      expect(first.container.textContent).not.toContain("Explore");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(5);
-      expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("true");
+
+      await act(async () => showLessButton(first.container).click());
+      expect(exploreDisclosure(first.container).getAttribute("aria-expanded")).toBe("false");
+      expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(0);
+      expect(window.localStorage.getItem("opengeni.rail.nav")).toBe("false");
     } finally {
       await act(async () => first.root.unmount());
       first.container.remove();
@@ -97,9 +104,9 @@ describe("session-first rail density", () => {
 
     const persisted = await render(<PrimaryNav />);
     try {
-      expect(workspaceDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("true");
+      expect(exploreDisclosure(persisted.container).getAttribute("aria-expanded")).toBe("false");
       expect(persisted.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
-        5,
+        0,
       );
     } finally {
       await act(async () => persisted.root.unmount());
@@ -112,7 +119,7 @@ describe("session-first rail density", () => {
     const primary = await render(<PrimaryNav />);
     try {
       expect(primary.container.textContent).toContain("New session");
-      expect(primary.container.textContent).toContain("For you");
+      expect(primary.container.textContent).not.toContain("For you");
       expect(primary.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );
@@ -124,12 +131,14 @@ describe("session-first rail density", () => {
 
     const workspace = await render(<WorkspaceShortcutLinks />);
     try {
+      expect(workspace.container.textContent).toContain("For you");
       expect(workspace.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         5,
       );
       expect(railShell).toMatch(
-        /id="mobile-nav-panel-workspace"[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
+        /id="mobile-nav-panel-workspace"[\s\S]*?<SwitcherBlock \/>[\s\S]*?<WorkspaceShortcutLinks className="px-2" \/>/,
       );
+      expect(railShell).toMatch(/\{rail\.isMobile \? null : <SwitcherBlock \/>\}/);
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();
@@ -138,16 +147,31 @@ describe("session-first rail density", () => {
 
   test("identifies an active shortcut when the compact disclosure hides its link", async () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
+    window.localStorage.setItem("opengeni.rail.nav", "false");
     pathname = "/workspaces/workspace-1/plugins";
     const rendered = await render(<PrimaryNav />);
     try {
-      const disclosure = workspaceDisclosure(rendered.container);
+      const disclosure = exploreDisclosure(rendered.container);
       expect(disclosure.getAttribute("aria-expanded")).toBe("false");
       expect(disclosure.getAttribute("data-active")).toBe("true");
-      expect(disclosure.getAttribute("aria-label")).toBe("Workspace, current section Plugins");
+      expect(disclosure.getAttribute("aria-label")).toBe("Explore, current section Plugins");
       expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
         0,
       );
+    } finally {
+      await act(async () => rendered.root.unmount());
+      rendered.container.remove();
+    }
+  });
+
+  test("identifies For you when the compact disclosure hides its link", async () => {
+    window.localStorage.setItem("opengeni.rail.nav", "false");
+    pathname = "/workspaces/workspace-1/priority";
+    const rendered = await render(<PrimaryNav />);
+    try {
+      const disclosure = exploreDisclosure(rendered.container);
+      expect(disclosure.getAttribute("data-active")).toBe("true");
+      expect(disclosure.getAttribute("aria-label")).toBe("Explore, current section For you");
     } finally {
       await act(async () => rendered.root.unmount());
       rendered.container.remove();

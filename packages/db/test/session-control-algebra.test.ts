@@ -3,12 +3,16 @@ import { and, eq } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   evaluateSessionControl,
   initializeSessionStartAtomically,
+  listOutstandingSessionSystemUpdates,
+  listSessionEvents,
+  peekSessionWork,
   listWorkspaceControlEvents,
   markSessionAttemptQuiesced,
   mutateSessionControlInTransaction,
@@ -17,6 +21,7 @@ import {
   SessionCommandIdempotencyError,
   SessionControlInvariantError,
   settleSessionAttemptInterruptions,
+  settleConnectedMachineSessionBackgroundCommand,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
 } from "../src/index";
 import { listSessionBackgroundCommands } from "../src/session-background-commands";
@@ -117,6 +122,153 @@ async function control(
 }
 
 describe("recursive session control algebra", () => {
+  test("terminal command proof atomically creates one durable agent input and workflow wake", async () => {
+    const value = await fixture();
+    const attempt = await claimAttempt(value, value.root.id);
+    const commandId = crypto.randomUUID();
+    const enrollmentId = crypto.randomUUID();
+    const connectionInstanceId = "launch-instance-terminal";
+    const opId = "background-op-terminal";
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      turnId: attempt.turn.id,
+      executionGeneration: attempt.turn.executionGeneration,
+      attemptId: attempt.attemptId,
+      commandId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      command: "printf done",
+    });
+    const turnSettlement = await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.root.id,
+      turnId: attempt.turn.id,
+      triggerEventId: attempt.turn.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [{ type: "turn.completed", payload: { output: "command started" } }],
+    });
+    expect(turnSettlement.action).toBe("settled");
+
+    const multibyteReason = "é".repeat(512);
+    const terminal = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      commandId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: multibyteReason,
+    });
+    expect(terminal?.command).toMatchObject({ id: commandId, state: "exited", exitCode: 0 });
+    expect(terminal?.events.map((event) => event.type)).toEqual([
+      "session.command.finished",
+      "system.update.pending",
+    ]);
+    expect(await peekSessionWork(client.db, value.grant.workspaceId!, value.root.id)).toEqual({
+      kind: "runnable",
+    });
+    const updates = await listOutstandingSessionSystemUpdates(
+      client.db,
+      value.grant.workspaceId!,
+      value.root.id,
+    );
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      kind: "background_command_result",
+      classification: "success",
+      payload: {
+        type: "background_command_result",
+        commandId,
+        state: "exited",
+        exitCode: 0,
+        reason: "é".repeat(256),
+        outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+      },
+    });
+
+    expect(
+      await settleConnectedMachineSessionBackgroundCommand(client.db, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.root.id,
+        commandId,
+        controlWorkspaceId: value.grant.workspaceId!,
+        enrollmentId,
+        connectionInstanceId,
+        opId,
+        outcome: "exited",
+        exitCode: 0,
+        reason: multibyteReason,
+      }),
+    ).toBeNull();
+    const events = await listSessionEvents(client.db, value.grant.workspaceId!, value.root.id);
+    expect(events.filter((event) => event.type === "session.command.finished")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(1);
+  });
+
+  test("command proof on a failed session keeps terminal audit without reopening model input", async () => {
+    const value = await fixture();
+    const attempt = await claimAttempt(value, value.root.id);
+    const commandId = crypto.randomUUID();
+    const enrollmentId = crypto.randomUUID();
+    const connectionInstanceId = "launch-instance-failed";
+    const opId = "background-op-failed";
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      turnId: attempt.turn.id,
+      executionGeneration: attempt.turn.executionGeneration,
+      attemptId: attempt.attemptId,
+      commandId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      command: "printf done",
+    });
+    const failed = await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
+      sessionId: value.root.id,
+      turnId: attempt.turn.id,
+      triggerEventId: attempt.turn.triggerEventId,
+      attemptId: attempt.attemptId,
+      turnStatus: "failed",
+      sessionStatus: "failed",
+      activeTurnId: null,
+      events: [{ type: "turn.failed", payload: { error: "fixture failure" } }],
+    });
+    expect(failed.action).toBe("settled");
+
+    const terminal = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+      commandId,
+      controlWorkspaceId: value.grant.workspaceId!,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_instance_lost",
+    });
+    expect(terminal?.command).toMatchObject({ id: commandId, state: "lost" });
+    expect(terminal?.events.map((event) => event.type)).toEqual(["session.command.finished"]);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, value.grant.workspaceId!, value.root.id),
+    ).toEqual([]);
+  });
+
   test("Pause atomically stops adopted commands in the selected subtree; Resume never revives them", async () => {
     const value = await fixture();
     for (const [index, sessionId] of [value.root.id, value.child.id].entries()) {

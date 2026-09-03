@@ -1342,7 +1342,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
     expect(await fallback.count()).toBe(1);
     expect(await fallback.isVisible()).toBe(true);
-    expect(await page.getByText("Goal wait", { exact: false }).count()).toBe(1);
+    expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
 
     await disclosure.click();
     expect(await disclosure.getAttribute("aria-expanded")).toBe("false");

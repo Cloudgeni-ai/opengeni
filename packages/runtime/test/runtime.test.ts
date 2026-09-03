@@ -11753,6 +11753,32 @@ describe("provider item id stripping", () => {
     expect(JSON.stringify(input)).toContain("data:image");
   });
 
+  test("reusing a non-lazy agent does not stack model context capture wrappers", async () => {
+    const settings = testSettings({
+      sandboxBackend: "none",
+      webSearchEnabled: false,
+    });
+    const model = new ScriptedModel("done");
+    const agent = buildOpenGeniAgent(settings, [], {
+      model,
+      hostedWebSearch: false,
+    });
+    const requestIndexes: number[] = [];
+
+    for (const input of ["first", "second"]) {
+      const result = await runAgentStream(agent, input, settings, {
+        onModelVisibleContext: (snapshot) => {
+          requestIndexes.push(snapshot.requestIndex);
+        },
+      });
+      for await (const event of result.toStream()) void event;
+      await result.completed;
+    }
+
+    expect(model.calls).toBe(2);
+    expect(requestIndexes).toEqual([1, 1]);
+  });
+
   test("external history ownership borrows frozen input without mutating it", async () => {
     const settings = testSettings({
       sandboxBackend: "none",

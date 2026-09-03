@@ -1096,12 +1096,15 @@ describe("MessageTimeline — settled turn folding", () => {
         phase: "commentary",
       }),
       timelineEvent("agent.toolCall.created", {
-        id: "goal-wait-1",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      timelineEvent("goal.held", { actor: "agent", reason: "child still running" }),
-      timelineEvent("agent.toolCall.output", { id: "goal-wait-1", output: { status: "held" } }),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "child still running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
       timelineEvent("turn.completed", {}),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
@@ -1118,7 +1121,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
-    expect(r.container.textContent).toContain("Goal wait");
+    expect(r.container.textContent).toContain("Wait for input");
 
     await r.unmount();
   });

@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
 
-const migrationName = "0404_workspace_html_site_sources.sql";
+const migrationName = "0405_workspace_html_site_sources.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
@@ -15,14 +15,14 @@ let blank: BlankTestDatabase | null = null;
 let admin: ReturnType<typeof postgres> | null = null;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0394-html-site-sources");
+  blank = await acquireBlankTestDatabase("migration-0405-html-site-sources");
   if (!blank) {
-    if (requireRealDatabase) throw new Error("migration 0400 requires real PostgreSQL");
+    if (requireRealDatabase) throw new Error("migration 0405 requires real PostgreSQL");
     return;
   }
   admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
 
-  // Let the canonical runner build the exact pre-0394 schema, including every
+  // Let the canonical runner build the exact pre-0405 schema, including every
   // historical directive and maintenance boundary, without copying that logic
   // into this test. Removing the temporary receipt then exercises the ordinary
   // forward-upgrade path through the same runner.
@@ -39,7 +39,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("migration 0404 workspace HTML Site sources", () => {
+describe("migration 0405 workspace HTML Site sources", () => {
   test("is a bounded rolling extension of the existing immutable artifact ledger", async () => {
     const source = await readFile(migrationUrl, "utf8");
     expect(source.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
@@ -59,11 +59,11 @@ describe("migration 0404 workspace HTML Site sources", () => {
     if (!admin) return;
     const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name)
-      values ('migration 0400 account')
+      values ('migration 0405 account')
       returning id`;
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${account!.id}, 'migration 0404 workspace')
+      values (${account!.id}, 'migration 0405 workspace')
       returning id`;
     const artifactId = crypto.randomUUID();
     const legacyVersionId = crypto.randomUUID();
@@ -72,7 +72,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
         id, account_id, workspace_id, slug, title, created_by_subject_id
       ) values (
         ${artifactId}, ${account!.id}, ${workspace!.id}, 'legacy-site',
-        'Legacy Site', 'migration-0394'
+        'Legacy Site', 'migration-0405'
       )`;
     await admin`
       insert into workspace_artifact_versions (
@@ -80,7 +80,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
         content_sha256, size_bytes, operation_key, created_by_subject_id
       ) values (
         ${legacyVersionId}, ${account!.id}, ${workspace!.id}, ${artifactId}, 1,
-        'legacy/index.html', ${"a".repeat(64)}, 128, 'legacy-publish', 'migration-0394'
+        'legacy/index.html', ${"a".repeat(64)}, 128, 'legacy-publish', 'migration-0405'
       )`;
     await admin`
       update workspace_artifacts
@@ -92,7 +92,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
         to_version_id, operation_key, actor_subject_id, reason
       ) values (
         ${account!.id}, ${workspace!.id}, ${artifactId}, 'published', null,
-        ${legacyVersionId}, 'legacy-publish', 'migration-0394', 'Initial publication'
+        ${legacyVersionId}, 'legacy-publish', 'migration-0405', 'Initial publication'
       )`;
 
     await admin`delete from schema_migrations where name = ${migrationName}`;
@@ -131,7 +131,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
         'sites/v2.html', ${"b".repeat(64)}, 256, 'sites/v2-source.json',
         ${"c".repeat(64)}, 512,
         ${admin.json([{ serverId: "opengeni", toolName: "documents.search" }])},
-        'publish-v2', 'migration-0394'
+        'publish-v2', 'migration-0405'
       )`;
     await admin`
       insert into workspace_artifact_events (
@@ -139,7 +139,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
         to_version_id, operation_key, actor_subject_id, reason
       ) values (
         ${account!.id}, ${workspace!.id}, ${artifactId}, 'archived',
-        ${newVersionId}, ${newVersionId}, 'archive-v2', 'migration-0394',
+        ${newVersionId}, ${newVersionId}, 'archive-v2', 'migration-0405',
         'Temporarily unpublish the Site'
       )`;
 
@@ -151,7 +151,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
           content_sha256, size_bytes, source_key, operation_key, created_by_subject_id
         ) values (
           ${account!.id}, ${workspace!.id}, ${artifactId}, 3, 'invalid.html',
-          ${"d".repeat(64)}, 128, 'partial-source.json', 'invalid-source', 'migration-0394'
+          ${"d".repeat(64)}, 128, 'partial-source.json', 'invalid-source', 'migration-0405'
         )`;
     } catch (error) {
       partialSourceError = error;
@@ -173,7 +173,7 @@ describe("migration 0404 workspace HTML Site sources", () => {
               toolName: `tool-${index}`,
             })),
           )},
-          'too-many-tools', 'migration-0394'
+          'too-many-tools', 'migration-0405'
         )`;
     } catch (error) {
       requestedToolLimitError = error;
