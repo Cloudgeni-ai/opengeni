@@ -65,7 +65,6 @@ import {
   CODEMODE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   hasCanonicalEditableArtifactToolSurface,
-  hasCanonicalSiteAuthoringToolSurface,
   oneShotGenesisTitleInputFilter,
   composeRuntimeSkills,
   effectiveSkillSelectionsForAgent,
@@ -10510,34 +10509,6 @@ function editableArtifactAttemptToolCatalog() {
   }).catalog;
 }
 
-function siteAttemptToolCatalog(
-  toolNames: readonly ("artifacts_create" | "artifacts_get_source" | "artifacts_publish")[],
-) {
-  return createAttemptToolEnvironment({
-    scope: {
-      accountId: "11111111-1111-4111-8111-111111111111",
-      workspaceId: "22222222-2222-4222-8222-222222222222",
-      sessionId: "33333333-3333-4333-8333-333333333333",
-      turnId: "44444444-4444-4444-8444-444444444444",
-      attemptId: "55555555-5555-4555-8555-555555555555",
-      executionGeneration: 1,
-    },
-    generation: 1,
-    definitions: toolNames.map((toolName) => ({
-      identity: { serverId: "opengeni", toolName },
-      modelName: `opengeni__${toolName}`,
-      codemodePath: ["opengeni", toolName],
-      inputSchema: { type: "object", additionalProperties: false },
-      source: "opengeni" as const,
-      approval: "none" as const,
-      execute: async () => ({
-        content: [{ type: "text" as const, text: "ok" }],
-        structuredContent: { ok: true },
-      }),
-    })),
-  }).catalog;
-}
-
 describe("runtime Skill activation", () => {
   const infraSkill = {
     name: "infra-ops",
@@ -10592,7 +10563,7 @@ describe("runtime Skill activation", () => {
     );
   });
 
-  test("the Site Skill joins the index only for a complete create or edit surface", () => {
+  test("the bundled Site Skill always joins sandbox agent indexes", () => {
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
       sites: true,
@@ -10606,47 +10577,17 @@ describe("runtime Skill activation", () => {
       source: "native_tool",
       version: null,
       contentSha256: null,
-      reason: "native Site-authoring tool surface",
+      reason: "bundled Site authoring skill",
     });
-
-    const createCatalog = siteAttemptToolCatalog(["artifacts_create"]);
-    expect(hasCanonicalSiteAuthoringToolSurface(createCatalog)).toBe(true);
     expect(
       indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-          attemptToolCatalog: createCatalog,
-        }),
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
         emptyManifest,
       ),
     ).toContain("opengeni-sites");
-
-    const editCatalog = siteAttemptToolCatalog(["artifacts_get_source", "artifacts_publish"]);
-    expect(hasCanonicalSiteAuthoringToolSurface(editCatalog)).toBe(true);
-    expect(
-      indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-          attemptToolCatalog: editCatalog,
-        }),
-        emptyManifest,
-      ),
-    ).toContain("opengeni-sites");
-
-    const incompleteEditCatalog = siteAttemptToolCatalog(["artifacts_get_source"]);
-    expect(hasCanonicalSiteAuthoringToolSurface(incompleteEditCatalog)).toBe(false);
-    expect(
-      indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-          attemptToolCatalog: incompleteEditCatalog,
-        }),
-        emptyManifest,
-      ),
-    ).not.toContain("opengeni-sites");
   });
 
   test("does not advertise the worker-bundled Site Skill on Connected Machine attempts", () => {
-    const createCatalog = siteAttemptToolCatalog(["artifacts_create"]);
-    expect(hasCanonicalSiteAuthoringToolSurface(createCatalog)).toBe(true);
-
     for (const settings of [
       testSettings({ sandboxBackend: "selfhosted" }),
       testSettings({ sandboxBackend: "docker" }),
@@ -10654,7 +10595,6 @@ describe("runtime Skill activation", () => {
       expect(
         indexedSkillNames(
           buildOpenGeniAgent(settings, [], {
-            attemptToolCatalog: createCatalog,
             activeSandboxBackend: "selfhosted",
             sandboxWorkspaceRoot: "/srv/opengeni-connected-machine",
           }),

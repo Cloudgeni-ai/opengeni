@@ -273,6 +273,10 @@ export const McpServerConnectionRefSchema = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
+/** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
+export const DEFAULT_MODAL_IMAGE_REF =
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78";
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -3047,7 +3051,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
-    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),

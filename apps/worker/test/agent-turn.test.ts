@@ -5749,8 +5749,26 @@ describe("transient provider error classifier", () => {
 });
 
 describe("structuredToolTransportForTurn", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
-    ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi = "responses",
+    options: {
+      id?: string;
+      wireProfile?: "openai" | "azure-openai";
+      builtin?: boolean;
+      baseUrl?: string;
+    } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        wireProfile: options.wireProfile ?? "openai",
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
   test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
@@ -5764,10 +5782,32 @@ describe("structuredToolTransportForTurn", () => {
     expect(structuredToolTransportForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 
-  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
-    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(true);
-    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+  test("preserves hosted tool types only for native OpenAI/Azure Responses providers", () => {
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { id: "openai", builtin: true }),
+      ),
+    ).toBe(true);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { wireProfile: "azure-openai" }),
+      ),
+    ).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+
+  test("keeps hosted apply_patch off OpenAI-compatible Responses endpoints", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(false);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

@@ -308,7 +308,7 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
       directory,
       lazySource: localDirLazySkillSource({ src: directory }),
       names: skillDirNames(directory),
-      reason: "native Site-authoring tool surface",
+      reason: "bundled Site authoring skill",
     });
   }
   if (nativeTools.videoGeneration) {

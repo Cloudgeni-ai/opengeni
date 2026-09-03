@@ -8,8 +8,10 @@ the agent reaches Fiken through host-side `fiken_*` tools on the first-party
 MCP surface. No Fiken data or credential ever enters the sandbox.
 
 Both lanes sit behind the deployment integrations kill switch: with
-`OPENGENI_INTEGRATIONS_ENABLED=false` (the default) the install, OAuth start,
-and callback routes all 404.
+`OPENGENI_INTEGRATIONS_ENABLED=false` the install, OAuth start, and callback
+routes all 404. Configuration remains fail-closed by default outside the local
+launcher; `bun run dev` enables integrations and persists a worktree-local OAuth
+state secret unless the operator explicitly sets the switch to false.
 
 ## The two connect lanes
 

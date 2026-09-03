@@ -1402,11 +1402,13 @@ package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
 Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml`. Set Helm
-`desktop.imageRef` to that digest (`registry/opengeni-desktop@sha256:…`). The
-chart fails closed when `OPENGENI_SANDBOX_BACKEND=modal` and
-`OPENGENI_SANDBOX_DESKTOP_ENABLED=true` without a digest pin. Do not point Modal
-at official `opengeni-sandbox`. A pin change applies to **new** sandbox creates;
+published by `.github/workflows/publish-desktop-image.yml`. OpenGeni defaults to
+a public, digest-pinned desktop image in both runtime config and Helm. Override
+Helm `desktop.imageRef` only with another compatible digest
+(`registry/opengeni-desktop@sha256:…`). The chart fails closed when
+`OPENGENI_SANDBOX_BACKEND=modal` and `OPENGENI_SANDBOX_DESKTOP_ENABLED=true`
+without a valid digest pin. Do not point Modal at official `opengeni-sandbox`.
+A pin change applies to **new** sandbox creates;
 rotate or reap the warm lease before an existing session can use the new box.
 Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The

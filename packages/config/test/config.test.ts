@@ -6,6 +6,7 @@ import {
   SandboxBackend,
 } from "@opengeni/contracts";
 import {
+  DEFAULT_MODAL_IMAGE_REF,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
@@ -171,7 +172,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("child lifecycle notices default off and parse the rollout flag", () => {
-    expect(getSettings().childLifecycleNoticesEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).childLifecycleNoticesEnabled).toBe(false);
     expect(
       withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
         .childLifecycleNoticesEnabled,
@@ -183,7 +184,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("host MCP connection authority defaults off and parses the rollout flag", () => {
-    expect(getSettings().hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
     expect(
       withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
         .hostMcpAuthoritySourceAdmissionEnabled,
@@ -222,7 +223,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
-    expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
+    expect(withEnv({}, () => getSettings()).slackWorkspaceRoutingEnabled).toBe(true);
     expect(
       withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "false" }, () => getSettings())
         .slackWorkspaceRoutingEnabled,
@@ -234,7 +235,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("work discovery rollout stages have safe independent defaults", () => {
-    const defaults = getSettings();
+    const defaults = withEnv({}, () => getSettings());
     expect(defaults.workDiscoveryEnabled).toBe(true);
     expect(defaults.workClaimMutationsEnabled).toBe(true);
     expect(defaults.workDiscoveryHumanAdvisoriesEnabled).toBe(true);
@@ -2021,9 +2022,9 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
-  test("production modal+desktop requires a digest-pinned image ref", () => {
+  test("production modal+desktop defaults to a public pin and accepts an override", () => {
     const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
-    expect(() =>
+    expect(
       withEnv(
         {
           OPENGENI_ENVIRONMENT: "production",
@@ -2033,8 +2034,8 @@ describe("backend-gated sandbox required-credential validation", () => {
           OPENGENI_MODAL_TOKEN_SECRET: "as-test",
         },
         () => getSettings(),
-      ),
-    ).toThrow("digest-pinned");
+      ).modalImageRef,
+    ).toBe(DEFAULT_MODAL_IMAGE_REF);
     expect(
       withEnv(
         {
