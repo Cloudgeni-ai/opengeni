@@ -35519,7 +35519,10 @@ export async function listSessionEventPage(
             scopedDb
               .select({
                 ...sessionEventProjectionSelect("full"),
-                transferBytes: sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`,
+                transferBytes:
+                  sql<number>`octet_length(row_to_json(${schema.sessionEvents})::text)::int`.as(
+                    "transfer_bytes",
+                  ),
               })
               .from(schema.sessionEvents)
               .where(and(...filters))
@@ -35534,7 +35537,7 @@ export async function listSessionEventPage(
             scopedDb
               .select({
                 ...sessionEventProjectionSelect("full", {}, candidateRows),
-                transferBytes: candidateRows.transferBytes,
+                transferBytes: sql<number>`${candidateRows.transferBytes}`.as("transfer_bytes"),
                 rowNumber: sql<number>`row_number() over (order by ${candidateOrdering})::int`.as(
                   "row_number",
                 ),
