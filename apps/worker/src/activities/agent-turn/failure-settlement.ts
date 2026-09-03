@@ -744,11 +744,36 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           true,
         );
       }
-      const [rotation, accounts, sessionCodex] = await Promise.all([
-        getCodexRotationSettings(db, input.workspaceId).catch(() => null),
-        listCodexAccountStatuses(db, input.workspaceId).catch(() => []),
-        getSessionCodexState(db, input.workspaceId, input.sessionId).catch(() => null),
-      ]);
+      let rotation: Awaited<ReturnType<typeof getCodexRotationSettings>>;
+      let accounts: Awaited<ReturnType<typeof listCodexAccountStatuses>>;
+      let sessionCodex: Awaited<ReturnType<typeof getSessionCodexState>>;
+      try {
+        [rotation, accounts, sessionCodex] = await Promise.all([
+          getCodexRotationSettings(db, input.workspaceId),
+          listCodexAccountStatuses(db, input.workspaceId),
+          getSessionCodexState(db, input.workspaceId, input.sessionId),
+        ]);
+      } catch (metadataError) {
+        // Rotation policy, the eligible pool, and a manual session pin are all
+        // authority for the next action. Never replace a failed read with a
+        // permissive synthetic default: doing so can terminal-fail a recoverable
+        // turn or move a manual pin. Operational database failures re-enter the
+        // existing exact-attempt recovery lane after the serving credential was
+        // quarantined; permanent failures escape without making a policy choice.
+        const recoveryFailure = postClaimDatabaseRecoveryFailure({
+          error: metadataError,
+          turnId: attempt.turnId,
+          triggerEventId: attempt.triggerEventId!,
+          executionGeneration: attempt.executionGeneration,
+        });
+        if (recoveryFailure) {
+          control.activityStatus = "recovering";
+          control.turnMetricOutcome = "recovering";
+          control.activityError = metadataError;
+          throw recoveryFailure;
+        }
+        throw metadataError;
+      }
       const decision = rotation
         ? chooseRotationActive({
             rotationStrategy: rotation.rotationStrategy as CodexRotationStrategy,
@@ -863,6 +888,12 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           control.activityError = error;
           control.activityStatus = "idle";
           control.turnMetricOutcome = "failed";
+          await deliverFailedChildTurnToParent(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            attempt.turnId,
+          );
           return claimedResult({ status: "idle" });
         }
       }
