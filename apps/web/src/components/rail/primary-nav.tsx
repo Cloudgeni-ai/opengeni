@@ -49,6 +49,9 @@ export function PrimaryNav() {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
+  const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
+    isConfigItemActive(pathname, rail.workspaceId, item.to),
+  );
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
@@ -94,9 +97,25 @@ export function PrimaryNav() {
             variant="ghost"
             size="sm"
             aria-expanded={shortcutsExpanded}
+            aria-label={
+              activeWorkspaceItem
+                ? `Workspace, current section ${activeWorkspaceItem.label}`
+                : undefined
+            }
+            data-active={activeWorkspaceItem ? "true" : undefined}
             onClick={() => setShortcutsExpanded(!shortcutsExpanded)}
-            className="w-full justify-between text-fg-muted pointer-coarse:h-10"
+            className={cn(
+              "group relative w-full justify-between text-fg-muted pointer-coarse:h-10",
+              activeWorkspaceItem && "bg-surface-2 text-fg",
+            )}
           >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity",
+                activeWorkspaceItem ? "opacity-100" : "opacity-0",
+              )}
+            />
             <span className="truncate text-left">Workspace</span>
             <ChevronDownIcon className={cn("size-3.5", shortcutsExpanded && "rotate-180")} />
           </Button>

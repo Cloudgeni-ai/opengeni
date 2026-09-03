@@ -9,10 +9,11 @@ const rail = {
   isMobile: false,
   setDrawerOpen: mock((_open: boolean) => undefined),
 };
+let pathname = "/workspaces/workspace-1/sessions/session-1";
 
 mock.module("@tanstack/react-router", () => ({
   useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
-    select({ location: { pathname: "/workspaces/workspace-1/sessions/session-1" } }),
+    select({ location: { pathname } }),
 }));
 
 mock.module("@/components/rail/rail-context", () => ({
@@ -56,6 +57,7 @@ beforeEach(() => {
   Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
   rail.collapsed = false;
   rail.isMobile = false;
+  pathname = "/workspaces/workspace-1/sessions/session-1";
   rail.setDrawerOpen.mockClear();
 });
 
@@ -131,6 +133,24 @@ describe("session-first rail density", () => {
     } finally {
       await act(async () => workspace.root.unmount());
       workspace.container.remove();
+    }
+  });
+
+  test("identifies an active shortcut when the compact disclosure hides its link", async () => {
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 700 });
+    pathname = "/workspaces/workspace-1/plugins";
+    const rendered = await render(<PrimaryNav />);
+    try {
+      const disclosure = workspaceDisclosure(rendered.container);
+      expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+      expect(disclosure.getAttribute("data-active")).toBe("true");
+      expect(disclosure.getAttribute("aria-label")).toBe("Workspace, current section Plugins");
+      expect(rendered.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(
+        0,
+      );
+    } finally {
+      await act(async () => rendered.root.unmount());
+      rendered.container.remove();
     }
   });
 });
