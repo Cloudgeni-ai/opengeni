@@ -74,6 +74,8 @@ describe("OpenGeniClient tools", () => {
           });
           return response({
             operationId: "33333333-3333-4333-8333-333333333333",
+            catalogDigest: catalog.digest,
+            identity: catalog.entries[0]!.identity,
             approvalToken: `ogta_${"a".repeat(43)}`,
             expiresAt: "2026-09-02T00:05:00.000Z",
           });
@@ -136,6 +138,52 @@ describe("OpenGeniClient tools", () => {
       .forWorkspace(workspaceId)
       .$call(catalog.entries[0]!.identity, { query: "opaque" });
     expect(result).toEqual({ content: [] });
+  });
+
+  test("rejects an approved token after another operation refreshes the shared catalog", async () => {
+    const operationId = "77777777-7777-4777-8777-777777777777";
+    let catalogReads = 0;
+    let callPosts = 0;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: (async (input, init) => {
+        const request = new Request(input, init);
+        if (request.method === "GET") {
+          catalogReads += 1;
+          return response(catalogReads === 1 ? catalog : refreshedCatalog);
+        }
+        const body = (await request.json()) as Record<string, unknown>;
+        if (new URL(request.url).pathname.endsWith("/tools/approvals")) {
+          return response({
+            operationId,
+            catalogDigest: catalog.digest,
+            identity: catalog.entries[0]!.identity,
+            approvalToken: `ogta_${"c".repeat(43)}`,
+            expiresAt: "2026-09-03T00:05:00.000Z",
+          });
+        }
+        callPosts += 1;
+        return response(body);
+      }) as typeof fetch,
+    });
+    const tools = client.tools.forWorkspace(workspaceId);
+    const approval = await tools.$approve(catalog.entries[0]!.identity, {}, { operationId });
+    await tools.$catalog({ refresh: true });
+    await expect(
+      tools.$call(
+        catalog.entries[0]!.identity,
+        {},
+        {
+          operationId,
+          approvalToken: approval.approvalToken,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "tool_reapproval_required",
+      previousCatalogDigest: catalog.digest,
+      catalogDigest: refreshedCatalog.digest,
+    });
+    expect(callPosts).toBe(0);
   });
 
   test("refreshes and retries one direct identity call with the same generated operation id", async () => {
@@ -246,6 +294,8 @@ describe("OpenGeniClient tools", () => {
         if (approvals.length === 1) return staleCatalogResponse();
         return response({
           operationId,
+          catalogDigest: refreshedCatalog.digest,
+          identity: refreshedCatalog.entries[0]!.identity,
           approvalToken: `ogta_${"b".repeat(43)}`,
           expiresAt: "2026-09-03T00:05:00.000Z",
         });

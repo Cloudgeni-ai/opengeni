@@ -2216,7 +2216,6 @@ describe("runtime event normalization", () => {
         ]);
         expect(fixture.calls).toEqual([
           "prepare:call-allow:needle",
-          "prepare:call-allow:needle",
           "begin:call-allow:needle",
           "complete:request-1:completed",
         ]);
@@ -2379,7 +2378,6 @@ describe("runtime event normalization", () => {
         ).toBeDefined();
         expect(executions).toEqual([{ title: "Quarterly" }]);
         expect(calls).toEqual([
-          "prepare:call-drive:Quarterly",
           "prepare:call-drive:Quarterly",
           "begin:call-drive:Quarterly",
           "complete:request-drive:completed",
@@ -2631,6 +2629,10 @@ describe("runtime event normalization", () => {
       ) => {
         const events: string[] = [];
         const hooks: ConnectorActionPolicyHooks = {
+          preview: async (call) => {
+            events.push(`preview:${call.approvalId}`);
+            return { managed: true, decision };
+          },
           prepare: async (call) => {
             events.push(`prepare:${call.approvalId}`);
             return { managed: true, decision };
@@ -2715,7 +2717,7 @@ describe("runtime event normalization", () => {
               fixture.call(operationId, "completed"),
             ),
           ).rejects.toThrow(decision === "ask" ? "approval" : "blocked");
-          expect(fixture.events).toEqual([`prepare:${operationId}`]);
+          expect(fixture.events).toEqual([`preview:${operationId}`]);
         } finally {
           await fixture.prepared.close();
         }
@@ -2738,10 +2740,10 @@ describe("runtime event normalization", () => {
         const completed = await allowed.prepared.attemptToolEnvironment!.prepareCall(
           allowed.call("66666666-6666-4666-8666-666666666664", "completed"),
         );
-        expect(allowed.events).toEqual(["prepare:66666666-6666-4666-8666-666666666664"]);
+        expect(allowed.events).toEqual(["preview:66666666-6666-4666-8666-666666666664"]);
         await completed.execute();
         expect(allowed.events).toEqual([
-          "prepare:66666666-6666-4666-8666-666666666664",
+          "preview:66666666-6666-4666-8666-666666666664",
           "begin:66666666-6666-4666-8666-666666666664",
           "execute:66666666-6666-4666-8666-666666666664",
           "complete:request:66666666-6666-4666-8666-666666666664:completed",
@@ -2752,7 +2754,7 @@ describe("runtime event normalization", () => {
         );
         await expect(uncertain.execute()).rejects.toThrow("provider request may have started");
         expect(allowed.events.slice(-4)).toEqual([
-          "prepare:66666666-6666-4666-8666-666666666665",
+          "preview:66666666-6666-4666-8666-666666666665",
           "begin:66666666-6666-4666-8666-666666666665",
           "execute:66666666-6666-4666-8666-666666666665",
           "complete:request:66666666-6666-4666-8666-666666666665:uncertain",
@@ -3026,7 +3028,7 @@ describe("runtime event normalization", () => {
             ]);
           }
           expect(policyCalls.map(({ phase }) => phase)).toEqual(
-            decision === "block" ? ["prepare", "prepare"] : ["prepare", "prepare", "begin"],
+            decision === "block" ? ["prepare"] : ["prepare", "begin"],
           );
           expect(
             policyCalls.every(
@@ -10492,8 +10494,8 @@ function editableArtifactAttemptToolCatalog() {
       executionGeneration: 1,
     },
     generation: 1,
-    definitions: Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(
-      ([toolName, codemodePath]) => ({
+    definitions: [
+      ...Object.entries(EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS).map(([toolName, codemodePath]) => ({
         identity: { serverId: "opengeni", toolName },
         modelName: `opengeni__${toolName}`,
         codemodePath,
@@ -10504,8 +10506,20 @@ function editableArtifactAttemptToolCatalog() {
           content: [{ type: "text" as const, text: "ok" }],
           structuredContent: { ok: true },
         }),
-      }),
-    ),
+      })),
+      ...["artifacts_create", "artifacts_get_source", "artifacts_publish"].map((toolName) => ({
+        identity: { serverId: "opengeni", toolName },
+        modelName: `opengeni__${toolName}`,
+        codemodePath: ["opengeni", toolName],
+        inputSchema: { type: "object", additionalProperties: false },
+        source: "opengeni" as const,
+        approval: "none" as const,
+        execute: async () => ({
+          content: [{ type: "text" as const, text: "ok" }],
+          structuredContent: { ok: true },
+        }),
+      })),
+    ],
   }).catalog;
 }
 
@@ -10563,7 +10577,7 @@ describe("runtime Skill activation", () => {
     );
   });
 
-  test("the bundled Site Skill always joins sandbox agent indexes", () => {
+  test("the bundled Site Skill follows the exact executable attempt catalog", () => {
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
       sites: true,
@@ -10581,10 +10595,18 @@ describe("runtime Skill activation", () => {
     });
     expect(
       indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+          attemptToolCatalog: editableArtifactAttemptToolCatalog(),
+        }),
         emptyManifest,
       ),
     ).toContain("opengeni-sites");
+    expect(
+      indexedSkillNames(
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
+        emptyManifest,
+      ),
+    ).not.toContain("opengeni-sites");
   });
 
   test("does not advertise the worker-bundled Site Skill on Connected Machine attempts", () => {

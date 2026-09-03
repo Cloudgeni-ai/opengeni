@@ -114,6 +114,14 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
   forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {
     const normalizedWorkspaceId = requiredId(workspaceId, "workspaceId");
     let catalogSnapshot: ToolGatewayCatalog | null = null;
+    const approvalBindings = new Map<
+      string,
+      {
+        operationId: string;
+        catalogDigest: string;
+        identity: ToolGatewayIdentity;
+      }
+    >();
     const catalog = async (
       options: { refresh?: boolean; signal?: AbortSignal } = {},
     ): Promise<ToolGatewayCatalog> => {
@@ -143,6 +151,22 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
       });
       const invoke = async (current: ToolGatewayCatalog): Promise<unknown> => {
         const identity = resolveIdentity(current);
+        const approvalBinding = options.approvalToken
+          ? approvalBindings.get(options.approvalToken)
+          : undefined;
+        if (
+          approvalBinding &&
+          (approvalBinding.operationId !== operationId ||
+            approvalBinding.catalogDigest !== current.digest ||
+            !sameToolIdentity(approvalBinding.identity, identity))
+        ) {
+          throw new OpenGeniToolReapprovalRequiredError(
+            operationId,
+            approvalBinding.catalogDigest,
+            current.digest,
+            identity,
+          );
+        }
         const request: ToolGatewayCallRequest = {
           operationId,
           catalogDigest: current.digest,
@@ -161,8 +185,10 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
           );
         } catch (error) {
           if (isCatalogStaleApiError(error)) catalogSnapshot = null;
+          else if (options.approvalToken) approvalBindings.delete(options.approvalToken);
           throw error;
         }
+        if (options.approvalToken) approvalBindings.delete(options.approvalToken);
         if (response.catalogDigest !== current.digest) {
           catalogSnapshot = null;
         }
@@ -219,13 +245,19 @@ export class OpenGeniToolsClient implements OpenGeniToolsFacade {
           arguments: argumentsValue,
         };
         try {
-          return await this.transport.requestJson<ToolGatewayApprovalResponse>(
+          const response = await this.transport.requestJson<ToolGatewayApprovalResponse>(
             "POST",
             `/v1/workspaces/${encodeURIComponent(normalizedWorkspaceId)}/tools/approvals`,
             request,
             {},
             options.signal ? { signal: options.signal } : {},
           );
+          approvalBindings.set(response.approvalToken, {
+            operationId: response.operationId,
+            catalogDigest: response.catalogDigest,
+            identity: response.identity,
+          });
+          return response;
         } catch (error) {
           if (isCatalogStaleApiError(error)) catalogSnapshot = null;
           throw error;
@@ -300,6 +332,10 @@ function findCatalogEntry(
       entry.identity.serverId === identity.serverId &&
       entry.identity.toolName === identity.toolName,
   );
+}
+
+function sameToolIdentity(left: ToolGatewayIdentity, right: ToolGatewayIdentity): boolean {
+  return left.serverId === right.serverId && left.toolName === right.toolName;
 }
 
 function requireCatalogIdentity(

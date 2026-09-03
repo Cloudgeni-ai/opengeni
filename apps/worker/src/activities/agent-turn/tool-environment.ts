@@ -9,6 +9,7 @@ import {
   organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
+  previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
@@ -539,6 +540,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     ...githubRestMcp.connectorBindings,
   ];
   const connectorActionPolicy: ConnectorActionPolicyHooks = {
+    preview: async (call) =>
+      await previewConnectorActionApproval(db, connectorActionIdentity, call),
     prepare: async (call) =>
       await prepareConnectorActionApproval(db, connectorActionIdentity, call),
     begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),

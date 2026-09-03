@@ -349,6 +349,8 @@ export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalReque
 export const ToolGatewayApprovalResponse = z
   .object({
     operationId: z.string().uuid(),
+    catalogDigest: sha256,
+    identity: ToolGatewayIdentity,
     approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
     expiresAt: z.string().datetime({ offset: true }),
   })

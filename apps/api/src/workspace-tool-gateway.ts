@@ -283,6 +283,9 @@ export function workspaceToolGatewayDefinitionFilter(
     ? new Set(allowedIdentities.map(workspaceToolGatewayIdentityKey))
     : null;
   return (definition) => {
+    // Fail closed until a connection-backed provider exposes a side-effect-free
+    // credential/resource preflight ahead of one-shot approval consumption.
+    if (definition.connectionBacked && definition.approval === "human") return false;
     if (
       definition.identity.serverId === "opengeni" &&
       !allowedFirstPartyTools.has(definition.identity.toolName)
@@ -515,6 +518,8 @@ export async function approveWorkspaceToolGatewayCall(
   observation.end("ok");
   return ToolGatewayApprovalResponse.parse({
     operationId: request.operationId,
+    catalogDigest: request.catalogDigest,
+    identity: preparedCall.entry.identity,
     approvalToken,
     expiresAt: expiresAt.toISOString(),
   });

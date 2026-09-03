@@ -466,6 +466,10 @@ workspace, operation id, catalog digest, exact tool identity, and arguments.
 The token expires after five minutes, is stored only as a hash, and is consumed
 once by the matching call.
 
+Connection-backed tools configured for both provider policy and one-shot human
+approval are omitted from this HTTP catalog until their provider adapter can
+preflight credential and resource authorization before consuming the token.
+
 ```ts
 const operationId = crypto.randomUUID();
 const identity = { serverId: "linear", toolName: "issues_update" };

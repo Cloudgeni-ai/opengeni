@@ -42,6 +42,8 @@ export type ToolGatewayCallContext = Pick<ToolGatewayExecutionContext, "transpor
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
+  /** In-process provider metadata; never enters the public catalog or its digest. */
+  connectionBacked?: boolean;
   /** In-process execution lifecycle; never enters the public catalog or its digest. */
   lifecycle?: ToolGatewayCallLifecycle;
   execute: (
@@ -260,7 +262,13 @@ export function prepareToolGatewayDefinitions(
   const paths = allocateToolPaths(definitions);
   const schemaValidators = createSchemaValidators();
   const compiled = definitions.map((definition, index): CompiledDefinition => {
-    const { execute, lifecycle, codemodePath: _path, ...entryInput } = definition;
+    const {
+      execute,
+      lifecycle,
+      codemodePath: _path,
+      connectionBacked: _connectionBacked,
+      ...entryInput
+    } = definition;
     const entry = ToolGatewayCatalogEntry.parse({
       ...entryInput,
       codemodePath: paths[index],

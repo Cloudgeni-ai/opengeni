@@ -29652,6 +29652,49 @@ export async function prepareConnectorActionApproval(
   );
 }
 
+/** Resolve the frozen connector policy without creating approval or audit state. */
+export async function previewConnectorActionApproval(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ConnectorActionInvocation,
+): Promise<PrepareConnectorActionApprovalResult> {
+  const normalized = normalizedConnectorActionInvocation(identity, invocation);
+  if (!normalized.connectionId) {
+    return { managed: false, decision: "unmanaged" };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved =
+        normalized.approvalMode === "session_mcp"
+          ? resolvedSessionMcpApproval(normalized.policyActionSelector)
+          : resolvedConnectorWriteApproval(
+              resolveConnectorActionPolicy(snapshot, {
+                connectionId: normalized.connectionId!,
+                serverId: normalized.serverId,
+                toolName: normalized.toolName,
+                actionName: normalized.policyActionSelector,
+              }),
+              normalized.approvalMode,
+              normalized.policyActionSelector,
+            );
+      if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
+      const durable = durableConnectorActionInvocation(
+        identity,
+        { ...normalized, connectionId: normalized.connectionId! },
+        resolved,
+      );
+      return {
+        managed: true,
+        decision: connectorActionPolicyDecision(resolved),
+        actionFingerprint: durable.actionFingerprint,
+      } as const;
+    },
+  );
+}
+
 export async function beginConnectorActionExecution(
   db: Database,
   identity: ConnectorActionAttemptIdentity,

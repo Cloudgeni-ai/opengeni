@@ -128,6 +128,8 @@ export type ToolGatewayApprovalRequest = {
 
 export type ToolGatewayApprovalResponse = {
   operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
   approvalToken: string;
   expiresAt: string;
 };

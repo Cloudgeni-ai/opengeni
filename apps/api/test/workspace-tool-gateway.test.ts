@@ -590,5 +590,16 @@ describe("workspace tool gateway adapters", () => {
         [{ serverId: "docs", toolName: "search_documents" }],
       ).mcpServers.map((server) => server.id),
     ).toEqual(["docs"]);
+    expect(
+      workspaceToolGatewayDefinitionFilter({ allowedFirstPartyMcpTools: [] })({
+        identity: { serverId: "inventory", toolName: "write" },
+        modelName: "inventory__write",
+        inputSchema: { type: "object" },
+        source: "mcp",
+        approval: "human",
+        connectionBacked: true,
+        execute: async () => ({ content: [] }),
+      }),
+    ).toBe(false);
   });
 });
