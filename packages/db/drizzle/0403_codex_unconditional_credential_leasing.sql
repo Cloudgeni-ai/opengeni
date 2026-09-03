@@ -1,9 +1,9 @@
 -- deployment-mode: maintenance
--- Migration 0401 retires the temporary allocator cutover bits. Every Codex
+-- Migration 0403 retires the temporary allocator cutover bits. Every Codex
 -- turn now uses the durable credential lease protocol; rotation_enabled remains
 -- the user-owned policy deciding whether a new lease may leave the active
--- account. Stop every pre-0401 API, control-worker, and turn-worker before this
--- migration, then start only the 0401-aware binary.
+-- account. Stop every pre-0403 API, control-worker, and turn-worker before this
+-- migration, then start only the 0403-aware binary.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -17,14 +17,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0401 unconditional Codex leasing requires an explicit application database role list'
+      '0403 unconditional Codex leasing requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0401 unconditional Codex leasing received a malformed application database role list'
+      '0403 unconditional Codex leasing received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -43,7 +43,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0401 unconditional Codex leasing received an invalid application database role list'
+      '0403 unconditional Codex leasing received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -55,7 +55,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0401 unconditional Codex leasing requires all configured OpenGeni application database sessions to be stopped'
+      '0403 unconditional Codex leasing requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -81,7 +81,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0401 unconditional Codex leasing requires all configured OpenGeni application database sessions to be stopped'
+      '0403 unconditional Codex leasing requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END

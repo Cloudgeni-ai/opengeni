@@ -287,10 +287,10 @@ and new runtime database login list through
 It moves active long-wait state from `session_goals` to `sessions`, removes the
 old columns and `goal_wait` protocol, and activates terminal background-command
 agent input. After it commits, never restart a pre-0402 image. This forward-only
-cutover was documented on September 3, 2026. Migration 0401 likewise requires
+cutover was documented on September 3, 2026. Migration 0403 likewise requires
 a complete API and worker drain and
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_codex_unconditional_credential_leasing`;
-it removes the temporary Codex allocator cutover columns, so pre-0401 binaries
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`;
+it removes the temporary Codex allocator cutover columns, so pre-0403 binaries
 must never run or restart after commit. Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.

@@ -346,31 +346,31 @@ new-allocation policy.
 
 Migration `0053_codex_credential_leases.sql` introduced the additive lease
 table, fairness columns, and temporary mixed-version cutover bits. Migration
-`0401_codex_unconditional_credential_leasing.sql` is the maintenance activation
-that retires those temporary bits. After 0401, the lease protocol is
+`0403_codex_unconditional_credential_leasing.sql` is the maintenance activation
+that retires those temporary bits. After 0403, the lease protocol is
 unconditional and `rotation_enabled` is only the user-owned account-selection
 policy described above.
 
 Safe rollout order:
 
-1. Build and pin one 0401-aware image digest. Confirm that API, control-worker,
+1. Build and pin one 0403-aware image digest. Confirm that API, control-worker,
    and turn-worker deployments all reference that same candidate.
-2. Drain every pre-0401 API, control-worker, and turn-worker. Select
-   `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0401_codex_unconditional_credential_leasing`
+2. Drain every pre-0403 API, control-worker, and turn-worker. Select
+   `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`
    and confirm the maintenance preflight only after the drain is complete.
-3. Apply migration 0401, provision the runtime role, and start only the pinned
-   0401-aware image. Never restart a pre-0401 binary against this schema.
+3. Apply migration 0403, provision the runtime role, and start only the pinned
+   0403-aware image. Never restart a pre-0403 binary against this schema.
 4. Verify that both rotation tables no longer contain
    `lease_rotation_enabled`, every running Codex turn has an exact
    `(workspace_id, turn_id)` lease, rotation-on recovers the same turn on an
    eligible alternate, and rotation-off enters `waiting_capacity` when the
    active account is capped despite a healthy alternate.
 
-Migration 0401 is forward-only. There is no environment or database switch back
+Migration 0403 is forward-only. There is no environment or database switch back
 to the legacy allocator. If an application defect appears after commit, keep the
-0401 schema and deploy a corrected 0401-aware image. `rotation_enabled=false`
+0403 schema and deploy a corrected 0403-aware image. `rotation_enabled=false`
 may temporarily constrain a workspace or organization pool to its active account,
-but leasing and holder/generation fencing remain mandatory. A pre-0401 image is
+but leasing and holder/generation fencing remain mandatory. A pre-0403 image is
 not a valid rollback target because it still reads the removed cutover column.
 
 Migration `0383_codex_cooldown_reconciliation.sql` is rolling. It adds typed

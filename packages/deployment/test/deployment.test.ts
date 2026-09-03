@@ -480,7 +480,7 @@ describe("deployment contract", () => {
       expect(plan.notes.join("\n")).toContain(cutover);
       expect(plan.notes.join("\n")).toContain("applications-disabled revision");
       if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
-        expect(plan.notes.join("\n")).toContain("migration 0401");
+        expect(plan.notes.join("\n")).toContain("migration 0403");
       }
     }
 

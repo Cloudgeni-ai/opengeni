@@ -35,7 +35,7 @@ afterAll(async () => {
 }, 180_000);
 
 describe("migration 0053 (Codex credential leases)", () => {
-  test("upgrades the additive lease foundation through the 0401 maintenance activation", async () => {
+  test("upgrades the additive lease foundation through the 0403 maintenance activation", async () => {
     if (!available) return;
 
     const admin = postgres(databaseUrl, { max: 1 });
@@ -43,7 +43,7 @@ describe("migration 0053 (Codex credential leases)", () => {
     try {
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
       expect(files).toContain("0053_codex_credential_leases.sql");
-      expect(files).toContain("0401_codex_unconditional_credential_leasing.sql");
+      expect(files).toContain("0403_codex_unconditional_credential_leasing.sql");
 
       await admin`select pg_advisory_lock(727458)`;
       await admin.unsafe(

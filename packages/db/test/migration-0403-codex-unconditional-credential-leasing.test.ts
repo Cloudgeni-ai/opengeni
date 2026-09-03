@@ -8,12 +8,12 @@ import { readFile } from "node:fs/promises";
 import { migrate } from "../src/migrate";
 
 const migrationUrl = new URL(
-  "../drizzle/0401_codex_unconditional_credential_leasing.sql",
+  "../drizzle/0403_codex_unconditional_credential_leasing.sql",
   import.meta.url,
 );
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-describe("migration 0401 unconditional Codex credential leasing", () => {
+describe("migration 0403 unconditional Codex credential leasing", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
   beforeAll(async () => {

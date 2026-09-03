@@ -25,7 +25,7 @@ async function buildSchemaContract(directory?: string) {
         "0400_session_attempt_model_context_snapshots.sql",
         "0401_organization_user_setup_token_transport.sql",
         "0402_session_input_wait_and_background_command_results.sql",
-        "0401_codex_unconditional_credential_leasing.sql",
+        "0403_codex_unconditional_credential_leasing.sql",
       ])
     : await buildCompleteSchemaContract(directory);
 }
@@ -132,7 +132,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0401_codex_unconditional_credential_leasing.sql",
+      "0403_codex_unconditional_credential_leasing.sql",
     );
     expect(
       completeSourceContract.migrations.find(
@@ -174,10 +174,10 @@ describe("release schema contract", () => {
     ).toMatchObject({ deploymentMode: "maintenance" });
     expect(
       completeSourceContract.migrations.find(
-        (migration) => migration.path === "0401_codex_unconditional_credential_leasing.sql",
+        (migration) => migration.path === "0403_codex_unconditional_credential_leasing.sql",
       ),
     ).toMatchObject({
-      sha256: "74901ee167e10369594fd52958497b3063257da60ab7aeadbc9987a3ac7b47a5",
+      sha256: "128cf185d08d08331da51be70a03df4c07fa584ab371a1dbbc1066a2bcbaf109",
       deploymentMode: "maintenance",
     });
   });
@@ -477,7 +477,7 @@ describe("release schema contract", () => {
         migration.path === "0402_session_input_wait_and_background_command_results.sql",
     );
     const codexUnconditionalCredentialLeasing = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0401_codex_unconditional_credential_leasing.sql",
+      (migration) => migration.path === "0403_codex_unconditional_credential_leasing.sql",
     );
     if (organizationUserSetupTokenTransport) {
       completeSourceContract = {
@@ -494,7 +494,7 @@ describe("release schema contract", () => {
     if (codexUnconditionalCredentialLeasing) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0401_codex_unconditional_credential_leasing.sql",
+        latestMigration: "0403_codex_unconditional_credential_leasing.sql",
       };
     }
 
@@ -560,13 +560,9 @@ describe("release schema contract", () => {
         (workspaceMemoryAndLearningDefaults ? 1 : 0) +
         (modelCallEquivalentCreditCost ? 1 : 0),
       latestMigration: codexUnconditionalCredentialLeasing
-        ? "0401_codex_unconditional_credential_leasing.sql"
-        : sessionInputWaitAndBackgroundCommandResults
-          ? "0402_session_input_wait_and_background_command_results.sql"
-          : organizationUserSetupTokenTransport
-            ? "0401_organization_user_setup_token_transport.sql"
-            : sessionAttemptModelContextSnapshots
-              ? "0400_session_attempt_model_context_snapshots.sql"
+        ? "0403_codex_unconditional_credential_leasing.sql"
+        : sessionAttemptModelContextSnapshots
+          ? "0400_session_attempt_model_context_snapshots.sql"
           : sandboxProviderDeadlineInteractionFollowup
             ? "0391_sandbox_provider_deadline_interaction_followup.sql"
             : organizationModelProviderConnections
@@ -675,23 +671,23 @@ describe("release schema contract", () => {
         ? { latestMigration: "0402_session_input_wait_and_background_command_results.sql" }
         : {}),
       ...(codexUnconditionalCredentialLeasing
-        ? { latestMigration: "0401_codex_unconditional_credential_leasing.sql" }
+        ? { latestMigration: "0403_codex_unconditional_credential_leasing.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       codexUnconditionalCredentialLeasing
-        ? "0401_codex_unconditional_credential_leasing.sql"
+        ? "0403_codex_unconditional_credential_leasing.sql"
         : sessionInputWaitAndBackgroundCommandResults
           ? "0402_session_input_wait_and_background_command_results.sql"
           : organizationUserSetupTokenTransport
             ? "0401_organization_user_setup_token_transport.sql"
-        : sessionAttemptModelContextSnapshots
-          ? "0400_session_attempt_model_context_snapshots.sql"
-          : additionalManagedOrganizationCreation
-            ? "0399_additional_managed_organization_creation.sql"
-            : organizationWorkspaceManagementEntry
-              ? "0398_organization_workspace_management_entry.sql"
-              : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
+            : sessionAttemptModelContextSnapshots
+              ? "0400_session_attempt_model_context_snapshots.sql"
+              : additionalManagedOrganizationCreation
+                ? "0399_additional_managed_organization_creation.sql"
+                : organizationWorkspaceManagementEntry
+                  ? "0398_organization_workspace_management_entry.sql"
+                  : completeSourceContractWithModelCallEquivalentCreditCost.latestMigration,
     );
     expect(completeSourceContractWithContextCompaction.latestMigration).toBe(
       workspaceMemoryAndLearningDefaults
@@ -922,7 +918,7 @@ describe("release schema contract", () => {
       "0400_session_attempt_model_context_snapshots.sql",
       "0401_organization_user_setup_token_transport.sql",
       "0402_session_input_wait_and_background_command_results.sql",
-      "0401_codex_unconditional_credential_leasing.sql",
+      "0403_codex_unconditional_credential_leasing.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1102,7 +1098,7 @@ describe("release schema contract", () => {
         migration.path === "0402_session_input_wait_and_background_command_results.sql",
     );
     const codexUnconditionalCredentialLeasing = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0401_codex_unconditional_credential_leasing.sql",
+      (migration) => migration.path === "0403_codex_unconditional_credential_leasing.sql",
     );
     if (workspaceMemoryAndLearningDefaults) {
       completeSourceContract = {
@@ -1149,7 +1145,7 @@ describe("release schema contract", () => {
     if (codexUnconditionalCredentialLeasing) {
       completeSourceContract = {
         ...completeSourceContract,
-        latestMigration: "0401_codex_unconditional_credential_leasing.sql",
+        latestMigration: "0403_codex_unconditional_credential_leasing.sql",
       };
     }
     expect(completeSourceContract).toMatchObject({
@@ -1216,13 +1212,9 @@ describe("release schema contract", () => {
         (workspaceMemoryAndLearningDefaults ? 1 : 0) +
         (modelCallEquivalentCreditCost ? 1 : 0),
       latestMigration: codexUnconditionalCredentialLeasing
-        ? "0401_codex_unconditional_credential_leasing.sql"
-        : sessionInputWaitAndBackgroundCommandResults
-          ? "0402_session_input_wait_and_background_command_results.sql"
-          : organizationUserSetupTokenTransport
-            ? "0401_organization_user_setup_token_transport.sql"
-            : sessionAttemptModelContextSnapshots
-              ? "0400_session_attempt_model_context_snapshots.sql"
+        ? "0403_codex_unconditional_credential_leasing.sql"
+        : sessionAttemptModelContextSnapshots
+          ? "0400_session_attempt_model_context_snapshots.sql"
           : sandboxProviderDeadlineInteractionFollowup
             ? "0391_sandbox_provider_deadline_interaction_followup.sql"
             : organizationModelProviderConnections
@@ -1335,12 +1327,12 @@ describe("release schema contract", () => {
         ? { latestMigration: "0402_session_input_wait_and_background_command_results.sql" }
         : {}),
       ...(codexUnconditionalCredentialLeasing
-        ? { latestMigration: "0401_codex_unconditional_credential_leasing.sql" }
+        ? { latestMigration: "0403_codex_unconditional_credential_leasing.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       codexUnconditionalCredentialLeasing
-        ? "0401_codex_unconditional_credential_leasing.sql"
+        ? "0403_codex_unconditional_credential_leasing.sql"
         : sessionInputWaitAndBackgroundCommandResults
           ? "0402_session_input_wait_and_background_command_results.sql"
           : organizationUserSetupTokenTransport
