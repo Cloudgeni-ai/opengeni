@@ -255,7 +255,7 @@ function codexFailureDeps(
 }
 
 describe("definitive Codex failure settlement", () => {
-  for (const failedRead of ["rotation", "accounts", "session"] as const) {
+  for (const failedRead of ["rotation", "accounts", "session", "goal"] as const) {
     test(`recovers without choosing policy when the ${failedRead} metadata read fails`, async () => {
       const readFailure = databaseReadFailure(failedRead);
       let accountReads = 0;
@@ -271,7 +271,7 @@ describe("definitive Codex failure settlement", () => {
           if (failedRead === "rotation") throw readFailure;
           return {
             activeCredentialId: "serving",
-            rotationEnabled: true,
+            rotationEnabled: failedRead !== "goal",
             rotationStrategy: "most_remaining",
           } as never;
         },
@@ -280,10 +280,15 @@ describe("definitive Codex failure settlement", () => {
         if (failedRead === "session") throw readFailure;
         return { pinnedCredentialId: null, lastCredentialId: "serving", pinSource: null };
       });
+      const getGoal = spyOn(opengeniDb, "getSessionGoal").mockImplementation(async () => {
+        if (failedRead === "goal") throw readFailure;
+        return null;
+      });
       const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue(
         true,
       );
       const failover = spyOn(opengeniDb, "settleCodexCredentialFailover");
+      const armWait = spyOn(opengeniDb, "armCodexCapacityWait");
       const { deps, control } = codexFailureDeps();
 
       try {
@@ -303,6 +308,7 @@ describe("definitive Codex failure settlement", () => {
         });
         expect(quarantine).toHaveBeenCalledTimes(1);
         expect(failover).not.toHaveBeenCalled();
+        expect(armWait).not.toHaveBeenCalled();
         expect(control.activityStatus).toBe("recovering");
         expect(control.turnMetricOutcome).toBe("recovering");
         expect(control.activityError).toBe(readFailure);
@@ -310,11 +316,85 @@ describe("definitive Codex failure settlement", () => {
         listAccounts.mockRestore();
         getRotation.mockRestore();
         getSession.mockRestore();
+        getGoal.mockRestore();
         quarantine.mockRestore();
         failover.mockRestore();
+        armWait.mockRestore();
       }
     });
   }
+
+  test("immediately re-evaluates a newly armed wait and recovers when capacity won the race", async () => {
+    const callOrder: string[] = [];
+    const listAccounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([
+      codexAccount("serving"),
+      codexAccount("alternate"),
+    ] as never);
+    const getRotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
+      activeCredentialId: "serving",
+      rotationEnabled: false,
+      rotationStrategy: "most_remaining",
+    } as never);
+    const getSession = spyOn(opengeniDb, "getSessionCodexState").mockResolvedValue({
+      pinnedCredentialId: null,
+      lastCredentialId: "serving",
+      pinSource: null,
+    });
+    const getGoal = spyOn(opengeniDb, "getSessionGoal").mockResolvedValue({
+      id: "goal-1",
+      status: "active",
+      version: 3,
+    } as never);
+    const quarantine = spyOn(opengeniDb, "quarantineCodexCredentialForLease").mockResolvedValue(
+      true,
+    );
+    const armWait = spyOn(opengeniDb, "armCodexCapacityWait").mockImplementation(async () => {
+      callOrder.push("arm");
+      return {
+        action: "waiting",
+        waiter: {
+          id: "waiter-1",
+          generation: 4,
+          nextCheckAt: new Date("2026-09-03T12:00:00.000Z"),
+          wakeRevision: 7,
+        },
+        events: [],
+      } as never;
+    });
+    const reconcileWait = spyOn(opengeniDb, "reconcileCodexCapacityWait").mockImplementation(
+      async () => {
+        callOrder.push("reconcile");
+        return {
+          action: "resumed",
+          waiter: { id: "waiter-1", generation: 4 },
+          events: [],
+        } as never;
+      },
+    );
+    const { deps, control } = codexFailureDeps();
+
+    try {
+      const result = await settleTurnFailure(deps as never);
+
+      expect(result).toEqual({ status: "recovering", turnId: "turn-1", attemptId: "attempt-1" });
+      expect(callOrder).toEqual(["arm", "reconcile"]);
+      expect(armWait).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ goalId: "goal-1", goalVersion: 3 }),
+      );
+      expect(deps.leases.codex.held).toBe(false);
+      expect(control.activityStatus).toBe("recovering");
+      expect(control.turnMetricOutcome).toBe("recovering");
+    } finally {
+      listAccounts.mockRestore();
+      getRotation.mockRestore();
+      getSession.mockRestore();
+      getGoal.mockRestore();
+      quarantine.mockRestore();
+      armWait.mockRestore();
+      reconcileWait.mockRestore();
+    }
+  });
 
   test("delivers a failover-exhausted child failure to its parent after settlement", async () => {
     const callOrder: string[] = [];
@@ -374,6 +454,7 @@ describe("definitive Codex failure settlement", () => {
         turnStatus: "failed",
         sessionStatus: "idle",
         activeTurnId: null,
+        suppressGoalContinuation: true,
       });
       expect(parentDelivery).toHaveBeenCalledWith(
         expect.any(Object),

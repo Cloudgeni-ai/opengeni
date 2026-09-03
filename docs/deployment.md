@@ -1923,8 +1923,12 @@ fleet is unsupported even while every process still uses `code`:
    Verify the application Deployments are absent and the configured database
    login has zero sessions. Then run the ordinary upgrade with those disable
    overrides removed; its pre-upgrade Job applies pending migrations through
-   0387 before Helm recreates the application. If the second upgrade fails,
-   remain drained and fix forward.
+   0387 before Helm recreates the application. Generated maintenance plans make
+   this final upgrade atomic and clean up newly created resources on failure.
+   Its rollback target is the immediately preceding new-chart, exact-image,
+   migrations-disabled revision above, so a failed post-migration rollout
+   restores the drained state without starting pre-migration application bytes.
+   Remain drained and fix forward.
 
 3. Apply `0389_model_catalog_and_gateway_custom_models.sql`, provision roles,
    and assert runtime posture using the catalog-aware release artifacts. The

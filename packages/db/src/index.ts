@@ -65695,6 +65695,13 @@ export type ApplySessionTurnSettlementInput = {
   turnStatus: SessionTurnStatus;
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
+  /**
+   * Finish this terminal turn without arming the active goal's autonomous
+   * continuation. The goal remains active so explicit later work can proceed,
+   * but this exact settlement cannot synthesize another turn from unchanged
+   * input after a bounded terminal condition.
+   */
+  suppressGoalContinuation?: boolean;
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -66062,6 +66069,14 @@ export async function applySessionTurnSettlement(
   input: ApplySessionTurnSettlementInput,
   hooks: ApplySessionTurnSettlementHooks = {},
 ): Promise<ApplySessionTurnSettlementResult> {
+  if (
+    input.suppressGoalContinuation &&
+    (!isTerminalSessionTurnStatus(input.turnStatus) || input.activeTurnId !== null)
+  ) {
+    throw new Error(
+      "Goal continuation suppression requires a terminal turn with no active turn pointer",
+    );
+  }
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   const eventTypes = [
     ...input.events.map((event) => event.type),
@@ -66801,7 +66816,12 @@ export async function applySessionTurnSettlement(
         );
       // Supersession already has newer human/Agent direction waiting. It must
       // not also arm an autonomous goal continuation behind that Steer.
-      if (terminal && input.turnStatus !== "superseded" && input.activeTurnId === null) {
+      if (
+        terminal &&
+        input.turnStatus !== "superseded" &&
+        input.activeTurnId === null &&
+        !input.suppressGoalContinuation
+      ) {
         const [armedGoal] = await tx
           .update(schema.sessionGoals)
           .set({

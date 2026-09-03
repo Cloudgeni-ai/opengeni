@@ -1022,6 +1022,36 @@ describe("durable active-goal wake", () => {
     });
   });
 
+  test("bounded terminal settlement can suppress autonomous continuation for an active goal", async () => {
+    const ctx = await runningGoalFixture();
+    const settled = await applySessionTurnSettlement(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      turnId: ctx.turn.id,
+      triggerEventId: ctx.turn.triggerEventId,
+      attemptId: ctx.attemptId,
+      turnStatus: "failed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      suppressGoalContinuation: true,
+      events: [{ type: "turn.failed", payload: { code: "bounded_terminal_test" } }],
+    });
+
+    expect(settled.action).toBe("settled");
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 0,
+      wakeRevision: 0,
+      observedRevision: 0,
+      updates: 0,
+      usage: 0,
+      events: 0,
+    });
+    expect((await materialize(ctx)).action).not.toBe("continue");
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.status,
+    ).toBe("active");
+  });
+
   test("concurrent evaluators and a lost COMMIT response materialize one update, event, and usage row", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);

@@ -1,4 +1,5 @@
 import {
+  armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
@@ -9,6 +10,7 @@ import {
   type CodexCapacityWakeTarget,
   type CodexCapacitySelectionContext,
 } from "@opengeni/db";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
@@ -135,6 +137,44 @@ export function codexCapacityDecision(
       policyHash: context.policyHash,
     },
   };
+}
+
+/**
+ * Arm a durable Codex waiter and immediately re-evaluate it under the
+ * allocator lock. A capacity mutation that commits just before the waiter is
+ * inserted cannot signal a row that does not exist yet, so every arm site must
+ * close that edge before returning an hours-away reset timer to the workflow.
+ * Mutations after the arm commit still advance the waiter's wake revision.
+ */
+export async function armAndReconcileCodexCapacityWait(
+  services: Pick<ControlActivityServices, "db" | "bus">,
+  input: Parameters<typeof armCodexCapacityWait>[1],
+  options: { onArmed?: () => void } = {},
+) {
+  const armed = await armCodexCapacityWait(services.db, input);
+  if (armed.action !== "waiting") return armed;
+
+  options.onArmed?.();
+  await publishDurableSessionEvents(services.bus, input.workspaceId, input.sessionId, armed.events);
+  const evaluated = await reconcileCodexCapacityWaitDb(
+    services.db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      waiterId: armed.waiter.id,
+      generation: armed.waiter.generation,
+      ...(input.now ? { now: input.now } : {}),
+    },
+    (context) => codexCapacityDecision(context),
+  );
+  await publishDurableSessionEvents(
+    services.bus,
+    input.workspaceId,
+    input.sessionId,
+    evaluated.events,
+  );
+  return evaluated;
 }
 
 async function refreshCapacityMetadata(

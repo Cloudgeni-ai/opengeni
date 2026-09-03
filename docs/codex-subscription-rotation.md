@@ -241,7 +241,11 @@ holder/generation and worker-redispatch fence. The row records the blocked turn
 generation, an optional active-goal id/version fence, accepted `policyHash`, the
 earliest authoritative reset (when known), bounded-refresh state, and
 `wakeRevision`/`observedWakeRevision`; it stores no credential material or
-provider body.
+provider body. Every worker arm site immediately runs one allocator
+reconciliation before returning the waiter to the workflow. That closes the
+mutation-before-insert edge: a rotation/account change that committed just
+before the waiter existed is observed under the allocator lock, while any
+later change advances the waiter's durable wake revision normally.
 
 `reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
 under the same rotation-row transaction. It accepts the same opaque
@@ -307,7 +311,10 @@ counter, emits `turn.recovery.requested`, and leaves the **same logical turn** i
 The next attempt reconstructs durable model history and tool lineage. This is an
 explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
 bounded by pool size so a malformed classification cannot walk forever; a stale
-holder cannot quarantine a credential or settle the turn.
+holder cannot quarantine a credential or settle the turn. Reaching the bound is
+a terminal result for that accepted turn and explicitly suppresses an active
+goal's autonomous continuation wake, so another synthesized turn cannot reset
+the per-turn counter without new external work.
 
 If no alternate is eligible, or rotation/manual-pin policy forbids leaving the
 selected account, the quarantined holder arms the same durable capacity waiter

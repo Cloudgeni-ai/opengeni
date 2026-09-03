@@ -472,6 +472,9 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       turnStatus: inputSettlement.turnStatus,
       sessionStatus: inputSettlement.sessionStatus,
       activeTurnId: inputSettlement.activeTurnId,
+      ...(inputSettlement.suppressGoalContinuation !== undefined
+        ? { suppressGoalContinuation: inputSettlement.suppressGoalContinuation }
+        : {}),
       events: inputs,
       ...(runState ? { runState } : {}),
       ...(compactionRequestFailure ? { compactionRequestFailure } : {}),

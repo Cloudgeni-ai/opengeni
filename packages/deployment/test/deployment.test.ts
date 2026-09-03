@@ -468,10 +468,19 @@ describe("deployment contract", () => {
           (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
         ),
       ).toHaveLength(2);
+      const helmCommands = plan.deployCommands.filter(
+        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+      );
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
       expect(commands).toContain("--set migrations.enabled=false");
       expect(commands).toContain("wait --for=delete pod");
       expect(plan.notes.join("\n")).toContain(cutover);
+      expect(plan.notes.join("\n")).toContain("applications-disabled revision");
     }
+
+    const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);
+    expect(rollingPlan.deployCommands.join("\n")).not.toContain("--atomic");
 
     expect(() =>
       stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
@@ -503,6 +512,8 @@ describe("deployment contract", () => {
         (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
       );
       expect(helmCommands).toHaveLength(2);
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
       for (const command of helmCommands) {
         expect(command).toContain(
           `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
@@ -555,6 +566,8 @@ describe("deployment contract", () => {
       }
     }
     expect(helmCommands[0]).not.toContain("if ! helm status");
+    expect(helmCommands[0]).not.toContain("--atomic");
+    expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
     expect(commands.indexOf("kind load docker-image")).toBeLessThan(
       commands.indexOf("--set api.enabled=false"),
     );

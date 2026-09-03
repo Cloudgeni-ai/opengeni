@@ -45,6 +45,7 @@ export type TurnSettleFn = (input: {
     | "requires_action";
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
+  suppressGoalContinuation?: boolean;
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;

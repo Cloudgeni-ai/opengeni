@@ -1879,6 +1879,10 @@ function requestedMaintenanceCutover(
   return requested as MaintenanceCutover;
 }
 
+function maintenanceFinalUpgradeSafetyArgs(env: Record<string, string | undefined>): string {
+  return requestedMaintenanceCutover(env) ? " --atomic --cleanup-on-fail" : "";
+}
+
 function helmApplicationDrainWaitCommand(namespace: string, release: string): string {
   const selector =
     `app.kubernetes.io/instance=${release},` +
@@ -1917,6 +1921,7 @@ function deployCommands(
   env: Record<string, string | undefined>,
 ): string[] {
   const maintenanceImageValuesArg = maintenanceImageDigestHelmArgs(contract, terraformRoot, env);
+  const maintenanceFinalUpgradeArgs = maintenanceFinalUpgradeSafetyArgs(env);
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
@@ -1949,7 +1954,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg} --wait --timeout 15m`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
     ];
   }
   if (contract.profile === "local-kubernetes") {
@@ -2005,7 +2010,7 @@ function deployCommands(
         drainUpgradeCommand,
         env,
       }),
-      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs} --wait --timeout 15m`,
+      `${maintenanceImageEnvPrefix}helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values}${sandboxValueArgs}${maintenanceImageTagHelmArgs}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
     ];
   }
   const commands: string[] = [
@@ -2048,7 +2053,7 @@ function deployCommands(
       drainUpgradeCommand,
       env,
     }),
-    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg} --wait --timeout 15m`,
+    `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace}${valuesArg}${maintenanceImageValuesArg}${maintenanceFinalUpgradeArgs} --wait --timeout 15m`,
   );
   return commands;
 }
@@ -2389,7 +2394,7 @@ function planNotes(
   const maintenanceCutover = requestedMaintenanceCutover(env);
   if (maintenanceCutover) {
     notes.push(
-      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until migration ${MAINTENANCE_CUTOVERS[maintenanceCutover].migration} and the final exact-digest upgrade succeed.`,
+      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until migration ${MAINTENANCE_CUTOVERS[maintenanceCutover].migration} and the final exact-digest upgrade succeed. If that final upgrade fails, Helm restores only the preceding exact-image, applications-disabled revision so recovery remains drained and forward-only.`,
     );
   }
   return notes;

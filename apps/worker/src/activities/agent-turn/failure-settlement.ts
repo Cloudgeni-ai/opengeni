@@ -1,7 +1,6 @@
 import {
   requestSessionTurnRecovery,
   getSessionGoal,
-  armCodexCapacityWait,
   armXaiCapacityWait,
   reconcileXaiCapacityWait,
   getCodexRotationSettings,
@@ -74,6 +73,7 @@ import type {
   ProviderTurnState,
   TurnControlState,
 } from "./turn-context";
+import { armAndReconcileCodexCapacityWait } from "../codex-capacity";
 
 export type TurnFailureDeps = {
   error: unknown;
@@ -881,6 +881,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
               turnStatus: "failed",
               sessionStatus: "idle",
               activeTurnId: null,
+              suppressGoalContinuation: true,
             }))
           ) {
             return claimedResult({ status: "cancelled" });
@@ -904,7 +905,24 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
         leases.codex.holderId &&
         leases.codex.generation !== null
       ) {
-        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        let goal: Awaited<ReturnType<typeof getSessionGoal>>;
+        try {
+          goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+        } catch (metadataError) {
+          const recoveryFailure = postClaimDatabaseRecoveryFailure({
+            error: metadataError,
+            turnId: attempt.turnId,
+            triggerEventId: attempt.triggerEventId!,
+            executionGeneration: attempt.executionGeneration,
+          });
+          if (recoveryFailure) {
+            control.activityStatus = "recovering";
+            control.turnMetricOutcome = "recovering";
+            control.activityError = metadataError;
+            throw recoveryFailure;
+          }
+          throw metadataError;
+        }
         const activeGoal = goal?.status === "active" ? goal : null;
         const exactProviderReset =
           codexCredentialFailure.cooldownSeconds !== null &&
@@ -929,37 +947,45 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
               : "the same accepted turn is waiting for eligible credential capacity",
           allAccounts,
         });
-        const armed = await armCodexCapacityWait(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          workflowId: input.workflowId,
-          goalId: activeGoal?.id ?? null,
-          goalVersion: activeGoal?.version ?? null,
-          earliestResetAt: authoritativeResetAt,
-          resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
-          failurePayload,
-          leaseFence: {
-            holderId: leases.codex.holderId,
-            generation: leases.codex.generation,
+        const evaluated = await armAndReconcileCodexCapacityWait(
+          { db, bus },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: attempt.turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: authoritativeResetAt,
+            resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+            failurePayload,
+            leaseFence: {
+              holderId: leases.codex.holderId,
+              generation: leases.codex.generation,
+            },
+            expectedRedispatches: attempt.redispatchesAtDispatch,
           },
-          expectedRedispatches: attempt.redispatchesAtDispatch,
-        });
-        if (armed.action === "waiting") {
-          leases.codex.held = false;
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+          { onArmed: () => (leases.codex.held = false) },
+        );
+        control.activityError = error;
+        if (evaluated.action === "resumed") {
+          control.activityStatus = "recovering";
+          control.turnMetricOutcome = "recovering";
+          return claimedResult({ status: "recovering" });
+        }
+        if (evaluated.action === "waiting") {
           control.activityError = error;
           control.activityStatus = "waiting_capacity";
           control.turnMetricOutcome = "recovering";
           return claimedResult({
             status: "waiting_capacity",
             capacityWait: {
-              waiterId: armed.waiter.id,
-              generation: armed.waiter.generation,
-              nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-              wakeRevision: armed.waiter.wakeRevision,
+              waiterId: evaluated.waiter.id,
+              generation: evaluated.waiter.generation,
+              nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+              wakeRevision: evaluated.waiter.wakeRevision,
             },
           });
         }
