@@ -6,9 +6,11 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { compactProtectedIndexHtml } from "./vite-index-html";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const canonicalIndexFilename = path.resolve(dirname, "index.html");
 const browserExtensionArchive = path.resolve(
   dirname,
   "../browser-extension/dist/opengeni-browser-extension.tar",
@@ -16,23 +18,6 @@ const browserExtensionArchive = path.resolve(
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
-const SETUP_ACCOUNT_BOOTSTRAP_START = '<script id="opengeni-setup-account-bootstrap">';
-const REFERRER_META = '<meta name="referrer" content="no-referrer" />';
-
-function prioritizeSetupAccountBootstrap(html: string): string {
-  const scriptStart = html.indexOf(SETUP_ACCOUNT_BOOTSTRAP_START);
-  if (scriptStart < 0) throw new Error("setup-account bootstrap is missing from index.html");
-  const scriptEnd = html.indexOf("</script>", scriptStart);
-  if (scriptEnd < 0) throw new Error("setup-account bootstrap is unterminated");
-  const bootstrap = html.slice(scriptStart, scriptEnd + "</script>".length);
-  const withoutBootstrap = `${html.slice(0, scriptStart)}${html.slice(scriptEnd + "</script>".length)}`;
-  const referrerStart = withoutBootstrap.indexOf(REFERRER_META);
-  if (referrerStart < 0)
-    throw new Error("setup-account referrer policy is missing from index.html");
-  const withoutProtectedHead = `${withoutBootstrap.slice(0, referrerStart)}${withoutBootstrap.slice(referrerStart + REFERRER_META.length)}`;
-  return withoutProtectedHead.replace("<head>", `<head>${REFERRER_META}${bootstrap}`);
-}
-
 export default defineConfig({
   build: {
     // The canonical post-build budget below computes gzip sizes for the exact
@@ -254,10 +239,11 @@ export default defineConfig({
         // the source bootstrap appears first. Reorder the final transformed
         // document so setup authority is scrubbed before those subrequests in
         // dev, preview, and production builds.
-        handler: (html, context) => {
-          if (context.path !== "/" && context.path !== "/index.html") return html;
-          return prioritizeSetupAccountBootstrap(html).replace(/>\s+</g, "><").trim();
-        },
+        handler: (html, context) =>
+          compactProtectedIndexHtml(html, {
+            filename: context.filename,
+            canonicalFilename: canonicalIndexFilename,
+          }),
       },
     },
   ],

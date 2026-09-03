@@ -310,7 +310,7 @@ describe("migration 0351 organization user setup delivery", () => {
           await sql`select set_config('opengeni.account_id', ${organizationId}, true)`;
           await sql`select set_config('opengeni.subject_id', ${ownerSubject}, true)`;
           await sql`select claim_organization_user_setup_delivery(
-            ${JSON.stringify({
+            ${sql.json({
               organizationId,
               actorSubjectId: ownerSubject,
               invitationId: queryInvitation.id,
@@ -348,7 +348,7 @@ describe("migration 0351 organization user setup delivery", () => {
           await sql`select set_config('opengeni.account_id', ${organizationId}, true)`;
           await sql`select set_config('opengeni.subject_id', ${ownerSubject}, true)`;
           await sql`select prepare_organization_user_setup_delivery(
-            ${JSON.stringify({
+            ${sql.json({
               organizationId,
               actorSubjectId: ownerSubject,
               deliveryId: queryRetry.delivery.id,
