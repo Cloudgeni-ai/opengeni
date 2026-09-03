@@ -398,6 +398,7 @@ describe("contracts", () => {
       activeCredentialId: "credential-active",
       rotationEnabled: false,
       rotationStrategy: "sharded",
+      source: "workspace",
       pinnedCredentialId: null,
       pinSource: null,
       lastCredentialId: "credential-last",
@@ -414,6 +415,38 @@ describe("contracts", () => {
       policy: snapshot,
     });
     expect(metadata[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]).toEqual(snapshot);
+  });
+
+  test("requires Codex policy pins to carry a matching pin source", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      source: "workspace" as const,
+      lastCredentialId: null,
+    };
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: null,
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: null,
+        pinSource: "policy",
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: "manual",
+      }),
+    ).toMatchObject({ pinnedCredentialId: "credential-pinned", pinSource: "manual" });
   });
 
   test("treats only an absent Codex snapshot key as legacy and rejects malformed values", () => {

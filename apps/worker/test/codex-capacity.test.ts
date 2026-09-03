@@ -208,6 +208,98 @@ describe("Codex capacity availability diagnostics", () => {
     ).toMatchObject({ kind: "unavailable", resetKind: "bounded_refresh" });
   });
 
+  test("missing manual pins become an explicit mutation-only wait", () => {
+    const result = codexCapacityDecision({
+      accounts: [account("alternate")],
+      activeCredentialId: "alternate",
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-missing-manual-pin",
+      sessionPinnedCredentialId: "disconnected-pin",
+      sessionPinSource: "manual",
+      sessionLastCredentialId: null,
+      policyHash: null,
+    });
+
+    expect(result).toMatchObject({
+      kind: "unavailable",
+      resetKind: "mutation_only",
+      diagnostic: { reason: "manual_pin_missing" },
+    });
+  });
+
+  test("an empty accepted policy pool becomes an explicit mutation-only wait", () => {
+    const result = codexCapacityDecision({
+      accounts: [],
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: { poolId: "accepted-empty-pool" },
+      unavailableDiagnostics: [],
+      sessionId: "session-empty-policy-pool",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: "accepted-policy",
+    });
+
+    expect(result).toMatchObject({
+      kind: "unavailable",
+      resetKind: "mutation_only",
+      diagnostic: { reason: "policy_filtered_pool_empty" },
+    });
+  });
+
+  test("a missing rotation-off active pointer becomes an explicit mutation-only wait", () => {
+    const result = codexCapacityDecision({
+      accounts: [account("connected")],
+      activeCredentialId: null,
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-missing-active-pointer",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    });
+
+    expect(result).toMatchObject({
+      kind: "unavailable",
+      resetKind: "mutation_only",
+      diagnostic: { reason: "rotation_off_active_pointer_missing" },
+    });
+  });
+
+  test("a pool with no connected accounts is explicit and mutation-only for wait reconciliation", () => {
+    const result = codexCapacityDecision({
+      accounts: [],
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      existingCredentialId: null,
+      policyScope: null,
+      unavailableDiagnostics: [],
+      sessionId: "session-no-connected-credentials",
+      sessionPinnedCredentialId: null,
+      sessionPinSource: null,
+      sessionLastCredentialId: null,
+      policyHash: null,
+    });
+
+    expect(result).toMatchObject({
+      kind: "unavailable",
+      resetKind: "mutation_only",
+      diagnostic: { reason: "no_connected_credentials" },
+    });
+  });
+
   test("committed capacity targets prefer typed signals and retain generic outbox delivery", async () => {
     const target = {
       accountId: "account",

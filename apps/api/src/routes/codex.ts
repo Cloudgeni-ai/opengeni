@@ -134,6 +134,55 @@ function codexAccountJson(
   };
 }
 
+/**
+ * Derive the two distinct cached worker-readiness meanings exposed by the
+ * status route. `poolReady` means at least one effective-pool account passes
+ * the worker's cached admission predicate. `workerRoutable` additionally
+ * honors rotation-off's active-pointer-only rule; it says nothing about a
+ * session-specific manual pin.
+ */
+export function codexWorkerReadiness(input: {
+  effectiveSource: "workspace" | "organization" | "disabled";
+  rotationEnabled: boolean;
+  activeCredentialId: string | null;
+  accounts: ReadonlyArray<
+    Pick<
+      CodexAccountStatus,
+      | "id"
+      | "status"
+      | "allocatorEnabled"
+      | "primaryUsedPercent"
+      | "primaryResetAt"
+      | "secondaryUsedPercent"
+      | "secondaryResetAt"
+      | "exhaustedUntil"
+    >
+  >;
+  now: Date;
+}): { poolReady: boolean; workerRoutable: boolean } {
+  if (input.effectiveSource === "disabled") {
+    return { poolReady: false, workerRoutable: false };
+  }
+  const windowUsed = (used: number | null, resetAt: Date | null): number =>
+    resetAt !== null && resetAt.getTime() <= input.now.getTime() ? 0 : (used ?? 0);
+  const eligible = (account: (typeof input.accounts)[number]): boolean =>
+    account.status === "active" &&
+    account.allocatorEnabled &&
+    (account.exhaustedUntil === null || account.exhaustedUntil.getTime() <= input.now.getTime()) &&
+    Math.max(
+      windowUsed(account.primaryUsedPercent, account.primaryResetAt),
+      windowUsed(account.secondaryUsedPercent, account.secondaryResetAt),
+    ) < 100;
+  const poolReady = input.accounts.some(eligible);
+  const activePointerReady = input.accounts.some(
+    (account) => account.id === input.activeCredentialId && eligible(account),
+  );
+  return {
+    poolReady,
+    workerRoutable: input.rotationEnabled ? poolReady : activePointerReady,
+  };
+}
+
 // The /codex/usage{,/refresh,/:id} wire wrapper: the rich normalized payload
 // carries its own `status`, surfaced at the top level for back-compat with the
 // existing CodexUsage = { status; usage } shape.
@@ -1198,15 +1247,13 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/status", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const status = await getCodexCredentialStatus(db, workspaceId);
-    if (!status) {
-      return c.json({ connected: false });
-    }
-    const [accounts, source] = await Promise.all([
+    const [status, accounts, source, rotation] = await Promise.all([
+      getCodexCredentialStatus(db, workspaceId),
       listCodexAccountStatuses(db, workspaceId),
       getWorkspaceCodexSubscriptionSource(db, workspaceId),
+      getCodexRotationSettings(db, workspaceId),
     ]);
-    const activeRow = accounts.find((account) => account.id === status.credentialId) ?? null;
+    const activeRow = accounts.find((account) => account.id === status?.credentialId) ?? null;
     const activeAccount = activeRow
       ? {
           id: activeRow.id,
@@ -1218,11 +1265,19 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           chatgptAccountId: activeRow.chatgptAccountId,
         }
       : null;
+    const activeCredentialId = status?.credentialId ?? rotation?.activeCredentialId ?? null;
+    const readiness = codexWorkerReadiness({
+      effectiveSource: source.effectiveSource,
+      rotationEnabled: rotation?.rotationEnabled ?? false,
+      activeCredentialId,
+      accounts,
+      now: new Date(),
+    });
     let valid = false;
     let models: ReturnType<typeof codexModelsForPicker> = [];
     let catalogError: string | null = null;
     try {
-      const cred = status.credentialId
+      const cred = status?.credentialId
         ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId)
         : null;
       if (cred) {
@@ -1244,11 +1299,14 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       catalogError = error instanceof Error ? error.message : String(error);
     }
     return c.json({
-      connected: status.connected,
-      plan: status.planType,
+      connected: status?.connected ?? false,
+      plan: status?.planType ?? null,
       valid,
-      expiresAt: status.expiresAt,
-      lastError: catalogError ?? status.lastError,
+      activeAccountValid: valid,
+      poolReady: readiness.poolReady,
+      workerRoutable: readiness.workerRoutable,
+      expiresAt: status?.expiresAt ?? null,
+      lastError: catalogError ?? status?.lastError ?? null,
       models, // ClientModel[] the picker surfaces under the "no credits" group
       activeAccount, // the account a session runs on when unpinned (label for the indicator)
       accountCount: accounts.length,

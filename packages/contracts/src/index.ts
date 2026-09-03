@@ -15974,11 +15974,22 @@ export const CodexCredentialPolicySnapshotV1 = /* @__PURE__ */ defineModelContra
       activeCredentialId: z.string().min(1).max(256).nullable(),
       rotationEnabled: z.boolean(),
       rotationStrategy: z.string().min(1).max(64),
+      /** Effective allocator source; absent only on pre-source snapshots. */
+      source: z.enum(["workspace", "organization", "disabled"]).optional(),
       pinnedCredentialId: z.string().min(1).max(256).nullable(),
       pinSource: z.enum(["manual", "policy"]).nullable(),
       lastCredentialId: z.string().min(1).max(256).nullable(),
     })
-    .strict(),
+    .strict()
+    .superRefine((policy, context) => {
+      if ((policy.pinnedCredentialId === null) !== (policy.pinSource === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pinSource"],
+          message: "pinnedCredentialId and pinSource must both be null or both be present",
+        });
+      }
+    }),
 );
 export type CodexCredentialPolicySnapshotV1 = z.infer<typeof CodexCredentialPolicySnapshotV1>;
 

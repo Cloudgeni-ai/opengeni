@@ -930,10 +930,13 @@ lease protocol is unconditional execution fencing; `rotation_enabled` only
 decides whether a new or recovered turn may leave the active account. Rotation
 off therefore waits on a capped active account instead of using a healthy
 alternate, while rotation on may recover the same checkpointed turn elsewhere.
-The first successful lease also atomically records a bounded
-`codexCredentialPolicySnapshotV1` in the durable turn metadata. Re-acquisition
-and definitive-failure settlement reuse that accepted active-pointer, rotation,
-strategy, and pin state while reading current account health/cooldowns; a
+The first allocator decision also atomically records a bounded
+`codexCredentialPolicySnapshotV1` in the durable turn metadata, including a
+new turn's no-credential result before it enters a capacity wait. The snapshot
+freezes the effective workspace/organization/disabled allocator source as well
+as active-pointer, rotation, effective strategy, and pin state. Re-acquisition
+and definitive-failure settlement reuse that accepted policy while reading current
+account health/cooldowns; a
 missing or expired last database-confirmed lease deadline fails closed before
 provider dispatch and follows the existing lease-loss recovery path.
 

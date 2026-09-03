@@ -23466,6 +23466,8 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   rotationStrategy: string;
   /** Session state from the row locked during this acquisition. */
   sessionCodexState: CodexCredentialLeaseSessionState;
+  /** Number of effective-pool rows before any downstream policy filter. */
+  poolAccountCount: number;
   /** Accepted allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
   /** True when this acquisition reused a snapshot already present on the turn. */
@@ -23789,7 +23791,6 @@ export async function acquireCodexCredentialLease<
       if (source.accountId !== input.accountId) {
         throw new Error("Codex subscription source account does not match the turn account");
       }
-      const disabledSource = source.effectiveSource === "disabled";
       const organizationSource = source.effectiveSource === "organization";
       if (organizationSource) {
         await tx.execute(sql`
@@ -23936,6 +23937,12 @@ export async function acquireCodexCredentialLease<
       const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(turn.metadata);
       const codexPolicySnapshot =
         acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+      // New snapshots carry the effective source because workspace/organization/
+      // disabled routing is allocator policy. Older snapshots predate that field
+      // and intentionally retain the historical live-source behavior.
+      const acceptedSource = codexPolicySnapshot?.source ?? source.effectiveSource;
+      const acceptedDisabledSource = acceptedSource === "disabled";
+      const acceptedOrganizationSource = acceptedSource === "organization";
       const acceptedSessionCodexState: CodexCredentialLeaseSessionState = codexPolicySnapshot
         ? {
             pinnedCredentialId: codexPolicySnapshot.pinnedCredentialId,
@@ -23980,13 +23987,13 @@ export async function acquireCodexCredentialLease<
       );
       const existingCredentialId = existingRows[0]?.credential_id ?? null;
 
-      const allAccounts = disabledSource
+      const allAccounts = acceptedDisabledSource
         ? []
         : await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             activeCredentialId,
-            source: organizationSource ? "organization" : "workspace",
+            source: acceptedOrganizationSource ? "organization" : "workspace",
             excludeTurnId: input.turnId,
           });
       const sameTurnCredentialId = existingCredentialId;
@@ -24032,6 +24039,45 @@ export async function acquireCodexCredentialLease<
           acceptedSessionCodexState,
         );
       }
+
+      // Capture the accepted policy before returning either a credential or a
+      // durable no-credential result. A turn that enters its first capacity
+      // wait must not remain free to observe later rotation/pin mutations.
+      const acceptedSnapshot =
+        codexPolicySnapshot ??
+        CodexCredentialPolicySnapshotV1.parse({
+          schemaVersion: 1,
+          activeCredentialId: settingsRow.active_credential_id,
+          rotationEnabled: settingsRow.rotation_enabled,
+          rotationStrategy: settingsRow.rotation_strategy,
+          source: source.effectiveSource,
+          pinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          pinSource: sessionCodexState.pinSource,
+          lastCredentialId: sessionCodexState.lastCredentialId,
+        });
+      if (codexPolicySnapshot === null) {
+        const [snapshottedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, acceptedSnapshot),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.accountId, input.accountId),
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!snapshottedTurn) {
+          throw new CodexCredentialLeaseAttemptFencedError();
+        }
+      }
       if (selected.credentialId === null) {
         if (existingCredentialId !== null) {
           await tx.execute(sql`
@@ -24046,7 +24092,8 @@ export async function acquireCodexCredentialLease<
           rotationEnabled,
           rotationStrategy,
           sessionCodexState: acceptedSessionCodexState,
-          codexPolicySnapshot,
+          poolAccountCount: allAccounts.length,
+          codexPolicySnapshot: acceptedSnapshot,
           codexPolicySnapshotReused: codexPolicySnapshot !== null,
           credentialId: null,
           reused: false,
@@ -24110,40 +24157,6 @@ export async function acquireCodexCredentialLease<
             and id = ${selected.credentialId}
         `);
       }
-      const acceptedSnapshot =
-        codexPolicySnapshot ??
-        CodexCredentialPolicySnapshotV1.parse({
-          schemaVersion: 1,
-          activeCredentialId: settingsRow.active_credential_id,
-          rotationEnabled: settingsRow.rotation_enabled,
-          rotationStrategy: settingsRow.rotation_strategy,
-          pinnedCredentialId: sessionCodexState.pinnedCredentialId,
-          pinSource: sessionCodexState.pinSource,
-          lastCredentialId: sessionCodexState.lastCredentialId,
-        });
-      if (codexPolicySnapshot === null) {
-        const [snapshottedTurn] = await tx
-          .update(schema.sessionTurns)
-          .set({
-            metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, acceptedSnapshot),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-              eq(schema.sessionTurns.status, "running"),
-              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
-            ),
-          )
-          .returning({ id: schema.sessionTurns.id });
-        if (!snapshottedTurn) {
-          throw new CodexCredentialLeaseAttemptFencedError();
-        }
-      }
       if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
         if (organizationSource) {
           await tx.execute(sql`
@@ -24166,6 +24179,7 @@ export async function acquireCodexCredentialLease<
         rotationEnabled,
         rotationStrategy,
         sessionCodexState: acceptedSessionCodexState,
+        poolAccountCount: allAccounts.length,
         codexPolicySnapshot: acceptedSnapshot,
         codexPolicySnapshotReused: codexPolicySnapshot !== null,
         credentialId: selected.credentialId,
@@ -24332,13 +24346,12 @@ async function lockExistingCodexRotationSettingsForCapacity(
   workspaceId: string,
 ): Promise<{
   accountId: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
+  source: EffectiveCodexSubscriptionSource;
   activeCredentialId: string | null;
   rotationEnabled: boolean;
   rotationStrategy: string;
 } | null> {
   const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
-  if (source.effectiveSource === "disabled") return null;
   const rows =
     source.effectiveSource === "organization"
       ? await tx.execute(sql<{
@@ -25240,6 +25253,10 @@ export async function reconcileCodexCapacityWait<
         const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(blockedTurn.metadata);
         const codexPolicySnapshot =
           acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+        // A post-wait source cutover must not move an already accepted turn to
+        // another credential pool. Pre-source snapshots remain compatible by
+        // using the current source, which was the only available semantics.
+        const acceptedSource = codexPolicySnapshot?.source ?? rotation.source;
         const activeCredentialId = codexPolicySnapshot
           ? codexPolicySnapshot.activeCredentialId
           : rotation.activeCredentialId;
@@ -25258,13 +25275,16 @@ export async function reconcileCodexCapacityWait<
         const sessionLastCredentialId = codexPolicySnapshot
           ? codexPolicySnapshot.lastCredentialId
           : session.codexLastCredentialId;
-        const allAccounts = await listCodexLeaseCandidatesInTransaction(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          activeCredentialId,
-          source: rotation.source,
-          excludeTurnId: waiter.blockedTurnId,
-        });
+        const allAccounts =
+          acceptedSource === "disabled"
+            ? []
+            : await listCodexLeaseCandidatesInTransaction(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                activeCredentialId,
+                source: acceptedSource,
+                excludeTurnId: waiter.blockedTurnId,
+              });
         const policyScope = policy?.resolvePolicyScope?.(blockedTurn.metadata ?? {}) ?? null;
         const filtered = filterCodexLeaseCandidatesForPolicy(
           allAccounts,

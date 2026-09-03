@@ -15,6 +15,7 @@ import {
 import * as schema from "../src/schema";
 import {
   acquireCodexCredentialLease,
+  armCodexCapacityWait,
   CodexCredentialLeaseAttemptFencedError,
   createDb,
   encryptEnvironmentValue,
@@ -31,6 +32,7 @@ import {
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
   releaseCodexCredentialLease,
+  reconcileCodexCapacityWait,
   setCodexCredentialExhausted,
   setCodexCredentialStatus,
   setCodexCredentialStatusById,
@@ -445,6 +447,93 @@ describe("credential allocator atomic Codex credential allocation", () => {
         reacquired.generation!,
       ),
     ).toBe(true);
+  }, 60_000);
+
+  test("freezes policy before the first no-credential capacity wait", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credentialId = await connectCredential(ws!, "wait-policy-original");
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+    await admin`
+      update codex_rotation_settings
+      set active_credential_id = null
+      where workspace_id = ${ws!.workspaceId}`;
+    const turnId = await seedTurn(ws!, 1);
+    const fence = await attemptFenceForTurn(turnId);
+
+    const first = await acquireCodexCredentialLease(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        ...fence,
+        turnId,
+        holderId: "wait-policy-first",
+        advanceActivePointer: true,
+      },
+      (context, sessionCodexState) =>
+        selectCodexCredentialLeaseForTurn({
+          context,
+          sessionId: fence.sessionId,
+          sessionPinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          sessionPinSource: sessionCodexState.pinSource,
+          sessionLastCredentialId: sessionCodexState.lastCredentialId,
+          now: new Date(),
+        }),
+    );
+    expect(first.credentialId).toBeNull();
+    expect(first.decision).toEqual({ kind: "none" });
+    expect(first.poolAccountCount).toBe(1);
+    expect(first.codexPolicySnapshot).toMatchObject({
+      activeCredentialId: null,
+      rotationEnabled: false,
+      source: "workspace",
+    });
+
+    const armed = await armCodexCapacityWait(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      sessionId: fence.sessionId,
+      turnId,
+      attemptId: fence.attemptId,
+      workflowId: fence.workflowId,
+      earliestResetAt: null,
+      resetKind: "mutation_only",
+      failurePayload: {
+        error: "Codex active pointer is unavailable",
+        code: "codex_active_pointer_unavailable",
+      },
+    });
+    expect(armed.action).toBe("waiting");
+    if (armed.action !== "waiting") throw new Error("expected capacity waiter");
+
+    expect(await setActiveCodexCredential(dbA, ws!.workspaceId, credentialId)).toBe(true);
+    await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: true });
+
+    const observed: Array<{ activeCredentialId: string | null; rotationEnabled: boolean }> = [];
+    const reconciled = await reconcileCodexCapacityWait(
+      dbA,
+      {
+        accountId: ws!.accountId,
+        workspaceId: ws!.workspaceId,
+        sessionId: fence.sessionId,
+        waiterId: armed.waiter.id,
+        generation: armed.waiter.generation,
+      },
+      (context) => {
+        observed.push({
+          activeCredentialId: context.activeCredentialId,
+          rotationEnabled: context.rotationEnabled,
+        });
+        return {
+          kind: "unavailable",
+          earliestResetAt: null,
+          resetKind: "mutation_only",
+        };
+      },
+    );
+    expect(reconciled.action).toBe("waiting");
+    expect(observed).toEqual([{ activeCredentialId: null, rotationEnabled: false }]);
   }, 60_000);
 
   test("rotation defaults off while every selected turn still receives a durable lease", async () => {

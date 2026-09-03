@@ -98,6 +98,9 @@ export function sessionTitleCodexRequestContext(
     refresh: context.refresh,
     resolveModel: context.resolveModel,
     ...(context.onUsageHeaders ? { onUsageHeaders: context.onUsageHeaders } : {}),
+    ...(context.beforeProviderDispatch
+      ? { beforeProviderDispatch: context.beforeProviderDispatch }
+      : {}),
     ...(context.responseTimeoutPolicy
       ? { responseTimeoutPolicy: context.responseTimeoutPolicy }
       : {}),
@@ -539,6 +542,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   providerTurn.latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                beforeProviderDispatch: () => {
+                  leases.codex.assertUsable();
+                },
                 onRequestPreparationDiagnostic: (phase) => {
                   if (
                     eventing.firstModelRequestCheckpointAt === null ||

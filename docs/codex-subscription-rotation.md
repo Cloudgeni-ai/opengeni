@@ -60,12 +60,22 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    credential's server-held fairness cursor. The active pointer advances
    in the same transaction only when the selector allows it; manual pins and
    sharded policy homes explicitly veto pointer movement.
-6. On the first successful lease, write the bounded accepted allocator policy
-   snapshot to the locked turn row in the same transaction. Re-acquisition and
+6. On the first allocator decision, write the bounded accepted allocator policy
+   snapshot to the locked turn row in the same transaction, even when the
+   decision has no credential and the caller must enter a capacity wait. New
+   snapshots include the effective `workspace`, `organization`, or `disabled`
+   source because it selects the allocator pool. Re-acquisition and
    definitive-failure settlement reuse its active pointer, rotation state,
-   strategy, and session pin/last-used state while re-reading current account
-   health and cooldowns. Later workspace/session policy changes therefore do
-   not change the constraints of an already accepted logical turn.
+   effective strategy, source, and session pin/last-used state while re-reading
+   current account health and cooldowns. Later workspace/session policy changes
+   therefore do not change the constraints of an already accepted logical turn.
+   Pre-source snapshots remain readable and use their historical live-source
+   behavior; all newly accepted turns persist the source explicitly.
+
+Stored legacy strategy values are normalized at every worker read to the
+effective `sharded` behavior. The old column values and API input compatibility
+remain for rollback/read compatibility, but `most_remaining`, `round_robin`,
+and `drain_then_next` are no longer distinct runtime strategies.
 
 `most_remaining` ranks eligible credentials by:
 
@@ -117,6 +127,23 @@ membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
 those diagnostics. The new-allocation filter runs only after exact live
 same-turn reuse, so a later membership/default change cannot move an already
 accepted holder.
+
+## Public status semantics
+
+`GET /v1/workspaces/:id/codex/status` keeps the backward-compatible
+`activeAccount` and `valid` fields. `valid` is a live model-catalog probe of the
+active account only; it is not a readiness claim about every connected account.
+The additive `activeAccountValid` field names that scope explicitly.
+
+`poolReady` is metadata-only cached readiness: at least one account in the
+effective pool is active, allocator-enabled, outside a current cooldown, and
+below cached 100% exhaustion in both windows. `workerRoutable` applies the
+current rotation rule to that same cached view: rotation on can route an
+unpinned turn to any ready pool account, while rotation off can route only to
+the active pointer. Manual session pins remain session-specific and are not
+represented by this workspace-level boolean. Both fields can become stale
+between reads; they describe worker admission inputs, while `valid` describes
+the separate active-account probe.
 
 `codex_subscription_credentials.allocator_enabled` is a separate, additive
 new-allocation gate (default `true`); it is not credential health. Setting it
@@ -264,8 +291,12 @@ under the same rotation-row transaction. It accepts the same opaque
 accepted-turn scope resolver/new-allocation filter as acquisition, so a named
 pool policy can return per-pool diagnostics without union ranking or duplicating
 the waiter. Unavailable decisions return `earliestResetAt`, `resetKind`
-(`authoritative` or `bounded_refresh`), and optional secret-safe diagnostics;
-unknown resets exponentially back off from one to fifteen minutes without
+(`authoritative`, `bounded_refresh`, or `mutation_only`), and optional
+secret-safe diagnostics. `mutation_only` is used when capacity can change only
+through a control-plane mutation such as reconnect, re-enabling an allocator,
+changing a pin, or restoring a missing active pointer; it never schedules a
+provider-reset-only wake.
+Unknown resets exponentially back off from one to fifteen minutes without
 running a model. Availability atomically marks the waiter resumed and moves the
 exact blocked turn and session from `waiting_capacity` to `recovering`, keeping
 the same turn id and active pointer. The workflow's ordinary admission path

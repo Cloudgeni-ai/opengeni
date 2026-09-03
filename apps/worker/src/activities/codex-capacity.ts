@@ -86,8 +86,8 @@ export async function signalPendingCodexCapacityWakeTargets(
   await signalCodexCapacityWakeTargets(services, targets);
 }
 
-export function codexCapacityDecision(
-  context: CodexCapacitySelectionContext,
+export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnostic = never>(
+  context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
   const now = new Date();
   const selected = selectCodexCredentialLeaseForTurn({
@@ -144,11 +144,25 @@ export function codexCapacityDecision(
       capacityAccounts.every(
         (account) => !account.allocatorEnabled || account.status !== "active",
       ));
+  const noneReason =
+    selected.decision.kind === "none"
+      ? context.sessionPinSource === "manual" && context.sessionPinnedCredentialId !== null
+        ? "manual_pin_missing"
+        : !context.rotationEnabled && context.activeCredentialId === null
+          ? "rotation_off_active_pointer_missing"
+          : context.policyScope !== null && context.accounts.length === 0
+            ? "policy_filtered_pool_empty"
+            : context.accounts.length === 0
+              ? "no_connected_credentials"
+              : "no_eligible_credential"
+      : null;
   return {
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      selected.decision.kind === "allocatorDisabled" || mutationOnlyStatusBlock
+      selected.decision.kind === "none" ||
+      selected.decision.kind === "allocatorDisabled" ||
+      mutationOnlyStatusBlock
         ? "mutation_only"
         : authoritativeReset && !hasReconcilableQuotaCooldown
           ? "authoritative"
@@ -157,6 +171,7 @@ export function codexCapacityDecision(
       connectedCount: context.accounts.length,
       allocatorEnabledCount: context.accounts.filter((account) => account.allocatorEnabled).length,
       policyHash: context.policyHash,
+      ...(noneReason ? { reason: noneReason } : {}),
     },
   };
 }

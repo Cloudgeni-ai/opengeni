@@ -27,7 +27,10 @@ export async function executeCodexImageGeneration(input: {
   prompt: string;
   references?: readonly ResolvedImageGenerationReference[];
   credentialId: string;
-  codexContext: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
+  codexContext: Pick<
+    CodexRequestContext,
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+  >;
   abortSignal?: AbortSignal;
 }): Promise<GeneratedImageReceipt> {
   const providerBindingHash = imageProviderBindingHash(CODEX_PROVIDER_ID, input.credentialId);

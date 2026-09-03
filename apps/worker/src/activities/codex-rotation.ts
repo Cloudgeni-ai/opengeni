@@ -513,8 +513,11 @@ export function chooseRotationActive(args: {
  * healthy pin wins only while eligible, so quota/auth quarantine cannot trap a
  * session on one subscription.
  */
-export function selectCodexCredentialLeaseForTurn(args: {
-  context: CodexCredentialLeaseSelectionContext;
+export function selectCodexCredentialLeaseForTurn<
+  TPolicyScope = never,
+  TUnavailableDiagnostic = never,
+>(args: {
+  context: CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic>;
   sessionId: string;
   sessionPinnedCredentialId: string | null;
   sessionPinSource: CodexPinSource | null;

@@ -13,6 +13,7 @@ import {
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
 import { type Settings } from "@opengeni/config";
+import { CodexReloginRequired } from "@opengeni/codex";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
@@ -429,6 +430,122 @@ export async function selectCodexTurnCapacity(
                 rotationDecision.kind === "allocatorDisabled"
                   ? "waiting for the selected credential to be re-enabled or the account-selection policy to change"
                   : "waiting for a credential to be re-enabled, reconnected, or added",
+            },
+          },
+        );
+        if (evaluated.action === "resumed") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "recovering";
+          return { exit: claimedResult({ status: "recovering" }) };
+        }
+        if (evaluated.action === "waiting") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "waiting_capacity";
+          return {
+            exit: claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: evaluated.waiter.id,
+                generation: evaluated.waiter.generation,
+                nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+                wakeRevision: evaluated.waiter.wakeRevision,
+              },
+            }),
+          };
+        }
+        acknowledgeLostAttemptOwnership();
+        control.turnMetricOutcome = "cancelled";
+        control.activityStatus = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
+
+      if (rotationDecision.kind === "none") {
+        if (
+          leased.poolAccountCount === 0 &&
+          !leased.codexPolicySnapshotReused &&
+          leased.codexPolicySnapshot?.source !== "disabled"
+        ) {
+          // Preserve the established no-account behavior. The empty-string
+          // token resolver used by the later model path raises this same typed
+          // reconnect outcome, but capacity must not report success and defer
+          // the failure to an unguarded provider setup.
+          throw new CodexReloginRequired("No Codex subscription is connected for this workspace.");
+        }
+        const noneReason =
+          sessionPinSource === "manual" && sessionPin !== null
+            ? {
+                code: "codex_manual_pin_unavailable",
+                error: "The pinned Codex subscription is unavailable for this turn.",
+                detail:
+                  "waiting for the pinned account to reconnect or for the session pin to change",
+              }
+            : !leased.rotationEnabled && leased.activeCredentialId === null
+              ? {
+                  code: "codex_active_pointer_unavailable",
+                  error: "The Codex active subscription pointer is unavailable for this turn.",
+                  detail:
+                    "waiting for an active account to be selected or for rotation policy to change",
+                }
+              : leased.poolAccountCount > leased.accounts.length
+                ? {
+                    code: "codex_policy_pool_unavailable",
+                    error: "No Codex subscription matches the accepted account-selection policy.",
+                    detail:
+                      "waiting for the accepted policy to change or a matching account to reconnect",
+                  }
+                : {
+                    code: "codex_credential_unavailable",
+                    error:
+                      "No Codex subscription is currently available under the accepted policy.",
+                    detail: "waiting for a matching account to reconnect or for policy to change",
+                  };
+        if (turn.source === "compaction") {
+          if (
+            !(await eventing.settle!({
+              events: [
+                {
+                  type: "turn.cancelled",
+                  payload: {
+                    maintenance: "context_compaction",
+                    reason: noneReason.code,
+                    requestPreserved: true,
+                  },
+                },
+                {
+                  type: "session.status.changed",
+                  payload: { status: "idle" },
+                },
+              ],
+              turnStatus: "cancelled",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return { exit: claimedResult({ status: "cancelled" }) };
+          }
+          control.turnMetricOutcome = "cancelled";
+          control.activityStatus = "idle";
+          return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
+        }
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+        const activeGoal = goal?.status === "active" ? goal : null;
+        const evaluated = await armAndReconcileCodexCapacityWait(
+          { db, bus },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: null,
+            resetKind: "mutation_only",
+            failurePayload: {
+              error: noneReason.error,
+              code: noneReason.code,
+              detail: noneReason.detail,
             },
           },
         );

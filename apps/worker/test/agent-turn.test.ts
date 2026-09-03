@@ -4336,6 +4336,55 @@ describe("Codex credential lease deadline fence", () => {
     expect(codexCredentialLeaseDeadlineExpired(now - 1, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now + 1, now)).toBe(false);
   });
+
+  test("transport dispatch fence preserves typed lease loss and skips the provider", async () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() + 10_000;
+    lease.markLost("not_found");
+
+    let providerCalls = 0;
+    await expect(
+      codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+          beforeProviderDispatch: lease.assertUsable,
+        },
+        () =>
+          codexSubscriptionFetch(async () => {
+            providerCalls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBeInstanceOf(CodexCredentialLeaseLostError);
+    expect(providerCalls).toBe(0);
+  });
 });
 
 describe("sandbox file materialization note", () => {
@@ -5550,6 +5599,7 @@ describe("transient provider error classifier", () => {
       accessToken: "codex-token-2",
       accountId: "acct",
     }));
+    const beforeProviderDispatch = mock(() => undefined);
     const codexContext: CodexRequestContext = {
       clientVersion: "test",
       sessionId: "session-id",
@@ -5557,6 +5607,7 @@ describe("transient provider error classifier", () => {
       refresh: refreshCodexToken,
       resolveModel: (model) => model,
       onUsageHeaders: () => undefined,
+      beforeProviderDispatch,
       onRequestPreparationDiagnostic: () => undefined,
       onModelRequestDiagnostic: () => undefined,
       onModelRequestEvent: () => undefined,
@@ -5572,6 +5623,7 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
