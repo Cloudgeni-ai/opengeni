@@ -19,6 +19,7 @@ import {
   NewSessionDraftConflictError,
   newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
+  publicNewSessionDraftOptions,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
   seedNewSessionDraftInTransaction,
@@ -568,6 +569,136 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         },
       },
     });
+  });
+
+  test("a stale realtime selection-history update preserves a newer draft and provenance", async () => {
+    const context = await fixture();
+    const projectA = crypto.randomUUID();
+    const projectB = crypto.randomUUID();
+    const sandboxA = crypto.randomUUID();
+    const sandboxB = crypto.randomUUID();
+    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
+    await saveDraft(context, 0, {
+      text: "Project A draft",
+      selectedProjectChannelId: projectA,
+      options: { targetSandboxId: sandboxA, workingDir: "/workspace/project-a" },
+    });
+    const staleRealtimeSession = await createUninitializedSession(context);
+
+    const projectBResources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/project-b.git",
+        ref: "main",
+        mountPath: "repos/project-b",
+      },
+    ];
+    const projectBTools: ToolRef[] = [{ kind: "mcp", id: "project-b-docs" }];
+    const projectBOptions: NewSessionDraftOptions = {
+      sandboxBackend: "selfhosted",
+      targetSandboxId: sandboxB,
+      workingDir: "/workspace/project-b",
+      variableSetIds,
+      variableSetId: variableSetIds[1],
+      rigId: crypto.randomUUID(),
+    };
+    const projectBDraft = await saveDraft(context, 1, {
+      text: "Project B draft from the newer tab",
+      resources: projectBResources,
+      tools: projectBTools,
+      toolsProvided: true,
+      model: "project-b-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      selectedProjectChannelId: projectB,
+      options: projectBOptions,
+    });
+
+    await initializeSessionStartAtomically(client.db, {
+      accountId: context.grant.accountId,
+      workspaceId: context.grant.workspaceId!,
+      sessionId: staleRealtimeSession.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      rememberNewSessionSelection: {
+        subjectId: context.subjectId,
+        acceptedSelection: {
+          channelId: projectA,
+          targetSandboxId: sandboxA,
+          workingDir: "/workspace/project-a",
+        },
+      },
+      deferInitialTurn: true,
+    });
+
+    const afterStaleRealtime = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(afterStaleRealtime).toMatchObject({
+      revision: projectBDraft.revision,
+      text: projectBDraft.text,
+      resources: projectBResources,
+      tools: projectBTools,
+      model: projectBDraft.model,
+      reasoningEffort: projectBDraft.reasoningEffort,
+      latencyMode: projectBDraft.latencyMode,
+      updatedAt: projectBDraft.updatedAt,
+    });
+    expect(publicNewSessionDraftOptions(afterStaleRealtime!)).toEqual(projectBOptions);
+    expect(newSessionDraftToolsProvided(afterStaleRealtime!)).toBe(true);
+    expect(newSessionDraftSelectedProjectChannelId(afterStaleRealtime!)).toBe(projectB);
+    expect(afterStaleRealtime?.sessionOptions).toEqual({
+      ...projectBOptions,
+      toolsProvided: true,
+      selectedProjectChannelId: projectB,
+      selectionHistory: {
+        projects: [
+          {
+            channelId: projectA,
+            targetSandboxId: sandboxA,
+            machines: [{ sandboxId: sandboxA, workingDir: "/workspace/project-a" }],
+          },
+        ],
+      },
+    });
+  });
+
+  test("realtime selection history preserves Default and legacy-missing provenance", async () => {
+    for (const provenance of [
+      { label: "Default", present: true, value: null },
+      { label: "legacy missing", present: false, value: undefined },
+    ] as const) {
+      const context = await fixture();
+      const projectA = crypto.randomUUID();
+      const saved = await saveDraft(context, 0, {
+        text: `${provenance.label} draft`,
+        ...(provenance.present ? { selectedProjectChannelId: provenance.value } : {}),
+      });
+      const session = await createUninitializedSession(context);
+
+      await initializeSessionStartAtomically(client.db, {
+        accountId: context.grant.accountId,
+        workspaceId: context.grant.workspaceId!,
+        sessionId: session.id,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+        rememberNewSessionSelection: {
+          subjectId: context.subjectId,
+          acceptedSelection: { channelId: projectA, targetSandboxId: null, workingDir: null },
+        },
+        deferInitialTurn: true,
+      });
+
+      const remembered = await readDraft(context.grant.workspaceId!, context.subjectId);
+      expect(remembered).toMatchObject({ revision: saved.revision, text: saved.text });
+      expect(Object.hasOwn(remembered!.sessionOptions, "selectedProjectChannelId")).toBe(
+        provenance.present,
+      );
+      expect(newSessionDraftSelectedProjectChannelId(remembered!)).toBe(provenance.value);
+      expect(remembered?.sessionOptions).toMatchObject({
+        selectionHistory: {
+          projects: [{ channelId: projectA, targetSandboxId: null, machines: [] }],
+        },
+      });
+    }
   });
 
   test("an idempotent initialization retry cannot consume a later draft with a reused revision", async () => {

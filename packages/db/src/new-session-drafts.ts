@@ -378,7 +378,7 @@ export async function rememberNewSessionSelectionInTransaction(
         publicNewSessionDraftOptions(current),
         newSessionDraftToolsProvided(current),
         rememberNewSessionSelection(newSessionSelectionHistory(current), input.acceptedSelection),
-        input.acceptedSelection.channelId,
+        newSessionDraftSelectedProjectChannelId(current),
       ),
     })
     .where(eq(schema.newSessionDrafts.id, current.id))

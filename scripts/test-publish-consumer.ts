@@ -40,6 +40,10 @@ type PackageManifest = {
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const keepArtifacts = process.env.OPENGENI_KEEP_PUBLISH_CONSUMER === "1";
+// Vite 8.2 accepts this release, while postcss 8.5.27 ships an invalid
+// declaration that references NodeProps without importing it. Keep this
+// external-consumer proof deterministic without weakening skipLibCheck.
+const cleanConsumerPostcssVersion = "8.5.26";
 
 async function run(command: string[], cwd: string, capture = false): Promise<string> {
   const child = Bun.spawn({
@@ -530,6 +534,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
+      postcss: cleanConsumerPostcssVersion,
     },
   };
 
@@ -938,6 +943,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: cleanConsumerPostcssVersion,
     },
   };
   await Promise.all([
@@ -1013,6 +1019,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: cleanConsumerPostcssVersion,
     },
   };
   await Promise.all([
@@ -1076,6 +1083,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: cleanConsumerPostcssVersion,
     },
   };
   await Promise.all([
