@@ -14,7 +14,6 @@ import {
 } from "@/lib/site-navigation";
 import { cn } from "@/lib/utils";
 
-const RECENT_SITE_FETCH_LIMIT = 100;
 const RECENT_SITE_DISPLAY_LIMIT = 6;
 
 /** Bounded active Site shortcuts nested beneath the primary Sites destination. */
@@ -45,7 +44,10 @@ export function RecentSitesNav() {
     if (rail.collapsed) return;
     let current = true;
     void collectRecentActiveSites(async (cursor) => {
-      const query = new URLSearchParams({ limit: String(RECENT_SITE_FETCH_LIMIT) });
+      const query = new URLSearchParams({
+        limit: String(RECENT_SITE_DISPLAY_LIMIT),
+        status: "active",
+      });
       if (cursor) query.set("cursor", cursor);
       return await request<WorkspaceArtifactListResponse>(
         `/v1/workspaces/${encodeURIComponent(rail.workspaceId)}/published-artifacts?${query.toString()}`,

@@ -135,23 +135,26 @@ async function artifactRow(scopedDb: any, workspaceId: string, artifactId: strin
 export async function listWorkspaceArtifacts(
   db: Database,
   workspaceId: string,
-  options: { limit?: number; cursor?: string } = {},
+  options: { limit?: number; cursor?: string; status?: "active" | "archived" } = {},
 ): Promise<{ artifacts: WorkspaceArtifact[]; nextCursor: string | null; truncated: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
-    const visibility = cursor
-      ? and(
-          eq(schema.workspaceArtifacts.workspaceId, workspaceId),
-          or(
-            lt(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
-            and(
-              eq(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
-              lt(schema.workspaceArtifacts.id, cursor.id),
+    const visibility = and(
+      eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+      ...(options.status ? [eq(schema.workspaceArtifacts.status, options.status)] : []),
+      ...(cursor
+        ? [
+            or(
+              lt(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
+              and(
+                eq(schema.workspaceArtifacts.updatedAt, cursor.updatedAt),
+                lt(schema.workspaceArtifacts.id, cursor.id),
+              ),
             ),
-          ),
-        )
-      : eq(schema.workspaceArtifacts.workspaceId, workspaceId);
+          ]
+        : []),
+    );
     const rows = await scopedDb
       .select()
       .from(schema.workspaceArtifacts)

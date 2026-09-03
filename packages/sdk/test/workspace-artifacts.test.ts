@@ -22,12 +22,13 @@ describe("workspace artifacts SDK", () => {
       await client.listWorkspaceArtifacts(WORKSPACE_ID, {
         limit: 25,
         cursor: "opaque-cursor",
+        status: "active",
       }),
     ).toEqual({ artifacts: [], nextCursor: null, truncated: false });
     expect(requests.map((request) => [request.method, request.url])).toEqual([
       [
         "GET",
-        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts?limit=25&cursor=opaque-cursor`,
+        `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/published-artifacts?limit=25&cursor=opaque-cursor&status=active`,
       ],
     ]);
   });

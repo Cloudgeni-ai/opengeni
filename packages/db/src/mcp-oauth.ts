@@ -102,18 +102,22 @@ export async function getMcpOAuthClient(
     sql`with reaped as (
         select opengeni_private.reap_mcp_oauth_state(128)
       )
-      update mcp_oauth_clients client
-      set expires_at = greatest(
-        client.expires_at,
-        clock_timestamp() + interval '31 days'
-      )
-      from reaped
+      select client.client_id, client.redirect_uris, client.client_name,
+        client.grant_types, client.response_types, client.created_at
+      from mcp_oauth_clients client
+      cross join reaped
       where client.client_id = ${clientId}
         and client.expires_at > clock_timestamp()
-      returning client.client_id, client.redirect_uris, client.client_name,
-        client.grant_types, client.response_types, client.created_at`,
+      limit 1`,
   );
   return row ? mapClient(row) : null;
+}
+
+async function extendMcpOAuthClientRetention(db: Database, clientId: string): Promise<void> {
+  await db.execute(sql`update mcp_oauth_clients
+    set expires_at = greatest(expires_at, clock_timestamp() + interval '31 days')
+    where client_id = ${clientId}
+      and expires_at > clock_timestamp()`);
 }
 
 export async function createMcpOAuthAuthorizationRequest(
@@ -202,6 +206,7 @@ export async function consumeMcpOAuthAuthorizationRequest(
           redirect_uri, code_challenge, state, permissions, tool_identities, expires_at`,
     );
     if (!row) return null;
+    await extendMcpOAuthClientRetention(tx, row.client_id);
     await tx.execute(sql`insert into mcp_oauth_authorization_codes (
       code_hash, client_id, account_id, workspace_id, subject_id, resource,
       redirect_uri, code_challenge, permissions, tool_identities, expires_at
@@ -251,6 +256,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
           permissions, tool_identities`,
     );
     if (!row) return null;
+    await extendMcpOAuthClientRetention(tx, row.client_id);
     const familyId = crypto.randomUUID();
     if (input.refreshTokenHash) {
       await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
@@ -335,6 +341,7 @@ export async function rotateMcpOAuthRefreshToken(
       return null;
     }
     if (!row.active) return null;
+    await extendMcpOAuthClientRetention(tx, row.client_id);
     await tx.execute(sql`update mcp_oauth_refresh_tokens
       set revoked_at = clock_timestamp()
       where token_hash = ${input.refreshTokenHash}`);

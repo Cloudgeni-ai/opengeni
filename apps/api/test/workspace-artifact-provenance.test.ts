@@ -3,11 +3,13 @@ import type {
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactEvent,
   WorkspaceArtifactListResponse,
+  WorkspaceArtifactMutationResponse,
   WorkspaceArtifactVersion,
 } from "@opengeni/contracts";
 
 import {
   projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
   projectWorkspaceArtifactVersionProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../src/workspace-artifact-provenance";
@@ -79,6 +81,19 @@ function detail(
   };
 }
 
+function mutation(
+  selectedVersion: WorkspaceArtifactVersion,
+  currentVersion: WorkspaceArtifactVersion,
+  selectedEvent: WorkspaceArtifactEvent,
+): WorkspaceArtifactMutationResponse {
+  return {
+    artifact: detail(currentVersion, [], []).artifact,
+    version: selectedVersion,
+    event: selectedEvent,
+    replayed: false,
+  };
+}
+
 describe("workspace artifact provenance projection", () => {
   test("list responses never expose source-session provenance", () => {
     const sourceSessionId = "00000000-0000-4000-8000-000000000007";
@@ -128,5 +143,46 @@ describe("workspace artifact provenance projection", () => {
     );
     expect(projected.sourceSessionId).toBeNull();
     expect(projected.sourceTurnId).toBeNull();
+  });
+
+  test("mutation receipts redact every unreadable provenance-bearing member", async () => {
+    const privateSession = "00000000-0000-4000-8000-000000000008";
+    const readable = "00000000-0000-4000-8000-000000000007";
+    const decisions: string[] = [];
+    const projected = await projectWorkspaceArtifactMutationProvenance(
+      mutation(
+        version("00000000-0000-4000-8000-000000000004", privateSession),
+        version("00000000-0000-4000-8000-000000000009", privateSession),
+        event("00000000-0000-4000-8000-000000000010", readable),
+      ),
+      async (sessionId) => {
+        decisions.push(sessionId);
+        return sessionId === readable;
+      },
+    );
+
+    expect(projected.artifact.currentVersion?.sourceSessionId).toBeNull();
+    expect(projected.version.sourceAttemptId).toBeNull();
+    expect(projected.event.sourceSessionId).toBe(readable);
+    expect(decisions).toEqual([privateSession, readable]);
+  });
+
+  test("mutation receipts fail closed without hiding a committed mutation", async () => {
+    const sourceSessionId = "00000000-0000-4000-8000-000000000008";
+    const projected = await projectWorkspaceArtifactMutationProvenance(
+      mutation(
+        version("00000000-0000-4000-8000-000000000004", sourceSessionId),
+        version("00000000-0000-4000-8000-000000000009", sourceSessionId),
+        event("00000000-0000-4000-8000-000000000010", sourceSessionId),
+      ),
+      async () => {
+        throw new Error("authorization temporarily unavailable");
+      },
+    );
+
+    expect(projected.artifact.currentVersion?.sourceSessionId).toBeNull();
+    expect(projected.version.sourceSessionId).toBeNull();
+    expect(projected.event.sourceSessionId).toBeNull();
+    expect(projected.replayed).toBeFalse();
   });
 });

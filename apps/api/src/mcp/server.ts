@@ -30,6 +30,7 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   type WorkspaceMemoryPromptMode,
+  type WorkspaceArtifactMutationResponse,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
@@ -175,6 +176,7 @@ import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browse
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
 import {
   projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
   projectWorkspaceArtifactVersionProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../workspace-artifact-provenance";
@@ -2935,6 +2937,15 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
+  const canReadProvenanceSession = (sourceSessionId: string): Promise<boolean> =>
+    authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+      .then(() => true)
+      .catch((error) => {
+        if (error instanceof SessionAuthorizationDeniedError) return false;
+        throw error;
+      });
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
     html: string,
     source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
@@ -3012,12 +3023,7 @@ function registerWorkspaceArtifactTools(
       const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
         const existing = sourceAuthorizations.get(sourceSessionId);
         if (existing) return existing;
-        const decision = authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
-          .then(() => true)
-          .catch((error) => {
-            if (error instanceof SessionAuthorizationDeniedError) return false;
-            throw error;
-          });
+        const decision = canReadProvenanceSession(sourceSessionId);
         sourceAuthorizations.set(sourceSessionId, decision);
         return decision;
       };
@@ -3080,14 +3086,16 @@ function registerWorkspaceArtifactTools(
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await createWorkspaceArtifact(deps.db, {
-          artifactId,
-          slug: resolvedSlug,
-          title,
-          description: description ?? null,
-          ...prepare(html, source, requestedTools),
-          ...provenance(idempotencyKey, "artifacts_create"),
-        }),
+        await mutation(
+          await createWorkspaceArtifact(deps.db, {
+            artifactId,
+            slug: resolvedSlug,
+            title,
+            description: description ?? null,
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_create"),
+          }),
+        ),
       );
     },
   );
@@ -3141,14 +3149,16 @@ function registerWorkspaceArtifactTools(
     }) => {
       await authorize();
       return json(
-        await publishWorkspaceArtifactVersion(deps.db, {
-          artifactId,
-          expectedCurrentVersionId,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...prepare(html, source, requestedTools),
-          ...provenance(idempotencyKey, "artifacts_publish"),
-        }),
+        await mutation(
+          await publishWorkspaceArtifactVersion(deps.db, {
+            artifactId,
+            expectedCurrentVersionId,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_publish"),
+          }),
+        ),
       );
     },
   );
@@ -3169,13 +3179,15 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await rollbackWorkspaceArtifact(deps.db, {
-          artifactId,
-          versionId,
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_rollback"),
-        }),
+        await mutation(
+          await rollbackWorkspaceArtifact(deps.db, {
+            artifactId,
+            versionId,
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_rollback"),
+          }),
+        ),
       );
     },
   );
@@ -3195,13 +3207,15 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await setWorkspaceArtifactStatus(deps.db, {
-          artifactId,
-          status: "archived",
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_archive"),
-        }),
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "archived",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_archive"),
+          }),
+        ),
       );
     },
   );
@@ -3221,13 +3235,15 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await setWorkspaceArtifactStatus(deps.db, {
-          artifactId,
-          status: "active",
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_restore"),
-        }),
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "active",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_restore"),
+          }),
+        ),
       );
     },
   );

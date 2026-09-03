@@ -49,6 +49,7 @@ describe("migration 0401 workspace HTML Site sources", () => {
     expect(source).toContain('"source_size_bytes" BETWEEN 1 AND 4194304');
     expect(source).toContain('jsonb_array_length("requested_tools") <= 128');
     expect(source).toContain("'archived', 'restored'");
+    expect(source).toContain('CREATE INDEX "workspace_artifacts_status_list_idx"');
     expect(source).not.toMatch(/UPDATE\s+"workspace_artifact_versions"/u);
   });
 

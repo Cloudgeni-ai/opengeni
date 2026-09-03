@@ -45,7 +45,7 @@ function page(
 }
 
 describe("Site navigation refresh", () => {
-  test("tracks only settled Site create and publish calls", () => {
+  test("tracks settled first-party Site lifecycle calls", () => {
     expect(
       latestSiteMutationSequence([
         event(1, "agent.toolCall.created", { id: "ordinary", name: "exec_command" }),
@@ -57,8 +57,20 @@ describe("Site navigation refresh", () => {
         event(4, "agent.toolCall.output", { id: "create", output: "created" }),
         event(5, "agent.toolCall.created", { id: "publish", name: "artifacts_publish" }),
         event(6, "agent.toolCall.output", { id: "publish", output: "published" }),
+        event(7, "agent.toolCall.created", {
+          id: "archive",
+          name: "opengeni__artifacts_archive",
+        }),
+        event(8, "agent.toolCall.output", { id: "archive", output: "archived" }),
+        event(9, "agent.toolCall.created", { id: "restore", name: "artifacts_restore" }),
+        event(10, "agent.toolCall.output", { id: "restore", output: "restored" }),
+        event(11, "agent.toolCall.created", {
+          id: "rollback",
+          name: "opengeni__artifacts_rollback",
+        }),
+        event(12, "agent.toolCall.output", { id: "rollback", output: "rolled back" }),
       ]),
-    ).toBe(6);
+    ).toBe(12);
   });
 
   test("does not refresh for an unsettled Site call or unmatched output", () => {
@@ -66,6 +78,18 @@ describe("Site navigation refresh", () => {
       latestSiteMutationSequence([
         event(1, "agent.toolCall.created", { id: "create", name: "artifacts_create" }),
         event(2, "agent.toolCall.output", { id: "different", output: "created" }),
+      ]),
+    ).toBe(0);
+  });
+
+  test("ignores similarly named external MCP lifecycle tools", () => {
+    expect(
+      latestSiteMutationSequence([
+        event(1, "agent.toolCall.created", {
+          id: "external",
+          name: "external__artifacts_archive",
+        }),
+        event(2, "agent.toolCall.output", { id: "external", output: "not a Site receipt" }),
       ]),
     ).toBe(0);
   });
@@ -89,6 +113,17 @@ describe("Site navigation refresh", () => {
 
     expect(cursors).toEqual([null, "next-page"]);
     expect(result.map((entry) => entry.id)).toEqual(["active-1", "active-2"]);
+  });
+
+  test("bounds defensive pagination when a server returns only archived Sites", async () => {
+    let pages = 0;
+    const result = await collectRecentActiveSites(async () => {
+      pages += 1;
+      return page([artifact(`archived-${pages}`, "archived")], `page-${pages}`);
+    }, 1);
+
+    expect(result).toEqual([]);
+    expect(pages).toBe(10);
   });
 
   test("publishes direct Site mutations through one workspace navigation snapshot", () => {

@@ -1,6 +1,15 @@
 import type { SessionEvent, WorkspaceArtifact, WorkspaceArtifactListResponse } from "@opengeni/sdk";
 
-const SITE_MUTATION_TOOL_NAMES = new Set(["artifacts_create", "artifacts_publish"]);
+const SITE_MUTATION_TOOL_NAMES = new Set(
+  [
+    "artifacts_create",
+    "artifacts_publish",
+    "artifacts_rollback",
+    "artifacts_archive",
+    "artifacts_restore",
+  ].flatMap((name) => [name, `opengeni__${name}`]),
+);
+const SITE_NAVIGATION_MAX_PAGES = 10;
 let siteNavigationSnapshot = 0;
 const siteNavigationListeners = new Set<() => void>();
 
@@ -26,8 +35,10 @@ export async function collectRecentActiveSites(
   const artifactIds = new Set<string>();
   const cursors = new Set<string>();
   let cursor: string | null = null;
+  let pages = 0;
 
-  while (active.length < displayLimit) {
+  while (active.length < displayLimit && pages < SITE_NAVIGATION_MAX_PAGES) {
+    pages += 1;
     const page = await fetchPage(cursor);
     for (const artifact of page.artifacts) {
       if (artifact.status !== "active" || artifactIds.has(artifact.id)) continue;
@@ -50,13 +61,8 @@ function record(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function toolLeaf(name: string): string {
-  const separator = name.indexOf("__");
-  return separator >= 0 ? name.slice(separator + 2) : name;
-}
-
 /**
- * Return the latest settled Site create/publish sequence in one routed session.
+ * Return the latest settled first-party Site lifecycle mutation in one routed session.
  * The rail uses this compact primitive as a refresh key instead of fetching
  * after every unrelated tool output.
  */
@@ -68,7 +74,7 @@ export function latestSiteMutationSequence(events: readonly SessionEvent[]): num
     const callId = typeof payload?.id === "string" ? payload.id : null;
     if (event.type === "agent.toolCall.created" && callId) {
       const name = typeof payload?.name === "string" ? payload.name : "";
-      if (SITE_MUTATION_TOOL_NAMES.has(toolLeaf(name))) siteCalls.add(callId);
+      if (SITE_MUTATION_TOOL_NAMES.has(name)) siteCalls.add(callId);
       continue;
     }
     if (event.type === "agent.toolCall.output" && callId && siteCalls.has(callId)) {

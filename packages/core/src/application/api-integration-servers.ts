@@ -94,6 +94,7 @@ export function buildApiIntegrationMcpServers(
         baseUrl: integration.baseUrl,
         providerDomain: integration.providerDomain,
         connectionRef: integration.connectionRef,
+        connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
       },
       ...(integration.connectionRef?.connectionId
         ? { resolvedConnectionId: integration.connectionRef.connectionId }

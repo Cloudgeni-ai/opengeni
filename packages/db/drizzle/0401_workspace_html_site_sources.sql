@@ -53,3 +53,6 @@ ALTER TABLE "workspace_artifact_events"
 
 ALTER TABLE "workspace_artifact_events"
   VALIDATE CONSTRAINT "workspace_artifact_events_type_chk";
+
+CREATE INDEX "workspace_artifacts_status_list_idx"
+  ON "workspace_artifacts" ("workspace_id", "status", "updated_at");

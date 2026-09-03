@@ -121,6 +121,15 @@ describe("migration 0402 MCP OAuth authorization server", () => {
     expect(source).toContain("pg_advisory_xact_lock");
     expect(source).toContain("global_count >= 600 OR scoped_count >= 20");
     expect(source).toContain("USING ERRCODE = 'P0004'");
+    const lookupSource = repositorySource.slice(
+      repositorySource.indexOf("export async function getMcpOAuthClient"),
+      repositorySource.indexOf("async function extendMcpOAuthClientRetention"),
+    );
+    expect(lookupSource).toContain("select client.client_id");
+    expect(lookupSource).not.toContain("set expires_at");
+    expect(
+      repositorySource.match(/extendMcpOAuthClientRetention\(tx, row\.client_id\)/gu),
+    ).toHaveLength(3);
     expect(repositorySource).toContain("clock_timestamp() + interval '31 days'");
   });
 

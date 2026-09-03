@@ -67,6 +67,12 @@ describe("defaultToolRegistry leaf resolution", () => {
     expect(create.name).toBe("SiteArtifactRenderer");
   });
 
+  test("does not trust an external MCP tool as a platform Site publication", () => {
+    const renderer = registry.resolve(tool({ name: "external__artifacts_create" }));
+    expect(renderer).toBe(registry.fallback);
+    expect(renderer.name).toBe("GenericRenderer");
+  });
+
   test("resolves ToolSearch by name and tool_search_call raw type", () => {
     const byName = registry.resolve(tool({ name: "tool_search" }));
     const byRaw = registry.resolve(

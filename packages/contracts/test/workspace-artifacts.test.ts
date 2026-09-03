@@ -34,6 +34,11 @@ describe("workspace artifact contracts", () => {
 
   test("bounds list pages and makes truncation explicit", () => {
     expect(WorkspaceArtifactListQuery.parse({})).toEqual({ limit: 50 });
+    expect(WorkspaceArtifactListQuery.parse({ status: "active" })).toEqual({
+      limit: 50,
+      status: "active",
+    });
+    expect(WorkspaceArtifactListQuery.safeParse({ status: "deleted" }).success).toBe(false);
     expect(WorkspaceArtifactListQuery.safeParse({ limit: 101 }).success).toBe(false);
     expect(
       WorkspaceArtifactListResponse.safeParse({

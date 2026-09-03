@@ -196,6 +196,11 @@ export const workspaceArtifacts = pgTable(
     ),
     workspaceId: uniqueIndex("workspace_artifacts_workspace_id_uq").on(table.workspaceId, table.id),
     list: index("workspace_artifacts_list_idx").on(table.workspaceId, table.updatedAt),
+    statusList: index("workspace_artifacts_status_list_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
   }),
 );
 

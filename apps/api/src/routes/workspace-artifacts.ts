@@ -41,6 +41,7 @@ import {
 } from "../workspace-artifact-content";
 import {
   projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../workspace-artifact-provenance";
 
@@ -130,6 +131,18 @@ async function canReadProvenanceSession(
   }
 }
 
+async function mutationResponse(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  response: WorkspaceArtifactMutationResponse,
+): Promise<WorkspaceArtifactMutationResponse> {
+  return WorkspaceArtifactMutationResponse.parse(
+    await projectWorkspaceArtifactMutationProvenance(response, (sessionId) =>
+      canReadProvenanceSession(deps, grant, sessionId),
+    ),
+  );
+}
+
 export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): void {
   // `published-artifacts` deliberately avoids the existing `/artifacts/:id`
   // retained-output API. The product route remains simply `/artifacts`.
@@ -141,6 +154,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const query = WorkspaceArtifactListQuery.safeParse({
       limit: context.req.query("limit"),
       cursor: context.req.query("cursor"),
+      status: context.req.query("status"),
     });
     if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
     try {
@@ -150,6 +164,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
             await listWorkspaceArtifacts(deps.db, workspaceId, {
               limit: query.data.limit,
               ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
+              ...(query.data.status ? { status: query.data.status } : {}),
             }),
           ),
         ),
@@ -173,7 +188,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     });
     try {
       return context.json(
-        WorkspaceArtifactMutationResponse.parse(
+        await mutationResponse(
+          deps,
+          grant,
           await createWorkspaceArtifact(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -260,7 +277,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     });
     try {
       return context.json(
-        WorkspaceArtifactMutationResponse.parse(
+        await mutationResponse(
+          deps,
+          grant,
           await publishWorkspaceArtifactVersion(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -284,7 +303,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const request = await body(context, RollbackWorkspaceArtifactRequest);
     try {
       return context.json(
-        WorkspaceArtifactMutationResponse.parse(
+        await mutationResponse(
+          deps,
+          grant,
           await rollbackWorkspaceArtifact(deps.db, {
             accountId: grant.accountId,
             workspaceId,
@@ -307,7 +328,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const request = await body(context, SetWorkspaceArtifactStatusRequest);
     try {
       return context.json(
-        WorkspaceArtifactMutationResponse.parse(
+        await mutationResponse(
+          deps,
+          grant,
           await setWorkspaceArtifactStatus(deps.db, {
             accountId: grant.accountId,
             workspaceId,

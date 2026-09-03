@@ -61,7 +61,11 @@ export type WorkspaceArtifactEvent = {
   createdAt: string;
 };
 
-export type WorkspaceArtifactListOptions = { limit?: number; cursor?: string };
+export type WorkspaceArtifactListOptions = {
+  limit?: number;
+  cursor?: string;
+  status?: WorkspaceArtifact["status"];
+};
 export type WorkspaceArtifactListResponse = {
   artifacts: WorkspaceArtifact[];
   nextCursor: string | null;

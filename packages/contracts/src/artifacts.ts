@@ -178,6 +178,7 @@ export const WorkspaceArtifactListQuery = z.object({
     .max(WORKSPACE_ARTIFACT_LIST_MAX)
     .default(WORKSPACE_ARTIFACT_LIST_DEFAULT),
   cursor: z.string().min(1).max(WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS).optional(),
+  status: WorkspaceArtifactStatus.optional(),
 });
 export type WorkspaceArtifactListQuery = z.infer<typeof WorkspaceArtifactListQuery>;
 
