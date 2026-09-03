@@ -254,7 +254,10 @@ export default defineConfig({
         // the source bootstrap appears first. Reorder the final transformed
         // document so setup authority is scrubbed before those subrequests in
         // dev, preview, and production builds.
-        handler: (html) => prioritizeSetupAccountBootstrap(html).replace(/>\s+</g, "><").trim(),
+        handler: (html, context) => {
+          if (context.path !== "/" && context.path !== "/index.html") return html;
+          return prioritizeSetupAccountBootstrap(html).replace(/>\s+</g, "><").trim();
+        },
       },
     },
   ],

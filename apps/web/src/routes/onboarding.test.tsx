@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { OrganizationInvitation } from "@/types";
 
 const completeSetup = mock(
   async (_input: { token: string; name: string; password: string; operationId: string }) => ({
@@ -27,6 +28,27 @@ const previewSetup = mock(
     expiresAt: "2026-09-01T00:00:00.000Z",
   }),
 );
+let currentAuthSession: {
+  session: { id: string; userId: string; expiresAt: string };
+  user: { id: string; name: string; email: string; emailVerified: boolean };
+} | null = null;
+const fetchSession = mock(async () => currentAuthSession);
+const listSetupInvitations = mock(
+  async (): Promise<{
+    invitations: OrganizationInvitation[];
+    nextCursor: null;
+  }> => ({
+    invitations: [],
+    nextCursor: null,
+  }),
+);
+const acceptSetupInvitation = mock(async () => ({
+  status: "complete" as const,
+}));
+const setupClient = {
+  listOrganizationInvitations: listSetupInvitations,
+  acceptOrganizationInvitation: acceptSetupInvitation,
+};
 
 class TestAuthApiError extends Error {
   constructor(
@@ -43,6 +65,8 @@ mock.module("@/api", () => ({
   AuthApiError: TestAuthApiError,
   apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
+  createOpenGeniClient: () => setupClient,
+  fetchAuthSession: fetchSession,
   managedActorMutationBusySnapshot: () => false,
   previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
@@ -620,6 +644,70 @@ describe("organization onboarding UI", () => {
       await act(async () => root.unmount());
       container.remove();
       sessionStorage.clear();
+    }
+  });
+
+  test("lets the invited signed-in account accept directly without account creation", async () => {
+    const invitationId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    currentAuthSession = {
+      session: { id: "session-1", userId: "user-1", expiresAt: now },
+      user: {
+        id: "user-1",
+        name: "Grace Hopper",
+        email: "INVITEE@example.test",
+        emailVerified: true,
+      },
+    };
+    listSetupInvitations.mockImplementationOnce(async () => ({
+      invitations: [
+        {
+          id: invitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [],
+          role: "member" as const,
+          status: "pending" as const,
+          revision: 7,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+      ],
+      nextCursor: null,
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SetupAccountRoute token="signed-in-token" />));
+      await flush();
+      await flush();
+      expect(container.textContent).toContain("Signed in as INVITEE@example.test");
+      expect(container.textContent).toContain("No new account or password is needed");
+      expect(container.querySelector("#setup-account-password")).toBeNull();
+      const acceptButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Accept and join",
+      )!;
+      await act(async () => acceptButton.click());
+      await flush();
+      expect(acceptSetupInvitation).toHaveBeenCalledWith(invitationId, {
+        expectedRevision: 7,
+        operationId: expect.any(String),
+      });
+      expect(completeSetup).not.toHaveBeenCalledWith(
+        expect.objectContaining({ token: "signed-in-token" }),
+      );
+      expect(container.textContent).toContain("Invitation accepted");
+      expect(container.textContent).toContain("Open OpenGeni");
+    } finally {
+      currentAuthSession = null;
+      await act(async () => root.unmount());
+      container.remove();
     }
   });
 

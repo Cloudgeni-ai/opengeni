@@ -39,6 +39,9 @@ BEGIN
     RETURN result;
   END IF;
   delivery_id_value := nullif(result #>> '{delivery,id}', '')::uuid;
+  PERFORM set_config(
+    'opengeni.organization_tenancy_lifecycle', 'organization_membership_lifecycle', true
+  );
   SELECT delivery.setup_token_transport INTO setup_token_transport_value
   FROM organization_user_setup_deliveries delivery
   WHERE delivery.id = delivery_id_value;
