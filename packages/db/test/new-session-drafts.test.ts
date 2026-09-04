@@ -166,6 +166,30 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(namedProject.sessionOptions).toMatchObject({ selectedProjectChannelId: projectId });
   });
 
+  test("legacy omission preserves stored provenance while explicit null selects Default", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const namedProject = await saveDraft(context, 0, {
+      text: "named-project draft",
+      selectedProjectChannelId: projectId,
+    });
+
+    const legacySave = await saveDraft(context, namedProject.revision, {
+      text: "older client edit without provenance",
+    });
+    expect(legacySave.revision).toBe(namedProject.revision + 1);
+    expect(newSessionDraftSelectedProjectChannelId(legacySave)).toBe(projectId);
+    expect(legacySave.sessionOptions).toMatchObject({ selectedProjectChannelId: projectId });
+
+    const explicitDefault = await saveDraft(context, legacySave.revision, {
+      text: "new client explicitly selected Default",
+      selectedProjectChannelId: null,
+    });
+    expect(explicitDefault.revision).toBe(legacySave.revision + 1);
+    expect(newSessionDraftSelectedProjectChannelId(explicitDefault)).toBeNull();
+    expect(explicitDefault.sessionOptions).toMatchObject({ selectedProjectChannelId: null });
+  });
+
   test("markerless legacy rows preserve narrowed and empty tool intent through seeding", async () => {
     for (const tools of [[{ kind: "mcp", id: "docs" }], []] as ToolRef[][]) {
       const context = await fixture();

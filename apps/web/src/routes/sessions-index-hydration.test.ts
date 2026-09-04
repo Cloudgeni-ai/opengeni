@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { resolveHydratedNewSessionProjectSelection } from "./sessions-index-hydration";
+import {
+  resolveAmbientNewSessionProjectChannelId,
+  resolveHydratedNewSessionProjectSelection,
+} from "./sessions-index-hydration";
 
 const PROJECT_A = "00000000-0000-4000-8000-000000000011";
 const PROJECT_B = "00000000-0000-4000-8000-000000000012";
@@ -26,14 +29,22 @@ const restoredProjectBCompute = {
 
 describe("sessions-index project hydration", () => {
   test("persisted project provenance wins over stale selection history", () => {
+    const hydrated = resolveHydratedNewSessionProjectSelection({
+      launchChannelId: undefined,
+      remote: { selectedProjectChannelId: PROJECT_B },
+      history: staleProjectAHistory,
+      restoredCompute: restoredProjectBCompute,
+    });
+
+    expect(hydrated).toEqual({ channelId: PROJECT_B, compute: restoredProjectBCompute });
     expect(
-      resolveHydratedNewSessionProjectSelection({
+      resolveAmbientNewSessionProjectChannelId({
         launchChannelId: undefined,
-        remote: { selectedProjectChannelId: PROJECT_B },
-        history: staleProjectAHistory,
-        restoredCompute: restoredProjectBCompute,
+        recentChannelId: PROJECT_A,
+        remoteDraftHydrated: true,
       }),
-    ).toEqual({ channelId: PROJECT_B, compute: restoredProjectBCompute });
+    ).toBeUndefined();
+    expect(hydrated.compute).toBe(restoredProjectBCompute);
   });
 
   test("explicit persisted Default provenance does not fall back to Recents", () => {
@@ -77,5 +88,29 @@ describe("sessions-index project hydration", () => {
       channelId: PROJECT_C,
       compute: { kind: "sandbox", backend: "" },
     });
+  });
+
+  test("ambient Recents applies before hydration but never reapplies afterward", () => {
+    expect(
+      resolveAmbientNewSessionProjectChannelId({
+        launchChannelId: undefined,
+        recentChannelId: PROJECT_A,
+        remoteDraftHydrated: false,
+      }),
+    ).toBe(PROJECT_A);
+    expect(
+      resolveAmbientNewSessionProjectChannelId({
+        launchChannelId: undefined,
+        recentChannelId: PROJECT_A,
+        remoteDraftHydrated: true,
+      }),
+    ).toBeUndefined();
+    expect(
+      resolveAmbientNewSessionProjectChannelId({
+        launchChannelId: null,
+        recentChannelId: PROJECT_A,
+        remoteDraftHydrated: true,
+      }),
+    ).toBeNull();
   });
 });

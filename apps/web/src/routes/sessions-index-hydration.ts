@@ -7,6 +7,19 @@ type PersistedProjectProvenance = {
   selectedProjectChannelId?: string | null | undefined;
 };
 
+/**
+ * Resolve the route's ambient project-selection effect. Undefined means the
+ * effect must not mutate an authority already installed by remote hydration.
+ */
+export function resolveAmbientNewSessionProjectChannelId(input: {
+  launchChannelId: string | null | undefined;
+  recentChannelId: string | null;
+  remoteDraftHydrated: boolean;
+}): string | null | undefined {
+  if (input.launchChannelId !== undefined) return input.launchChannelId;
+  return input.remoteDraftHydrated ? undefined : input.recentChannelId;
+}
+
 // Keep project-selection orchestration in this route-only leaf. session-create.ts
 // is also retained by the active-session route and must not carry new-session-only code.
 /** Apply a project change without leaving compute from the prior project behind. */

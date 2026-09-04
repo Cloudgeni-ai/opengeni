@@ -248,6 +248,11 @@ export async function saveNewSessionDraftInTransaction(
   }
 
   const revision = currentRevision + 1;
+  const selectedProjectChannelId = Object.hasOwn(input, "selectedProjectChannelId")
+    ? input.selectedProjectChannelId
+    : current
+      ? newSessionDraftSelectedProjectChannelId(current)
+      : undefined;
   const values = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -265,7 +270,7 @@ export async function saveNewSessionDraftInTransaction(
       input.options,
       input.toolsProvided,
       current ? newSessionSelectionHistory(current) : { projects: [] },
-      input.selectedProjectChannelId,
+      selectedProjectChannelId,
     ),
     updatedAt: new Date(),
   };

@@ -156,6 +156,7 @@ import {
 } from "@/routes/sessions-index-submission";
 import {
   newSessionProjectSelection,
+  resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "@/routes/sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "@/types";
@@ -222,6 +223,7 @@ function SessionsIndexRouteContent({
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
   });
+  const remoteDraftHydratedRef = useRef(false);
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -587,7 +589,12 @@ function SessionsIndexRouteContent({
   // local so choosing a folder does not turn the composer URL into application
   // state.
   useEffect(() => {
-    selectProject(launchChannelId !== undefined ? launchChannelId : recentChannelId);
+    const channelId = resolveAmbientNewSessionProjectChannelId({
+      launchChannelId,
+      recentChannelId,
+      remoteDraftHydrated: remoteDraftHydratedRef.current,
+    });
+    if (channelId !== undefined) selectProject(channelId);
   }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
@@ -723,6 +730,10 @@ function SessionsIndexRouteContent({
         restoredCompute: restored.compute,
         defaultSandboxBackend,
       });
+      // Fence the ambient Recents effect before installing history. That state
+      // update changes recentChannelId, but must not replace this hydrated
+      // explicit/persisted selection (or the legacy fallback resolved above).
+      remoteDraftHydratedRef.current = true;
       setSelectionHistory(history);
       setSelectedProjectChannelId(projectSelection.channelId);
       setDraft({ ...restored, compute: projectSelection.compute });
