@@ -207,7 +207,7 @@ describe("durable image generation operation rebinding", () => {
     expect(begunB.operation.status).toBe("provider_started");
 
     const raceOperationId = crypto.randomUUID();
-    const raceOperationKey = "r".repeat(64);
+    const raceOperationKey = "c".repeat(64);
     const raceArtifactA = crypto.randomUUID();
     const raceArtifactB = crypto.randomUUID();
     const raceCommon = {
