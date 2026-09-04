@@ -294,6 +294,103 @@ describe("image generation paid-operation fence", () => {
     expect(generateCalls.count).toBe(1);
   });
 
+  test("rebinds a stable operation from a rejected credential to the failover credential", async () => {
+    const generateCalls = { count: 0 };
+    const bindingA = "a".repeat(64);
+    const bindingB = "b".repeat(64);
+    const states = new Map<
+      string,
+      { providerBindingHash: string; expectedArtifactId: string; status: string }
+    >();
+    const inputA = executionInput(generateCalls);
+    const operationA = imageGenerationOperationIdentity({
+      ...base,
+      providerBindingHash: bindingA,
+    });
+    const operationB = imageGenerationOperationIdentity({
+      ...base,
+      providerBindingHash: bindingB,
+    });
+    states.set(operationA.operationKey, {
+      providerBindingHash: bindingA,
+      expectedArtifactId: operationA.artifactId,
+      status: "prepared",
+    });
+    let providerCalls = 0;
+    const ports = operationPorts({
+      prepare: async (_db, preparedInput) => {
+        const existing = states.get(preparedInput.operationKey);
+        if (!existing) {
+          states.set(preparedInput.operationKey, {
+            providerBindingHash: preparedInput.providerBindingHash,
+            expectedArtifactId: preparedInput.expectedArtifactId,
+            status: "prepared",
+          });
+          return { operation: { status: "prepared" } as never, created: true };
+        }
+        if (existing.status === "prepared") {
+          existing.providerBindingHash = preparedInput.providerBindingHash;
+          existing.expectedArtifactId = preparedInput.expectedArtifactId;
+        }
+        return { operation: { status: existing.status } as never, created: false };
+      },
+      begin: async (_db, begunInput) => {
+        const existing = states.get(begunInput.operationKey)!;
+        expect(existing.providerBindingHash).toBe(begunInput.providerBindingHash);
+        expect(existing.expectedArtifactId).toBe(begunInput.expectedArtifactId);
+        existing.status = "provider_started";
+        return { operation: { status: existing.status } as never, started: true };
+      },
+      resetBeforeProviderDispatch: async (_db, resetInput) => {
+        const existing = states.get(resetInput.operationKey)!;
+        existing.status = "prepared";
+        return { status: existing.status } as never;
+      },
+      complete: async (_db, completeInput) => {
+        const existing = states.get(completeInput.operationKey)!;
+        existing.status = "completed";
+        return { status: existing.status } as never;
+      },
+    });
+
+    const firstAttempt: ExecuteImageGenerationOperationInput = {
+      ...inputA,
+      providerBindingHash: bindingA,
+      generate: async () => {
+        providerCalls += 1;
+        throw new Error("lease rejected before dispatch");
+      },
+      isProviderDispatchRejected: () => true,
+    };
+    await expect(executeImageGenerationOperation(firstAttempt, ports)).rejects.toThrow(
+      "lease rejected before dispatch",
+    );
+    expect(providerCalls).toBe(1);
+
+    const secondAttempt: ExecuteImageGenerationOperationInput = {
+      ...inputA,
+      providerBindingHash: bindingB,
+      generate: async () => {
+        providerCalls += 1;
+        return {
+          toolCallId: base.toolCallId,
+          providerItemId: null,
+          bytes: Uint8Array.of(1),
+          declaredMediaType: "image/png",
+        };
+      },
+    };
+    await expect(executeImageGenerationOperation(secondAttempt, ports)).resolves.toEqual(receipt);
+    expect(providerCalls).toBe(2);
+    expect(operationB.operationKey).toBe(operationA.operationKey);
+    expect(operationB.artifactId).not.toBe(operationA.artifactId);
+    expect(states.get(operationA.operationKey)).toMatchObject({
+      providerBindingHash: bindingB,
+      expectedArtifactId: operationB.artifactId,
+      status: "completed",
+    });
+  });
+
   test("records a known provider success separately when durable retention fails", async () => {
     const generateCalls = { count: 0 };
     let ambiguousFences = 0;

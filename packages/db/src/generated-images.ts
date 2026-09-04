@@ -114,8 +114,31 @@ export async function prepareImageGenerationOperation(
           input.operationKey,
         );
         if (existing) {
-          assertImageGenerationOperationMatches(existing, input);
-          return { operation: existing, created: false };
+          assertImageGenerationOperationStableFieldsMatch(existing, input);
+          const bindingChanged = existing.providerBindingHash !== input.providerBindingHash;
+          const artifactChanged = existing.expectedArtifactId !== input.expectedArtifactId;
+          if (!bindingChanged && !artifactChanged) {
+            return { operation: existing, created: false };
+          }
+          if (existing.status !== "prepared" || !bindingChanged || !artifactChanged) {
+            throw new Error("Image generation retry does not match the reserved operation");
+          }
+          const [row] = await tx
+            .update(schema.imageGenerationOperations)
+            .set({
+              providerBindingHash: input.providerBindingHash,
+              expectedArtifactId: input.expectedArtifactId,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.imageGenerationOperations.id, existing.id),
+                eq(schema.imageGenerationOperations.status, "prepared"),
+              ),
+            )
+            .returning();
+          if (!row) throw new Error("Failed to rebind prepared image generation operation");
+          return { operation: mapImageGenerationOperation(row), created: false };
         }
         const [row] = await tx
           .insert(schema.imageGenerationOperations)
@@ -154,11 +177,19 @@ export async function beginImageGenerationOperation(
     workspaceId: string;
     operationId: string;
     operationKey: string;
+    providerBindingHash: string;
+    expectedArtifactId: string;
   },
 ): Promise<{ operation: ImageGenerationOperation; started: boolean }> {
   let started = false;
   const operation = await mutateImageGenerationOperation(db, input, async (tx, current) => {
     if (current.status !== "prepared") return current;
+    if (
+      current.providerBindingHash !== input.providerBindingHash ||
+      current.expectedArtifactId !== input.expectedArtifactId
+    ) {
+      throw new Error("Image generation operation binding changed before provider dispatch");
+    }
     const now = new Date();
     const [row] = await tx
       .update(schema.imageGenerationOperations)
@@ -752,7 +783,7 @@ function mapImageGenerationOperation(
   };
 }
 
-function assertImageGenerationOperationMatches(
+function assertImageGenerationOperationStableFieldsMatch(
   operation: ImageGenerationOperation,
   input: PrepareImageGenerationOperationInput,
 ): void {
@@ -765,10 +796,8 @@ function assertImageGenerationOperationMatches(
     operation.operationKey !== input.operationKey ||
     operation.toolCallId !== input.toolCallId ||
     operation.providerId !== input.providerId ||
-    operation.providerBindingHash !== input.providerBindingHash ||
     operation.modelId !== input.modelId ||
-    operation.requestDigest !== input.requestDigest ||
-    operation.expectedArtifactId !== input.expectedArtifactId
+    operation.requestDigest !== input.requestDigest
   ) {
     throw new Error("Image generation retry does not match the reserved operation");
   }

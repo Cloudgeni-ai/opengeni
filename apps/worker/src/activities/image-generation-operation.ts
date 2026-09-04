@@ -143,6 +143,8 @@ export async function executeImageGenerationOperation(
     workspaceId: input.workspaceId,
     operationId: identity.operationId,
     operationKey: identity.operationKey,
+    providerBindingHash: input.providerBindingHash,
+    expectedArtifactId: identity.artifactId,
   });
   if (!begun.started || begun.operation.status !== "provider_started") {
     const recovered = await ports.recover(input, {
