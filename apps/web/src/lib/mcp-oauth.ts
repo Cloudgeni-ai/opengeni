@@ -1,4 +1,4 @@
-import type { OAuthStartRequest, OAuthStartResponse } from "@/types";
+import type { ConnectionOwnership, OAuthStartRequest, OAuthStartResponse } from "@/types";
 
 export const MCP_OAUTH_START_TIMEOUT_MS = 20_000;
 
@@ -17,6 +17,50 @@ type OAuthStartClient = {
     options?: { signal?: AbortSignal },
   ) => Promise<OAuthStartResponse>;
 };
+
+/** Client mirror of the API's canonical provider-domain comparison. */
+export function normalizeProviderDomain(domain: string): string {
+  return domain
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "");
+}
+
+/** Generic per-subject OAuth binding; never persist the returned personal row id. */
+export function subjectOAuthConnectionRef(providerDomain: string): {
+  providerDomain: string;
+  kind: "oauth2";
+  subjectScope: "subject";
+} {
+  return { providerDomain, kind: "oauth2", subjectScope: "subject" };
+}
+
+/** Build the capability binding that matches the OAuth row's explicit ownership. */
+export function oauthConnectionRef(
+  ownership: ConnectionOwnership,
+  connectionId: string,
+  providerDomain: string,
+):
+  | ReturnType<typeof subjectOAuthConnectionRef>
+  | {
+      connectionId: string;
+      providerDomain: string;
+      kind: "oauth2";
+      subjectScope: "workspace";
+    } {
+  return ownership === "personal"
+    ? subjectOAuthConnectionRef(providerDomain)
+    : {
+        connectionId,
+        providerDomain,
+        kind: "oauth2",
+        subjectScope: "workspace",
+      };
+}
+
+export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
+  return value === "workspace" || value === "personal" ? value : null;
+}
 
 /**
  * Bound the pre-redirect MCP OAuth request. Browser fetch can otherwise remain

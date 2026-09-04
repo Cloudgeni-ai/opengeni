@@ -1,4 +1,10 @@
 import type { IntegrationChip } from "@/components/capabilities/integration-view-model";
+import {
+  normalizeProviderDomain,
+  oauthConnectionOwnership,
+  oauthConnectionRef,
+  subjectOAuthConnectionRef,
+} from "@/lib/mcp-oauth";
 import type {
   CapabilityCatalogItem,
   CapabilityKind,
@@ -8,6 +14,13 @@ import type {
   CreateCapabilityInput,
   SocialConnection,
 } from "@/types";
+
+export {
+  normalizeProviderDomain,
+  oauthConnectionOwnership,
+  oauthConnectionRef,
+  subjectOAuthConnectionRef,
+};
 
 export type CapabilityFilter = "all" | CapabilityKind;
 
@@ -774,19 +787,6 @@ export function registryResultsForQuery(
 }
 
 /**
- * Client mirror of the API's `canonicalProviderDomain` (apps/api oauth-client):
- * trim, lowercase, strip a single leading "www.". Used only to match/dedup rows
- * client-side — connectionRefs sent to the API are always built from the
- * connection row the API returns, never from a domain the client canonicalized.
- */
-export function normalizeProviderDomain(domain: string): string {
-  return domain
-    .trim()
-    .toLowerCase()
-    .replace(/^www\./, "");
-}
-
-/**
  * What to do when an OAuth round-trip returns, once the item has been resolved
  * from a FRESH catalog fetch (a just-created registry item may be absent from
  * the pre-redirect snapshot). Pure so the decision is unit-testable:
@@ -813,38 +813,6 @@ export function oauthResumeAction(
   return "enable";
 }
 
-/** Generic per-subject OAuth binding; never persist the returned personal row id. */
-export function subjectOAuthConnectionRef(providerDomain: string): {
-  providerDomain: string;
-  kind: "oauth2";
-  subjectScope: "subject";
-} {
-  return { providerDomain, kind: "oauth2", subjectScope: "subject" };
-}
-
-/** Build the capability binding that matches the OAuth row's explicit ownership. */
-export function oauthConnectionRef(
-  ownership: ConnectionOwnership,
-  connectionId: string,
-  providerDomain: string,
-):
-  | ReturnType<typeof subjectOAuthConnectionRef>
-  | {
-      connectionId: string;
-      providerDomain: string;
-      kind: "oauth2";
-      subjectScope: "workspace";
-    } {
-  return ownership === "personal"
-    ? subjectOAuthConnectionRef(providerDomain)
-    : {
-        connectionId,
-        providerDomain,
-        kind: "oauth2",
-        subjectScope: "workspace",
-      };
-}
-
 export function apiKeyConnectionRef(
   ownership: ConnectionOwnership,
   connectionId: string,
@@ -865,10 +833,6 @@ export function apiKeyConnectionRef(
         kind: "api_key",
         subjectScope: "workspace",
       };
-}
-
-export function oauthConnectionOwnership(value: string | null): ConnectionOwnership | null {
-  return value === "workspace" || value === "personal" ? value : null;
 }
 
 /** First one or two initials for the logo monogram fallback. */

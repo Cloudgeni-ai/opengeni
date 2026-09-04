@@ -85,8 +85,8 @@ import {
   normalizeProviderDomain,
   oauthConnectionOwnership,
   oauthConnectionRef,
-} from "@/lib/capabilities";
-import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
+  startMcpOAuthWithTimeout,
+} from "@/lib/mcp-oauth";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
