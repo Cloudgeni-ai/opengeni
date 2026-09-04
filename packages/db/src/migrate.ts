@@ -119,7 +119,7 @@ export function parseConcurrentIndexMigration(
   };
 }
 
-function parseBatchedBackfillMigration(
+export function parseBatchedBackfillMigration(
   file: string,
   sqlText: string,
 ): { batchSize: number; lockTimeout: string; statementTimeout: string; statement: string } | null {

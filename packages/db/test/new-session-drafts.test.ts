@@ -27,11 +27,16 @@ import {
   seedNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "../src/index";
+import { parseBatchedBackfillMigration } from "../src/migrate";
 import * as schema from "../src/schema";
 
-const projectProvenanceMigration = await Bun.file(
-  new URL("../drizzle/0404_new_session_draft_project_provenance.sql", import.meta.url),
-).text();
+const projectProvenanceBackfill = parseBatchedBackfillMigration(
+  "0406_new_session_draft_project_provenance_backfill.sql",
+  await Bun.file(
+    new URL("../drizzle/0406_new_session_draft_project_provenance_backfill.sql", import.meta.url),
+  ).text(),
+);
+if (!projectProvenanceBackfill) throw new Error("project provenance backfill is not governed");
 
 // Exact pre-0404 table shape. Using a separate Drizzle table object proves an
 // old binary neither selects nor writes the additive provenance columns.
@@ -175,7 +180,7 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
-  test("0404 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
+  test("0406 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
     const context = await fixture();
     const projectId = crypto.randomUUID();
     const compute = {
@@ -185,7 +190,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     };
     const saved = await saveDraft(context, 0);
 
-    await shared.admin`alter table new_session_drafts disable trigger new_session_drafts_strip_project_provenance`;
+    await shared.admin`alter table new_session_drafts disable trigger new_session_drafts_project_provenance_v1_fence`;
     try {
       await shared.admin`
         update new_session_drafts
@@ -200,11 +205,11 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
           selected_project_compute_snapshot = null
         where id = ${saved.id}`;
     } finally {
-      await shared.admin`alter table new_session_drafts enable trigger new_session_drafts_strip_project_provenance`;
+      await shared.admin`alter table new_session_drafts enable trigger new_session_drafts_project_provenance_v1_fence`;
     }
 
     await shared.admin.begin(async (tx) => {
-      await tx.unsafe(projectProvenanceMigration);
+      await tx.unsafe(projectProvenanceBackfill.statement);
     });
 
     const migrated = await readDraft(context.grant.workspaceId!, context.subjectId);
@@ -387,9 +392,9 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     );
     expect(afterOldComputeChange).toMatchObject({
       selectedProjectChannelId: projectId,
-      selectedProjectComputeSnapshot: compute,
+      selectedProjectComputeSnapshot: changedCompute,
     });
-    expect(newSessionDraftSelectedProjectChannelId(afterOldComputeChange!)).toBeUndefined();
+    expect(newSessionDraftSelectedProjectChannelId(afterOldComputeChange!)).toBe(projectId);
     const oldExactCreateOptions = { ...afterOldComputeChange!.sessionOptions };
     delete oldExactCreateOptions.toolsProvided;
     delete oldExactCreateOptions.selectionHistory;
