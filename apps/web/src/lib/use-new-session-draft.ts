@@ -92,6 +92,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   restoreReadyFilesRef.current = options.restoreReadyFiles;
   const draftRef = useRef<NewSessionDraft | null>(null);
   const lastSavedSignature = useRef<string | null>(null);
+  const pendingHydratedBaselineGeneration = useRef<number | null>(null);
   const targetGeneration = useRef(0);
   const persistenceEpoch = useRef(0);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
@@ -206,6 +207,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       // Otherwise a read-only reload schedules an immediate write solely
       // because the two equivalent representations serialize differently.
       lastSavedSignature.current = draftSignature(remote.editable);
+      pendingHydratedBaselineGeneration.current = targetGeneration.current;
       setDraft(remote.draft);
       setCurrentConflict(null);
       setError(null);
@@ -252,6 +254,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     persistenceEpoch.current += 1;
     draftRef.current = null;
     lastSavedSignature.current = null;
+    pendingHydratedBaselineGeneration.current = null;
     saveChain.current = Promise.resolve();
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
     autosaveTimer.current = null;
@@ -331,6 +334,20 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
   const valueSignature = draftSignature(options.value);
   useEffect(() => {
+    if (
+      !loading &&
+      draftRef.current &&
+      pendingHydratedBaselineGeneration.current === targetGeneration.current
+    ) {
+      // Route hydration may deliberately project the durable row through newer
+      // route intent (Recents/Default/named project) and therefore change its
+      // compute/provenance representation. The first complete controlled value
+      // after onApplyRemote is the acknowledged baseline. A later user or route
+      // edit still gets the ordinary debounce/OCC path.
+      pendingHydratedBaselineGeneration.current = null;
+      lastSavedSignature.current = valueSignature;
+      return;
+    }
     if (
       loading ||
       !draftRef.current ||

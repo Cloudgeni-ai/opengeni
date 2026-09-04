@@ -7399,6 +7399,14 @@ export const newSessionDrafts = pgTable(
     reasoningEffort: text("reasoning_effort").notNull(),
     latencyMode: text("latency_mode").notNull().default("standard"),
     sessionOptions: jsonb("session_options").$type<Record<string, unknown>>().notNull().default({}),
+    // Project provenance is schema-owned so rolling old Drizzle binaries do
+    // not select or overwrite it while updating the public draft columns.
+    // A null snapshot means absent/unknown; a non-null snapshot plus a null
+    // channel means explicit Default provenance.
+    selectedProjectChannelId: uuid("selected_project_channel_id"),
+    selectedProjectComputeSnapshot: jsonb("selected_project_compute_snapshot").$type<
+      Record<string, unknown>
+    >(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -7420,6 +7428,10 @@ export const newSessionDrafts = pgTable(
     latencyModeValid: check(
       "new_session_drafts_latency_mode_check",
       sql`${table.latencyMode} in ('standard', 'priority', 'fast')`,
+    ),
+    projectProvenanceValid: check(
+      "new_session_drafts_project_provenance_check",
+      sql`(${table.selectedProjectComputeSnapshot} is null and ${table.selectedProjectChannelId} is null) or jsonb_typeof(${table.selectedProjectComputeSnapshot}) = 'object'`,
     ),
   }),
 );

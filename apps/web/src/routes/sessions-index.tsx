@@ -155,7 +155,10 @@ import {
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
 import {
+  hydratedNewSessionProjectProvenancePresent,
+  initialNewSessionProjectLaunchIntent,
   newSessionProjectSelection,
+  nextNewSessionProjectLaunchIntent,
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "@/routes/sessions-index-hydration";
@@ -227,7 +230,8 @@ function SessionsIndexRouteContent({
     launchChannelId !== undefined,
   );
   const remoteDraftHydratedRef = useRef(false);
-  const previousLaunchChannelIdRef = useRef<string | null | undefined>(undefined);
+  const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);
+  const launchProjectIntentRef = useRef(initialNewSessionProjectLaunchIntent(launchChannelId));
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -596,6 +600,11 @@ function SessionsIndexRouteContent({
   useEffect(() => {
     const previousLaunchChannelId = previousLaunchChannelIdRef.current;
     previousLaunchChannelIdRef.current = launchChannelId;
+    launchProjectIntentRef.current = nextNewSessionProjectLaunchIntent(
+      launchProjectIntentRef.current,
+      previousLaunchChannelId,
+      launchChannelId,
+    );
     const channelId = resolveAmbientNewSessionProjectChannelId({
       launchChannelId,
       previousLaunchChannelId,
@@ -737,7 +746,7 @@ function SessionsIndexRouteContent({
         defaultSandboxBackend,
       );
       const projectSelection = resolveHydratedNewSessionProjectSelection({
-        launchChannelId,
+        launchIntent: launchProjectIntentRef.current,
         remote,
         history,
         restoredCompute: restored.compute,
@@ -749,7 +758,7 @@ function SessionsIndexRouteContent({
       remoteDraftHydratedRef.current = true;
       setSelectionHistory(history);
       setProjectProvenancePresent(
-        launchChannelId !== undefined || Object.hasOwn(remote, "selectedProjectChannelId"),
+        hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote),
       );
       setSelectedProjectChannelId(projectSelection.channelId);
       setDraft({ ...restored, compute: projectSelection.compute });
@@ -783,7 +792,6 @@ function SessionsIndexRouteContent({
       githubRepos,
       defaultFirstPartyMcpTools,
       defaultSandboxBackend,
-      launchChannelId,
       setSelectedProjectChannelId,
       workspaceDefaultToolIdsForHydration,
     ],

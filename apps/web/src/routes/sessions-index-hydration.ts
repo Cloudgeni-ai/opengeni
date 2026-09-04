@@ -7,6 +7,30 @@ type PersistedProjectProvenance = {
   selectedProjectChannelId?: string | null | undefined;
 };
 
+export type NewSessionProjectLaunchIntent =
+  | { generation: number; kind: "initial_omitted" }
+  | { generation: number; kind: "explicit"; channelId: string | null }
+  | { generation: number; kind: "omitted_after_explicit" };
+
+export function initialNewSessionProjectLaunchIntent(
+  launchChannelId: string | null | undefined,
+): NewSessionProjectLaunchIntent {
+  return launchChannelId === undefined
+    ? { generation: 0, kind: "initial_omitted" }
+    : { generation: 0, kind: "explicit", channelId: launchChannelId };
+}
+
+export function nextNewSessionProjectLaunchIntent(
+  current: NewSessionProjectLaunchIntent,
+  previousLaunchChannelId: string | null | undefined,
+  launchChannelId: string | null | undefined,
+): NewSessionProjectLaunchIntent {
+  if (previousLaunchChannelId === launchChannelId) return current;
+  return launchChannelId === undefined
+    ? { generation: current.generation + 1, kind: "omitted_after_explicit" }
+    : { generation: current.generation + 1, kind: "explicit", channelId: launchChannelId };
+}
+
 /**
  * Resolve the route's ambient project-selection effect. Undefined means the
  * effect must not mutate an authority already installed by remote hydration;
@@ -49,7 +73,7 @@ export function newSessionProjectSelection(
 }
 
 export function resolveHydratedNewSessionProjectSelection(input: {
-  launchChannelId: string | null | undefined;
+  launchIntent: NewSessionProjectLaunchIntent;
   remote: PersistedProjectProvenance;
   history: NewSessionSelectionHistory;
   restoredCompute: ComputeTarget;
@@ -59,7 +83,11 @@ export function resolveHydratedNewSessionProjectSelection(input: {
     ? (input.remote.selectedProjectChannelId ?? null)
     : (input.history.projects[0]?.channelId ?? null);
   const channelId =
-    input.launchChannelId !== undefined ? input.launchChannelId : persistedOrRecentChannelId;
+    input.launchIntent.kind === "explicit"
+      ? input.launchIntent.channelId
+      : input.launchIntent.kind === "omitted_after_explicit"
+        ? (input.history.projects[0]?.channelId ?? null)
+        : persistedOrRecentChannelId;
 
   return newSessionProjectSelection(
     input.history,
@@ -70,4 +98,13 @@ export function resolveHydratedNewSessionProjectSelection(input: {
     },
     input.defaultSandboxBackend,
   );
+}
+
+export function hydratedNewSessionProjectProvenancePresent(
+  launchIntent: NewSessionProjectLaunchIntent,
+  remote: PersistedProjectProvenance,
+): boolean {
+  if (launchIntent.kind === "explicit") return true;
+  if (launchIntent.kind === "omitted_after_explicit") return false;
+  return Object.hasOwn(remote, "selectedProjectChannelId");
 }

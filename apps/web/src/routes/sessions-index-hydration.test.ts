@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  initialNewSessionProjectLaunchIntent,
   newSessionProjectSelection,
+  nextNewSessionProjectLaunchIntent,
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "./sessions-index-hydration";
@@ -36,7 +38,7 @@ const restoredProjectBCompute = {
 describe("sessions-index project hydration", () => {
   test("newer same-project draft compute wins over stale selection history", () => {
     const hydrated = resolveHydratedNewSessionProjectSelection({
-      launchChannelId: undefined,
+      launchIntent: initialNewSessionProjectLaunchIntent(undefined),
       remote: { selectedProjectChannelId: PROJECT_A },
       history: staleProjectAHistory,
       restoredCompute: restoredProjectBCompute,
@@ -57,7 +59,7 @@ describe("sessions-index project hydration", () => {
   test("explicit persisted Default provenance does not fall back to Recents", () => {
     expect(
       resolveHydratedNewSessionProjectSelection({
-        launchChannelId: undefined,
+        launchIntent: initialNewSessionProjectLaunchIntent(undefined),
         remote: { selectedProjectChannelId: null },
         history: staleProjectAHistory,
         restoredCompute: restoredProjectBCompute,
@@ -68,7 +70,7 @@ describe("sessions-index project hydration", () => {
   test("legacy drafts without provenance fall back to Recents", () => {
     expect(
       resolveHydratedNewSessionProjectSelection({
-        launchChannelId: undefined,
+        launchIntent: initialNewSessionProjectLaunchIntent(undefined),
         remote: {},
         history: staleProjectAHistory,
         restoredCompute: restoredProjectBCompute,
@@ -86,7 +88,7 @@ describe("sessions-index project hydration", () => {
   test("explicit launch intent wins over persisted provenance", () => {
     expect(
       resolveHydratedNewSessionProjectSelection({
-        launchChannelId: PROJECT_C,
+        launchIntent: initialNewSessionProjectLaunchIntent(PROJECT_C),
         remote: { selectedProjectChannelId: PROJECT_B },
         history: staleProjectAHistory,
         restoredCompute: restoredProjectBCompute,
@@ -96,6 +98,34 @@ describe("sessions-index project hydration", () => {
       compute: { kind: "sandbox", backend: "" },
     });
   });
+
+  test.each([
+    ["named", PROJECT_C],
+    ["Default", null],
+  ] as const)(
+    "a deferred %s-to-omitted transition keeps the newer Recents intent during hydration",
+    (_label, explicitChannelId) => {
+      const initial = initialNewSessionProjectLaunchIntent(explicitChannelId);
+      const newest = nextNewSessionProjectLaunchIntent(initial, explicitChannelId, undefined);
+
+      expect(newest).toEqual({ generation: 1, kind: "omitted_after_explicit" });
+      expect(
+        resolveHydratedNewSessionProjectSelection({
+          launchIntent: newest,
+          remote: { selectedProjectChannelId: PROJECT_B },
+          history: staleProjectAHistory,
+          restoredCompute: restoredProjectBCompute,
+        }),
+      ).toEqual({
+        channelId: PROJECT_A,
+        compute: {
+          kind: "machine",
+          sandboxId: MACHINE_A,
+          folder: { kind: "path", path: "/workspace/project-a" },
+        },
+      });
+    },
+  );
 
   test("ambient Recents applies before hydration without overwriting hydrated selection history", () => {
     expect(

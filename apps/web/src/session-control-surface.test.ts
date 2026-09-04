@@ -145,8 +145,10 @@ describe("session control surface architecture", () => {
     expect(selection).not.toContain("const selectProject = useCallback(");
     expect(selection).not.toContain("[defaultSandboxBackend, selectedChannelId, selectionHistory]");
     expect(route).toContain(
-      "const previousLaunchChannelIdRef = useRef<string | null | undefined>(undefined);",
+      "const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);",
     );
+    expect(route).toContain("const launchProjectIntentRef = useRef(");
+    expect(route).toContain("nextNewSessionProjectLaunchIntent(");
     expect(route).toContain("previousLaunchChannelIdRef.current = launchChannelId;");
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
@@ -159,7 +161,7 @@ describe("session control surface architecture", () => {
       "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
     );
     expect(route).toContain(
-      'launchChannelId !== undefined || Object.hasOwn(remote, "selectedProjectChannelId")',
+      "hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote)",
     );
     expect(route).toContain("resolveHydratedNewSessionProjectSelection({");
     expect(route).toContain("remote,");

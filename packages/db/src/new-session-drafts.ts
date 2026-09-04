@@ -64,7 +64,7 @@ type StoredNewSessionDraftOptions = NewSessionDraftOptionsValue & {
   toolsProvided?: boolean;
   /** Successful-create preference state, separate from transient draft edits. */
   selectionHistory?: NewSessionSelectionHistory;
-  /** Absent is legacy/unknown; null is explicit provenance for the Default project. */
+  /** Legacy rolling-upgrade input; migration 0404 strips this on every write. */
   selectedProjectChannelId?: string | null;
 };
 
@@ -76,14 +76,16 @@ function storedOptions(
   options: NewSessionDraftOptionsValue,
   toolsProvided: boolean,
   selectionHistory: NewSessionSelectionHistory = { projects: [] },
-  selectedProjectChannelId?: string | null,
 ): StoredNewSessionDraftOptions {
-  return {
+  const stored = {
     ...options,
     toolsProvided,
     selectionHistory,
-    ...(selectedProjectChannelId !== undefined ? { selectedProjectChannelId } : {}),
   };
+  // A caller may have read a row written by the short-lived JSONB provenance
+  // implementation. Never carry that metadata back into public create options.
+  delete (stored as StoredNewSessionDraftOptions).selectedProjectChannelId;
+  return stored;
 }
 
 export function newSessionSelectionHistory(row: NewSessionDraftRow): NewSessionSelectionHistory {
@@ -135,12 +137,16 @@ export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
 export function newSessionDraftSelectedProjectChannelId(
   row: NewSessionDraftRow,
 ): string | null | undefined {
-  const options = row.sessionOptions as StoredNewSessionDraftOptions;
-  if (!Object.hasOwn(options, "selectedProjectChannelId")) return undefined;
-  if (options.selectedProjectChannelId === null) return null;
-  return typeof options.selectedProjectChannelId === "string" &&
-    PROJECT_CHANNEL_ID_PATTERN.test(options.selectedProjectChannelId)
-    ? options.selectedProjectChannelId
+  if (row.selectedProjectComputeSnapshot === null) return undefined;
+  if (
+    stableJson(row.selectedProjectComputeSnapshot) !==
+    stableJson(newSessionDraftProjectComputeSnapshot(publicNewSessionDraftOptions(row)))
+  ) {
+    return undefined;
+  }
+  if (row.selectedProjectChannelId === null) return null;
+  return PROJECT_CHANNEL_ID_PATTERN.test(row.selectedProjectChannelId)
+    ? row.selectedProjectChannelId
     : undefined;
 }
 
@@ -163,6 +169,49 @@ function projectComputeMatches(
     current.targetSandboxId === incoming.targetSandboxId &&
     current.workingDir === incoming.workingDir
   );
+}
+
+function newSessionDraftProjectComputeSnapshot(
+  options: NewSessionDraftOptionsValue,
+): Record<string, unknown> {
+  return {
+    ...(Object.hasOwn(options, "sandboxBackend") ? { sandboxBackend: options.sandboxBackend } : {}),
+    ...(Object.hasOwn(options, "targetSandboxId")
+      ? { targetSandboxId: options.targetSandboxId }
+      : {}),
+    ...(Object.hasOwn(options, "workingDir") ? { workingDir: options.workingDir } : {}),
+  };
+}
+
+function resolvedProjectProvenance(
+  current: NewSessionDraftRow | null | undefined,
+  incomingOptions: NewSessionDraftOptionsValue,
+  explicitChannelId: string | null | undefined,
+  explicit: boolean,
+): {
+  selectedProjectChannelId: string | null;
+  selectedProjectComputeSnapshot: Record<string, unknown> | null;
+} {
+  if (explicit && explicitChannelId !== undefined) {
+    return {
+      selectedProjectChannelId: explicitChannelId,
+      selectedProjectComputeSnapshot: newSessionDraftProjectComputeSnapshot(incomingOptions),
+    };
+  }
+  if (
+    current &&
+    projectComputeMatches(publicNewSessionDraftOptions(current), incomingOptions) &&
+    newSessionDraftSelectedProjectChannelId(current) !== undefined
+  ) {
+    return {
+      selectedProjectChannelId: current.selectedProjectChannelId,
+      selectedProjectComputeSnapshot: current.selectedProjectComputeSnapshot,
+    };
+  }
+  return {
+    selectedProjectChannelId: null,
+    selectedProjectComputeSnapshot: null,
+  };
 }
 
 export async function getNewSessionDraftInTransaction(
@@ -261,11 +310,12 @@ export async function saveNewSessionDraftInTransaction(
   }
 
   const revision = currentRevision + 1;
-  const selectedProjectChannelId = Object.hasOwn(input, "selectedProjectChannelId")
-    ? input.selectedProjectChannelId
-    : current && projectComputeMatches(publicNewSessionDraftOptions(current), input.options)
-      ? newSessionDraftSelectedProjectChannelId(current)
-      : undefined;
+  const projectProvenance = resolvedProjectProvenance(
+    current,
+    input.options,
+    input.selectedProjectChannelId,
+    Object.hasOwn(input, "selectedProjectChannelId"),
+  );
   const values = {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -283,8 +333,8 @@ export async function saveNewSessionDraftInTransaction(
       input.options,
       input.toolsProvided,
       current ? newSessionSelectionHistory(current) : { projects: [] },
-      selectedProjectChannelId,
     ),
+    ...projectProvenance,
     updatedAt: new Date(),
   };
   if (current) {
@@ -396,7 +446,6 @@ export async function rememberNewSessionSelectionInTransaction(
         publicNewSessionDraftOptions(current),
         newSessionDraftToolsProvided(current),
         rememberNewSessionSelection(newSessionSelectionHistory(current), input.acceptedSelection),
-        newSessionDraftSelectedProjectChannelId(current),
       ),
     })
     .where(eq(schema.newSessionDrafts.id, current.id))
@@ -548,8 +597,12 @@ export async function seedNewSessionDraftInTransaction(
               input.acceptedSelection,
             )
           : newSessionSelectionHistory(current),
-        selectedProjectChannelId,
       ),
+      selectedProjectChannelId: selectedProjectChannelId ?? null,
+      selectedProjectComputeSnapshot:
+        selectedProjectChannelId !== undefined
+          ? newSessionDraftProjectComputeSnapshot(safeOptions)
+          : null,
       updatedAt: new Date(),
     })
     .where(
