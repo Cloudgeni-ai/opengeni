@@ -700,6 +700,42 @@ setup link. Provider availability is deliberately not part of that
 configuration precondition; the durable journal records the resulting delivery
 outcome.
 
+Email links support a bounded `token` query parameter because mail security and
+click-tracking gateways may discard URL fragments, but generation remains on
+the rolling-safe `fragment` default until an operator completes the web-first
+cutover in `docs/deployment.md`. The production web handler serves the exact
+`/setup-account` shell directly with no-store/no-referrer/noindex protections;
+it emits no scheme- or Host-derived redirect, so TLS termination cannot create
+an HTTPS downgrade. HTTP servers never receive URL fragments, so the first
+executable inline script in the HTML head reads query and fragment together,
+requires one canonical base64url HMAC-SHA256 bearer, rejects cross-source or
+same-source duplicates, and scrubs both locations with `history.replaceState`
+before the favicon, module graph, API work, or durable browser storage. It then
+hands the token to the SPA once through non-enumerable process memory. Malformed
+and oversized values are removed without reflection. A deployment CSP must
+authorize this exact bootstrap with its normal nonce/hash mechanism; query
+transport must remain disabled if the bootstrap is blocked.
+
+The chosen `fragment|query` transport is frozen durably on the delivery's first
+preparation beside its bearer and payload digests. Retries reuse that transport
+even after a configuration cutover or on a differently configured API replica.
+Rolling rows prepared by an older binary have a nullable transport; the new API
+recovers it by rendering both supported forms and matching the already-frozen
+payload digest before persisting the result. It never guesses or changes the
+provider payload.
+
+The managed chart emits the dedicated setup Ingress only for configured hosts
+with a web route and disables both ingress-nginx access logs and OpenTelemetry
+tracing for that exact location. Those annotations do not alter ingress-nginx's
+controller-wide `error_log`, whose upstream failure records can include the
+full request line. Query mode therefore also requires the explicit
+`OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true` gate,
+set only after every controller and external load balancer, CDN, WAF, service
+mesh, APM/analytics system, non-NGINX ingress, and other edge has been proven not
+to retain the query URI or Referer in access, trace, or error sinks. The chart
+route alone is not sufficient. The database still stores only the bearer digest
+and the completion path remains single-use and expiry-bounded.
+
 `POST /v1/auth/organization-setup/preview` accepts the same signed-out bearer
 under the setup abuse limiter and returns only its frozen safe invitation
 projection. Pending previews include organization, invited name/email, role,

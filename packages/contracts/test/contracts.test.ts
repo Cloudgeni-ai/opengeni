@@ -54,6 +54,7 @@ import {
   OrganizationInvitation,
   RequestHumanInputToolInput,
   RepositoryResourceRef,
+  CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   TURN_EXECUTION_POLICY_METADATA_KEY,
   ResourceRef,
   SessionBusMessage,
@@ -90,11 +91,14 @@ import {
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
+  CodexCredentialPolicySnapshotV1,
+  metadataWithCodexCredentialPolicySnapshotV1,
   metadataWithTurnExecutionPolicyV1,
   mergeResourceRefs,
   normalizeRepositoryTransportUri,
   normalizeResourceMountPath,
   readTurnExecutionPolicyV1,
+  readCodexCredentialPolicySnapshotV1,
   resourceMountPath,
   resourceMountPathCollisionKey,
   sandboxShellPath,
@@ -386,6 +390,84 @@ describe("contracts", () => {
       policy: turnExecutionPolicy,
     });
     expect(metadata[TURN_EXECUTION_POLICY_METADATA_KEY]).toEqual(turnExecutionPolicy);
+  });
+
+  test("reads and merges a bounded Codex allocator policy snapshot without disturbing metadata", () => {
+    const snapshot = CodexCredentialPolicySnapshotV1.parse({
+      schemaVersion: 1,
+      activeCredentialId: "credential-active",
+      rotationEnabled: false,
+      rotationStrategy: "sharded",
+      source: "workspace",
+      pinnedCredentialId: null,
+      pinSource: null,
+      lastCredentialId: "credential-last",
+    });
+    const metadata = metadataWithCodexCredentialPolicySnapshotV1(
+      { dispatchRevision: 3, recovery: { generation: 2 } },
+      snapshot,
+    );
+
+    expect(metadata.dispatchRevision).toBe(3);
+    expect(metadata.recovery).toEqual({ generation: 2 });
+    expect(readCodexCredentialPolicySnapshotV1(metadata)).toEqual({
+      kind: "valid",
+      policy: snapshot,
+    });
+    expect(metadata[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]).toEqual(snapshot);
+  });
+
+  test("requires Codex policy pins to carry a matching pin source", () => {
+    const base = {
+      schemaVersion: 1 as const,
+      activeCredentialId: null,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+      source: "workspace" as const,
+      lastCredentialId: null,
+    };
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: null,
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(() =>
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: null,
+        pinSource: "policy",
+      }),
+    ).toThrow("pinnedCredentialId and pinSource must both be null or both be present");
+    expect(
+      CodexCredentialPolicySnapshotV1.parse({
+        ...base,
+        pinnedCredentialId: "credential-pinned",
+        pinSource: "manual",
+      }),
+    ).toMatchObject({ pinnedCredentialId: "credential-pinned", pinSource: "manual" });
+  });
+
+  test("treats only an absent Codex snapshot key as legacy and rejects malformed values", () => {
+    expect(readCodexCredentialPolicySnapshotV1(null)).toEqual({ kind: "absent" });
+    expect(readCodexCredentialPolicySnapshotV1({ dispatchRevision: 3 })).toEqual({
+      kind: "absent",
+    });
+    expect(() =>
+      readCodexCredentialPolicySnapshotV1({
+        [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: {
+          schemaVersion: 1,
+          activeCredentialId: null,
+          rotationEnabled: true,
+          rotationStrategy: "sharded",
+          pinnedCredentialId: null,
+          pinSource: null,
+          lastCredentialId: null,
+          unexpected: "reject-me",
+        },
+      }),
+    ).toThrow("Malformed Codex credential policy snapshot metadata");
   });
 
   test("treats only an absent policy key as legacy and reports malformed paths without values", () => {

@@ -32,7 +32,7 @@ import {
   useRail,
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
-import { PrimaryNav } from "@/components/rail/primary-nav";
+import { PrimaryNav, WorkspaceShortcutLinks } from "@/components/rail/primary-nav";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
   SessionSandboxSwitcher,
@@ -77,7 +77,7 @@ function RailBody() {
       {/* Brand */}
       <div
         className={cn(
-          "flex h-12 shrink-0 items-center gap-2",
+          "flex h-10 shrink-0 items-center gap-2",
           rail.collapsed ? "justify-center px-2" : "px-3",
         )}
       >
@@ -106,7 +106,7 @@ function RailBody() {
         ) : null}
       </div>
 
-      <SwitcherBlock />
+      {rail.isMobile ? null : <SwitcherBlock />}
 
       {rail.isMobile ? (
         <>
@@ -180,6 +180,10 @@ function RailBody() {
               aria-labelledby="mobile-nav-tab-workspace"
               className="mt-2 flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border pt-2"
             >
+              <SwitcherBlock />
+              <div className="my-2 border-t border-border" />
+              <WorkspaceShortcutLinks className="px-2" />
+              <div className="my-2 border-t border-border" />
               <WorkspaceNav />
               <RailFooter />
             </div>

@@ -391,6 +391,27 @@ const budgets = {
   // across 31 files. Advance only the raw whole-KiB envelope, retaining 1,778
   // bytes of headroom; gzip, file count, initial, per-file, lazy, and CSS caps
   // remain fixed.
+  // Authoritative Codex capacity status parsing and its visible wait reason,
+  // combined with current main, measure 2,279,737 raw bytes on Linux/x64 Bun
+  // 1.4. Advance only the policy-derived raw whole-KiB envelope, retaining
+  // 1,735 bytes of headroom; every compressed and unrelated cap stays fixed.
+  // The sidebar-density head and untouched current main both measure 2,279,505
+  // raw bytes in the configured-API browser acceptance build. The prior
+  // 2,226-KiB envelope was therefore a stale baseline by 81 bytes. Advance only
+  // the policy-derived raw envelope to 2,228 KiB, retaining 1,967 bytes of
+  // headroom; gzip, file count, initial, per-file, lazy, and CSS caps remain
+  // fixed.
+  // Setup-account query compatibility adds the early browser scrub/handoff and
+  // canonical query fallback required for Vite/static serving. Rebasing onto
+  // the sidebar-density main graph measures 2,281,164 raw / 637,260 gzip bytes
+  // across 30 files on Linux/x64 Bun 1.3.14. The existing raw whole-KiB
+  // envelope retains 1,332 bytes of headroom; gzip, file count, initial,
+  // per-file, lazy, and CSS caps remain fixed.
+  // Session-level waits, terminal background-command input, their two
+  // first-party capability entries, and current main measure 2,281,673 raw /
+  // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
+  // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
+  // gzip and every other cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,

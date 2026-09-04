@@ -178,8 +178,16 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#holdSessionGoalContinuationWithEvent": {
+  "packages/db/src/index.ts#waitForSessionInputWithEvent": {
     inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#settleSessionInputWaitInActivity": {
+    inserts: 2,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#backgroundCommandTerminalMutation": {
+    inserts: 3,
     contract: "canonical",
   },
   "packages/db/src/index.ts#rejectSessionGoalRevisionWithEvent": {
@@ -233,7 +241,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
@@ -385,6 +393,7 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionDispatch",
+  "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",

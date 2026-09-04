@@ -33,6 +33,8 @@ const settings = testSettings({
   productAccessMode: "managed",
   publicBaseUrl: "http://opengeni.test",
   betterAuthSecret: "managed-onboarding-test-secret-at-least-32-bytes",
+  organizationUserSetupEmailTokenTransport: "query",
+  organizationUserSetupQueryEdgeSanitizationConfirmed: true,
 });
 
 beforeAll(async () => {
@@ -67,6 +69,18 @@ describe("managed organization onboarding", () => {
     expect(first.token).not.toBe(first.digest);
     expect(first.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(first.url).toBe(
+      `http://opengeni.test/setup-account?token=${encodeURIComponent(first.token)}`,
+    );
+    const compatibilityDefault = await deriveOrganizationUserSetupToken(
+      testSettings({
+        productAccessMode: "managed",
+        publicBaseUrl: "http://opengeni.test",
+        betterAuthSecret: "managed-onboarding-test-secret-at-least-32-bytes",
+      }),
+      { invitationId, deliveryId: operationId },
+    );
+    expect(compatibilityDefault.token).toBe(first.token);
+    expect(compatibilityDefault.url).toBe(
       `http://opengeni.test/setup-account#token=${encodeURIComponent(first.token)}`,
     );
     const fingerprint = await organizationUserSetupRequestFingerprint(settings, {

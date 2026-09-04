@@ -159,7 +159,7 @@ export function sessionChromeGoalPillLabel(
 
 /**
  * One human sentence explaining WHY the goal is not pursuing right now: the
- * pause reason, the agent's own `goal_wait` hold (reason + deadline), or the
+ * pause reason, the agent's own `wait_for_input` hold (reason + deadline), or the
  * next idle-backoff check time. Null when the state needs no explanation.
  */
 export function sessionChromeGoalPillExplanation(
@@ -182,7 +182,7 @@ export function sessionChromeGoalPillExplanation(
     const until = continuation.nextAttemptAt
       ? ` until ${formatClockTime(continuation.nextAttemptAt)}`
       : "";
-    return `Waiting for input${reason ? `: ${reason}` : ""}${until}. A child result, an agent message, or your prompt wakes it sooner.`;
+    return `Waiting for input${reason ? `: ${reason}` : ""}${until}. Relevant session input—including a child result, background-command result, agent message, schedule, or your prompt—wakes it sooner.`;
   }
   return null;
 }
@@ -228,7 +228,7 @@ export function sessionChromeGoalPillState(
   // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    // `held_for_input` is the agent's own goal_wait hold (waiting for child
+    // `held_for_input` is the agent's own wait_for_input hold (waiting for child
     // results / external input until a deadline); it shares the Held pill.
     return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
       ? "held"

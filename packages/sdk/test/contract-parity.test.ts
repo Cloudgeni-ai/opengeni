@@ -118,6 +118,8 @@ import {
   SyncSessionRealtimeLedgerResponse as ContractSyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
+  SessionSystemUpdateKind as ContractSessionSystemUpdateKind,
+  SessionSystemUpdatePayload as ContractSessionSystemUpdatePayload,
   SessionTurn as ContractSessionTurn,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
@@ -271,6 +273,8 @@ import type {
   SyncSessionRealtimeLedgerResponse,
   RenewSessionRealtimeRequest,
   SessionStatus,
+  SessionSystemUpdateKind,
+  SessionSystemUpdatePayload,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
@@ -455,6 +459,25 @@ describe("SDK / contracts parity", () => {
     expect([sdkAcceptsContract, contractAcceptsSdk].every((fn) => typeof fn === "function")).toBe(
       true,
     );
+  });
+
+  test("session system-update kinds and payloads accept every contract value", () => {
+    type ContractSessionSystemUpdateKind = z.infer<typeof ContractSessionSystemUpdateKind>;
+    type ContractSessionSystemUpdatePayload = z.infer<typeof ContractSessionSystemUpdatePayload>;
+    const sdkAcceptsContractKind = (
+      value: ContractSessionSystemUpdateKind,
+    ): SessionSystemUpdateKind => value;
+    const contractAcceptsSdkKind = (
+      value: SessionSystemUpdateKind,
+    ): ContractSessionSystemUpdateKind => value;
+    const sdkAcceptsContractPayload = (
+      value: ContractSessionSystemUpdatePayload,
+    ): SessionSystemUpdatePayload => value;
+    expect(
+      [sdkAcceptsContractKind, contractAcceptsSdkKind, sdkAcceptsContractPayload].every(
+        (fn) => typeof fn === "function",
+      ),
+    ).toBe(true);
   });
 
   test("Codex realtime V3 wire shapes and voices match", () => {

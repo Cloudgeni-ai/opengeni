@@ -781,6 +781,20 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "codex.capacity.waiting": {
+        items.push({
+          kind: "notice",
+          id: event.id,
+          tone: "waiting",
+          text:
+            stringValue(payload.detail) ??
+            stringValue(payload.error) ??
+            "Waiting for Codex capacity.",
+          occurredAt: event.occurredAt,
+        });
+        break;
+      }
+
       case "session.requiresAction": {
         finalizeOpen(turnId, "complete", event.occurredAt);
         items.push({
@@ -1953,6 +1967,8 @@ const SESSION_STATUSES: readonly SessionStatus[] = [
   "running",
   "idle",
   "requires_action",
+  "recovering",
+  "waiting_capacity",
   "failed",
   "cancelled",
 ];

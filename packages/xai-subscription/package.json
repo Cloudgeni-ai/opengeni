@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/xai-subscription",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "SuperGrok/xAI connected-subscription auth and transport. Pure HTTP, request context, quota/model metadata, and media helpers; no database dependency.",
   "license": "Apache-2.0",
   "repository": {

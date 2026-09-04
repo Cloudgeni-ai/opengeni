@@ -1,5 +1,26 @@
 # @opengeni/config
 
+## 1.0.0
+
+### Major Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+  - @opengeni/contracts@2.13.0
+  - @opengeni/codex@0.2.21
+  - @opengeni/xai-subscription@0.1.3
+
+## 0.23.3
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+
 ## 0.23.2
 
 ### Patch Changes

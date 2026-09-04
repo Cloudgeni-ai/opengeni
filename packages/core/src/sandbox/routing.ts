@@ -29,7 +29,6 @@ import {
   type SandboxRetainedProcess,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
-import { settleSessionBackgroundCommandForRetainedProcess } from "@opengeni/db/session-background-commands";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import {
   isProviderSandboxGoneDuringRoutedOperation,
@@ -449,14 +448,11 @@ export function wrapChannelABoxWithRouting(
           reason: proof.reason,
           idleGraceMs: settings.sandboxIdleGraceMs,
         });
-        const backgroundSettlement = retainedProcessBackgroundSettlement(settlement.process, proof);
-        await settleSessionBackgroundCommandForRetainedProcess(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          retainedProcessId: process.id,
-          ...backgroundSettlement,
-        });
+        if (settlement.backgroundCommandEvents.length > 0 && bus) {
+          await bus
+            .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
+            .catch(() => undefined);
+        }
       }
     : undefined;
   const resolver = makeActiveBackendResolver({
@@ -520,6 +516,7 @@ export function wrapChannelABoxWithRouting(
   });
 
   const proxy = new RoutingSandboxSession({
+    bindActiveRouteOnFirstResolve: true,
     defaultResolved: {
       session: established.session as RoutableBackendSession,
       sandboxId: null,

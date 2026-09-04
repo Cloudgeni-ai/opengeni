@@ -40,10 +40,6 @@ type PackageManifest = {
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const keepArtifacts = process.env.OPENGENI_KEEP_PUBLISH_CONSUMER === "1";
-// Vite 8.2 accepts this release, while postcss 8.5.27 ships an invalid
-// declaration that references NodeProps without importing it. Keep this
-// external-consumer proof deterministic without weakening skipLibCheck.
-const cleanConsumerPostcssVersion = "8.5.26";
 
 async function run(command: string[], cwd: string, capture = false): Promise<string> {
   const child = Bun.spawn({
@@ -491,6 +487,12 @@ try {
   const reactSource = JSON.parse(
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
+  // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
+  // importing it. Pin the version @opengeni/react already typechecks.
+  const postcssVersion = reactSource.devDependencies?.postcss;
+  if (typeof postcssVersion !== "string" || !/^\d+\.\d+\.\d+$/u.test(postcssVersion)) {
+    throw new Error("React package must pin an exact PostCSS version for clean consumers");
+  }
 
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
@@ -534,7 +536,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
-      postcss: cleanConsumerPostcssVersion,
+      postcss: postcssVersion,
     },
   };
 
@@ -943,7 +945,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      postcss: cleanConsumerPostcssVersion,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1019,7 +1021,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      postcss: cleanConsumerPostcssVersion,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1083,7 +1085,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
-      postcss: cleanConsumerPostcssVersion,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([

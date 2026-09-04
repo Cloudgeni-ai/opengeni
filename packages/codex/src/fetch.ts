@@ -752,6 +752,7 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         deferTransportTerminal: !callerWantsStream,
       };
       try {
+        await ctx.beforeProviderDispatch?.();
         res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
         const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {

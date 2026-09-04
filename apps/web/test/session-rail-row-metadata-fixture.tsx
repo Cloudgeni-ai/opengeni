@@ -1,6 +1,10 @@
 import { createRoot } from "react-dom/client";
 
-import { SessionRowContent } from "../src/components/rail/session-row-content";
+import {
+  SessionRowContent,
+  SessionRowHoverDetails,
+} from "../src/components/rail/session-row-content";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../src/components/ui/hover-card";
 import { cn } from "../src/lib/utils";
 import "../src/styles.css";
 
@@ -47,23 +51,45 @@ function SessionRailRowMetadataFixture() {
                 className="flex w-4 shrink-0 items-center"
                 style={scenario.depth > 0 ? { marginLeft: scenario.depth * 12 } : undefined}
               />
-              <a
-                href={`#${scenario.id}`}
-                aria-current={scenario.active ? "page" : undefined}
-                aria-label={`Open ${longTitle}. Idle`}
-                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
-              >
-                <SessionRowContent
-                  title={longTitle}
-                  stateLabel="Idle"
-                  depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
-                  descendantLabel={null}
-                  mobile={false}
-                  summary={scenario.summary}
-                  scheduled={"scheduled" in scenario ? scenario.scheduled : false}
-                  relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
-                />
-              </a>
+              <HoverCard openDelay={100} closeDelay={80}>
+                <HoverCardTrigger asChild>
+                  <a
+                    href={`#${scenario.id}`}
+                    aria-current={scenario.active ? "page" : undefined}
+                    aria-label={`Open ${longTitle}. Idle`}
+                    className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
+                  >
+                    <SessionRowContent
+                      title={longTitle}
+                      stateLabel="Idle"
+                      depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
+                      descendantLabel={null}
+                      mobile={false}
+                      summary={scenario.summary}
+                      scheduled={"scheduled" in scenario ? scenario.scheduled : false}
+                      relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
+                      creator={{
+                        kind: "subject",
+                        subjectId: "user:bendik",
+                        label: "Bendik Nyheim",
+                      }}
+                    />
+                  </a>
+                </HoverCardTrigger>
+                <HoverCardContent side="right" collisionPadding={8}>
+                  <SessionRowHoverDetails
+                    title={longTitle}
+                    createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
+                    createdBy={{
+                      kind: "subject",
+                      subjectId: "user:bendik",
+                      label: "Bendik Nyheim",
+                    }}
+                    descendantCount={3}
+                    descendantCountTruncated={false}
+                  />
+                </HoverCardContent>
+              </HoverCard>
             </div>
           ))}
         </div>

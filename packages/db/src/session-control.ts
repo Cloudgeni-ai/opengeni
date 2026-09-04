@@ -244,11 +244,11 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
   },
 ): Promise<void> {
-  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
-    throw new SessionControlInvariantError("An agent goal command must target its own session");
+  if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
   // Reusing the event-write helper here keeps cross-session actor authority on
@@ -1855,13 +1855,13 @@ async function findCommandReceipt(
     targetSessionId: string | null;
     targetTurnId: string | null;
     operationKey: string;
-    identityScope: "actor" | "goal_operation";
+    identityScope: "actor" | "target_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const identity =
-    input.identityScope === "goal_operation"
+    input.identityScope === "target_operation"
       ? and(
           eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
           eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
@@ -2063,21 +2063,21 @@ export async function reserveSessionCommandReceipt(
     targetTurnId: string | null;
     operationKey: string;
     canonicalRequestHash: string;
-    identityScope?: "actor" | "goal_operation";
+    identityScope?: "actor" | "target_operation";
     initialResult?: Record<string, unknown>;
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const identityScope = input.identityScope ?? "actor";
   if (
-    identityScope === "goal_operation" &&
+    identityScope === "target_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      !["goal.update", "goal.progress", "goal.wait"].includes(input.action) ||
+      !["goal.update", "goal.progress", "session.wait_for_input"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
     throw new SessionControlInvariantError(
-      "Target-scoped receipt identity is reserved for agent goal commands",
+      "Target-scoped receipt identity is reserved for agent self commands",
     );
   }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;

@@ -203,6 +203,41 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
+  test("projects allocator-disabled policy waits without exposing credential identity", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      actualOutcome: "waiting",
+      actualCandidateKey: null,
+      actualReason: "allocator_disabled",
+    });
+    expect(JSON.stringify(item)).not.toContain("credential-secret");
+  });
+
+  test("projects authoritative allocator-disabled waits without the shadow feature", () => {
+    reset();
+    const [item] = buildTimeline([
+      event("codex.capacity.waiting", {
+        code: "codex_allocator_disabled",
+        detail: "waiting for a credential policy mutation",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "waiting for a credential policy mutation",
+    });
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [
@@ -2314,20 +2349,19 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
   });
 
-  test("agent goal.held is suppressed like the other agent goal tool events", () => {
+  test("agent session.wait.started is suppressed beside the wait tool", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
         event("agent.toolCall.created", {
           id: "call-wait",
-          name: "opengeni__goal_wait",
-          arguments: { reason: "two children still running", untilSeconds: 900 },
+          name: "opengeni__wait_for_input",
+          arguments: { reason: "two children still running", timeoutSeconds: 900 },
         }),
         event("agent.toolCall.output", { id: "call-wait", output: "ok" }),
-        event("goal.held", {
-          goalId: "goal-1",
-          turnId: "turn-1",
-          untilAt: "2026-01-01T00:15:00.000Z",
+        event("session.wait.started", {
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-09-03T23:15:00.000Z",
           reason: "two children still running",
           actor: "agent",
         }),
@@ -2340,7 +2374,7 @@ describe("buildTimeline", () => {
       activities[0]!.items
         .filter((item): item is ToolCallItem => item.kind === "tool-call")
         .map((item) => item.name),
-    ).toEqual(["opengeni__goal_wait"]);
+    ).toEqual(["opengeni__wait_for_input"]);
   });
 
   test("non-agent goal.held renders a held landmark with its reason", () => {
@@ -2748,11 +2782,11 @@ describe("groupTimeline", () => {
       }),
       event("agent.toolCall.created", {
         id: "call-2",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      event("goal.held", { actor: "agent", reason: "child still running" }),
-      event("agent.toolCall.output", { id: "call-2", output: { status: "held" } }),
+      event("session.wait.started", { actor: "agent", reason: "child still running" }),
+      event("agent.toolCall.output", { id: "call-2", output: { status: "waiting_for_input" } }),
       event("turn.completed", {}),
     ];
     const items = buildTimeline(events);
@@ -2826,12 +2860,12 @@ describe("groupTimeline", () => {
         ),
         event(
           "agent.toolCall.created",
-          { id: "wait-1", name: "goal_wait", arguments: { untilSeconds: 900 } },
+          { id: "wait-1", name: "wait_for_input", arguments: { timeoutSeconds: 900 } },
           { turnId: "turn-held" },
         ),
         event(
           "agent.toolCall.output",
-          { id: "wait-1", output: { status: "held" } },
+          { id: "wait-1", output: { status: "waiting_for_input" } },
           { turnId: "turn-held" },
         ),
         event("turn.completed", {}, { turnId: "turn-held" }),
@@ -3247,6 +3281,19 @@ describe("sessionStatusFromEvents", () => {
     ];
     expect(sessionStatusFromEvents(events)).toBe("idle");
     expect(sessionStatusFromEvents([event("user.message", { text: "x" })])).toBeNull();
+  });
+
+  test("accepts durable capacity wait and recovery statuses", () => {
+    reset();
+    expect(
+      sessionStatusFromEvents([event("session.status.changed", { status: "waiting_capacity" })]),
+    ).toBe("waiting_capacity");
+    expect(
+      sessionStatusFromEvents([
+        event("session.status.changed", { status: "waiting_capacity" }),
+        event("session.status.changed", { status: "recovering" }),
+      ]),
+    ).toBe("recovering");
   });
 });
 

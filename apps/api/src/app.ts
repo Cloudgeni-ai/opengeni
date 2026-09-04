@@ -96,7 +96,10 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
-import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
+import {
+  assertManagedEmailTransportMetadata,
+  assertOrganizationUserSetupQueryTransportConfigured,
+} from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
@@ -245,6 +248,7 @@ export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
 } {
+  assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
   // @opengeni/config at boot; install it for every request-scoped db command
   // (Send/Steer/control/queue/settings/delete) built by this app.
