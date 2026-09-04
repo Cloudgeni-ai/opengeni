@@ -939,6 +939,15 @@ and definitive-failure settlement reuse that accepted policy while reading curre
 account health/cooldowns; a
 missing or expired last database-confirmed lease deadline fails closed before
 provider dispatch and follows the existing lease-loss recovery path.
+Heartbeat renewal is fail-closed as well: a response that arrives after the
+prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
+uses execution-time database time after its relevant locks are acquired.
+An effective workspace/organization source transition is a serialized hard
+cutover: the source advisory lock rejects it while a Codex turn is running,
+awaiting action, recovering, waiting for capacity, or still holds a live lease.
+This keeps a capacity waiter from resuming against an obsolete allocator pool;
+same-source pointer, rotation, allocator, and health mutations may wake and
+re-evaluate the immutable accepted snapshot.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),

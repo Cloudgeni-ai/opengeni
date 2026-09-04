@@ -4337,6 +4337,46 @@ describe("Codex credential lease deadline fence", () => {
     expect(codexCredentialLeaseDeadlineExpired(now + 1, now)).toBe(false);
   });
 
+  test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let resolveHeartbeat!: (value: Date | null) => void;
+    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+      () =>
+        new Promise<Date | null>((resolve) => {
+          resolveHeartbeat = resolve;
+        }),
+    );
+    try {
+      const lease = new CodexTurnLease({
+        db: {},
+        observability: {
+          incrementCounter: () => undefined,
+          warn: () => undefined,
+        },
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        codexWorkspaceKey: "workspace-key",
+        getTurnId: () => "turn-1",
+      } as never);
+      lease.held = true;
+      lease.holderId = "holder-1";
+      lease.generation = 1;
+      const priorDeadline = performance.now() + 1;
+      lease.confirmedUntilMs = priorDeadline;
+
+      const renewal = lease.renew("timer");
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      resolveHeartbeat(new Date());
+      await renewal;
+
+      expect(lease.lost).toBe(true);
+      expect(lease.lossReason).toBe("deadline");
+      expect(lease.confirmedUntilMs).toBe(priorDeadline);
+    } finally {
+      heartbeat.mockRestore();
+    }
+  });
+
   test("transport dispatch fence preserves typed lease loss and skips the provider", async () => {
     const lease = new CodexTurnLease({
       db: {},

@@ -21873,6 +21873,49 @@ async function lockWorkspaceCodexSubscriptionSource(
   );
 }
 
+/**
+ * Effective-source changes are a hard boundary for accepted Codex turns. A
+ * waiting turn carries the source that selected its allocator pool; allowing
+ * the live source to move underneath it would make the next reconciliation or
+ * lease insert use an authority that no longer serves the workspace. Keep the
+ * existing error text for API compatibility; "active" includes a durable
+ * capacity waiter here.
+ */
+async function assertCodexSubscriptionSourceChangeAllowed(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<void> {
+  const [activeCodexTurn] = await scopedDb
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        inArray(schema.sessionTurns.status, [
+          "running",
+          "requires_action",
+          "recovering",
+          "waiting_capacity",
+        ]),
+        sql`${schema.sessionTurns.model} like 'codex/%'`,
+      ),
+    )
+    .limit(1);
+  const [liveLease] = await scopedDb
+    .select({ id: schema.codexCredentialLeases.id })
+    .from(schema.codexCredentialLeases)
+    .where(
+      and(
+        eq(schema.codexCredentialLeases.workspaceId, workspaceId),
+        sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
+      ),
+    )
+    .limit(1);
+  if (activeCodexTurn || liveLease) {
+    throw new Error("Codex subscription source cannot change while active turns are using it");
+  }
+}
+
 function codexCredentialPoolCondition(input: {
   accountId: string;
   workspaceId: string;
@@ -21907,6 +21950,57 @@ async function effectiveCodexCredentialPoolCondition(
             source: source.effectiveSource,
           }),
   };
+}
+
+async function lockOrganizationCodexSubscriptionSources(
+  scopedDb: Database,
+  accountId: string,
+): Promise<string[]> {
+  const rows = await scopedDb.execute<{ workspace_id: string }>(sql`
+    select workspace_id
+    from list_organization_workspace_ids(${accountId}::uuid)
+    order by workspace_id
+  `);
+  const workspaceIds = rows.map((row: { workspace_id: string }) => row.workspace_id);
+  for (const workspaceId of workspaceIds) {
+    // Organization credential mutations can change automatic routing in every
+    // inheriting workspace. Acquire all workspace source locks before the
+    // organization rotation row, matching normal acquisition's source -> pool
+    // lock order and preventing a waiter from observing a half-cutover source.
+    await lockWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  return workspaceIds;
+}
+
+async function captureOrganizationCodexSubscriptionSources(
+  scopedDb: Database,
+  accountId: string,
+  workspaceIds: readonly string[],
+): Promise<Map<string, EffectiveCodexSubscriptionSource>> {
+  const sources = new Map<string, EffectiveCodexSubscriptionSource>();
+  for (const workspaceId of workspaceIds) {
+    await setRlsContext(scopedDb, { accountId, workspaceId });
+    const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
+    sources.set(workspaceId, source.effectiveSource);
+  }
+  await setRlsContext(scopedDb, { accountId, workspaceId: null });
+  return sources;
+}
+
+async function assertOrganizationCodexSourceChangesAllowed(
+  scopedDb: Database,
+  accountId: string,
+  before: ReadonlyMap<string, EffectiveCodexSubscriptionSource>,
+  after: ReadonlyMap<string, EffectiveCodexSubscriptionSource>,
+): Promise<void> {
+  const workspaceIds = new Set([...before.keys(), ...after.keys()]);
+  for (const workspaceId of workspaceIds) {
+    if (before.get(workspaceId) === after.get(workspaceId)) continue;
+    if (!after.has(workspaceId)) continue;
+    await setRlsContext(scopedDb, { accountId, workspaceId });
+    await assertCodexSubscriptionSourceChangeAllowed(scopedDb, workspaceId);
+  }
+  await setRlsContext(scopedDb, { accountId, workspaceId: null });
 }
 
 export async function setWorkspaceCodexSubscriptionModeInTransaction(
@@ -21951,30 +22045,7 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
   }
   if (next.effectiveSource !== effectiveSourceBeforeMutation) {
-    const [activeCodexTurn] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-          sql`${schema.sessionTurns.model} like 'codex/%'`,
-        ),
-      )
-      .limit(1);
-    const [liveLease] = await scopedDb
-      .select({ id: schema.codexCredentialLeases.id })
-      .from(schema.codexCredentialLeases)
-      .where(
-        and(
-          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-        ),
-      )
-      .limit(1);
-    if (activeCodexTurn || liveLease) {
-      throw new Error("Codex subscription source cannot change while active turns are using it");
-    }
+    await assertCodexSubscriptionSourceChangeAllowed(scopedDb, input.workspaceId);
   }
   return next;
 }
@@ -22198,6 +22269,15 @@ export async function upsertOrganizationCodexSubscriptionCredential(
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-codex-upsert:${input.organizationId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
     );
+    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+    );
+    const sourcesBefore = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
     await scopedDb
       .insert(schema.organizationCodexRotationSettings)
       .values({ accountId: input.organizationId })
@@ -22267,6 +22347,17 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           isNull(schema.organizationCodexRotationSettings.activeCredentialId),
         ),
       );
+    const sourcesAfter = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
+    await assertOrganizationCodexSourceChangesAllowed(
+      scopedDb,
+      input.organizationId,
+      sourcesBefore,
+      sourcesAfter,
+    );
     const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
       accountId: input.organizationId,
       reason: "organization_codex_credential_connected",
@@ -22489,6 +22580,15 @@ export async function disconnectOrganizationCodexAccount(
   wakeTargets: CodexCapacityWakeTarget[];
 }> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+    );
+    const sourcesBefore = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
     const [settings] = await scopedDb
       .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
       .from(schema.organizationCodexRotationSettings)
@@ -22531,6 +22631,17 @@ export async function disconnectOrganizationCodexAccount(
         .set({ activeCredentialId: newActiveCredentialId, updatedAt: new Date() })
         .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId));
     }
+    const sourcesAfter = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
+    await assertOrganizationCodexSourceChangesAllowed(
+      scopedDb,
+      input.organizationId,
+      sourcesBefore,
+      sourcesAfter,
+    );
     const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
       accountId: input.organizationId,
       reason: "organization_codex_credential_disconnected",
@@ -23689,7 +23800,7 @@ async function listCodexLeaseCandidatesInTransaction(
               ${input.excludeTurnId ?? null}::uuid
             )`
           : sql`count(l.id) filter (
-              where l.leased_until > now()
+              where l.leased_until > clock_timestamp()
                 and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
             )::int`
       } as active_lease_count
@@ -23970,7 +24081,7 @@ export async function acquireCodexCredentialLease<
 
       await tx.execute(sql`
         delete from codex_credential_leases
-        where workspace_id = ${input.workspaceId} and leased_until <= now()
+        where workspace_id = ${input.workspaceId} and leased_until <= clock_timestamp()
       `);
       const existingRows = await tx.execute(
         sql<{
@@ -23981,7 +24092,7 @@ export async function acquireCodexCredentialLease<
           select credential_id, holder_id, generation from codex_credential_leases
           where workspace_id = ${input.workspaceId}
             and turn_id = ${input.turnId}
-            and leased_until > now()
+            and leased_until > clock_timestamp()
           limit 1
         `,
       );
@@ -24351,6 +24462,7 @@ async function lockExistingCodexRotationSettingsForCapacity(
   rotationEnabled: boolean;
   rotationStrategy: string;
 } | null> {
+  await lockWorkspaceCodexSubscriptionSource(tx, workspaceId);
   const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
   const rows =
     source.effectiveSource === "organization"
@@ -24406,7 +24518,8 @@ function nextCodexCapacityCheckAt(
 
 /**
  * Atomically close one all-unavailable attempt and arm exactly one durable wait
- * for the same logical turn. Lock order is allocator rotation row -> workspace
+ * for the same logical turn. Lock order is workspace source advisory -> allocator
+ * rotation row -> workspace
  * control -> actual workspace -> session -> exact turn -> exact attempt ->
  * optional goal -> live lease (when a reactive failure owns one) -> waiter.
  * The waiting turn/session pointer, durable events, exact lease release, and
@@ -24489,7 +24602,7 @@ export async function armCodexCapacityWait(
               where account_id = ${input.accountId}
                 and workspace_id = ${input.workspaceId}
                 and turn_id = ${input.turnId}
-                and leased_until > now()
+                and leased_until > clock_timestamp()
               for update
             `)
           : [];
@@ -24869,12 +24982,16 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
   mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
 ): Promise<CodexCapacityMutationResult<T>> {
   await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
+  const sourceBefore = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
   const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
   const mutation = await mutate(tx);
   if (!mutation.changed) {
     return { result: mutation.result, wakeTargets: [] };
   }
   const sourceAfter = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
+  if (sourceAfter.effectiveSource !== sourceBefore.effectiveSource) {
+    await assertCodexSubscriptionSourceChangeAllowed(tx, input.workspaceId);
+  }
   const wakeTargets =
     rotation?.source === "organization" && sourceAfter.effectiveSource === "organization"
       ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
@@ -26671,7 +26788,8 @@ export async function reconcileXaiCapacityWait(
  * Extend a live holder and return the database-confirmed expiry. A
  * missing/expired/released row returns null. A successful result lets the worker
  * derive a conservative monotonic deadline from the request start and configured
- * TTL, without comparing the Postgres and worker wall clocks.
+ * TTL, without comparing the Postgres and worker wall clocks; the worker still
+ * rejects a response that returns after its prior confirmed deadline.
  */
 export async function heartbeatCodexCredentialLeaseUntil(
   db: Database,
@@ -26685,14 +26803,14 @@ export async function heartbeatCodexCredentialLeaseUntil(
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
     const rows = await scopedDb.execute(sql<{ leased_until: Date | string }>`
       update codex_credential_leases
-      set leased_until = now() + (${leaseTtlMs} * interval '1 millisecond'),
-          updated_at = now()
+      set leased_until = clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'),
+          updated_at = clock_timestamp()
       where account_id = ${accountId}
         and workspace_id = ${workspaceId}
         and turn_id = ${turnId}
         and holder_id = ${holderId}
         and generation = ${generation}
-        and leased_until > now()
+        and leased_until > clock_timestamp()
       returning leased_until
     `);
     return codexMetadataDate(rows[0]?.leased_until);
@@ -26869,7 +26987,7 @@ export async function quarantineCodexCredentialForLease(
             and credential_id = ${input.credentialId}
             and holder_id = ${input.holderId}
             and generation = ${input.generation}
-            and leased_until > now()
+            and leased_until > clock_timestamp()
           for update
         `);
         if (!leaseRows[0]) {

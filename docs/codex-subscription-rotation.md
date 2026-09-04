@@ -70,6 +70,10 @@ in-row replacement fence, not the sole owner identity. Expired rows may be
 reaped before a successor acquires the same turn and starts at generation `1`;
 the successor still cannot be touched by a stale worker because heartbeat,
 release, quarantine, and settlement all carry the non-reused holder identity.
+Heartbeat renewal is fail-closed: a response that returns after the prior
+worker-confirmed deadline is discarded rather than extending ownership, and
+expiry-sensitive lease SQL uses the execution-time database clock after its
+relevant locks are acquired.
 
 6. On the first allocator decision, write the bounded accepted allocator policy
    snapshot to the locked turn row in the same transaction, even when the
@@ -82,6 +86,15 @@ release, quarantine, and settlement all carry the non-reused holder identity.
    therefore do not change the constraints of an already accepted logical turn.
    Pre-source snapshots remain readable and use their historical live-source
    behavior; all newly accepted turns persist the source explicitly.
+
+An effective source transition is a hard cutover boundary. The source lock
+serializes it and the write is rejected while any Codex turn is running,
+awaiting action, recovering, or in `waiting_capacity`, or while a credential
+lease is still live. This prevents an accepted capacity waiter from resuming
+against a different workspace or organization pool; cancel or finish that
+turn before changing its effective source. Same-source pointer, rotation, and
+pin mutations may wake a waiter for re-evaluation, but they never rewrite its
+accepted snapshot.
 
 Stored legacy strategy values are normalized at every worker read to the
 effective `sharded` behavior. The old column values and API input compatibility
@@ -295,7 +308,10 @@ provider body. Every worker arm site immediately runs one allocator
 reconciliation before returning the waiter to the workflow. That closes the
 mutation-before-insert edge: a rotation/account change that committed just
 before the waiter existed is observed under the allocator lock, while any
-later change advances the waiter's durable wake revision normally.
+later same-source capacity change advances the waiter's durable wake revision
+normally. An effective-source change is serialized by the source lock and is
+fenced while this accepted turn or its lease is live, so it cannot leave the
+waiter holding an obsolete pool snapshot.
 
 `reconcileCodexCapacityWait` runs the normal metadata-only allocator decision
 under the same rotation-row transaction. It accepts the same opaque
@@ -377,10 +393,15 @@ the per-turn counter without new external work.
 
 If no alternate is eligible, or rotation/manual-pin policy forbids leaving the
 selected account, the quarantined holder arms the same durable capacity waiter
-used by proactive admission. Quota/rate-limit cooldowns, reconnects, status
-repairs, allocator changes, and rotation-policy changes wake that exact turn.
-An auth/forbidden refusal is terminal only when the pool is truly empty or has
-no allocatable account to wait for.
+used by proactive admission. Quota/rate-limit cooldowns, reconnects that leave
+the effective source unchanged, status repairs, allocator changes, and
+same-source rotation-policy writes wake that exact turn for a recheck. The
+accepted source, active pointer, rotation setting, and session pin remain
+immutable for that turn, so a policy write that does not make the accepted pool
+eligible leaves it waiting. An effective-source change is fenced while the
+turn/waiter is live; cancel or finish it before changing source. An
+auth/forbidden refusal is terminal only when the pool is truly empty or has no
+allocatable account to wait for.
 
 Ambiguous failures never walk the pool because a partial stream may already have
 performed tools or consumed allowance. Every terminal failure path reconciles

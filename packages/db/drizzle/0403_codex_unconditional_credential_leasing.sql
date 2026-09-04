@@ -33,6 +33,7 @@ BEGIN
       SELECT 1 FROM jsonb_array_elements(configured_roles) AS roles(value)
       WHERE jsonb_typeof(value) <> 'string'
         OR btrim(value #>> '{}') = ''
+        OR value #>> '{}' <> btrim(value #>> '{}')
         OR octet_length(value #>> '{}') > 63
     )
     OR (

@@ -93,6 +93,7 @@ export class CodexTurnLease {
     }
     if (this.heartbeatInFlight) return;
     this.heartbeatInFlight = true;
+    const priorConfirmedUntilMs = this.confirmedUntilMs;
     const renewalStartedAtMs = performance.now();
     try {
       const renewedUntil = await heartbeatCodexCredentialLeaseUntil(
@@ -106,6 +107,14 @@ export class CodexTurnLease {
       );
       if (!renewedUntil) {
         this.markLost("not_found");
+      } else if (
+        codexCredentialLeaseDeadlineExpired(priorConfirmedUntilMs) ||
+        codexCredentialLeaseDeadlineExpired(renewalStartedAtMs + CODEX_CREDENTIAL_LEASE_TTL_MS)
+      ) {
+        // The database call may have waited on a lock until the prior lease
+        // expired. A late successful UPDATE is not proof that this worker
+        // owned the credential continuously; do not accept or extend it.
+        this.markLost("deadline");
       } else {
         this.confirmedUntilMs = renewalStartedAtMs + CODEX_CREDENTIAL_LEASE_TTL_MS;
         this.deps.observability.incrementCounter({

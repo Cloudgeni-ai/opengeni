@@ -5,12 +5,13 @@ import {
 } from "@opengeni/testing";
 import { readFile } from "node:fs/promises";
 
-import { migrate } from "../src/migrate";
+import { migrate, migrationApplicationRoles } from "../src/migrate";
 
 const migrationUrl = new URL(
   "../drizzle/0403_codex_unconditional_credential_leasing.sql",
   import.meta.url,
 );
+const dbIndexUrl = new URL("../src/index.ts", import.meta.url);
 const schemaUrl = new URL("../src/schema.ts", import.meta.url);
 const deploymentDocUrl = new URL("../../../docs/deployment.md", import.meta.url);
 const rotationDocUrl = new URL("../../../docs/codex-subscription-rotation.md", import.meta.url);
@@ -37,6 +38,7 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
     expect(source.startsWith("-- deployment-mode: maintenance\n")).toBe(true);
     expect(source).toContain("opengeni.migration_application_roles");
     expect(source).toContain("pg_stat_activity");
+    expect(source).toContain("value #>> '{}' <> btrim(value #>> '{}')");
     expect(source).toContain("USING ERRCODE = '55000'");
     expect(source).toContain(
       "LOCK TABLE organization_codex_rotation_settings IN ACCESS EXCLUSIVE MODE",
@@ -66,11 +68,16 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
   });
 
   test("keeps the lease index and 0403 role-list runbooks aligned", async () => {
-    const [schema, deployment, rotation] = await Promise.all([
+    const [dbIndex, schema, deployment, rotation] = await Promise.all([
+      readFile(dbIndexUrl, "utf8"),
       readFile(schemaUrl, "utf8"),
       readFile(deploymentDocUrl, "utf8"),
       readFile(rotationDocUrl, "utf8"),
     ]);
+    expect(dbIndex).toMatch(
+      /heartbeatCodexCredentialLeaseUntil[\s\S]*?leased_until = clock_timestamp\(\)[\s\S]*?leased_until > clock_timestamp\(\)/u,
+    );
+    expect(dbIndex).toContain("leased_until <= clock_timestamp()");
     expect(schema).toMatch(
       /activeCredential:\s*index\("codex_credential_leases_active_credential_idx"\)\.on\(\s*table\.credentialId,\s*table\.leasedUntil,\s*\)/su,
     );
@@ -124,5 +131,23 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
         and table_name = 'session_goals'
         and column_name = 'continuation_suppressed_turn_id'`;
     expect(goalFence).toEqual({ data_type: "uuid", is_nullable: "YES" });
+  });
+
+  test("rejects non-canonical embedded migration role lists", () => {
+    expect(() =>
+      migrationApplicationRoles(undefined, {
+        applicationDatabaseRoles: [" opengeni_app "],
+      }),
+    ).toThrow("canonical Postgres role names");
+    expect(() =>
+      migrationApplicationRoles(undefined, {
+        applicationDatabaseRoles: ["opengeni_app", " opengeni_app"],
+      }),
+    ).toThrow("canonical Postgres role names");
+    expect(
+      migrationApplicationRoles(undefined, {
+        applicationDatabaseRoles: ["worker_role", "opengeni_app"],
+      }),
+    ).toEqual(["opengeni_app", "worker_role"]);
   });
 });

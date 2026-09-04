@@ -253,7 +253,7 @@ function deploymentDepthPolicy(
   return { maxNestedAgentDepth: value, source: "deployment" };
 }
 
-function migrationApplicationRoles(
+export function migrationApplicationRoles(
   schema: string | undefined,
   options: MigrationRuntimeOptions | undefined,
 ): string[] {
@@ -281,6 +281,14 @@ function migrationApplicationRoles(
     return [DEFAULT_APPLICATION_DATABASE_ROLE];
   }
 
+  if (
+    configured !== undefined &&
+    configured.some((role) => typeof role !== "string" || role !== role.trim())
+  ) {
+    throw new Error(
+      "MigrationRuntimeOptions.applicationDatabaseRoles must contain canonical Postgres role names without surrounding whitespace",
+    );
+  }
   if (explicit.length < 1 || explicit.length > MAX_MIGRATION_APPLICATION_ROLES) {
     throw new Error(
       `Migration application database roles must contain 1-${MAX_MIGRATION_APPLICATION_ROLES} entries`,

@@ -428,8 +428,8 @@ export async function selectCodexTurnCapacity(
               code: "codex_allocator_disabled",
               detail:
                 rotationDecision.kind === "allocatorDisabled"
-                  ? "waiting for the selected credential to be re-enabled or the account-selection policy to change"
-                  : "waiting for a credential to be re-enabled, reconnected, or added",
+                  ? "waiting for the selected credential to be re-enabled under the accepted source policy"
+                  : "waiting for a credential in the accepted source pool to be re-enabled, reconnected, or added",
             },
           },
         );
@@ -477,27 +477,28 @@ export async function selectCodexTurnCapacity(
                 code: "codex_manual_pin_unavailable",
                 error: "The pinned Codex subscription is unavailable for this turn.",
                 detail:
-                  "waiting for the pinned account to reconnect or for the session pin to change",
+                  "waiting for the pinned account to reconnect or become allocatable under the accepted source policy",
               }
             : !leased.rotationEnabled && leased.activeCredentialId === null
               ? {
                   code: "codex_active_pointer_unavailable",
                   error: "The Codex active subscription pointer is unavailable for this turn.",
                   detail:
-                    "waiting for an active account to be selected or for rotation policy to change",
+                    "waiting for the accepted active account to be restored or become allocatable",
                 }
               : leased.poolAccountCount > leased.accounts.length
                 ? {
                     code: "codex_policy_pool_unavailable",
                     error: "No Codex subscription matches the accepted account-selection policy.",
                     detail:
-                      "waiting for the accepted policy to change or a matching account to reconnect",
+                      "waiting for a matching credential to reconnect or become allocatable under the accepted source policy",
                   }
                 : {
                     code: "codex_credential_unavailable",
                     error:
                       "No Codex subscription is currently available under the accepted policy.",
-                    detail: "waiting for a matching account to reconnect or for policy to change",
+                    detail:
+                      "waiting for a matching credential to reconnect or become allocatable under the accepted source policy",
                   };
         if (turn.source === "compaction") {
           if (
