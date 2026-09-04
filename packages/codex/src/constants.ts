@@ -25,14 +25,19 @@ export const CODEX_PROVIDER_ID = "codex-subscription";
 export const CODEX_PROVIDER_BASE_URL = "https://chatgpt.com/backend-api";
 export const CODEX_MODEL_ID_PREFIX = "codex/";
 
-// The only Codex subscription models OpenGeni exposes. The live GET /models
-// catalog must contain every exact slug; older or internal models never broaden
-// this product allowlist.
-export const CODEX_FALLBACK_MODEL_SLUGS = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] as const;
+// The only Codex subscription models OpenGeni exposes. Astra is deliberately
+// pre-advertised before an account receives provider rollout access so the
+// picker becomes runnable without another OpenGeni release once access arrives.
+// Older or internal live models never broaden this product allowlist.
+export const CODEX_FALLBACK_MODEL_SLUGS = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-6-astra",
+] as const;
 
-// Live Codex model-catalog values for every exposed gpt-5.6 subscription slug.
-// Verified 2026-07-18 against Codex CLI 0.144.6's freshly fetched
-// ~/.codex/models_cache.json and the matching openai/codex core derivations:
+// Live Codex model-catalog values for every exposed subscription slug.
+// Verified 2026-09-04 against Codex CLI 0.153.2's bundled model catalog:
 //   raw context window                = 272,000
 //   effective input window (95%)      = 258,400
 //   automatic compaction limit (90%)  = 244,800
@@ -49,10 +54,10 @@ export const CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT = Math.floor(
 );
 
 // Sent as the `version` header and inside the User-Agent. Staging-proven on
-// 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models, while the
-// official Codex 0.144.0+ releases return all three exact slugs above. Keep
-// this pinned to the latest stable Codex release we have verified end-to-end.
-export const CODEX_CLIENT_VERSION = "0.145.0";
+// 2026-07-09: 0.142.4 filtered every GPT-5.6 slug out of GET /models. Keep this
+// pinned to the latest stable Codex release whose bundled catalog and transport
+// contract have been reviewed here.
+export const CODEX_CLIENT_VERSION = "0.153.2";
 
 // Public OpenGeni selector for native ChatGPT/Codex subscription WebRTC. This
 // remains stable for persisted sessions; the provider's remotely configured

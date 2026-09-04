@@ -982,6 +982,8 @@ describe("productLabelForModelId", () => {
     expect(productLabelForModelId("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(productLabelForModelId("codex/gpt-5.6-sol")).toBe("GPT-5.6 Sol");
     expect(productLabelForModelId("gpt-5.6-terra")).toBe("GPT-5.6 Terra");
+    expect(productLabelForModelId("gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(productLabelForModelId("codex/gpt-6-astra")).toBe("GPT-6 Astra");
     expect(productLabelForModelId("gpt-5.4-mini")).toBe("GPT-5.4 Mini");
   });
 });
@@ -992,6 +994,7 @@ describe("productShortLabelForModelId", () => {
     expect(productShortLabelForModelId("codex/gpt-5.6-sol")).toBe("5.6 Sol");
     expect(productShortLabelForModelId("gpt-5.6-luna")).toBe("5.6 Luna");
     expect(productShortLabelForModelId("gpt-5.6-terra")).toBe("5.6 Terra");
+    expect(productShortLabelForModelId("codex/gpt-6-astra")).toBe("6 Astra");
     expect(productShortLabelForModelId("grok-4.6")).toBe("4.6");
     expect(productShortLabelForModelId("gpt-5.4-mini")).toBeNull();
   });
@@ -1102,6 +1105,19 @@ describe("configuredModels", () => {
     expect(
       models.find((model) => model.id === "codex/gpt-5.6-luna")?.capabilities.inputModalities,
     ).toEqual(["text", "image"]);
+    const astra = models.find((model) => model.id === "codex/gpt-6-astra");
+    expect(astra).toMatchObject({
+      label: "GPT-6 Astra",
+      shortLabel: "6 Astra",
+      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    });
+    expect(astra?.capabilities.latencyModes.map(({ id, runnable }) => ({ id, runnable }))).toEqual([
+      { id: "standard", runnable: true },
+      { id: "fast", runnable: true },
+    ]);
+    expect(astra?.capabilities.inputModalities).toEqual(["text", "image"]);
   });
 
   test("with no registry returns exactly the built-in allow-list, default model first", () => {
