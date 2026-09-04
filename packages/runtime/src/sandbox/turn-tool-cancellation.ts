@@ -83,6 +83,7 @@ type CommandCancellationSession = {
   cancelPendingExecCommand?(): Promise<void>;
   supportsPty?(): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  adoptRetainedProcessAsBackgroundCommand?(providerSessionId: number): Promise<void>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
     chars?: string;
@@ -90,12 +91,6 @@ type CommandCancellationSession = {
     maxOutputTokens?: number;
   }): Promise<string>;
   writeStdinForProcessControl?(args: {
-    sessionId: number;
-    chars?: string;
-    yieldTimeMs?: number;
-    maxOutputTokens?: number;
-  }): Promise<string>;
-  writeStdinForProcessObservation?(args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
@@ -1126,14 +1121,11 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identityValidated: false,
                 cancellation: null,
               };
-              // A routing session exposes a retained locator only after both
-              // provider retention and the session-owned background-command
-              // adoption are durable. That commit transfers cancellation
-              // ownership away from this turn, so ordinary completion and
-              // Steer must not drain it.
-              if (state.processSession?.hasRetainedProcess?.(sessionId) !== true) {
-                this.shellSessions.set(sessionId, state);
-              }
+              // Provider retention preserves the physical process but does not
+              // transfer it to the session. Keep it turn-owned and cancellable
+              // throughout eager waiting; successful adoption removes it below
+              // immediately before the running receipt is returned.
+              this.shellSessions.set(sessionId, state);
               pendingStart?.settle();
               return await this.awaitModelFacingShellResult({
                 state,
@@ -1273,23 +1265,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
     while (performance.now() - startedAt < waitMs) {
       if (this.cancelled) throw cancellationError(this.reason);
-      if (
-        !state.writeInvoke &&
-        !state.processSession?.writeStdinForProcessObservation &&
-        !state.processSession?.writeStdinForProcessControl
-      ) {
-        break;
-      }
+      if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) break;
       const remainingMs = waitMs - (performance.now() - startedAt);
       if (remainingMs <= 0) break;
       const yieldTimeMs = Math.min(TURN_PROVIDER_YIELD_SLICE_MS, Math.ceil(remainingMs));
       let next: unknown;
       try {
-        const processObservation =
-          state.processSession?.writeStdinForProcessObservation ??
-          state.processSession?.writeStdinForProcessControl;
-        next = processObservation
-          ? await processObservation.call(state.processSession, {
+        next = state.processSession?.writeStdinForProcessControl
+          ? await state.processSession.writeStdinForProcessControl({
               sessionId: state.sessionId,
               chars: "",
               yieldTimeMs,
@@ -1329,6 +1312,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // A conforming provider blocks for the requested slice. Avoid a hot loop
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
+    }
+    if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      await state.processSession.adoptRetainedProcessAsBackgroundCommand(state.sessionId);
+      this.shellSessions.delete(state.sessionId);
     }
     return runningCommandBanner(state.sessionId, output);
   }

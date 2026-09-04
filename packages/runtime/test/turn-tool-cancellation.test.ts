@@ -92,33 +92,6 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ]);
   });
 
-  test("eager retained-process polling uses model-observation settlement", async () => {
-    const controller = createTurnToolCancellationController();
-    let observations = 0;
-    let controls = 0;
-    const exec = functionTool("exec_command", async () => running(106, "starting\n"));
-    const session = {
-      hasRetainedProcess: (sessionId: number) => sessionId === 106,
-      writeStdinForProcessObservation: async () => {
-        observations += 1;
-        return exited(0, "finished\n");
-      },
-      writeStdinForProcessControl: async () => {
-        controls += 1;
-        return exited(0, "wrong path\n");
-      },
-    };
-    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
-      Extract<Tool<unknown>, { type: "function" }>
-    >;
-
-    expect(await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "quick-task" }))).toContain(
-      "finished",
-    );
-    expect(observations).toBe(1);
-    expect(controls).toBe(0);
-  });
-
   test("an explicit short yield still returns a controllable running process", async () => {
     const controller = createTurnToolCancellationController();
     let writes = 0;
@@ -138,6 +111,48 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(output).toContain("Process running with session ID 16");
     expect(writes).toBe(0);
+  });
+
+  test("a retained process becomes a background command only before its receipt is returned", async () => {
+    const controller = createTurnToolCancellationController();
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => running(116, "ready\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 116,
+      adoptRetainedProcessAsBackgroundCommand: async (sessionId: number) => {
+        expect(sessionId).toBe(116);
+        adoptions += 1;
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "long-task", yield_time_ms: 0 }),
+    );
+
+    expect(output).toContain("Process running with session ID 116");
+    expect(adoptions).toBe(1);
+  });
+
+  test("failed background adoption never exposes a live process receipt", async () => {
+    const controller = createTurnToolCancellationController();
+    const exec = functionTool("exec_command", async () => running(117, "ready\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 117,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        throw new Error("durable adoption failed");
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "long-task", yield_time_ms: 0 })),
+    ).rejects.toThrow("durable adoption failed");
   });
 
   test.skipIf(Bun.which("setsid") === null)(
@@ -369,6 +384,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     });
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 32,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       writeStdinForProcessMutation: async () => {
         mutations += 1;
         return running(32);
@@ -428,6 +444,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(320));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 320 && retained,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       execCommandForProcessControl: async () => {
         helperCalls += 1;
         await Bun.sleep(providerLatencyMs);
@@ -463,6 +480,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     const exec = functionTool("exec_command", async () => running(321));
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 321 && retained,
+      adoptRetainedProcessAsBackgroundCommand: async () => {},
       execCommandForProcessControl: async (_sessionId: number, args: { cmd: string }) => {
         helperCommands.push(args.cmd);
         return exited(helperCommands.length === 1 ? 76 : helperCommands.length === 2 ? 75 : 0);

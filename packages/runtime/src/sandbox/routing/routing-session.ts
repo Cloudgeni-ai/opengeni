@@ -246,7 +246,12 @@ export interface RoutingSandboxSessionDeps {
     backend: ResolvedActiveBackend;
     process: RoutingRetainedProcess;
     proof: RoutingRetainedProcessTerminalProof;
-    backgroundCommandDelivery: "notify_model" | "observed_inline";
+  }) => Promise<void>;
+  /** Transfer an already-durable retained process to session background
+   * ownership immediately before its running receipt becomes model-visible. */
+  adoptProcessAsBackgroundCommand?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
   }) => Promise<void>;
   /** Called only when an operation against the default/home backend throws a
    * non-fence error. Wiring may classify definitive provider disappearance and
@@ -454,6 +459,7 @@ type RetainedProcessRecord = {
     result: string;
   } | null;
   settlement: Promise<void> | null;
+  backgroundAdoption: Promise<void> | null;
 };
 
 /** Recognize a stale-epoch FENCE error from a backend op so the proxy retries
@@ -845,6 +851,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       pendingMutationSettlement: null,
       pendingTerminal: null,
       settlement: null,
+      backgroundAdoption: null,
     };
     this.retainedProcesses.set(process.providerSessionId, record);
     return record;
@@ -907,6 +914,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       pendingMutationSettlement: null,
       pendingTerminal: null,
       settlement: null,
+      backgroundAdoption: null,
     });
   }
 
@@ -955,7 +963,6 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     record: RetainedProcessRecord,
     proof: RoutingRetainedProcessTerminalProof,
     result: string,
-    backgroundCommandDelivery: "notify_model" | "observed_inline" = "notify_model",
   ): Promise<void> {
     record.pendingTerminal ??= { proof, result };
     const pending = record.pendingTerminal;
@@ -975,7 +982,6 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         backend: record.backend,
         process: record.process,
         proof: pending.proof,
-        backgroundCommandDelivery,
       });
       this.retainedProcesses.delete(record.process.providerSessionId);
       record.pendingTerminal = null;
@@ -1006,10 +1012,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
   }
 
-  private async flushPendingProcessMutation(
-    record: RetainedProcessRecord,
-    backgroundCommandDelivery: "notify_model" | "observed_inline" = "notify_model",
-  ): Promise<string | null> {
+  private async flushPendingProcessMutation(record: RetainedProcessRecord): Promise<string | null> {
     const pending = record.pendingMutationSettlement;
     if (!pending) return null;
     try {
@@ -1025,7 +1028,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     if (pending.outcome === "resolved" && typeof pending.result === "string") {
       const proof = retainedProcessTerminalProof(pending.result, record.process.providerSessionId);
       if (proof) {
-        await this.settleRetainedProcess(record, proof, pending.result, backgroundCommandDelivery);
+        await this.settleRetainedProcess(record, proof, pending.result);
         return pending.result;
       }
     }
@@ -1036,11 +1039,11 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
-    const priorTerminal = await this.flushPendingProcessMutation(record, "observed_inline");
+    const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) return priorTerminal;
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
-      await this.settleRetainedProcess(record, terminal.proof, terminal.result, "observed_inline");
+      await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       return terminal.result;
     }
     await this.ensureParentPromotion(record);
@@ -1111,27 +1114,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       }
     }
     const proof = retainedProcessTerminalProof(result, providerSessionId);
-    if (proof) await this.settleRetainedProcess(record, proof, result, "observed_inline");
+    if (proof) await this.settleRetainedProcess(record, proof, result);
     return result;
   }
 
-  private async dispatchProcessControl(
-    args: unknown,
-    backgroundCommandDelivery: "notify_model" | "observed_inline",
-  ): Promise<string> {
+  private async dispatchProcessControl(args: unknown): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
-    const priorTerminal = await this.flushPendingProcessMutation(record, backgroundCommandDelivery);
+    const priorTerminal = await this.flushPendingProcessMutation(record);
     if (priorTerminal !== null) return priorTerminal;
     if (record.pendingTerminal) {
       const terminal = record.pendingTerminal;
-      await this.settleRetainedProcess(
-        record,
-        terminal.proof,
-        terminal.result,
-        backgroundCommandDelivery,
-      );
+      await this.settleRetainedProcess(record, terminal.proof, terminal.result);
       return terminal.result;
     }
     await this.ensureParentPromotion(record);
@@ -1141,9 +1136,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       write.call(record.backend.session, args),
     );
     const proof = retainedProcessTerminalProof(result, providerSessionId);
-    if (proof) {
-      await this.settleRetainedProcess(record, proof, result, backgroundCommandDelivery);
-    }
+    if (proof) await this.settleRetainedProcess(record, proof, result);
     return result;
   }
 
@@ -1609,6 +1602,35 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     return record ? { ...record.process } : null;
   }
 
+  /** Make a retained process session-owned before exposing its live locator.
+   * Provider yield alone is not adoption: short commands can still finish and
+   * return inline during the model-facing eager-wait window. */
+  async adoptRetainedProcessAsBackgroundCommand(providerSessionId: number): Promise<void> {
+    const record = this.retainedProcess(providerSessionId);
+    await this.ensureParentPromotion(record);
+    if (!this.deps.adoptProcessAsBackgroundCommand) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "backgroundCommandAdoption",
+        `Retained provider session ${providerSessionId} has no durable session-adoption authority`,
+        { retainedProcess: record.process },
+      );
+    }
+    record.backgroundAdoption ??= this.deps.adoptProcessAsBackgroundCommand({
+      backend: record.backend,
+      process: record.process,
+    });
+    try {
+      await record.backgroundAdoption;
+    } catch (error) {
+      record.backgroundAdoption = null;
+      throw new RoutingMutationOutcomeUnknownError(
+        "backgroundCommandAdoption",
+        `Retained provider session ${providerSessionId} could not transfer to session background ownership`,
+        { cause: error, retainedProcess: record.process },
+      );
+    }
+  }
+
   /** Model/user-visible stdin is a distinct workspace mutation admission under
    * the durable retained-process holder. It never re-reads the active pointer. */
   async writeStdinForProcessMutation(args: unknown): Promise<string> {
@@ -1619,13 +1641,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * the process backend and may prove terminal state, but never advance the
    * workspace generation. */
   async writeStdinForProcessControl(args: unknown): Promise<string> {
-    return await this.dispatchProcessControl(args, "notify_model");
-  }
-
-  /** Eager polling performed inside the still-open shell tool call. Terminal
-   * proof returned here is already delivered in that tool result. */
-  async writeStdinForProcessObservation(args: unknown): Promise<string> {
-    return await this.dispatchProcessControl(args, "observed_inline");
+    return await this.dispatchProcessControl(args);
   }
 
   /** Run a PID/PGID marker or signal helper on the retained process's exact

@@ -994,6 +994,20 @@ export class SelfhostedSession {
               outcome: await client.exec(opId, execReq, executionTimeoutMs, wallMs),
             };
       if (result.status === "running") {
+        if (result.terminal && adoptedCommandId) {
+          await Promise.resolve(
+            this.settleBackgroundCommand?.({
+              commandId: adoptedCommandId,
+              controlWorkspaceId: admission.controlWorkspaceId,
+              enrollmentId: this.agentId,
+              connectionInstanceId: admission.connectionInstanceId,
+              opId,
+              outcome: "exited",
+              exitCode: result.terminal.outcome.response.exitCode,
+              reason: "op_exit",
+            }),
+          ).catch(() => undefined);
+        }
         const retries = result.heals + result.startRetries;
         this.emitOp({
           op: "exec",

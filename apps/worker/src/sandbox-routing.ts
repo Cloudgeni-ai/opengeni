@@ -17,6 +17,7 @@
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
+  adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
   getRetainedProcess,
@@ -512,10 +513,6 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
-          backgroundCommand: {
-            commandId: retainedProcess.id,
-            command: op,
-          },
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -647,12 +644,11 @@ function settleRetainedProcessForTurn(
       backend: ResolvedActiveBackend;
       process: RoutingRetainedProcess;
       proof: RoutingRetainedProcessTerminalProof;
-      backgroundCommandDelivery: "notify_model" | "observed_inline";
     }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ backend, process, proof, backgroundCommandDelivery }) => {
+  return async ({ backend, process, proof }) => {
     const durable = await getRetainedProcess(services.db, {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -680,7 +676,6 @@ function settleRetainedProcessForTurn(
       exitCode: proof.exitCode,
       reason: proof.reason,
       idleGraceMs: services.settings.sandboxIdleGraceMs,
-      backgroundCommandDelivery,
     });
     if (settlement.process.state === "active") {
       throw new Error("Retained-process settlement returned an active durable process");
@@ -690,6 +685,46 @@ function settleRetainedProcessForTurn(
         .publish(ids.workspaceId, ids.sessionId, settlement.backgroundCommandEvents)
         .catch(() => undefined);
     }
+  };
+}
+
+function adoptRetainedProcessAsBackgroundCommandForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: { backend: ResolvedActiveBackend; process: RoutingRetainedProcess }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ backend, process }) => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== backend.kind ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    ) {
+      throw new Error("Background command adoption lost its exact retained-process identity");
+    }
+    await adoptManagedSessionBackgroundCommand(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: fence.turnId,
+      executionGeneration: fence.executionGeneration,
+      attemptId: fence.attemptId,
+      processId: process.id,
+      expected: retainedProcessSettlementIdentity(durable),
+      command: "execCommand",
+    });
   };
 }
 
@@ -731,6 +766,10 @@ export function wrapTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
+    services,
+    ids,
+  );
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -892,6 +931,7 @@ export function wrapTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -970,6 +1010,10 @@ export function wrapLazyTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
+    services,
+    ids,
+  );
   const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
   const defaultSupportsPty = defaultBackend
     ? selectBackend(defaultBackend).capabilities.Terminal.pty
@@ -1110,6 +1154,7 @@ export function wrapLazyTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({

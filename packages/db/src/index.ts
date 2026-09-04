@@ -37970,6 +37970,80 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
   );
 }
 
+/** Transfer one exact managed retained process from a live turn attempt to its
+ * session. Retaining the provider process and backgrounding it are deliberately
+ * separate: a provider yield only preserves physical ownership; this adoption
+ * occurs immediately before the running receipt becomes model-visible. */
+export async function adoptManagedSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "share");
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          throw new SessionBackgroundCommandAdoptionFencedError(fence.reason);
+        }
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          fence.session.accountId !== input.accountId ||
+          !process ||
+          process.state !== "active" ||
+          process.ownerActorKind !== "turn" ||
+          process.ownerActorId !== input.attemptId ||
+          process.ownerTurnId !== input.turnId ||
+          process.ownerAttemptId !== input.attemptId ||
+          process.ownerExecutionGeneration !== input.executionGeneration ||
+          process.sandboxGroupId !== fence.session.sandboxGroupId ||
+          !retainedProcessMatchesSettlementIdentity(process, input.expected)
+        ) {
+          throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
+        }
+        return await insertManagedSessionBackgroundCommandInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          commandId: input.processId,
+          retainedProcessId: input.processId,
+          command: input.command,
+        });
+      }),
+  );
+}
+
 export type InstallOrReadTurnExecutionPolicyForAttemptResult =
   | {
       accepted: true;
@@ -49469,7 +49543,6 @@ export async function settleRetainedProcess(
     exitCode?: number | null;
     reason: string;
     idleGraceMs: number;
-    backgroundCommandDelivery?: "notify_model" | "observed_inline";
   },
 ): Promise<{
   settled: boolean;
@@ -49532,7 +49605,6 @@ export async function settleRetainedProcess(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          delivery: input.backgroundCommandDelivery ?? "notify_model",
         });
         await settleSessionBackgroundCommandForRetainedProcessInTransaction(
           tx,
@@ -49719,7 +49791,6 @@ export async function settleRetainedProcess(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
-        delivery: input.backgroundCommandDelivery ?? "notify_model",
       });
       await settleSessionBackgroundCommandForRetainedProcessInTransaction(
         tx,
@@ -71436,7 +71507,6 @@ function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  delivery: "notify_model" | "observed_inline";
 }): {
   events: SessionEvent[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
@@ -71529,17 +71599,6 @@ function backgroundCommandTerminalMutation(input: {
         )
         .returning();
       if (!finishedEvent) throw new Error("Failed to append session.command.finished event");
-      // The still-open shell tool call returns this exact terminal proof to the
-      // model. Preserve command audit truth without enqueueing a duplicate
-      // machine-input turn after the current turn completes.
-      if (input.delivery === "observed_inline") {
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
-          .where(eq(schema.sessions.id, session.id));
-        events.push(mapEvent(finishedEvent));
-        return;
-      }
       // Failed/cancelled sessions are terminal and cannot claim another model
       // turn. Their terminal transition has already drained pending machine
       // input, so reopening one here would violate cancellation authority. The
@@ -71720,7 +71779,7 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     reason: string;
   },
 ): Promise<SessionBackgroundCommandTerminalSettlement | null> {
-  const mutation = backgroundCommandTerminalMutation({ ...input, delivery: "notify_model" });
+  const mutation = backgroundCommandTerminalMutation(input);
   const command = await settleConnectedMachineSessionBackgroundCommandWithMutation(
     db,
     input,
@@ -71737,7 +71796,6 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     accountId: input.claim.accountId,
     workspaceId: input.claim.workspaceId,
     sessionId: input.claim.sessionId,
-    delivery: "notify_model",
   });
   const settled = await settleClaimedConnectedMachineBackgroundCommandWithMutation(
     db,

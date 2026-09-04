@@ -1094,13 +1094,12 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       afterProcessMutation: async ({ outcome }) => {
         events.push(`stdin-${outcome}`);
       },
-      settleProcess: async ({ proof, backgroundCommandDelivery }) => {
+      settleProcess: async ({ proof }) => {
         expect(proof).toEqual({
           outcome: "exited",
           exitCode: 23,
           reason: "provider_exit_banner",
         });
-        expect(backgroundCommandDelivery).toBe("observed_inline");
         events.push("parent-settled");
       },
     });
@@ -1119,31 +1118,34 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ]);
   });
 
-  test("eager shell observation marks terminal command delivery as inline", async () => {
-    let delivery: string | null = null;
+  test("retained process promotion and session background adoption are separate and idempotent", async () => {
+    let parentPromotions = 0;
+    let backgroundAdoptions = 0;
     const backend: RoutableBackendSession = {
       async execCommand() {
-        return "Process running with session ID 174\n\nOutput:\nstarted";
-      },
-      async writeStdin() {
-        return "Process exited with code 0\n\nOutput:\ndone";
+        return "Process running with session ID 175\n\nOutput:\nstarted";
       },
     };
     const proxy = new RoutingSandboxSession({
       readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
       resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
       beforeMutation: async () => "parent",
-      afterMutation: async () => undefined,
-      settleProcess: async (input) => {
-        delivery = input.backgroundCommandDelivery;
+      afterMutation: async () => {
+        parentPromotions += 1;
+      },
+      adoptProcessAsBackgroundCommand: async ({ process }) => {
+        expect(process.providerSessionId).toBe(175);
+        backgroundAdoptions += 1;
       },
     });
 
-    await proxy.execCommand({ cmd: "quick" });
-    expect(await proxy.writeStdinForProcessObservation({ sessionId: 174, chars: "" })).toContain(
-      "code 0",
-    );
-    expect(delivery).toBe("observed_inline");
+    await proxy.execCommand({ cmd: "long" });
+    expect(parentPromotions).toBe(1);
+    expect(backgroundAdoptions).toBe(0);
+
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    expect(backgroundAdoptions).toBe(1);
   });
 
   test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {

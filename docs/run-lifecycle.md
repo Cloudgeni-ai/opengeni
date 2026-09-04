@@ -1309,23 +1309,29 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
-A yielded managed process promotes its parent admission to retained state and
-creates the non-TTL process holder in the same transaction before any caller
-receives a live locator. The holder keeps the exact temporary sandbox alive after
-the turn ends. A yielded Connected Machine exec instead creates a session-owned
-background-command row before returning; that row freezes the physical control
-workspace, enrollment, connection instance, and op ID. The exact parent
-admission/process UUID/provider locator or Connected Machine locator remains
-pinned across active-pointer movement.
-Both provider paths serialize adoption with Steer, Pause, terminal Cancel, and
-session-tree deletion through the canonical workspace-control, workspace,
-session, turn, and exact-attempt fence. Managed promotion and command insertion
-are one transaction. For Connected Machines, the op-stream yield path takes
-exact failure-cancellation authority before the adoption transaction begins;
-if the fence rejects, that path exact-cancels the frozen op, while a committed
-row transfers cancellation to session control and reconciliation. This closes
-the post-commit/pre-unwind window in which attempt cancellation could otherwise
-send `OpCancel` after durable adoption.
+A yielded managed process first promotes its parent admission to retained state
+and creates the non-TTL process holder before the internal provider locator can
+leave the routing layer. The holder preserves exact cleanup authority while the
+same shell tool continues a bounded foreground wait. A command that proves
+terminal during that wait returns inline and never becomes session background
+state. Only a command still running when the tool must return takes a second,
+exact-attempt-fenced adoption transaction that inserts its session-owned command
+row immediately before the model receives the live locator. A yielded Connected
+Machine exec likewise creates its session-owned background-command row before
+returning; that row freezes the physical control workspace, enrollment,
+connection instance, and op ID. The exact parent admission/process UUID/provider
+locator or Connected Machine locator remains pinned across active-pointer
+movement.
+Both provider paths serialize session adoption with Steer, Pause, terminal
+Cancel, and session-tree deletion through the canonical workspace-control,
+workspace, session, turn, and exact-attempt fence. Managed retention and session
+adoption are deliberately separate so a provider's short yield is not mistaken
+for a model-visible background command. For Connected Machines, the op-stream
+yield path takes exact failure-cancellation authority before the adoption
+transaction begins; if the fence rejects, that path exact-cancels the frozen op,
+while a committed row transfers cancellation to session control and
+reconciliation. This closes the post-commit/pre-unwind window in which attempt
+cancellation could otherwise send `OpCancel` after durable adoption.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
