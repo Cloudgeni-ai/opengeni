@@ -375,11 +375,17 @@ function requireCatalogPath(
   return entry;
 }
 
-function isCatalogStaleApiError(error: unknown): error is OpenGeniApiError {
+function isCatalogStaleApiError(
+  error: unknown,
+): error is OpenGeniApiError | { code: "catalog_stale" } {
   return (
-    error instanceof OpenGeniApiError &&
-    error.status === 409 &&
-    error.details?.code === "catalog_stale"
+    (error instanceof OpenGeniApiError &&
+      error.status === 409 &&
+      error.details?.code === "catalog_stale") ||
+    (typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "catalog_stale")
   );
 }
 

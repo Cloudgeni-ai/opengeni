@@ -467,7 +467,7 @@ async function assertAttemptAuthority(
   }
 }
 
-async function assertArtifactRequestedToolAuthority(
+async function assertArtifactRequestedToolsInAttemptCatalog(
   scopedDb: any,
   input: Pick<
     PublishMetadata,
@@ -502,15 +502,10 @@ async function assertArtifactRequestedToolAuthority(
       ),
     )
     .limit(1);
-  let allowed: Map<string, "none" | "human" | "policy">;
+  let allowed: Set<string>;
   try {
     const catalog = parseVerifiedAttemptToolCatalog(row?.catalog);
-    allowed = new Map(
-      catalog.entries.map((entry): [string, "none" | "human" | "policy"] => [
-        toolIdentityKey(entry.identity),
-        entry.approval,
-      ]),
-    );
+    allowed = new Set(catalog.entries.map((entry) => toolIdentityKey(entry.identity)));
   } catch {
     throw new WorkspaceArtifactOperationError(
       "Artifact requested tool authority is unavailable for the exact attempt",
@@ -519,11 +514,6 @@ async function assertArtifactRequestedToolAuthority(
   if (requestedTools.some((identity) => !allowed.has(toolIdentityKey(identity)))) {
     throw new WorkspaceArtifactOperationError(
       "Artifact requested tools must be present in the exact attempt tool catalog",
-    );
-  }
-  if (requestedTools.some((identity) => allowed.get(toolIdentityKey(identity)) !== "none")) {
-    throw new WorkspaceArtifactOperationError(
-      "Agent-authored Site versions cannot activate tools requiring policy or current-human approval",
     );
   }
 }
@@ -805,7 +795,7 @@ export async function createWorkspaceArtifact(
             );
           }
           await assertAttemptAuthority(tx, input);
-          await assertArtifactRequestedToolAuthority(tx, input, input.requestedTools ?? []);
+          await assertArtifactRequestedToolsInAttemptCatalog(tx, input, input.requestedTools ?? []);
           await input.persistContent();
           contentPersisted = true;
           const [artifact] = await tx
@@ -925,7 +915,7 @@ export async function publishWorkspaceArtifactVersion(
           }
           const current = await currentVersion(tx, artifact);
           if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
-          await assertArtifactRequestedToolAuthority(
+          await assertArtifactRequestedToolsInAttemptCatalog(
             tx,
             input,
             input.requestedTools ?? current.requestedTools,
@@ -1078,7 +1068,7 @@ export async function rollbackWorkspaceArtifact(
           )
           .limit(1);
         if (!target) throw new WorkspaceArtifactNotFoundError("Artifact version not found");
-        await assertArtifactRequestedToolAuthority(tx, input, target.requestedTools);
+        await assertArtifactRequestedToolsInAttemptCatalog(tx, input, target.requestedTools);
         const [updated] = await tx
           .update(schema.workspaceArtifacts)
           .set({ currentVersionId: target.id, updatedAt: new Date() })
@@ -1163,7 +1153,7 @@ export async function setWorkspaceArtifactStatus(
         const current = await currentVersion(tx, artifact);
         if (!current) throw new WorkspaceArtifactNotFoundError("Artifact has no current version");
         if (input.status === "active") {
-          await assertArtifactRequestedToolAuthority(tx, input, current.requestedTools);
+          await assertArtifactRequestedToolsInAttemptCatalog(tx, input, current.requestedTools);
         }
         if (artifact.status === input.status) {
           throw new WorkspaceArtifactOperationError(

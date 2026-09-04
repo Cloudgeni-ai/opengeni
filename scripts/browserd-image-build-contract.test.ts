@@ -78,7 +78,11 @@ describe("browser controller image build contract", () => {
       expect(dockerfile).toContain(
         'test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"',
       );
+      expect(dockerfile).toContain(
+        "ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules",
+      );
       expect(dockerfile).toContain('await import("@opengeni/codemode")');
+      expect(dockerfile).toContain('await import("@opengeni/sdk/site")');
 
       const crossCompiled = dockerfile.replace(
         "FROM oven/bun:${BUN_VERSION} AS browserd-build",

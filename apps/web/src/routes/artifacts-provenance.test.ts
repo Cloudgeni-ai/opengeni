@@ -7,13 +7,13 @@ describe("Site provenance navigation", () => {
     expect(source).toContain("key={`${workspaceId}:${artifactId}`}");
   });
 
-  test("invalidates recent Site shortcuts after direct lifecycle mutations", () => {
-    expect(source).toContain("notifySiteNavigationChanged();");
-  });
-
   test("links immutable Site versions back to their source sessions", () => {
     expect(source).toContain("version.sourceSessionId");
-    expect(source).toContain('to="/workspaces/$workspaceId/sessions/$sessionId"');
-    expect(source).toContain('version.revision === 1 ? "Creation session" : "Publishing session"');
+    expect(source).toContain(
+      'to="/workspaces/$workspaceId/sessions/$sessionId"',
+    );
+    expect(source).toContain('version.revision === 1');
+    expect(source).toContain('"Creation session"');
+    expect(source).toContain('"Publishing session"');
   });
 });

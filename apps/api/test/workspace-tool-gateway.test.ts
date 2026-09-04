@@ -94,9 +94,7 @@ function preparedGateway(
       },
     ],
     requireApproval: (entry, _caller, context) =>
-      entry.approval === "human" &&
-      context.transportMeta?.approvalConfirmed !== true &&
-      context.transportMeta?.siteApprovalBypass !== true,
+      entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
     ...(options.authorize ? { authorize: options.authorize } : {}),
   });
   return {
@@ -669,7 +667,7 @@ describe("workspace tool gateway adapters", () => {
     });
   });
 
-  test("lets an authorized Site call its immutable allowlist without per-call approval", async () => {
+  test("applies ordinary tool approval after authorizing a Site allowlist", async () => {
     const calls: Array<{
       kind: string;
       argumentsValue: Record<string, unknown>;
@@ -703,18 +701,17 @@ describe("workspace tool gateway adapters", () => {
       ...site,
     };
 
-    const response = await callWorkspaceToolGateway(
-      prepared,
-      access,
-      request,
-      {} as never,
-      async () => {
-        throw new Error("Site calls must not consume approval capabilities");
-      },
-      undefined,
-      authorizeSiteTool as never,
-    );
-    expect(response.result).toMatchObject({ structuredContent: { count: 7 } });
+    await expect(
+      callWorkspaceToolGateway(
+        prepared,
+        access,
+        request,
+        {} as never,
+        async () => false,
+        undefined,
+        authorizeSiteTool as never,
+      ),
+    ).rejects.toMatchObject({ status: 409 });
     expect(authorizationChecks).toEqual([
       {
         siteArtifactId: site.siteArtifactId,
@@ -722,9 +719,9 @@ describe("workspace tool gateway adapters", () => {
         identity: request.identity,
       },
     ]);
-    expect(calls).toEqual([{ kind: "http", argumentsValue: { sku: "SITE-1" } }]);
-    expect(order).toEqual(["site_authorize", "preflight", "execute"]);
-    expect(executeTransportMeta).toEqual({ siteApprovalBypass: true });
+    expect(calls).toEqual([]);
+    expect(order).toEqual(["site_authorize", "preflight"]);
+    expect(executeTransportMeta).toBeUndefined();
   });
 
   test("generates SDK declarations from the catalog exposed by the route adapter", () => {

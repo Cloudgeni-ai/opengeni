@@ -272,14 +272,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       requestedTools: [{ serverId: "docs", toolName: "search_documents" }],
       idempotencyKey: "create-status-board",
     };
-    const putsBeforeDeniedPublisher = objectPutCount;
-    const deniedPublisherResponse = await request(grant, publishPermissions, base, {
-      method: "POST",
-      body: JSON.stringify(createBody),
-    });
-    expect(deniedPublisherResponse.status).toBe(403);
-    expect(objectPutCount).toBe(putsBeforeDeniedPublisher);
-    const createdResponse = await requestAsCanonicalLocalHuman(base, {
+    const createdResponse = await request(grant, publishPermissions, base, {
       method: "POST",
       body: JSON.stringify(createBody),
     });
@@ -795,7 +788,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     }
   }, 60_000);
 
-  test("prevents attempts from activating Site tools outside their immutable catalog", async () => {
+  test("prevents attempts from retaining Site tools outside their immutable catalog", async () => {
     const attempt = await seedAttempt(grant, {
       permissions: ["artifacts:publish"],
       tools: ["artifacts_create", "artifacts_publish", "artifacts_rollback", "artifacts_restore"],
@@ -883,41 +876,27 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(deniedCreate.isError).toBe(true);
       expect(objectPutCount).toBe(putsBeforeDeniedCreate);
 
-      const deniedHumanApprovalCreate = await mcp.callTool({
+      const humanClassCreate = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
-          title: "Human approval cannot be minted",
-          html: "<!doctype html><main>Denied</main>",
+          title: "Human-classified tool allowlist",
+          html: "<!doctype html><main>Allowed</main>",
           requestedTools: [{ serverId: "inventory", toolName: "charge_card" }],
-          idempotencyKey: `denied-human-approval-create-${suffix}`,
+          idempotencyKey: `human-class-create-${suffix}`,
         },
       });
-      expect(deniedHumanApprovalCreate.isError).toBe(true);
-      expect(deniedHumanApprovalCreate.content.find((item) => item.type === "text")).toMatchObject({
-        text: expect.stringContaining(
-          "cannot activate tools requiring policy or current-human approval",
-        ),
-      });
-      expect(objectPutCount).toBe(putsBeforeDeniedCreate);
+      expect(humanClassCreate.isError).not.toBe(true);
 
-      const deniedPolicyApprovalCreate = await mcp.callTool({
+      const policyClassCreate = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
-          title: "Attempt policy cannot be minted",
-          html: "<!doctype html><main>Denied</main>",
+          title: "Policy-classified tool allowlist",
+          html: "<!doctype html><main>Allowed</main>",
           requestedTools: [{ serverId: "crm", toolName: "sync_contacts" }],
-          idempotencyKey: `denied-policy-approval-create-${suffix}`,
+          idempotencyKey: `policy-class-create-${suffix}`,
         },
       });
-      expect(deniedPolicyApprovalCreate.isError).toBe(true);
-      expect(deniedPolicyApprovalCreate.content.find((item) => item.type === "text")).toMatchObject(
-        {
-          text: expect.stringContaining(
-            "cannot activate tools requiring policy or current-human approval",
-          ),
-        },
-      );
-      expect(objectPutCount).toBe(putsBeforeDeniedCreate);
+      expect(policyClassCreate.isError).not.toBe(true);
 
       const allowedCreate = await mcp.callTool({
         name: "artifacts_create",

@@ -42,7 +42,6 @@ import {
   artifactEditInstructions,
   artifactEditOpeningMessage,
 } from "@/lib/artifact-authoring";
-import { notifySiteNavigationChanged } from "@/lib/site-navigation";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
 
 function formatDate(value: string): string {
@@ -151,7 +150,9 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
         />
       ) : null}
       {data?.artifacts.length === 0 ? (
-        <EmptyState>No Sites yet. Ask Geni to build the first one for this workspace.</EmptyState>
+        <EmptyState>
+          No Sites yet. Ask Geni to build the first one for this workspace.
+        </EmptyState>
       ) : null}
       {data?.artifacts.length ? (
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -168,13 +169,17 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <Badge
-                    variant={artifact.status === "active" ? "secondary" : "outline"}
+                    variant={
+                      artifact.status === "active" ? "secondary" : "outline"
+                    }
                     className="text-2xs font-normal"
                   >
                     {artifact.status === "active" ? "Live" : "Archived"}
                   </Badge>
                   <span className="text-2xs text-fg-subtle">
-                    {artifact.currentVersion ? `v${artifact.currentVersion.revision}` : "Draft"}
+                    {artifact.currentVersion
+                      ? `v${artifact.currentVersion.revision}`
+                      : "Draft"}
                   </span>
                 </div>
               </div>
@@ -204,8 +209,11 @@ export function ArtifactDetailRoute({
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
-  const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
+  const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(
+    null,
+  );
+  const [content, setContent] =
+    useState<WorkspaceArtifactContentResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
@@ -227,7 +235,9 @@ export function ArtifactDetailRoute({
   useEffect(() => void load(), [load]);
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
   const siteVersionId = content?.versionId;
-  const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
+  const siteToolBridge = useMemo<
+    PublishedHtmlArtifactToolBridge | undefined
+  >(() => {
     if (requestedTools.length === 0 || !siteVersionId) return undefined;
     return createSiteToolBridge({
       workspaceTools: context.client.tools.forWorkspace(workspaceId),
@@ -239,7 +249,8 @@ export function ArtifactDetailRoute({
   }, [artifactId, context.client, requestedTools, siteVersionId, workspaceId]);
   const editWithGeni = async () => {
     const currentVersion = detail?.artifact.currentVersion;
-    if (!detail || !currentVersion || detail.artifact.status === "archived") return;
+    if (!detail || !currentVersion || detail.artifact.status === "archived")
+      return;
     const artifact = detail.artifact;
     const currentVersionId = currentVersion.id;
     const submission = await context.client
@@ -274,7 +285,12 @@ export function ArtifactDetailRoute({
   };
   const rollback = async (versionId: string) => {
     const current = detail?.artifact.currentVersion;
-    if (!current || current.id === versionId || detail?.artifact.status === "archived") return;
+    if (
+      !current ||
+      current.id === versionId ||
+      detail?.artifact.status === "archived"
+    )
+      return;
     setBusyVersion(versionId);
     try {
       await request<WorkspaceArtifactMutationResponse>(
@@ -289,12 +305,12 @@ export function ArtifactDetailRoute({
           }),
         },
       );
-      notifySiteNavigationChanged();
       toast.success("Artifact version restored");
       await load();
     } catch (nextError) {
       toast.error("Couldn't restore version", {
-        description: nextError instanceof Error ? nextError.message : String(nextError),
+        description:
+          nextError instanceof Error ? nextError.message : String(nextError),
       });
     } finally {
       setBusyVersion(null);
@@ -318,14 +334,19 @@ export function ArtifactDetailRoute({
           }),
         },
       );
-      notifySiteNavigationChanged();
       toast.success(status === "archived" ? "Site archived" : "Site restored");
       await load();
       return true;
     } catch (nextError) {
-      toast.error(status === "archived" ? "Couldn't archive Site" : "Couldn't restore Site", {
-        description: nextError instanceof Error ? nextError.message : String(nextError),
-      });
+      toast.error(
+        status === "archived"
+          ? "Couldn't archive Site"
+          : "Couldn't restore Site",
+        {
+          description:
+            nextError instanceof Error ? nextError.message : String(nextError),
+        },
+      );
       return false;
     } finally {
       setStatusBusy(false);
@@ -334,23 +355,42 @@ export function ArtifactDetailRoute({
   const archived = detail?.artifact.status === "archived";
   return (
     <ContentPage width="wide">
-      <Link
-        to="/workspaces/$workspaceId/artifacts"
-        params={{ workspaceId }}
-        className="mb-4 inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-muted transition-colors hover:text-fg"
-      >
-        <ArrowLeftIcon className="size-3.5" />
-        Back to Sites
-      </Link>
-      <PageHeader
-        icon={<PanelsTopLeftIcon className="size-4" />}
-        title={detail?.artifact.title ?? "Site"}
-        description={detail?.artifact.description ?? "An interactive workspace Site."}
-        actions={
-          <div className="flex flex-wrap items-center justify-end gap-2">
+      <div className="mb-5 border-b border-border pb-5">
+        <Link
+          to="/workspaces/$workspaceId/artifacts"
+          params={{ workspaceId }}
+          className="mb-3 inline-flex w-fit items-center gap-1.5 text-xs font-medium text-fg-subtle transition-colors hover:text-fg"
+        >
+          <ArrowLeftIcon className="size-3.5" />
+          All Sites
+        </Link>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2.5">
+              <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-brand/10 text-brand">
+                <PanelsTopLeftIcon className="size-4" />
+              </span>
+              <h1 className="truncate text-xl font-semibold tracking-tight text-fg">
+                {detail?.artifact.title ?? "Site"}
+              </h1>
+              {detail?.artifact.currentVersion ? (
+                <Badge
+                  variant="outline"
+                  className="h-5 rounded-md px-1.5 text-2xs font-normal"
+                >
+                  v{detail.artifact.currentVersion.revision}
+                </Badge>
+              ) : null}
+            </div>
+            <p className="mt-2 max-w-3xl text-sm leading-5 text-fg-muted">
+              {detail?.artifact.description ?? "An interactive workspace Site."}
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
             {archived ? (
               <Button
                 variant="outline"
+                size="sm"
                 onClick={() => void setSiteStatus("active")}
                 disabled={!detail || statusBusy}
               >
@@ -360,6 +400,7 @@ export function ArtifactDetailRoute({
             ) : (
               <Button
                 variant="outline"
+                size="sm"
                 onClick={() => setArchiveDialogOpen(true)}
                 disabled={!detail || statusBusy}
               >
@@ -368,6 +409,7 @@ export function ArtifactDetailRoute({
               </Button>
             )}
             <Button
+              size="sm"
               onClick={() => void editWithGeni()}
               disabled={!detail || context.busy || archived}
             >
@@ -375,8 +417,8 @@ export function ArtifactDetailRoute({
               Edit with Geni
             </Button>
           </div>
-        }
-      />
+        </div>
+      </div>
       {!detail && !error ? <Skeleton className="h-96 w-full" /> : null}
       {error ? (
         <LoadErrorState
@@ -386,15 +428,18 @@ export function ArtifactDetailRoute({
         />
       ) : null}
       {detail && content ? (
-        <div className="grid gap-5">
+        <div className="grid gap-6">
           {archived ? (
             <div className="flex flex-col gap-3 rounded-xl border border-border bg-surface-2/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-start gap-3">
                 <ArchiveIcon className="mt-0.5 size-4 shrink-0 text-fg-muted" />
                 <div>
-                  <p className="text-sm font-medium text-fg">This Site is archived</p>
+                  <p className="text-sm font-medium text-fg">
+                    This Site is archived
+                  </p>
                   <p className="mt-0.5 text-xs text-fg-muted">
-                    Its source and versions are retained. Restore it before editing or rolling back.
+                    Its source and versions are retained. Restore it before
+                    editing or rolling back.
                   </p>
                 </div>
               </div>
@@ -414,12 +459,14 @@ export function ArtifactDetailRoute({
             connectedToolCount={content.requestedTools.length}
             sourceFileCount={content.source.files.length}
           />
-          <section className="rounded-xl border border-border bg-surface p-4 shadow-xs sm:p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
+          <section className="overflow-hidden rounded-2xl border border-border/80 bg-surface/60 shadow-xs">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3.5 sm:px-5">
               <div>
-                <h2 className="text-sm font-semibold text-fg">Version history</h2>
-                <p className="mt-1 text-xs text-fg-muted">
-                  Every publish keeps immutable HTML and editable source together.
+                <h2 className="text-sm font-semibold text-fg">
+                  Version history
+                </h2>
+                <p className="mt-0.5 text-xs text-fg-muted">
+                  Restore an earlier version without losing the current source.
                 </p>
               </div>
               <div className="flex items-center gap-3 text-2xs text-fg-subtle">
@@ -435,32 +482,41 @@ export function ArtifactDetailRoute({
                 </span>
               </div>
             </div>
-            <div className="mt-3 divide-y divide-border">
+            <div className="divide-y divide-border/80 px-4 sm:px-5">
               {detail.versions.map((version) => {
-                const current = detail.artifact.currentVersion?.id === version.id;
+                const current =
+                  detail.artifact.currentVersion?.id === version.id;
                 return (
                   <div
                     key={version.id}
-                    className="flex items-center justify-between gap-4 py-3 text-sm"
+                    className="flex min-h-16 items-center justify-between gap-4 py-3 text-sm"
                   >
                     <div>
-                      <span className="font-medium text-fg">Version {version.revision}</span>
+                      <span className="font-medium text-fg">
+                        Version {version.revision}
+                      </span>
                       {current ? (
-                        <span className="ml-2 rounded-full bg-brand/10 px-2 py-0.5 text-2xs text-brand">
+                        <span className="ml-2 rounded-full bg-status-success/10 px-2 py-0.5 text-2xs font-medium text-status-success">
                           Current
                         </span>
                       ) : null}
                       <p className="mt-1 text-xs text-fg-subtle">
-                        {formatDate(version.createdAt)} · {(version.sizeBytes / 1024).toFixed(1)} KB
+                        {formatDate(version.createdAt)} ·{" "}
+                        {(version.sizeBytes / 1024).toFixed(1)} KB
                         {version.sourceSessionId ? (
                           <>
                             {" · "}
                             <Link
                               to="/workspaces/$workspaceId/sessions/$sessionId"
-                              params={{ workspaceId, sessionId: version.sourceSessionId }}
+                              params={{
+                                workspaceId,
+                                sessionId: version.sourceSessionId,
+                              }}
                               className="font-medium text-fg-muted underline-offset-2 hover:text-fg hover:underline"
                             >
-                              {version.revision === 1 ? "Creation session" : "Publishing session"}
+                              {version.revision === 1
+                                ? "Creation session"
+                                : "Publishing session"}
                             </Link>
                           </>
                         ) : null}

@@ -89,6 +89,7 @@ describe("API helpers", () => {
     );
     expect(isApiContractProtectedMutation("GET", "/v1/workspaces/ws/sessions/s")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/mcp")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/codemode/calls")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/webhooks/stripe")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/enrollments/device/poll")).toBe(false);
     expect(isApiContractProtectedMutation("POST", "/v1/auth/organization-onboarding")).toBe(true);
@@ -1851,6 +1852,19 @@ describe("GET /v1/config/client", () => {
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       });
     }
+  });
+
+  test("leaves Codemode calls outside the production browser contract fence", async () => {
+    const response = await appFor(testSettings({ environment: "production" })).request(
+      "/v1/workspaces/ws/codemode/calls",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    const body = (await response.json()) as { code?: string };
+    expect(body.code).not.toBe("API_CONTRACT_CHANGED");
   });
 
   test("returns a models[] whose ids match configuredAllowedModels", async () => {

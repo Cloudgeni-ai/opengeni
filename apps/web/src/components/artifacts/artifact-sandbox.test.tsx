@@ -6,7 +6,10 @@ import {
   openGeniSiteBridgePortFromBootstrap,
   publishedHtmlArtifactDocument,
 } from "@opengeni/react/artifacts";
-import { OPENGENI_SITE_BRIDGE_CONNECT, OPENGENI_SITE_BRIDGE_VERSION } from "@opengeni/sdk/site";
+import {
+  OPENGENI_SITE_BRIDGE_CONNECT,
+  OPENGENI_SITE_BRIDGE_VERSION,
+} from "@opengeni/sdk/site";
 
 import { ArtifactSandbox } from "./artifact-sandbox";
 
@@ -16,23 +19,35 @@ describe("published HTML artifacts", () => {
     expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).toContain("allow-forms");
     expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).toContain("allow-popups");
     expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).toContain("allow-downloads");
-    expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).not.toContain("allow-same-origin");
-    expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).not.toContain("allow-top-navigation");
-
-    const html = '<script>document.body.dataset.ran="yes"</script><form></form>';
-    const markup = renderToStaticMarkup(<PublishedHtmlArtifactFrame html={html} title="App" />);
-    expect(markup).toContain(
-      html.replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;"),
+    expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).not.toContain(
+      "allow-same-origin",
     );
-    expect(markup).toContain(`sandbox="${PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}"`);
+    expect(PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX).not.toContain(
+      "allow-top-navigation",
+    );
+
+    const html =
+      '<script>document.body.dataset.ran="yes"</script><form></form>';
+    const markup = renderToStaticMarkup(
+      <PublishedHtmlArtifactFrame html={html} title="App" />,
+    );
+    expect(markup).toContain(
+      html
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;"),
+    );
+    expect(markup).toContain(
+      `sandbox="${PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX}"`,
+    );
     expect(markup).toContain('referrerPolicy="no-referrer"');
   });
 
-  it("renders platform-owned stop, reload, full-screen, and version controls", () => {
+  it("renders polished platform-owned live, reload, full-screen, and version controls", () => {
     const markup = renderToStaticMarkup(
       <ArtifactSandbox html="<h1>App</h1>" title="Status" versionLabel="v4" />,
     );
-    expect(markup).toContain('aria-label="Stop Site"');
+    expect(markup).toContain("Live");
     expect(markup).toContain('aria-label="Reload Site"');
     expect(markup).toContain('aria-label="Open Site full screen"');
     expect(markup).toContain("v4");
@@ -47,7 +62,9 @@ describe("published HTML artifacts", () => {
 
     expect(openGeniSiteBridgePortFromBootstrap(connect, [port])).toBe(port);
     expect(openGeniSiteBridgePortFromBootstrap(connect, [])).toBeNull();
-    expect(openGeniSiteBridgePortFromBootstrap(connect, [port, port])).toBeNull();
+    expect(
+      openGeniSiteBridgePortFromBootstrap(connect, [port, port]),
+    ).toBeNull();
   });
 
   it("installs the document bootstrap receiver before Site application code", () => {
@@ -60,9 +77,12 @@ describe("published HTML artifacts", () => {
       bridged.indexOf("window.siteStarted"),
     );
     expect(publishedHtmlArtifactDocument(html, false)).toBe(html);
-    const doctypeLiteral = '<script>window.literal = "<!doctype html>"</script>';
-    expect(publishedHtmlArtifactDocument(doctypeLiteral, true).startsWith("<script>(()=>")).toBe(
-      true,
-    );
+    const doctypeLiteral =
+      '<script>window.literal = "<!doctype html>"</script>';
+    expect(
+      publishedHtmlArtifactDocument(doctypeLiteral, true).startsWith(
+        "<script>(()=>",
+      ),
+    ).toBe(true);
   });
 });

@@ -2549,5 +2549,6 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   ) {
     return false;
   }
-  return !pathname.split("/").includes("mcp");
+  const segments = pathname.split("/");
+  return !segments.includes("mcp") && !segments.includes("codemode");
 }

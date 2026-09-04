@@ -18,7 +18,6 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
-  type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -46,7 +45,6 @@ import {
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../workspace-artifact-provenance";
-import { prepareWorkspaceToolGateway } from "../workspace-tool-gateway";
 
 const ArtifactId = z.string().uuid();
 
@@ -116,43 +114,6 @@ function provenance(subjectId: string, idempotencyKey: string) {
     sourceExecutionGeneration: null,
     sourceToolName: null,
   };
-}
-
-async function requireRequestedSiteToolAuthority(
-  deps: ApiRouteDeps,
-  authorization: AccessGrantAuthorization,
-  requestedTools: readonly { serverId: string; toolName: string }[],
-): Promise<void> {
-  if (requestedTools.length === 0) return;
-  const prepared = await prepareWorkspaceToolGateway(deps, authorization);
-  try {
-    const allowed = new Set(
-      prepared.toolGatewayCatalog.entries.map((entry) =>
-        JSON.stringify([entry.identity.serverId, entry.identity.toolName]),
-      ),
-    );
-    if (
-      requestedTools.some(
-        (identity) => !allowed.has(JSON.stringify([identity.serverId, identity.toolName])),
-      )
-    ) {
-      throw new HTTPException(403, {
-        message: "Requested Site tools must be available to the publishing human",
-      });
-    }
-  } finally {
-    await prepared.close().catch(() => undefined);
-  }
-}
-
-async function requestedToolsForArtifactVersion(
-  deps: ApiRouteDeps,
-  workspaceId: string,
-  targetArtifactId: string,
-  versionId: string,
-) {
-  return (await getWorkspaceArtifactContentRef(deps.db, workspaceId, targetArtifactId, versionId))
-    .version.requestedTools;
 }
 
 async function canReadProvenanceSession(
@@ -231,7 +192,6 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     );
     const grant = authorization.grant;
     const request = await body(context, CreateWorkspaceArtifactRequest);
-    await requireRequestedSiteToolAuthority(deps, authorization, request.requestedTools ?? []);
     const id = crypto.randomUUID();
     const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
@@ -333,17 +293,6 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
-    await requireRequestedSiteToolAuthority(
-      deps,
-      authorization,
-      request.requestedTools ??
-        (await requestedToolsForArtifactVersion(
-          deps,
-          workspaceId,
-          id,
-          request.expectedCurrentVersionId,
-        )),
-    );
     const content = prepareContent(deps, workspaceId, {
       html: request.html,
       ...(request.source ? { source: request.source } : {}),
@@ -382,11 +331,6 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, RollbackWorkspaceArtifactRequest);
     const id = artifactId(context);
-    await requireRequestedSiteToolAuthority(
-      deps,
-      authorization,
-      await requestedToolsForArtifactVersion(deps, workspaceId, id, request.versionId),
-    );
     try {
       return context.json(
         await mutationResponse(
@@ -419,18 +363,6 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, SetWorkspaceArtifactStatusRequest);
     const id = artifactId(context);
-    if (request.status === "active") {
-      await requireRequestedSiteToolAuthority(
-        deps,
-        authorization,
-        await requestedToolsForArtifactVersion(
-          deps,
-          workspaceId,
-          id,
-          request.expectedCurrentVersionId,
-        ),
-      );
-    }
     try {
       return context.json(
         await mutationResponse(

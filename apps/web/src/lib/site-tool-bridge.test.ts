@@ -95,7 +95,6 @@ describe("Site tool bridge direct calls", () => {
         approvalToken: `ogta_${"a".repeat(43)}`,
         siteArtifactId: "55555555-5555-4555-8555-555555555556",
         siteVersionId: "55555555-5555-4555-8555-555555555557",
-        siteApprovalBypass: true,
       } as never,
       { signal },
     );
@@ -107,7 +106,6 @@ describe("Site tool bridge direct calls", () => {
       siteVersionId,
     });
     expect(callRequest).not.toHaveProperty("approvalToken");
-    expect(callRequest).not.toHaveProperty("siteApprovalBypass");
   });
 
   test("refreshes and retries when a call loses a catalog race", async () => {

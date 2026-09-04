@@ -258,9 +258,7 @@ export async function prepareWorkspaceToolGatewayForGrant(
       ...(codexAppsAuth ? { codexAppsAuth } : {}),
       workspaceToolGateway: {
         requireApproval: (entry, _caller, context) =>
-          entry.approval === "human" &&
-          context.transportMeta?.approvalConfirmed !== true &&
-          context.transportMeta?.siteApprovalBypass !== true,
+          entry.approval === "human" && context.transportMeta?.approvalConfirmed !== true,
         filterDefinition: workspaceToolGatewayDefinitionFilter(gatewaySettings, allowedIdentities),
       },
     },
@@ -422,13 +420,9 @@ export async function callWorkspaceToolGateway(
       if (!db) throw new HTTPException(503, { message: "site_tool_authorization_unavailable" });
       await authorizeSiteTool(db, grant, siteContext);
     }
-    // Approval is adapter-owned, so prepare with an in-process provisional
-    // confirmation for direct current-human calls. An authorized Site receives
-    // a separate host-owned bypass that publisher-controlled code cannot set.
-    // Provider preflight can run here, but no provider request begins.
-    const transportMeta: Record<string, unknown> = siteContext
-      ? { siteApprovalBypass: true }
-      : { approvalConfirmed: true };
+    // Approval is adapter-owned. Prepare provisionally so provider preflight can
+    // run, then require the ordinary single-use capability before execution.
+    const transportMeta: Record<string, unknown> = { approvalConfirmed: true };
     const preparedCall = await prepared.toolGateway.prepareCall(
       {
         operationId,
@@ -439,10 +433,8 @@ export async function callWorkspaceToolGateway(
       },
       { transportMeta },
     );
-    // An authorized active Site version is the transport-owned approval boundary:
-    // its retained identity allowlist replaces per-invocation human confirmation.
-    let approvalConfirmed = siteContext !== null;
-    const approvalRequired = preparedCall.entry.approval === "human" && siteContext === null;
+    let approvalConfirmed = false;
+    const approvalRequired = preparedCall.entry.approval === "human";
     if (approvalRequired && request.approvalToken && db) {
       approvalConfirmed = await consumeApproval(db, {
         tokenHash: hashOpaqueValue(request.approvalToken),
@@ -459,7 +451,7 @@ export async function callWorkspaceToolGateway(
     if (approvalRequired && !approvalConfirmed) {
       throw new HTTPException(409, { message: "tool_gateway_approval_required" });
     }
-    if (!siteContext) transportMeta.approvalConfirmed = approvalConfirmed;
+    transportMeta.approvalConfirmed = approvalConfirmed;
     const result = await preparedCall.execute();
     observation.end(result.isError ? "tool_error" : "ok");
     return ToolGatewayCallResponse.parse({

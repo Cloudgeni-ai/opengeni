@@ -17,6 +17,7 @@ export const OPENGENI_SITE_BRIDGE_REQUEST = "opengeni.site.request" as const;
 export const OPENGENI_SITE_BRIDGE_RESPONSE = "opengeni.site.response" as const;
 export const OPENGENI_SITE_BRIDGE_CANCEL = "opengeni.site.cancel" as const;
 export const OPENGENI_SITE_BRIDGE_BOOTSTRAP_GLOBAL = "__opengeniSiteBridgeBootstrapV2" as const;
+export const OPENGENI_SITE_LOCAL_CODEMODE_PATH = "/__opengeni/site-tools" as const;
 
 export type OpenGeniSiteBridgeConnectMessage = {
   type: typeof OPENGENI_SITE_BRIDGE_CONNECT;
@@ -91,6 +92,10 @@ export type OpenGeniSiteClientOptions = {
   connectTimeoutMs?: number;
   requestTimeoutMs?: number;
   createMessageChannel?: () => MessageChannel;
+  /** Local-preview seam. Top-level pages use this same-origin Codemode proxy automatically. */
+  localCodemodePath?: string | false;
+  /** Test/embedding seam for local-preview requests. */
+  fetch?: typeof globalThis.fetch;
 };
 
 export class OpenGeniSiteBridgeError extends Error {
@@ -106,18 +111,80 @@ export class OpenGeniSiteBridgeError extends Error {
 }
 
 /**
- * Create the browser client used inside one opaque-origin OpenGeni Site iframe.
- * No token, workspace id, API URL, cookie, or parent DOM reference crosses the
- * bridge; the host receives RPC over one transferred MessagePort.
+ * Create the browser client used by a Site. Published iframes use the parent
+ * MessagePort; top-level sandbox previews use the same-origin Codemode adapter.
+ * Credentials remain in the selected host and never enter Site code.
  */
 export function createOpenGeniSiteClient(
   options: OpenGeniSiteClientOptions = {},
 ): OpenGeniSiteClient {
-  const transport = new OpenGeniSiteBridgeTransport(options);
+  const transport = shouldUseLocalCodemode(options)
+    ? new OpenGeniSiteLocalCodemodeTransport(options)
+    : new OpenGeniSiteBridgeTransport(options);
   return {
     tools: new OpenGeniToolsClient(transport).forWorkspace("site-host"),
     close: () => transport.close(),
   };
+}
+
+class OpenGeniSiteLocalCodemodeTransport implements OpenGeniToolTransport {
+  private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly basePath: string;
+
+  constructor(options: OpenGeniSiteClientOptions) {
+    this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    const configured = options.localCodemodePath;
+    this.basePath = (
+      typeof configured === "string" ? configured : OPENGENI_SITE_LOCAL_CODEMODE_PATH
+    ).replace(/\/+$/u, "");
+  }
+
+  close(): void {}
+
+  async requestJson<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    _query?: Record<string, string>,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<T> {
+    const suffix = localCodemodeSuffix(method, path);
+    const response = await this.fetchImpl(`${this.basePath}${suffix}`, {
+      method,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(body === undefined
+        ? {}
+        : {
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          }),
+    });
+    const value = (await response.json()) as unknown;
+    if (response.ok) return value as T;
+    const envelope = isRecord(value) && isRecord(value.error) ? value.error : {};
+    throw new OpenGeniSiteBridgeError(
+      typeof envelope.code === "string" ? envelope.code : "local_codemode_error",
+      typeof envelope.message === "string"
+        ? envelope.message
+        : `Local Site tool request failed with HTTP ${response.status}`,
+      envelope.retryable === true,
+      envelope.outcomeUnknown === true,
+    );
+  }
+}
+
+function shouldUseLocalCodemode(options: OpenGeniSiteClientOptions): boolean {
+  if (options.localCodemodePath === false || options.bootstrapPort) return false;
+  if (typeof options.localCodemodePath === "string") return true;
+  const siteWindow = options.siteWindow ?? globalThis.window;
+  return Boolean(siteWindow && siteWindow.parent === siteWindow);
+}
+
+function localCodemodeSuffix(method: string, path: string): string {
+  if (method === "GET" && path.endsWith("/tools/catalog")) return "/catalog";
+  if (method === "GET" && path.endsWith("/tools/declarations")) return "/declarations";
+  if (method === "POST" && path.endsWith("/tools/calls")) return "/calls";
+  throw new OpenGeniSiteBridgeError("unsupported_request", "Unsupported Site tool request");
 }
 
 export function isOpenGeniSiteBridgeConnectMessage(
@@ -158,14 +225,9 @@ export function isOpenGeniSiteBridgeCancelMessage(
   );
 }
 
-type SiteToolCallRequestCandidate = ToolGatewayCallRequest & {
-  /** Internal host transport marker; never accepted from iframe code. */
-  siteApprovalBypass?: unknown;
-};
-
-/** Strip every host-only field and transport marker before a call crosses the Site boundary. */
+/** Strip every host-only field before a call crosses the Site boundary. */
 export function sanitizeOpenGeniSiteToolCallRequest(
-  value: SiteToolCallRequestCandidate,
+  value: ToolGatewayCallRequest,
 ): OpenGeniSiteToolCallRequest {
   return {
     ...(value.operationId === undefined ? {} : { operationId: value.operationId }),

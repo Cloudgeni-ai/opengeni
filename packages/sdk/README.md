@@ -499,13 +499,11 @@ operation id and rejects another approval with
 not turn an ambiguous call into a second approved execution by minting a fresh
 operation id automatically.
 
-Do not request approval capabilities speculatively or expose them to Site
-iframe code. Sites do not use this approval sequence: the host projects only
-the active immutable version's requested identities, supplies the Site context
-on direct calls, and the server revalidates the active version and viewer's live
-authority. This direct path also applies to tools whose ordinary current-human
-catalog policy is `human` only when a current human published that Site version;
-agent-authored versions cannot activate any non-`none` approval class. Archived Sites
+Do not request approval capabilities speculatively or expose them to Site iframe
+code. The host projects only the active immutable version's requested identities,
+supplies the Site context on direct calls, and the server revalidates the active
+version and viewer's live authority. The requested set is a maximum allowlist,
+not an authority grant; ordinary gateway approval still applies. Archived Sites
 receive no tool bridge.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit

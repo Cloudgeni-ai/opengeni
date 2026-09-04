@@ -1127,12 +1127,10 @@ parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
 credentials nor workspace routing context. The active immutable Site version's
 retained tool identities are its direct-call allowlist: the parent intersects
 them with the current viewer's live gateway, and the API revalidates the exact
-active version and identity on every call. Sites do not use per-invocation
-approval prompts or approval capabilities. An agent-authored version may retain
-only identities classified `approval: none` in its exact attempt catalog; a
-canonical managed-cookie or local human session must publish any version that
-activates another approval class. A delegated bearer cannot acquire that
-publisher authority by claiming `principalKind: human_session`. The host
+active version and identity on every call. Publishing grants no tool authority:
+requested identities are only a maximum allowlist, and ordinary live gateway
+approval still applies at execution. An agent-authored version may retain any
+identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
 port and every derived tool-call port are revoked on navigation or replacement.

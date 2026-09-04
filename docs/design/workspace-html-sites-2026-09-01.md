@@ -404,11 +404,9 @@ catalog changed after the Site was built.
   adding, removing, or hiding a colliding catalog neighbor cannot rename an
   already-requested tool.
 - Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
-  approval policy. The Site adapter bypasses per-invocation approval after the
-  host and API verify the active immutable version's direct-call allowlist.
-  Agent-authored versions may place only `approval: none` identities from the
-  exact attempt catalog in that allowlist; a current human must publish a
-  version that activates another approval class.
+  approval policy. A Site version's requested identities are only a maximum
+  allowlist; publishing grants no authority, and execution uses the viewer's
+  ordinary live gateway policy.
 - Codemode keeps its exact-attempt durable operation journal and recovery
   semantics. An expired post-execution claim reaches `outcome_unknown` only in
   the same transaction that appends its terminal tool-call output. Direct

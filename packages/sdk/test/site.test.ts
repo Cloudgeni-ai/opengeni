@@ -41,7 +41,6 @@ describe("OpenGeni Site client", () => {
         approvalToken: `ogta_${"a".repeat(43)}`,
         siteArtifactId: "00000000-0000-4000-8000-000000000004",
         siteVersionId: "00000000-0000-4000-8000-000000000005",
-        siteApprovalBypass: true,
       }),
     ).toEqual({
       operationId: "00000000-0000-4000-8000-000000000003",
@@ -49,6 +48,92 @@ describe("OpenGeni Site client", () => {
       identity: catalog.entries[0]!.identity,
       arguments: { query: "roadmap" },
     });
+  });
+
+  test("uses the same client API through the local Codemode endpoint in a top-level preview", async () => {
+    const requests: Array<{ url: string; method: string; body: unknown }> = [];
+    const siteWindow = {
+      parent: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as Pick<Window, "parent" | "addEventListener" | "removeEventListener">;
+    Object.defineProperty(siteWindow, "parent", { value: siteWindow });
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ? JSON.parse(String(init.body)) : null,
+      });
+      if (url.endsWith("/catalog")) return Response.json(catalog);
+      return Response.json({
+        operationId: "00000000-0000-4000-8000-000000000003",
+        catalogDigest: catalog.digest,
+        result: {
+          content: [],
+          structuredContent: { documents: [{ id: "document-1" }] },
+        },
+      });
+    }) as typeof fetch;
+    const client = createOpenGeniSiteClient({ siteWindow, fetch: fetchImpl });
+
+    expect(await client.tools.docs!.search!({ query: "roadmap" })).toEqual({
+      documents: [{ id: "document-1" }],
+    });
+    expect(requests.map(({ url }) => url)).toEqual([
+      "/__opengeni/site-tools/catalog",
+      "/__opengeni/site-tools/calls",
+    ]);
+    expect(requests[1]?.body).toMatchObject({
+      catalogDigest: catalog.digest,
+      identity: { serverId: "docs", toolName: "search" },
+      arguments: { query: "roadmap" },
+    });
+    client.close();
+  });
+
+  test("refreshes the local attempt catalog after a stale preview call", async () => {
+    const nextCatalog = { ...catalog, digest: "b".repeat(64) };
+    let catalogReads = 0;
+    let calls = 0;
+    const siteWindow = {
+      parent: null,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    } as unknown as Pick<Window, "parent" | "addEventListener" | "removeEventListener">;
+    Object.defineProperty(siteWindow, "parent", { value: siteWindow });
+    const fetchImpl = (async (input: string | URL | Request) => {
+      if (String(input).endsWith("/catalog")) {
+        catalogReads += 1;
+        return Response.json(catalogReads === 1 ? catalog : nextCatalog);
+      }
+      calls += 1;
+      if (calls === 1) {
+        return Response.json(
+          {
+            error: {
+              code: "catalog_stale",
+              message: "Catalog changed",
+              retryable: true,
+            },
+          },
+          { status: 409 },
+        );
+      }
+      return Response.json({
+        operationId: "00000000-0000-4000-8000-000000000003",
+        catalogDigest: nextCatalog.digest,
+        result: { content: [], structuredContent: { ok: true } },
+      });
+    }) as typeof fetch;
+    const client = createOpenGeniSiteClient({ siteWindow, fetch: fetchImpl });
+
+    expect(await client.tools.docs!.search!({ query: "roadmap" })).toEqual({
+      ok: true,
+    });
+    expect(catalogReads).toBe(2);
+    expect(calls).toBe(2);
+    client.close();
   });
 
   test("exposes direct typed tools over one parent-held MessagePort", async () => {

@@ -49,6 +49,9 @@ running attempt, and the catalog digest. Ordinary workspace or session bearers
 cannot use this surface, and the Codemode bearer cannot use the ordinary MCP
 mount as a back door.
 
+Codemode is outside the browser API-contract fence because its attempt catalog
+digest is the compatibility token for this live protocol.
+
 The caller supplies a UUID operation id. The first valid submission atomically
 binds it to the exact request digest and creates a durable `queued` row. An
 identical submission is a free idempotent replay. The same id with different
