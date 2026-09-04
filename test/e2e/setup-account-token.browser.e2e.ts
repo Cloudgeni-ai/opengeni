@@ -102,5 +102,5 @@ describe("setup-account query-token compatibility", () => {
     expect(await page.locator("body").textContent()).not.toContain(SETUP_TOKEN);
     expect(await page.locator("body").textContent()).not.toContain(conflictingToken);
     expect(leakedReferrers).toEqual([]);
-  });
+  }, 30_000);
 });

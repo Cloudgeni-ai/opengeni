@@ -577,14 +577,23 @@ it to an ordinary queue signal, so the workflow interrupts the hold and processe
 the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
-run. With workspace-local leasing enabled, the worker atomically selects and
-leases a credential under the workspace rotation-row lock; concurrent replicas
+run. The worker always selects and leases a credential atomically under the
+workspace rotation-row lock; concurrent replicas
 therefore observe earlier reservations. A second 401, 403, explicit quota, or
 429 can quarantine that credential and requeue the same durable turn after a
 conversation-truth checkpoint. Network/5xx/invalid-content/partial-stream
-failures never rotate or blindly replay. The allocator, strict workspace scope,
+failures never rotate or blindly replay. The first accepted failover freezes its
+enabled-alternate ceiling in turn metadata, so later pool changes neither strand
+an originally permitted account nor extend the same-turn retry budget. The allocator, strict workspace scope,
 five-hour reset semantics, and rollout fence are canonical in
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md).
+The first successful lease also stores a bounded accepted Codex allocator-policy
+snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
+that snapshot for active-pointer, rotation, strategy, and pin constraints while
+using current account health/cooldowns; mutable policy changes affect later
+logical turns. Immediately before provider dispatch, a missing or expired
+last-confirmed lease deadline is treated as lease loss and follows lease-loss
+settlement instead of reaching the provider.
 
 SuperGrok/xAI uses the same provider-tagged durable same-turn wait protocol but
 with its explicit workspace-or-user authority pool. A definitive typed or
@@ -596,9 +605,10 @@ sentence "The model is currently at capacity due to high demand..."; isolated
 streams, and unrelated errors never walk the pool. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-When every allocator-enabled Codex credential is unavailable, this recovery
-boundary becomes a durable capacity wait for the current logical turn, whether
-or not the session has an active goal. The worker atomically closes the exact
+When the policy-selected credential is allocator-disabled, or every
+allocator-enabled Codex credential is unavailable, this recovery boundary
+becomes a durable capacity wait for the current logical turn, whether or not the
+session has an active goal. The worker atomically closes the exact
 attempt with outcome `waiting_capacity`, leaves the turn and session
 nonterminal with the same active-turn pointer, and stores one session-scoped
 waiter fenced by blocked turn generation, accepted policy hash, and the
@@ -625,9 +635,11 @@ waiter plus workflow-wake outbox.
 Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
-optional goal, accepted credential policy, active pointer, or blocked-turn
-generation supersede the waiter/turn under their durable fences, so no stale
-timer or signal can produce double inference.
+optional goal, downstream accepted credential-policy hash, or blocked-turn
+generation supersede the waiter/turn under their durable fences. Mutable Codex
+rotation or pin settings do not replace the accepted snapshot for this turn, so
+no stale timer or signal can produce double inference or silently change its
+policy.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,

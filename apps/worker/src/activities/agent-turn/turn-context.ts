@@ -2,6 +2,7 @@ import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
 import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
 import type {
+  CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
   XaiProviderAccountAuthoritySnapshotV1,
@@ -45,6 +46,7 @@ export type TurnSettleFn = (input: {
     | "requires_action";
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
+  suppressGoalContinuation?: boolean;
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;
@@ -59,6 +61,7 @@ export type TurnControlState = {
 
 export type AttemptIdentityState = {
   turnId: string | undefined;
+  dispatchId: string;
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
@@ -150,6 +153,12 @@ export type ProviderTurnState = {
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;
+  /** Exact row version returned by the resolver for the latest provider request. */
+  effectiveCodexCredentialVersion: number | null;
+  /** Frozen alternate-account ceiling observed by the fenced allocator. */
+  codexCredentialFailoverLimit: number;
+  /** Accepted Codex allocator policy captured with the first durable lease. */
+  codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -196,6 +205,7 @@ export function createTurnContext(input: {
     },
     attempt: {
       turnId: undefined,
+      dispatchId: "",
       triggerEventId: undefined,
       executionGeneration: 0,
       providerRecoveryCount: 0,
@@ -268,6 +278,9 @@ export function createTurnContext(input: {
     },
     providerTurn: {
       effectiveCodexCredentialId: null,
+      effectiveCodexCredentialVersion: null,
+      codexCredentialFailoverLimit: 1,
+      codexPolicySnapshot: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,

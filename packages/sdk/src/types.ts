@@ -2152,7 +2152,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {
@@ -3340,6 +3347,12 @@ export type CodexConnectionStatus = {
     label?: string | null;
     chatgptAccountId?: string | null;
   } | null;
+  /** Live model-catalog probe result for the active account only. */
+  activeAccountValid?: boolean;
+  /** Cached readiness of any account in the effective worker pool. */
+  poolReady?: boolean;
+  /** Cached unpinned worker routability; rotation-off remains active-pointer-only. */
+  workerRoutable?: boolean;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
   source?: WorkspaceCodexSubscriptionSource;

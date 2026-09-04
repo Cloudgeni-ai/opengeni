@@ -925,6 +925,29 @@ Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits
 run that reconciliation through bounded control-plane refreshes.
+Every Codex turn owns one durable credential lease before provider work. The
+lease protocol is unconditional execution fencing; `rotation_enabled` only
+decides whether a new or recovered turn may leave the active account. Rotation
+off therefore waits on a capped active account instead of using a healthy
+alternate, while rotation on may recover the same checkpointed turn elsewhere.
+The first allocator decision also atomically records a bounded
+`codexCredentialPolicySnapshotV1` in the durable turn metadata, including a
+new turn's no-credential result before it enters a capacity wait. The snapshot
+freezes the effective workspace/organization/disabled allocator source as well
+as active-pointer, rotation, effective strategy, and pin state. Re-acquisition
+and definitive-failure settlement reuse that accepted policy while reading current
+account health/cooldowns; a
+missing or expired last database-confirmed lease deadline fails closed before
+provider dispatch and follows the existing lease-loss recovery path.
+Heartbeat renewal is fail-closed as well: a response that arrives after the
+prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
+uses execution-time database time after its relevant locks are acquired.
+An effective workspace/organization source transition is a serialized hard
+cutover: the source advisory lock rejects it while a Codex turn is running,
+awaiting action, recovering, waiting for capacity, or still holds a live lease.
+This keeps a capacity waiter from resuming against an obsolete allocator pool;
+same-source pointer, rotation, allocator, and health mutations may wake and
+re-evaluate the immutable accepted snapshot.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
@@ -967,7 +990,7 @@ handlers because its host owns process lifecycle.
 | --- | --- | --- |
 | `packages/contracts` | `@opengeni/contracts` | Cross-boundary schemas, enums, permissions, events, capability descriptors, and tokens |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
-| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport |
+| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
@@ -1528,7 +1551,7 @@ This index intentionally routes at subsystem granularity. Use
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |

@@ -15970,6 +15970,92 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
 );
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
 
+/**
+ * Secret-safe Codex allocator policy accepted with the first durable lease of
+ * a logical turn. Account ids are policy references only; credential material
+ * and provider tokens must never be stored here.
+ */
+export const CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY =
+  "codexCredentialPolicySnapshotV1" as const;
+
+export const CodexCredentialPolicySnapshotV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      activeCredentialId: z.string().min(1).max(256).nullable(),
+      rotationEnabled: z.boolean(),
+      rotationStrategy: z.string().min(1).max(64),
+      /** Effective allocator source; absent only on pre-source snapshots. */
+      source: z.enum(["workspace", "organization", "disabled"]).optional(),
+      pinnedCredentialId: z.string().min(1).max(256).nullable(),
+      pinSource: z.enum(["manual", "policy"]).nullable(),
+      lastCredentialId: z.string().min(1).max(256).nullable(),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if ((policy.pinnedCredentialId === null) !== (policy.pinSource === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pinSource"],
+          message: "pinnedCredentialId and pinSource must both be null or both be present",
+        });
+      }
+    }),
+);
+export type CodexCredentialPolicySnapshotV1 = z.infer<typeof CodexCredentialPolicySnapshotV1>;
+
+export type CodexCredentialPolicySnapshotReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: CodexCredentialPolicySnapshotV1 };
+
+/**
+ * Read the accepted Codex allocator policy from turn metadata. A present but
+ * malformed snapshot fails closed; only a missing key is legacy metadata.
+ */
+export function readCodexCredentialPolicySnapshotV1(
+  metadata: unknown,
+): CodexCredentialPolicySnapshotReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error(
+      "Malformed Codex credential policy snapshot metadata: turn metadata is not an object",
+    );
+  }
+  const record = metadata as Record<string, unknown>;
+  if (
+    !Object.prototype.hasOwnProperty.call(record, CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY)
+  ) {
+    return { kind: "absent" };
+  }
+  const parsed = CodexCredentialPolicySnapshotV1.safeParse(
+    record[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY],
+  );
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed Codex credential policy snapshot metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted Codex allocator policy snapshot into turn metadata. */
+export function metadataWithCodexCredentialPolicySnapshotV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: CodexCredentialPolicySnapshotV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: CodexCredentialPolicySnapshotV1.parse(policy),
+  };
+}
+
 export type TurnExecutionPolicyReadV1 =
   | { kind: "absent" }
   | { kind: "valid"; policy: TurnExecutionPolicyV1 };

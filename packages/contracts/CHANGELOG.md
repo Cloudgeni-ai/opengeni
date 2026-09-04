@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 2.13.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
 ## 2.12.0
 
 ### Minor Changes

@@ -71,6 +71,7 @@ describe("buildCodexTokenResolver", () => {
     const resolver = buildCodexTokenResolver(db, settings, "ws_fresh", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("AC");
+    expect(token.credentialVersion).toBe(1);
     expect(counts.refresh).toBe(0);
   });
 
@@ -81,6 +82,7 @@ describe("buildCodexTokenResolver", () => {
     const resolver = buildCodexTokenResolver(db, settings, "ws_stale", "cred_1", d);
     const token = await resolver.getToken();
     expect(token.accessToken).toBe("AC2");
+    expect(token.credentialVersion).toBe(2);
     expect(counts.refresh).toBe(1);
     expect(counts.record).toBe(1);
   });

@@ -1432,7 +1432,6 @@ export const organizationCodexRotationSettings = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     activeCredentialId: uuid("active_credential_id"),
     rotationEnabled: boolean("rotation_enabled").notNull().default(false),
-    leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
     rotationStrategy: text("rotation_strategy").notNull().default("sharded"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3727,14 +3726,10 @@ export const codexRotationSettings = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     activeCredentialId: uuid("active_credential_id"),
-    // Legacy selector bit. Keep false as the DB default forever: an old worker
-    // only understands this column, so a schema-first rollout or binary
-    // rollback must never make it enter the non-atomic rotation path.
+    // User-owned account-selection policy. When false, every new turn may lease
+    // only the active credential and waits if that credential is unavailable.
+    // When true, the allocator may choose another eligible account.
     rotationEnabled: boolean("rotation_enabled").notNull().default(false),
-    // Revision-aware allocator cutover. Only migration-compatible API/worker
-    // code reads this bit; old binaries safely ignore it and keep the legacy
-    // pin/rotation policy.
-    leaseRotationEnabled: boolean("lease_rotation_enabled").notNull().default(false),
     rotationStrategy: text("rotation_strategy").notNull().default("sharded"), // sharded-rotation policy: legacy residue; behavior is always sharded
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -3780,9 +3775,9 @@ export const workspaceModelPolicies = pgTable(
 // insertion happen atomically while codex_rotation_settings is locked FOR
 // UPDATE, so concurrent replicas in the SAME workspace see one another's
 // assignments before choosing. Workspaces never share or correlate lease state.
-// The composite (workspace, account), (workspace, credential), and
-// (workspace, turn) FKs are declared in migration 0053 (sessionTurns is defined
-// later in this module).
+// The turn workspace FK is declared in migration 0053 and the account/credential
+// FK is installed in migration 0381 (sessionTurns is defined later in this
+// module).
 export const codexCredentialLeases = pgTable(
   "codex_credential_leases",
   {
@@ -3795,9 +3790,12 @@ export const codexCredentialLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     credentialId: uuid("credential_id").notNull(),
     turnId: uuid("turn_id").notNull(),
-    // Temporal activity execution fence. A successor dispatch for the same
-    // durable turn replaces holderId and increments generation atomically;
-    // stale/zombie heartbeats and releases must match both values.
+    // Durable turn-attempt fence. The worker holder includes the
+    // durable workflow turn-attempt identity; dispatchId remains a separate
+    // attempt/audit identity. A successor dispatch for the same durable turn
+    // replaces holderId and increments generation atomically; stale/zombie
+    // heartbeats and releases must match both values. Generation may restart
+    // at 1 after an expired row is reaped, so holder identity cannot be reused.
     holderId: text("holder_id").notNull(),
     generation: integer("generation").notNull().default(1),
     leasedUntil: timestamp("leased_until", { withTimezone: true }).notNull(),
@@ -3810,7 +3808,6 @@ export const codexCredentialLeases = pgTable(
       table.turnId,
     ),
     activeCredential: index("codex_credential_leases_active_credential_idx").on(
-      table.workspaceId,
       table.credentialId,
       table.leasedUntil,
     ),
@@ -7914,6 +7911,10 @@ export const sessionGoals = pgTable(
     })
       .notNull()
       .default(0),
+    // A terminal condition can keep the goal active while making unchanged
+    // autonomous input unsafe. The fence is honored only while this remains
+    // the newest finished turn; newer work or a goal mutation clears it.
+    continuationSuppressedTurnId: uuid("continuation_suppressed_turn_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -8071,7 +8072,7 @@ export const codexCapacityWaiters = pgTable(
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
-    resetKind: text("reset_kind").notNull(), // authoritative | bounded_refresh
+    resetKind: text("reset_kind").notNull(), // authoritative | bounded_refresh | mutation_only
     refreshAttempt: integer("refresh_attempt").notNull().default(0),
     // Coalescing outbox generation. Every eligibility-affecting mutation bumps
     // wakeRevision. Duplicate/lost Temporal signals are harmless because only

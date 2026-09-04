@@ -142,6 +142,10 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
+import {
+  CodexCredentialLeaseLostError,
+  CodexTurnLease,
+} from "../src/activities/agent-turn/credential-leases";
 import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
   SandboxExecReadinessTimeoutError,
@@ -2928,6 +2932,11 @@ describe("lazy sandbox provisioner single-flight", () => {
       runStreamOnceAt,
     );
     const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const codexLeaseAssertionAt = source.indexOf("leases.codex.assertUsable()", runStreamOnceAt);
+    const providerInvocationAt = source.indexOf(
+      "eventing.stream = await withProviderRequestContext(runStreamOnce)",
+      runStreamOnceAt,
+    );
     const genericWireHookAt = source.indexOf(
       "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
       runtimeRunStreamAt,
@@ -2935,6 +2944,8 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(runStreamOnceAt).toBeGreaterThan(-1);
     expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeLessThan(providerInvocationAt);
     expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
     expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
   });
@@ -4295,6 +4306,28 @@ describe("settled run-credential finalization", () => {
 });
 
 describe("Codex credential lease deadline fence", () => {
+  test("an expired confirmed deadline marks the lease lost before dispatch", () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() - 1;
+
+    expect(() => lease.assertUsable()).toThrow(CodexCredentialLeaseLostError);
+    expect(lease.lost).toBe(true);
+    expect(lease.lossReason).toBe("deadline");
+  });
+
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
     expect(codexCredentialLeaseDeadlineExpired(null, now)).toBe(true);
@@ -4302,6 +4335,95 @@ describe("Codex credential lease deadline fence", () => {
     expect(codexCredentialLeaseDeadlineExpired(now, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now - 1, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now + 1, now)).toBe(false);
+  });
+
+  test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let resolveHeartbeat!: (value: Date | null) => void;
+    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+      () =>
+        new Promise<Date | null>((resolve) => {
+          resolveHeartbeat = resolve;
+        }),
+    );
+    try {
+      const lease = new CodexTurnLease({
+        db: {},
+        observability: {
+          incrementCounter: () => undefined,
+          warn: () => undefined,
+        },
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        codexWorkspaceKey: "workspace-key",
+        getTurnId: () => "turn-1",
+      } as never);
+      lease.held = true;
+      lease.holderId = "holder-1";
+      lease.generation = 1;
+      const priorDeadline = performance.now() + 1;
+      lease.confirmedUntilMs = priorDeadline;
+
+      const renewal = lease.renew("timer");
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      resolveHeartbeat(new Date());
+      await renewal;
+
+      expect(lease.lost).toBe(true);
+      expect(lease.lossReason).toBe("deadline");
+      expect(lease.confirmedUntilMs).toBe(priorDeadline);
+    } finally {
+      heartbeat.mockRestore();
+    }
+  });
+
+  test("transport dispatch fence preserves typed lease loss and skips the provider", async () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() + 10_000;
+    lease.markLost("not_found");
+
+    let providerCalls = 0;
+    await expect(
+      codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+          beforeProviderDispatch: lease.assertUsable,
+        },
+        () =>
+          codexSubscriptionFetch(async () => {
+            providerCalls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBeInstanceOf(CodexCredentialLeaseLostError);
+    expect(providerCalls).toBe(0);
   });
 });
 
@@ -5517,6 +5639,7 @@ describe("transient provider error classifier", () => {
       accessToken: "codex-token-2",
       accountId: "acct",
     }));
+    const beforeProviderDispatch = mock(() => undefined);
     const codexContext: CodexRequestContext = {
       clientVersion: "test",
       sessionId: "session-id",
@@ -5524,6 +5647,7 @@ describe("transient provider error classifier", () => {
       refresh: refreshCodexToken,
       resolveModel: (model) => model,
       onUsageHeaders: () => undefined,
+      beforeProviderDispatch,
       onRequestPreparationDiagnostic: () => undefined,
       onModelRequestDiagnostic: () => undefined,
       onModelRequestEvent: () => undefined,
@@ -5539,6 +5663,7 @@ describe("transient provider error classifier", () => {
     expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
     expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
     expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
     expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
     expect(titleCodexContext.onModelRequestEvent).toBeUndefined();

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET,
+  CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT,
   DIRECT_SESSION_RAW_BUDGET,
   DIRECT_SESSION_RAW_MEASUREMENT,
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
@@ -132,6 +134,7 @@ describe("web bundle budget policy", () => {
         ORGANIZATION_CODEX_INHERITANCE_RAW_BUDGET,
         MODEL_CATALOG_GATEWAY_OPENROUTER_RAW_BUDGET,
         ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET,
+        CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET,
         SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET,
         SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET,
         SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET,
@@ -236,6 +239,14 @@ describe("web bundle budget policy", () => {
       ORGANIZATION_INVITATION_CONTINUATION_RAW_BUDGET -
         ORGANIZATION_INVITATION_CONTINUATION_RAW_MEASUREMENT,
     ).toBe(1_778);
+  });
+
+  test("retains the exact authoritative Codex capacity-status envelope", () => {
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT).toBe(2_279_737);
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET).toBe(2228 * KIB);
+    expect(CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET - CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT).toBe(
+      1_735,
+    );
   });
 
   test("retains the exact sidebar-density and current-main configured-browser envelope", () => {

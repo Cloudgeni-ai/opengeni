@@ -198,7 +198,7 @@ Broker rules:
 
 The broker passes resolved connection credentials directly to the outbound request rather than deliberately copying them into session configuration, events, run state, or Temporal inputs. OpenGeni does not heuristically scan or rewrite arbitrary provider, user, agent, or tool content if that content contains credential-shaped text; internal persisted and model-visible data remains exact.
 
-## 5. MCP OAuth client (spec rev 2025-11-25)
+## 5. MCP OAuth client (current profile with 2025-03-26 compatibility)
 
 ### 5.1 Flow
 
@@ -206,6 +206,9 @@ The broker passes resolved connection credentials directly to the outbound reque
 DISCOVER   probe server URL unauthenticated
            → 401 + WWW-Authenticate: parse resource_metadata URL + scope hint
            → RFC 9728 Protected Resource Metadata (well-known fallback probing)
+           → only when the challenge has no resource_metadata and every PRM
+             candidate is explicitly absent (404/410), probe the MCP origin's
+             RFC 8414 metadata as the legacy 2025-03-26 profile
            → pick AS; RFC 8414 / OIDC-discovery metadata (both well-known path orders)
            → REQUIRE code_challenge_methods_supported ∋ S256, else abort with clear error
 REGISTER   priority: (1) operator pre-registered creds for this AS
@@ -216,7 +219,8 @@ REGISTER   priority: (1) operator pre-registered creds for this AS
            (4) manual client-credential entry in UI
            A reviewed provider profile may explicitly force DCR or CIMD.
 AUTHORIZE  authorize URL: PKCE S256, state = signed payload (§5.2),
-           resource = canonical MCP server URI (RFC 8707, ALWAYS sent),
+           resource = canonical MCP server URI (RFC 8707 in modern PRM mode;
+           omitted in legacy 2025-03-26 mode),
            scope = requestedScopes when supplied (step-up), else 401-challenge
            scope if present, else PRM scopes_supported
            → browser → provider consent → redirect to callback
@@ -231,7 +235,7 @@ STEP-UP    runtime 403 error="insufficient_scope" → tool.auth_needed → re-AU
 
 ### 5.2 Stateless grant state (decision)
 
-No pending-grant table. The `state` parameter is a **signed, time-limited payload** using the established `createSignedState`/`verifySignedState` pattern from `@opengeni/github`, with a dedicated `integrationsStateSecret`: `{ workspaceId, accountId, subjectId, providerDomain, resource, requestedScopes, authorizeScopes, encryptedPkceVerifier, clientId, tokenEndpoint, authorizationServer, issuer, returnPath, nonce, iat }`. The PKCE verifier is **encrypted** (variable-sets key) inside the signed state — state transits browser URLs and provider logs, and a plaintext verifier there would defeat PKCE's interception protection. Single-use is enforced by inserting the consumed nonce into `integration_oauth_state_nonces` with a short TTL; the primary key makes replay fail across API instances. This survives multi-instance API deployments (the callback may land on any instance) — which is also why a random per-process fallback secret is forbidden: `integrationsStateSecret` is required whenever integrations are enabled outside local dev.
+No pending-grant table. The `state` parameter is a **signed, time-limited payload** using the established `createSignedState`/`verifySignedState` pattern from `@opengeni/github`, with a dedicated `integrationsStateSecret`: `{ workspaceId, accountId, subjectId, providerDomain, resource, requestedScopes, authorizeScopes, encryptedPkceVerifier, clientId, tokenEndpoint, authorizationServer, issuer, discoveryMode, discoveryMetadataSha256, protectedResourceMetadataUrl?, authorizationServerMetadataUrl, returnPath, nonce, iat }`. The discovery mode, selected issuer/resource, and exact metadata provenance hash are therefore frozen before the browser redirect; a callback cannot reinterpret a legacy grant as modern (or vice versa) after a deploy or discovery race. The PKCE verifier is **encrypted** (variable-sets key) inside the signed state — state transits browser URLs and provider logs, and a plaintext verifier there would defeat PKCE's interception protection. Single-use is enforced by inserting the consumed nonce into `integration_oauth_state_nonces` with a short TTL; the primary key makes replay fail across API instances. This survives multi-instance API deployments (the callback may land on any instance) — which is also why a random per-process fallback secret is forbidden: `integrationsStateSecret` is required whenever integrations are enabled outside local dev.
 
 The callback route must NOT call `requireAccessGrant` — a browser redirect carries only `code`+`state`. It trusts exclusively the verified, unexpired signed state minted by the authenticated start route.
 
@@ -292,7 +296,17 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 
 - PKCE S256 always; refuse ASes not advertising it.
 - `state` signed, single-use, TTL-bound, workspace+subject-bound; callback validates all of it.
-- `resource` (RFC 8707) on both authorize and token requests regardless of AS support.
+- RFC 9728 PRM is authoritative whenever present. Malformed, contradictory,
+  unreachable, redirected-to-unsafe, or otherwise invalid PRM is a hard failure;
+  it never causes a legacy downgrade.
+- Automatic legacy discovery requires a real Bearer/OAuth challenge without
+  `resource_metadata`, explicit absence of every PRM candidate, valid RFC 8414
+  metadata at the MCP URL's own origin, an issuer matching that metadata
+  authority, and a same-origin MCP-resource-to-issuer binding. Cross-origin
+  legacy servers require a reviewed profile/manual decision.
+- `resource` (RFC 8707) is sent on both authorize and token requests in modern
+  PRM mode, subject to reviewed provider-profile suppression. It is always
+  omitted in legacy 2025-03-26 mode.
 - Exact-match redirect URI only; never follow AS-supplied alternative redirects.
 - SSRF guard on PRM/AS-metadata/token-endpoint fetches: no private-range targets unless running in local/test or `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS=true`.
 - No token passthrough: tokens minted for an MCP server go only to that server; our own first-party MCP servers keep validating audience on inbound tokens.
@@ -337,6 +351,14 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 - **In-session:** the `tool.auth_needed` chip folds into the turn per existing timeline fold rules.
 
 ## 10. Discovery & catalog (I4)
+
+Runtime OAuth discovery and catalog OAuth diagnostics share
+`packages/network/src/mcp-oauth-discovery.ts`. Catalog results are diagnostic
+cache only; a connection attempt always performs fresh runtime discovery under
+the current DNS/IP/SSRF and redirect policy. Auth-gated rows carry one of:
+`oauth_rfc9728`, `oauth_legacy_same_origin_metadata`,
+`oauth_legacy_default_endpoints_unverified`, `oauth_requires_profile`, or
+`oauth_discovery_broken`.
 
 - Source-of-truth order: (1) the service's own well-known signals probed at add-by-domain time, (2) a **vendored, reviewed snapshot** of the integrations.sh registry (MIT) — import pipeline re-verifies `detected` entries (probe endpoint, confirm PRM) and demotes the rest to `community`, (3) the committed **curated overlay** `data/catalog/curated.json`, keyed by exact MCP URL, which wins over the snapshot field-by-field and carries reviewed first-party contracts, branding, category, and the checkable `featured` / `official` flags. Never live-consume the registry at request time; snapshots are versioned with import provenance. See `docs/capabilities.md` § Curated overlay.
 - Catalog rows extend `capability_catalog_items` with surface type, MCP URL, transports, credential facts, tier, provenance.

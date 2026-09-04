@@ -3,7 +3,6 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   clearSessionGoal,
-  countConsecutiveReactiveRotations,
   createDb,
   createSession,
   evaluateGoalContinuation,
@@ -13,19 +12,9 @@ import {
   type DbClient,
 } from "../src/index";
 
-// Finding 1b + Finding 2 — the persisted-event backstops for the codex
-// auto-rotation boundedness, driven through the REAL packages/db query fns against
-// a throwaway postgres under the NON-superuser opengeni_app role (so FORCE RLS
-// actually applies). Seeding is done as the superuser (bypasses RLS).
-//
-//   Finding 1b — countConsecutiveReactiveRotations: the number of CONSECUTIVE
-//     rotated 429-failover turns since the last SUCCESSFUL turn (turn.completed
-//     anchor). The reactive path consults it to bound its 0-delay re-dispatch, and
-//     it RESETS to 0 the moment a turn.completed lands.
-//   Finding 2 — evaluateGoalContinuation must FREEZE autoContinuations for the
-//     rotation-wait state on BOTH the reactive AND the (now `rotated:true`)
-//     proactive all-capped path, while a NORMAL non-rotation goal continuation
-//     still increments. A goal waiting out a reset must not burn its budget.
+// Persisted goal-state behavior is exercised through the real packages/db
+// functions against a throwaway PostgreSQL database under the non-superuser
+// application role, so FORCE RLS remains part of the test.
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -104,11 +93,11 @@ async function seedGoalOnFinishedTurn(
 }
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("reactive-rotation-boundedness");
+  shared = await acquireSharedTestDatabase("codex-capacity-goal-continuation");
   if (!shared) {
     available = false;
     // eslint-disable-next-line no-console
-    console.warn("[reactive-rotation-boundedness] docker unavailable, skipping");
+    console.warn("[codex-capacity-goal-continuation] docker unavailable, skipping");
     return;
   }
   admin = shared.admin;
@@ -124,68 +113,6 @@ afterAll(async () => {
   }
   await shared?.release();
 }, 180_000);
-
-describe("Finding 1b — countConsecutiveReactiveRotations", () => {
-  test("no events → 0 (a fresh session is never mid-loop)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const sessionId = await seedSession(ws);
-    expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(0);
-  });
-
-  test("counts every rotated turn.failed when there is no successful turn yet (the runaway-walk case)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const sessionId = await seedSession(ws);
-    await appendEvent(ws, sessionId, "turn.failed", {
-      rotated: true,
-      recovery: "goal_continuation",
-    });
-    await appendEvent(ws, sessionId, "turn.failed", {
-      rotated: true,
-      recovery: "goal_continuation",
-    });
-    await appendEvent(ws, sessionId, "turn.failed", {
-      rotated: true,
-      recovery: "goal_continuation",
-    });
-    expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(3);
-  });
-
-  test("a non-rotated turn.failed is NOT counted (only rotation failovers)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const sessionId = await seedSession(ws);
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.failed", {
-      recovery: "provider_backpressure",
-    }); // no rotated marker
-    expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(1);
-  });
-
-  test("(2) the streak RESETS after a successful turn (turn.completed moves the anchor past prior failovers)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const sessionId = await seedSession(ws);
-    // Two failovers, then a SUCCESS, then one more failover.
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.completed", { output: "done" }); // real progress → resets the anchor
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    // Only the failover AFTER the success counts — the pre-success streak is forgotten.
-    expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(1);
-  });
-
-  test("(2) a success with NO subsequent failover returns 0 (fully reset)", async () => {
-    if (!available) return;
-    const ws = await freshWorkspace();
-    const sessionId = await seedSession(ws);
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.failed", { rotated: true });
-    await appendEvent(ws, sessionId, "turn.completed", { output: "done" });
-    expect(await countConsecutiveReactiveRotations(db, ws.workspaceId, sessionId)).toBe(0);
-  });
-});
 
 describe("session goal clearing", () => {
   test("deletes the goal row, appends goal.cleared once, and is idempotent", async () => {
@@ -209,15 +136,15 @@ describe("session goal clearing", () => {
   });
 });
 
-describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BOTH paths", () => {
+describe("evaluateGoalContinuation freezes Codex capacity waits", () => {
   const CONFIG = { defaultMaxAutoContinuations: 100 } as const;
 
-  test("(3) a rotated:true continuation FREEZES autoContinuations (reactive AND proactive all-capped, post-fix)", async () => {
+  test("a rotated capacity continuation freezes autoContinuations", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const sessionId = await seedSession(ws);
     const turnId = await seedGoalOnFinishedTurn(ws, sessionId);
-    // The turn.failed shape BOTH all-capped paths now emit: recovery=goal_continuation + rotated:true.
+    // Capacity recovery marks the failed turn as rotated so it does not consume goal budget.
     await appendEvent(
       ws,
       sessionId,
@@ -239,13 +166,12 @@ describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BO
     expect(decision.decision === "continue" ? decision.autoContinuation : -1).toBe(0);
   });
 
-  test("(3) a NORMAL non-rotation goal continuation still INCREMENTS (the pre-fix proactive shape / normal backpressure)", async () => {
+  test("a normal non-capacity goal continuation still increments", async () => {
     if (!available) return;
     const ws = await freshWorkspace();
     const sessionId = await seedSession(ws);
     const turnId = await seedGoalOnFinishedTurn(ws, sessionId);
-    // recovery=goal_continuation but NO rotated marker — exactly the proactive all-capped
-    // payload BEFORE Finding 2, and a normal (non-rotation) continuation in general.
+    // A normal goal continuation has no rotated capacity marker.
     await appendEvent(
       ws,
       sessionId,
@@ -259,7 +185,7 @@ describe("Finding 2 — evaluateGoalContinuation freezes the rotation-wait on BO
       ...CONFIG,
     });
     expect(decision.decision).toBe("continue");
-    // Not a rotation wait → the budget advances as before (proves the freeze is scoped to rotation).
+    // Not a capacity wait, so the budget advances as before.
     expect(decision.decision === "continue" ? decision.autoContinuation : -1).toBe(1);
   });
 });

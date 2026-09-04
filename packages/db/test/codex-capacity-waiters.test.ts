@@ -50,7 +50,6 @@ let claimDb: Database;
 
 const settings = testSettings({
   codexSubscriptionEnabled: true,
-  codexCredentialLeasingEnabled: true,
   environmentsEncryptionKey: Buffer.alloc(32, 17).toString("base64"),
 });
 
@@ -566,6 +565,28 @@ describe("durable Codex capacity waits", () => {
     const scenario = await seedScenario(ws);
     const armed = await arm(scenario);
     if (armed.action !== "waiting") throw new Error("expected waiter");
+    const duplicate = await arm(scenario);
+    if (duplicate.action !== "waiting") throw new Error("expected existing waiter");
+    expect(duplicate.waiter.refreshAttempt).toBe(0);
+    expect(duplicate.waiter.nextCheckAt).toEqual(armed.waiter.nextCheckAt);
+
+    const immediate = await reconcileCodexCapacityWait(
+      dbA,
+      {
+        accountId: scenario.accountId,
+        workspaceId: scenario.workspaceId,
+        sessionId: scenario.sessionId,
+        waiterId: armed.waiter.id,
+        generation: armed.waiter.generation,
+        now: new Date(armed.waiter.nextCheckAt.getTime() - 1),
+      },
+      unavailableDecision,
+    );
+    expect(immediate.action).toBe("waiting");
+    if (immediate.action !== "waiting") throw new Error("expected waiter");
+    expect(immediate.waiter.refreshAttempt).toBe(0);
+    expect(immediate.waiter.nextCheckAt).toEqual(armed.waiter.nextCheckAt);
+
     const reconciled = await reconcileCodexCapacityWait(
       dbA,
       {
@@ -575,6 +596,7 @@ describe("durable Codex capacity waits", () => {
         waiterId: armed.waiter.id,
         generation: armed.waiter.generation,
         now: new Date(armed.waiter.nextCheckAt.getTime() + 1),
+        boundedRefreshAttempted: true,
       },
       unavailableDecision,
     );
@@ -770,8 +792,8 @@ describe("durable Codex capacity waits", () => {
       ) returning id`;
     await admin`
       insert into organization_codex_rotation_settings (
-        account_id, active_credential_id, rotation_enabled, lease_rotation_enabled
-      ) values (${account!.id}, ${credential!.id}, true, true)`;
+        account_id, active_credential_id, rotation_enabled
+      ) values (${account!.id}, ${credential!.id}, true)`;
     const firstScenario = await seedScenario(workspaces[0]!);
     const secondScenario = await seedScenario(workspaces[1]!);
     const firstWait = await arm(firstScenario);

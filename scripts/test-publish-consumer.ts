@@ -499,7 +499,6 @@ try {
   const reactSource = JSON.parse(
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
-
   // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
   // importing it. Pin the version @opengeni/react already typechecks.
   const postcssVersion = reactSource.devDependencies?.postcss;
