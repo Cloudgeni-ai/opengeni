@@ -113,7 +113,7 @@ function Harness() {
   const prepend = useCallback(() => {
     flushSync(() =>
       setItems((current) => [
-        ...(compactTail ? range(1, 14) : adjacentPrepend ? range(1_000, 40) : range(900, 100)),
+        ...(compactTail ? range(1, 12) : adjacentPrepend ? range(1_000, 40) : range(900, 100)),
         ...current,
       ]),
     );

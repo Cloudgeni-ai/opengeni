@@ -495,7 +495,11 @@ describe("timeline scroll ownership browser regression", () => {
     expect(atTop.gap).toBeGreaterThan(1);
     expect(atTop.gap).toBeLessThanOrEqual(48);
 
+    const anchor = page.locator('[data-timeline-row="row-13"]').first();
+    const beforeAnchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+
     await page.evaluate(() => window.timelineScrollHarness!.prepend());
+    await page.locator('[data-timeline-row="row-1"]').waitFor({ timeout: 5_000 });
     await page.waitForTimeout(80);
 
     const after = await scroller.evaluate((node) => ({
@@ -504,10 +508,12 @@ describe("timeline scroll ownership browser regression", () => {
       height: node.scrollHeight,
       pin: node.getAttribute("data-og-bottom-follow"),
     }));
+    const afterAnchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
     expect(after.height).toBeGreaterThan(atTop.height + 200);
     expect(after.scrollTop).toBeGreaterThan(200);
     expect(after.gap).toBeCloseTo(atTop.gap, 0);
     expect(after.pin).toBe("false");
+    expect(afterAnchorTop).toBeCloseTo(beforeAnchorTop, 0);
     expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(1);
   }, 30_000);
 

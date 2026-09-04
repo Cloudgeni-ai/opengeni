@@ -1194,13 +1194,12 @@ export function MessageTimeline({
         pinnedRef.current &&
         !hasNewer &&
         !pendingReaderLeaveRef.current &&
-        !olderPrefetchArmedRef.current &&
         (wasAtLiveTailBeforeCommit || underfillOwned)
       ) {
-        // Automatic underfill (the reader never left the live tip) must stay
-        // parked there when the short window finally grows. A reader-driven
-        // sentinel load arms prefetch first; those prepends restore in place
-        // even if a stale pin or short-window gap still looks like the tip.
+        // Still following the live tip: underfill, or a prefetch the reader
+        // started and then returned from. Park at the new tip. A stale pin
+        // while they are actually up in a short window (gap is not inside
+        // PIN_THRESHOLD of maxScroll, so wasAtLiveTail is false) restores.
         clearPendingReaderLeave();
         snapToBottom(node);
       } else {
