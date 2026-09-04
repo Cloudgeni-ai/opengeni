@@ -457,11 +457,11 @@ describe("capabilities browser e2e", () => {
     }
   }, 60_000);
 
-  test("in-place workspace navigation resets Browse to the first 48-item window", async () => {
+  test("in-place workspace navigation clears Browse while the next workspace loads", async () => {
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
     try {
-      await installWorkspaceCatalogApi(page, 120, 96);
+      const catalog = await installWorkspaceCatalogApi(page, 120, 96);
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
         waitUntil: "networkidle",
       });
@@ -473,27 +473,78 @@ describe("capabilities browser e2e", () => {
       expect(await tiles.count()).toBe(96);
       await expectFocused(seeMore);
 
+      const focusedWorkspaceATile = tiles.nth(95).locator("button").first();
+      await focusedWorkspaceATile.focus();
+      await expectFocused(focusedWorkspaceATile);
+
       await page.evaluate((nextWorkspaceId) => {
         window.history.pushState(null, "", `/workspaces/${nextWorkspaceId}/plugins`);
         window.dispatchEvent(new PopStateEvent("popstate"));
       }, secondWorkspaceId);
       await page.waitForURL(`**/workspaces/${secondWorkspaceId}/plugins`);
+      await catalog.waitForSecondCatalogRequest();
+      // The B request starts only after B's first route commit. At that boundary,
+      // no A catalog or focused A action may survive while the request stays held.
+      await expectNoWorkspaceATileOrFocus(page);
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+      expect(await tiles.count()).toBe(0);
+
+      await page.waitForTimeout(100);
+      expect(await tiles.count()).toBe(0);
+      await expectNoWorkspaceATileOrFocus(page);
+
+      catalog.resolveSecondCatalog();
       await expectVisible(
         page.locator('[data-capability-catalog-tile^="mcp:workspace-b-"]').first(),
       );
 
       expect(await tiles.count()).toBe(48);
       await expectVisible(page.getByRole("button", { name: "See more" }));
-      expect(await page.locator('[data-capability-catalog-tile^="mcp:workspace-a-"]').count()).toBe(
-        0,
-      );
-      expect(
-        (await page.evaluate(() =>
-          document.activeElement
-            ?.closest("[data-capability-catalog-tile]")
-            ?.getAttribute("data-capability-catalog-tile"),
-        )) ?? "",
-      ).not.toMatch(/^mcp:workspace-a-/);
+      await expectNoWorkspaceATileOrFocus(page);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a rejected next-workspace catalog never restores the previous workspace", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      const catalog = await installWorkspaceCatalogApi(page, 120, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.click();
+      expect(await tiles.count()).toBe(96);
+
+      const focusedWorkspaceATile = tiles.nth(95).locator("button").first();
+      await focusedWorkspaceATile.focus();
+      await expectFocused(focusedWorkspaceATile);
+
+      await page.evaluate((nextWorkspaceId) => {
+        window.history.pushState(null, "", `/workspaces/${nextWorkspaceId}/plugins`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, secondWorkspaceId);
+      await page.waitForURL(`**/workspaces/${secondWorkspaceId}/plugins`);
+      await catalog.waitForSecondCatalogRequest();
+      // The rejected path must be isolated at B's first commit too, before its
+      // held catalog request is allowed to fail.
+      await expectNoWorkspaceATileOrFocus(page);
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+      expect(await tiles.count()).toBe(0);
+
+      catalog.rejectSecondCatalog();
+      const error = page.getByRole("alert").filter({ hasText: "Couldn't load plugins" });
+      await expectVisible(error);
+      await expectText(error, "Workspace B catalog rejected");
+      await expectVisible(error.getByRole("button", { name: "Retry" }));
+      expect(await tiles.count()).toBe(0);
+      expect(await page.getByRole("button", { name: "See more" }).count()).toBe(0);
+      await expectNoWorkspaceATileOrFocus(page);
     } finally {
       await context.close();
     }
@@ -1132,11 +1183,17 @@ async function installWorkspaceCatalogApi(
   page: Page,
   firstCatalogSize: number,
   secondCatalogSize: number,
-): Promise<void> {
+): Promise<{
+  waitForSecondCatalogRequest: () => Promise<void>;
+  resolveSecondCatalog: () => void;
+  rejectSecondCatalog: () => void;
+}> {
   const catalogs = new Map([
     [workspaceId, largeCatalog("workspace-a", firstCatalogSize)],
     [secondWorkspaceId, largeCatalog("workspace-b", secondCatalogSize)],
   ]);
+  const secondCatalogRequested = deferred<void>();
+  const secondCatalogOutcome = deferred<"resolve" | "reject">();
   const workspaces = [
     workspace(),
     { ...workspace(), id: secondWorkspaceId, name: "Second Focus Test Workspace" },
@@ -1199,6 +1256,12 @@ async function installWorkspaceCatalogApi(
     const resource = match?.[2];
     if (!routeWorkspaceId || !catalogs.has(routeWorkspaceId)) return json({});
     if (resource === "capabilities") {
+      if (routeWorkspaceId === secondWorkspaceId) {
+        secondCatalogRequested.resolve();
+        if ((await secondCatalogOutcome.promise) === "reject") {
+          return json({ message: "Workspace B catalog rejected" }, 500);
+        }
+      }
       return json({ items: catalogs.get(routeWorkspaceId), installations: [] });
     }
     if (resource === "connections") return json({ connections: [] });
@@ -1219,6 +1282,31 @@ async function installWorkspaceCatalogApi(
     }
     return json({});
   });
+
+  return {
+    waitForSecondCatalogRequest: async () => await secondCatalogRequested.promise,
+    resolveSecondCatalog: () => secondCatalogOutcome.resolve("resolve"),
+    rejectSecondCatalog: () => secondCatalogOutcome.resolve("reject"),
+  };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function expectNoWorkspaceATileOrFocus(page: Page): Promise<void> {
+  expect(await page.locator('[data-capability-catalog-tile^="mcp:workspace-a-"]').count()).toBe(0);
+  expect(
+    (await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-capability-catalog-tile]")
+        ?.getAttribute("data-capability-catalog-tile"),
+    )) ?? "",
+  ).not.toMatch(/^mcp:workspace-a-/);
 }
 
 function largeCatalog(prefix: string, size: number) {
