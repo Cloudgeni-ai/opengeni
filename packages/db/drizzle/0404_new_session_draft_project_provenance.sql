@@ -59,6 +59,9 @@ LANGUAGE plpgsql
 AS $function$
 DECLARE
   project_channel_is_valid boolean;
+  old_compute_snapshot jsonb;
+  new_compute_snapshot jsonb;
+  provenance_was_replaced boolean;
 BEGIN
   IF NEW."session_options" ? 'selectedProjectChannelId' THEN
     project_channel_is_valid :=
@@ -87,6 +90,55 @@ BEGIN
       ELSE NULL
     END;
     NEW."session_options" := NEW."session_options" - 'selectedProjectChannelId';
+  ELSIF TG_OP = 'UPDATE' THEN
+    old_compute_snapshot :=
+      CASE WHEN OLD."session_options" ? 'sandboxBackend'
+        THEN jsonb_build_object('sandboxBackend', OLD."session_options" -> 'sandboxBackend')
+        ELSE '{}'::jsonb END
+      || CASE WHEN OLD."session_options" ? 'targetSandboxId'
+        THEN jsonb_build_object('targetSandboxId', OLD."session_options" -> 'targetSandboxId')
+        ELSE '{}'::jsonb END
+      || CASE WHEN OLD."session_options" ? 'workingDir'
+        THEN jsonb_build_object('workingDir', OLD."session_options" -> 'workingDir')
+        ELSE '{}'::jsonb END;
+    new_compute_snapshot :=
+      CASE WHEN NEW."session_options" ? 'sandboxBackend'
+        THEN jsonb_build_object('sandboxBackend', NEW."session_options" -> 'sandboxBackend')
+        ELSE '{}'::jsonb END
+      || CASE WHEN NEW."session_options" ? 'targetSandboxId'
+        THEN jsonb_build_object('targetSandboxId', NEW."session_options" -> 'targetSandboxId')
+        ELSE '{}'::jsonb END
+      || CASE WHEN NEW."session_options" ? 'workingDir'
+        THEN jsonb_build_object('workingDir', NEW."session_options" -> 'workingDir')
+        ELSE '{}'::jsonb END;
+
+    IF old_compute_snapshot IS DISTINCT FROM new_compute_snapshot THEN
+      -- An old binary cannot name either additive column, so both arrive here
+      -- byte-identical to OLD. A new binary replaces the pair and stamps the
+      -- incoming compute snapshot in the same UPDATE. Require both pieces of
+      -- evidence before retaining provenance: merely changing one stale column
+      -- must not make a later compute ABA capable of revalidating it.
+      provenance_was_replaced :=
+        (
+          NEW."selected_project_channel_id"
+            IS DISTINCT FROM OLD."selected_project_channel_id"
+          OR NEW."selected_project_compute_snapshot"
+            IS DISTINCT FROM OLD."selected_project_compute_snapshot"
+        )
+        AND (
+          (
+            NEW."selected_project_channel_id" IS NULL
+            AND NEW."selected_project_compute_snapshot" IS NULL
+          )
+          OR NEW."selected_project_compute_snapshot"
+            IS NOT DISTINCT FROM new_compute_snapshot
+        );
+
+      IF NOT provenance_was_replaced THEN
+        NEW."selected_project_channel_id" := NULL;
+        NEW."selected_project_compute_snapshot" := NULL;
+      END IF;
+    END IF;
   END IF;
   RETURN NEW;
 END

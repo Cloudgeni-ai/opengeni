@@ -304,7 +304,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     });
   });
 
-  test("pre-0404 Drizzle reads and writes preserve columns while compute mismatch invalidates provenance", async () => {
+  test("pre-0404 Drizzle writes permanently clear provenance on markerless compute ABA", async () => {
     const context = await fixture();
     const projectId = crypto.randomUUID();
     const compute = {
@@ -373,14 +373,10 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       db
         .update(legacyNewSessionDrafts)
         .set({
-          // A stale transaction may still carry the short-lived JSON key.
-          // The rolling trigger must remove it instead of exposing it to an
-          // old exact-create comparison.
           sessionOptions: {
             ...changedCompute,
             toolsProvided: false,
             selectionHistory: { projects: [] },
-            selectedProjectChannelId: projectId,
           },
           updatedAt: new Date(),
         })
@@ -391,14 +387,39 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
       false,
     );
     expect(afterOldComputeChange).toMatchObject({
-      selectedProjectChannelId: projectId,
-      selectedProjectComputeSnapshot: changedCompute,
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
     });
-    expect(newSessionDraftSelectedProjectChannelId(afterOldComputeChange!)).toBe(projectId);
+    expect(newSessionDraftSelectedProjectChannelId(afterOldComputeChange!)).toBeUndefined();
     const oldExactCreateOptions = { ...afterOldComputeChange!.sessionOptions };
     delete oldExactCreateOptions.toolsProvided;
     delete oldExactCreateOptions.selectionHistory;
     expect(stableJson(oldExactCreateOptions)).toBe(stableJson(changedCompute));
+
+    await withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
+      db
+        .update(legacyNewSessionDrafts)
+        .set({
+          sessionOptions: {
+            ...compute,
+            toolsProvided: false,
+            selectionHistory: { projects: [] },
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(legacyNewSessionDrafts.id, legacyRead[0]!.id)),
+    );
+    const afterLegacyAba = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(afterLegacyAba).toMatchObject({
+      sessionOptions: {
+        ...compute,
+        toolsProvided: false,
+        selectionHistory: { projects: [] },
+      },
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
+    });
+    expect(newSessionDraftSelectedProjectChannelId(afterLegacyAba!)).toBeUndefined();
   });
 
   test("legacy omission clears named-project provenance when machine placement changes", async () => {

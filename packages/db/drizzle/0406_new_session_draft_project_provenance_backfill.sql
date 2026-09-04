@@ -1,23 +1,16 @@
 -- deployment-mode: rolling
 -- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
 -- Convert legacy JSON provenance in independently committed, deterministic
--- batches. The partial index keeps candidate discovery and the final empty
--- batch bounded to remaining legacy rows. A contended candidate aborts the
--- transaction instead of being skipped, so the migration cannot be ledgered
--- while any locked legacy row remains.
-WITH backfill_capability AS MATERIALIZED (
-  SELECT pg_catalog.set_config(
-    'opengeni.new_session_draft_project_provenance_backfill_v1',
-    '1',
-    true
-  ) AS enabled
-),
-candidates AS MATERIALIZED (
+-- batches. The runner sets the owner-only capability transaction-locally
+-- before this statement; a same-query CTE cannot establish visibility for the
+-- FORCE-RLS scan reliably. The partial index keeps candidate discovery and the
+-- final empty batch bounded to remaining legacy rows. A contended candidate
+-- aborts the transaction instead of being skipped, so the migration cannot be
+-- ledgered while any locked legacy row remains.
+WITH candidates AS MATERIALIZED (
   SELECT draft.id
   FROM new_session_drafts draft
-  CROSS JOIN backfill_capability capability
-  WHERE capability.enabled = '1'
-    AND draft.session_options ? 'selectedProjectChannelId'
+  WHERE draft.session_options ? 'selectedProjectChannelId'
   ORDER BY draft.id
   LIMIT 500
   FOR UPDATE OF draft

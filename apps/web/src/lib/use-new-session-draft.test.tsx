@@ -6,6 +6,7 @@ import type {
   OpenGeniClient,
   SaveNewSessionDraftRequest,
 } from "@opengeni/sdk";
+import { stableJson } from "@opengeni/contracts";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useLayoutEffect, useRef, useState } from "react";
 
@@ -86,7 +87,6 @@ type DraftClient = Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDr
 
 type RouteDraftHookProps = {
   launchChannelId: string | null | undefined;
-  resolveRemoteAfterCommit?: (() => void) | undefined;
 };
 
 function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
@@ -110,10 +110,11 @@ function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
 function renderRouteDraftHook(
   draftClient: DraftClient,
   initialLaunchChannelId: string | null | undefined = undefined,
+  onRemoteApplied?: () => void,
 ) {
   return renderHook(
     (props: RouteDraftHookProps) => {
-      const { launchChannelId, resolveRemoteAfterCommit } = props;
+      const { launchChannelId } = props;
       const [remoteValue, setRemoteValue] = useState(() => editable());
       const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
         launchChannelId ?? null,
@@ -140,8 +141,7 @@ function renderRouteDraftHook(
           launchChannelId,
         );
         previousLaunchChannelIdRef.current = launchChannelId;
-        resolveRemoteAfterCommit?.();
-      }, [launchChannelId, resolveRemoteAfterCommit]);
+      }, [launchChannelId]);
       const value = {
         ...remoteValue,
         ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
@@ -196,6 +196,7 @@ function renderRouteDraftHook(
           setProjectProvenancePresent(
             hydratedNewSessionProjectProvenancePresent(launchIntentRef.current, nextRemote),
           );
+          onRemoteApplied?.();
         },
         restoreReadyFiles: () => {},
       });
@@ -265,6 +266,37 @@ function conflict(): OpenGeniApiError {
       message: "draft changed",
       currentRevision: 5,
     }),
+  );
+}
+
+async function settleBeforePassiveEffects(run: () => Promise<void> | void): Promise<void> {
+  // This helper is paired with renderHook.rerenderThroughLayout: the test needs
+  // the real browser microtask window after layout commit but before React's
+  // passive-effect task. Ordinary assertions and cleanup return to `act`.
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  try {
+    await run();
+  } finally {
+    globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+}
+
+function exactCreateAccepts(
+  authoritative: NewSessionDraft,
+  expectedRevision: number,
+  local: NewSessionDraftEditable,
+): boolean {
+  const {
+    revision,
+    selectionHistory: _selectionHistory,
+    updatedAt: _updatedAt,
+    selectedProjectChannelId: _authoritativeProject,
+    ...authoritativeSnapshot
+  } = authoritative;
+  const { selectedProjectChannelId: _localProject, ...localSnapshot } = local;
+  return (
+    revision === expectedRevision && stableJson(authoritativeSnapshot) === stableJson(localSnapshot)
   );
 }
 
@@ -490,14 +522,88 @@ describe("useNewSessionDraft", () => {
   });
 
   test.each([
+    ["explicit route", PROJECT_A],
+    ["Recents", undefined],
+  ] as const)(
+    "%s projection stays passively read-only but an immediate create flush persists its exact snapshot",
+    async (_label, launchChannelId) => {
+      const history = {
+        projects: [
+          {
+            channelId: PROJECT_A,
+            targetSandboxId: MACHINE_A,
+            machines: [{ sandboxId: MACHINE_A, workingDir: "/workspace/project-a" }],
+          },
+        ],
+      };
+      let authoritative = {
+        ...remote(1, {
+          ...(launchChannelId === undefined ? {} : { selectedProjectChannelId: PROJECT_B }),
+          options: {
+            visibility: "workspace" as const,
+            targetSandboxId: MACHINE_B,
+            workingDir: "/workspace/project-b",
+          },
+        }),
+        selectionHistory: history,
+      };
+      const requests: SaveNewSessionDraftRequest[] = [];
+      const hook = await renderRouteDraftHook(
+        client({
+          getNewSessionDraft: async () => authoritative,
+          saveNewSessionDraft: async (_workspaceId, request) => {
+            requests.push(request);
+            if (request.expectedRevision !== authoritative.revision) throw conflict();
+            const { expectedRevision: _expectedRevision, ...savedEditable } = request;
+            authoritative = {
+              ...remote(request.expectedRevision + 1, savedEditable),
+              selectionHistory: history,
+            };
+            return authoritative;
+          },
+        }),
+        launchChannelId,
+      );
+      await flush(550);
+
+      expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
+      expect(hook.result.current.value.options).toMatchObject({
+        targetSandboxId: MACHINE_A,
+        workingDir: "/workspace/project-a",
+      });
+      expect(requests).toHaveLength(0);
+
+      const flushed = await actRun(() => hook.result.current.draft.flush());
+      expect(flushed?.revision).toBe(2);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        expectedRevision: 1,
+        options: {
+          targetSandboxId: MACHINE_A,
+          workingDir: "/workspace/project-a",
+        },
+      });
+      if (launchChannelId === undefined) {
+        expect(Object.hasOwn(requests[0]!, "selectedProjectChannelId")).toBe(false);
+      } else {
+        expect(requests[0]?.selectedProjectChannelId).toBe(PROJECT_A);
+      }
+      expect(
+        flushed && exactCreateAccepts(authoritative, flushed.revision, hook.result.current.value),
+      ).toBe(true);
+      await hook.unmount();
+    },
+  );
+
+  test.each([
     ["named", PROJECT_B],
     ["Default", null],
   ] as const)(
     "deferred GET honors a newer %s-to-omitted route intent without a passive write",
     async (_label, initialLaunchChannelId) => {
       const pending = deferred<NewSessionDraft>();
+      const applied = deferred<void>();
       const requests: SaveNewSessionDraftRequest[] = [];
-      let resolvedAfterCommit = false;
       const history = {
         projects: [
           {
@@ -527,18 +633,16 @@ describe("useNewSessionDraft", () => {
           },
         }),
         initialLaunchChannelId,
+        () => applied.resolve(),
       );
 
-      await hook.rerender({
-        launchChannelId: undefined,
-        resolveRemoteAfterCommit: () => {
-          resolvedAfterCommit = true;
-          pending.resolve(hydratedRemote);
-        },
+      await hook.rerenderThroughLayout({ launchChannelId: undefined });
+      await settleBeforePassiveEffects(async () => {
+        pending.resolve(hydratedRemote);
+        await applied.promise;
       });
       await flush(550);
 
-      expect(resolvedAfterCommit).toBe(true);
       expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
       expect(hook.result.current.value.options).toMatchObject({
         targetSandboxId: MACHINE_A,

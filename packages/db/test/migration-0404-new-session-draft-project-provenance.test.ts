@@ -87,6 +87,34 @@ async function asAppScope<T>(
   })) as T;
 }
 
+async function waitForBlockedFinalBackfillBatch(
+  admin: postgres.Sql,
+  holderPid: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  let lastState: { remaining: number; blocked: boolean } | null = null;
+  while (Date.now() < deadline) {
+    const [state] = await admin<Array<{ remaining: number; blocked: boolean }>>`
+      select
+        count(*) filter (
+          where session_options ? 'selectedProjectChannelId'
+        )::integer as remaining,
+        exists (
+          select 1
+          from pg_catalog.pg_stat_activity activity
+          where activity.datname = current_database()
+            and ${holderPid} = any(pg_catalog.pg_blocking_pids(activity.pid))
+        ) as blocked
+      from new_session_drafts`;
+    lastState = state ?? null;
+    if (state?.remaining === 1 && state.blocked) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(
+    `timed out waiting for committed first backfill batch and blocked final candidate: ${JSON.stringify(lastState)}`,
+  );
+}
+
 describe("phased new-session draft project provenance migration", () => {
   let owned: OwnerMigratedTestDatabase | null = null;
 
@@ -102,11 +130,12 @@ describe("phased new-session draft project provenance migration", () => {
   }, 120_000);
 
   test("declares four bounded rolling phases with matching runner contracts", async () => {
-    const [fence, index, backfill, validation] = await Promise.all([
+    const [fence, index, backfill, validation, migrationRunner] = await Promise.all([
       migrationSource(fenceMigration),
       migrationSource(indexMigration),
       migrationSource(backfillMigration),
       migrationSource(validationMigration),
+      readFile(new URL("../src/migrate.ts", import.meta.url), "utf8"),
     ]);
 
     expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
@@ -123,6 +152,13 @@ describe("phased new-session draft project provenance migration", () => {
       'NEW."session_options" := NEW."session_options" - \'selectedProjectChannelId\'',
     );
     expect(fence).toContain("IF NEW.\"session_options\" ? 'selectedProjectChannelId' THEN");
+    expect(fence).toContain("ELSIF TG_OP = 'UPDATE' THEN");
+    expect(fence).toContain("old_compute_snapshot IS DISTINCT FROM new_compute_snapshot");
+    expect(fence).toMatch(
+      /NEW\."selected_project_compute_snapshot"\s+IS NOT DISTINCT FROM new_compute_snapshot/u,
+    );
+    expect(fence).toContain('NEW."selected_project_channel_id" := NULL');
+    expect(fence).toContain('NEW."selected_project_compute_snapshot" := NULL');
     expect(fence).not.toMatch(/^\s*UPDATE\s+"?new_session_drafts"?/imu);
     expect(fence).not.toContain("VALIDATE CONSTRAINT");
     expect(fence).not.toContain("NO FORCE ROW LEVEL SECURITY");
@@ -142,8 +178,12 @@ describe("phased new-session draft project provenance migration", () => {
       lockTimeout: "1s",
       statementTimeout: "10s",
     });
-    expect(parsedBackfill?.statement).toContain("backfill_capability AS MATERIALIZED");
-    expect(parsedBackfill?.statement).toContain(`'${capabilityGuc}'`);
+    expect(parsedBackfill?.statement).not.toContain("backfill_capability AS MATERIALIZED");
+    expect(parsedBackfill?.statement).not.toContain("set_config");
+    expect(migrationRunner).toContain(
+      "const transactionLocalSetting = batchedBackfillTransactionLocalSetting(file)",
+    );
+    expect(migrationRunner).toContain("${transactionLocalSetting.guc}");
     expect(parsedBackfill?.statement).toContain("ORDER BY draft.id");
     expect(parsedBackfill?.statement).toContain("LIMIT 500");
     expect(parsedBackfill?.statement).toContain("FOR UPDATE OF draft");
@@ -171,6 +211,8 @@ describe("phased new-session draft project provenance migration", () => {
     const lockedDraftId = "00000000-0000-4000-8000-0000000001f5";
     const mixedWriterDraftId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
     const mixedWriterSubject = "subject:0404-mixed-writer";
+    const newWriterInsertDraftId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const newWriterInsertSubject = "subject:0404-new-writer-insert";
     await admin.begin(async (transaction) => {
       await transaction`
         insert into managed_accounts (id, name)
@@ -235,6 +277,7 @@ describe("phased new-session draft project provenance migration", () => {
     const app = postgres(appUrl(owned), { max: 2, prepare: false, onnotice: () => undefined });
     let holder: postgres.Sql | null = null;
     let heldPromise: Promise<unknown> | null = null;
+    let holderPid: number | null = null;
     const heldLock: { release?: () => void } = {};
     try {
       const [ownerWithoutCapability] = await owner<Array<{ rows: number }>>`
@@ -303,6 +346,128 @@ describe("phased new-session draft project provenance migration", () => {
         },
       });
 
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: mixedWriterSubject },
+        async (transaction) => {
+          await transaction`
+            update new_session_drafts
+            set text = 'unrelated legacy edit'
+            where id = ${mixedWriterDraftId}`;
+          await transaction`
+            update new_session_drafts
+            set session_options = session_options
+            where id = ${mixedWriterDraftId}`;
+        },
+      );
+      const [afterUnrelatedAndNoop] = await admin<
+        Array<{ projectId: string | null; snapshot: Record<string, unknown> | null }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot
+        from new_session_drafts where id = ${mixedWriterDraftId}`;
+      expect(afterUnrelatedAndNoop).toEqual({
+        projectId: validProjectId,
+        snapshot: {
+          sandboxBackend: "selfhosted",
+          targetSandboxId: "33333333-3333-4333-8333-333333333333",
+          workingDir: "/workspace/mixed-writer",
+        },
+      });
+
+      const legacyComputeB = {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: "55555555-5555-4555-8555-555555555555",
+        workingDir: "/workspace/legacy-b",
+      };
+      const legacyComputeA = {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: "33333333-3333-4333-8333-333333333333",
+        workingDir: "/workspace/mixed-writer",
+      };
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: mixedWriterSubject },
+        async (transaction) => {
+          await transaction`
+            update new_session_drafts
+            set session_options = ${transaction.json(legacyComputeB)}
+            where id = ${mixedWriterDraftId}`;
+        },
+      );
+      const [afterLegacyDeparture] = await admin<
+        Array<{ projectId: string | null; snapshot: Record<string, unknown> | null }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot
+        from new_session_drafts where id = ${mixedWriterDraftId}`;
+      expect(afterLegacyDeparture).toEqual({ projectId: null, snapshot: null });
+
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: mixedWriterSubject },
+        async (transaction) => {
+          await transaction`
+            update new_session_drafts
+            set session_options = ${transaction.json(legacyComputeA)}
+            where id = ${mixedWriterDraftId}`;
+        },
+      );
+      const [afterLegacyAba] = await admin<
+        Array<{ projectId: string | null; snapshot: Record<string, unknown> | null }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot
+        from new_session_drafts where id = ${mixedWriterDraftId}`;
+      expect(afterLegacyAba).toEqual({ projectId: null, snapshot: null });
+
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: mixedWriterSubject },
+        async (transaction) => {
+          await transaction`
+            update new_session_drafts
+            set session_options = ${transaction.json({
+              ...legacyComputeA,
+              selectedProjectChannelId: null,
+            })}
+            where id = ${mixedWriterDraftId}`;
+        },
+      );
+      const [afterMarkerDefault] = await admin<
+        Array<{ projectId: string | null; snapshot: Record<string, unknown> | null }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot
+        from new_session_drafts where id = ${mixedWriterDraftId}`;
+      expect(afterMarkerDefault).toEqual({ projectId: null, snapshot: legacyComputeA });
+
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: mixedWriterSubject },
+        async (transaction) => {
+          await transaction`
+            update new_session_drafts
+            set session_options = ${transaction.json({
+              ...legacyComputeA,
+              selectedProjectChannelId: "malformed-project-id",
+            })}
+            where id = ${mixedWriterDraftId}`;
+        },
+      );
+      const [afterMalformedMarker] = await admin<
+        Array<{ projectId: string | null; snapshot: Record<string, unknown> | null }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot
+        from new_session_drafts where id = ${mixedWriterDraftId}`;
+      expect(afterMalformedMarker).toEqual({ projectId: null, snapshot: null });
+
       const explicitProjectId = "44444444-4444-4444-8444-444444444444";
       await asAppScope(
         app,
@@ -335,6 +500,42 @@ describe("phased new-session draft project provenance migration", () => {
         options: { sandboxBackend: "none" },
       });
 
+      await asAppScope(
+        app,
+        { accountId, workspaceId, subjectId: newWriterInsertSubject },
+        async (transaction) => {
+          await transaction`
+            insert into new_session_drafts (
+              id, account_id, workspace_id, subject_id, revision, text, resources,
+              tools, model, reasoning_effort, latency_mode, session_options,
+              selected_project_channel_id, selected_project_compute_snapshot
+            ) values (
+              ${newWriterInsertDraftId}, ${accountId}, ${workspaceId}, ${newWriterInsertSubject},
+              1, '', '[]'::jsonb, '[]'::jsonb, 'scripted-model', 'low', 'standard',
+              ${transaction.json({ sandboxBackend: "none" })},
+              ${explicitProjectId},
+              ${transaction.json({ sandboxBackend: "none" })}
+            )`;
+        },
+      );
+      const [afterNewWriterInsert] = await admin<
+        Array<{
+          projectId: string | null;
+          snapshot: Record<string, unknown> | null;
+          options: Record<string, unknown>;
+        }>
+      >`
+        select
+          selected_project_channel_id as "projectId",
+          selected_project_compute_snapshot as snapshot,
+          session_options as options
+        from new_session_drafts where id = ${newWriterInsertDraftId}`;
+      expect(afterNewWriterInsert).toEqual({
+        projectId: explicitProjectId,
+        snapshot: { sandboxBackend: "none" },
+        options: { sandboxBackend: "none" },
+      });
+
       await applyThrough(ownerUrl, indexMigration);
       const [index] = await admin<
         Array<{ valid: boolean; ready: boolean; predicate: string | null }>
@@ -352,6 +553,15 @@ describe("phased new-session draft project provenance migration", () => {
       expect(index).toMatchObject({ valid: true, ready: true });
       expect(index?.predicate).toContain("session_options ? 'selectedProjectChannelId'::text");
 
+      const [lastCandidate] = await admin<Array<{ id: string }>>`
+        select id
+        from new_session_drafts
+        where session_options ? 'selectedProjectChannelId'
+        order by id desc
+        limit 1`;
+      if (!lastCandidate) throw new Error("expected a final legacy backfill candidate");
+      expect(lastCandidate.id).toBe(lockedDraftId);
+
       holder = postgres(owned.adminUrl, {
         max: 1,
         prepare: false,
@@ -367,6 +577,9 @@ describe("phased new-session draft project provenance migration", () => {
         heldLock.release = resolve;
       });
       heldPromise = holder.begin(async (transaction) => {
+        const [backend] = await transaction<Array<{ pid: number }>>`
+          select pg_catalog.pg_backend_pid() as pid`;
+        holderPid = backend?.pid ?? null;
         await transaction`select id from new_session_drafts where id = ${lockedDraftId} for update`;
         locked();
         await release;
@@ -377,17 +590,8 @@ describe("phased new-session draft project provenance migration", () => {
         () => null,
         (error: unknown) => error,
       );
-      let remaining = 501;
-      const deadline = Date.now() + 5_000;
-      while (remaining !== 1 && Date.now() < deadline) {
-        const [count] = await admin<Array<{ rows: number }>>`
-          select count(*)::integer as rows
-          from new_session_drafts
-          where session_options ? 'selectedProjectChannelId'`;
-        remaining = count?.rows ?? -1;
-        if (remaining !== 1) await Bun.sleep(20);
-      }
-      expect(remaining).toBe(1);
+      if (!holderPid) throw new Error("lock holder backend pid was not captured");
+      await waitForBlockedFinalBackfillBatch(admin, holderPid);
 
       const duringBlockedBatch = await asAppScope(
         app,

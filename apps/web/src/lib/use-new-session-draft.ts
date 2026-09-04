@@ -92,6 +92,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   restoreReadyFilesRef.current = options.restoreReadyFiles;
   const draftRef = useRef<NewSessionDraft | null>(null);
   const lastSavedSignature = useRef<string | null>(null);
+  const passiveProjectionSignature = useRef<string | null>(null);
   const pendingHydratedBaselineGeneration = useRef<number | null>(null);
   const targetGeneration = useRef(0);
   const persistenceEpoch = useRef(0);
@@ -207,6 +208,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       // Otherwise a read-only reload schedules an immediate write solely
       // because the two equivalent representations serialize differently.
       lastSavedSignature.current = draftSignature(remote.editable);
+      passiveProjectionSignature.current = null;
       pendingHydratedBaselineGeneration.current = targetGeneration.current;
       setDraft(remote.draft);
       setCurrentConflict(null);
@@ -254,6 +256,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     persistenceEpoch.current += 1;
     draftRef.current = null;
     lastSavedSignature.current = null;
+    passiveProjectionSignature.current = null;
     pendingHydratedBaselineGeneration.current = null;
     saveChain.current = Promise.resolve();
     if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
@@ -304,6 +307,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           }
           draftRef.current = saved;
           lastSavedSignature.current = signature;
+          passiveProjectionSignature.current = null;
           setDraft(saved);
           setCurrentConflict(null);
           setError(null);
@@ -342,20 +346,23 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       // Route hydration may deliberately project the durable row through newer
       // route intent (Recents/Default/named project) and therefore change its
       // compute/provenance representation. The first complete controlled value
-      // after onApplyRemote is the acknowledged baseline. A later user or route
-      // edit still gets the ordinary debounce/OCC path.
+      // after onApplyRemote is a passive-autosave baseline only. It is not a
+      // durable acknowledgement: an immediate create-time flush must persist
+      // this projection against the remote revision before exact create.
       pendingHydratedBaselineGeneration.current = null;
-      lastSavedSignature.current = valueSignature;
+      passiveProjectionSignature.current = valueSignature;
       return;
     }
     if (
       loading ||
       !draftRef.current ||
       conflictRef.current ||
-      valueSignature === lastSavedSignature.current
+      valueSignature === lastSavedSignature.current ||
+      valueSignature === passiveProjectionSignature.current
     ) {
       return;
     }
+    passiveProjectionSignature.current = null;
     const snapshot = cloneEditable(valueRef.current);
     autosaveTimer.current = setTimeout(() => {
       autosaveTimer.current = null;
@@ -432,6 +439,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             );
             draftRef.current = remote.draft;
             lastSavedSignature.current = draftSignature(remote.editable);
+            passiveProjectionSignature.current = null;
             setDraft(remote.draft);
             setCurrentConflict(problem);
             setError(problem);
@@ -445,6 +453,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
           draftRef.current = remote.draft;
           lastSavedSignature.current = draftSignature(remote.editable);
+          passiveProjectionSignature.current = null;
           setDraft(remote.draft);
           if (signature === flushed.signature) {
             // The server now owns the safe seed. Keep the post-create composer
@@ -452,6 +461,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             // route's deliberate clear as a new empty draft.
             draftRef.current = null;
             lastSavedSignature.current = null;
+            passiveProjectionSignature.current = null;
             setDraft(null);
             return { kind: "consumed" };
           }
@@ -468,6 +478,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           }
           draftRef.current = saved;
           lastSavedSignature.current = signature;
+          passiveProjectionSignature.current = null;
           setDraft(saved);
           setCurrentConflict(null);
           setError(null);
@@ -515,6 +526,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         if (!remote || generation !== targetGeneration.current) return;
         draftRef.current = remote.draft;
         lastSavedSignature.current = draftSignature(remote.editable);
+        passiveProjectionSignature.current = null;
         setDraft(remote.draft);
         setCurrentConflict(null);
         await persistSnapshot(mine);
