@@ -902,7 +902,9 @@ export async function runTurnStreamAttempt(
         });
       }
     };
-    if (leases.codex.lost) {
+    if (billingState.isCodexTurn) {
+      leases.codex.assertUsable();
+    } else if (leases.codex.lost) {
       throw new Error("Codex credential lease expired before the model run");
     }
     if (leases.xai.lost) {

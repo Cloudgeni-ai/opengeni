@@ -113,9 +113,17 @@ export type RotationDecision =
   // No connected accounts at all (preserves today's relogin-fail path).
   | { kind: "none" };
 
+export type CodexTurnLeaseDecision =
+  | RotationDecision
+  // The user's manual pin or rotation-off active pointer names a connected row
+  // that is disabled for NEW allocations. This is policy-constrained capacity,
+  // not a disconnected-account relogin failure: the accepted turn must wait
+  // until the row is re-enabled or the governing policy changes.
+  | { kind: "allocatorDisabled"; credentialId: string };
+
 export type CodexTurnLeaseSelection = {
   credentialId: string | null;
-  decision: RotationDecision;
+  decision: CodexTurnLeaseDecision;
   /** Policy/manual homes never move the workspace-global legacy pointer. */
   advanceActivePointer?: boolean;
 };
@@ -391,74 +399,6 @@ export function computeIdleDelayMs(earliestResetAt: Date, now: Date, maxMs: numb
   return Math.min(Math.max(delta, MIN_IDLE_MS), maxMs);
 }
 
-// --- P3 reactive-rotation boundedness (Finding 1). The reactive 429 catch, on a
-// LIVE failover candidate, normally returns continueDelayMs:0 (skip the hold and
-// re-dispatch NOW — the just-served account is cooling so the next rank cannot
-// re-pick it). Two independent second-order faults can break that "cannot
-// re-pick it" premise and turn the 0-delay re-dispatch into a hot loop, so this
-// pure decision applies two backstops before allowing the 0.
-
-/**
- * Slow-retry floor (Finding 1a) for the double-fault where the just-served
- * account's cooldown write could NOT be confirmed persisted: the next proactive
- * rank might re-select the same capped account (stale-low cached usedPercent, not
- * cooling). A positive floor degrades that to a SLOW retry instead of a
- * model-paced hot loop. A few seconds — long enough to break the loop, short
- * enough to stay responsive once the transient write fault clears.
- */
-export const REACTIVE_PERSISTENCE_FAULT_FLOOR_MS = 5_000; // 5s
-/**
- * Circuit-breaker slack (Finding 1b) added to the connected-account count to bound
- * consecutive reactive failovers. Each legitimate failover cools one account, so
- * after at most N failovers every account is capped and the reactive path takes the
- * all-capped idle instead; the +margin absorbs benign capacity re-ranks without
- * tripping the breaker in normal use.
- */
-export const REACTIVE_ROTATION_MARGIN = 2;
-/**
- * The FIXED positive idle the reactive path falls to once consecutive reactive
- * failovers exceed the bound (a double-fault where cooldown writes are not sticking
- * AND the 429s carry no usage headers, so the same account keeps getting re-picked).
- * Mirrors the all-capped floor — a mandatory, bounded hold, never another 0-delay
- * re-dispatch — so the loop can never hammer the capped backend + DB (invariant 4).
- */
-export const REACTIVE_CIRCUIT_BREAKER_IDLE_MS = MIN_IDLE_MS; // 60s
-
-/** The reactive-resume shape returned to the goal-continuation caller. */
-export type ReactiveRotationResume = { continueDelayMs: number; idleUntilReset: boolean };
-
-/**
- * Decide the continueDelayMs for a reactive 429 failover onto a LIVE candidate,
- * bounding the (otherwise 0-delay) re-dispatch against two second-order faults:
- *
- *  1. Circuit breaker (1b): if the consecutive reactive-failover streak (prior
- *     rotated 429 failovers since the last successful turn, PLUS this one) exceeds
- *     `connectedAccountCount + REACTIVE_ROTATION_MARGIN`, fall to a FIXED positive,
- *     MANDATORY idle. Covers the double-fault (cooldown write not persisted + a
- *     header-less cap 429) where the same capped account is re-picked every turn.
- *  2. Persistence-fault floor (1a): if the just-served account's cooldown could NOT
- *     be confirmed persisted, use a positive floor (slow retry) instead of 0.
- *
- * Otherwise (a confirmed cooldown + an in-bounds streak) returns the unchanged
- * 0-delay fast re-dispatch — the happy single-rotation path is byte-identical.
- * Pure so the boundedness contract is unit-testable without a worker/db env.
- */
-export function computeReactiveRotationResume(args: {
-  cooldownPersisted: boolean;
-  priorConsecutiveRotations: number; // reactive rotated failovers since last success (excludes this one)
-  connectedAccountCount: number;
-}): ReactiveRotationResume {
-  const streak = args.priorConsecutiveRotations + 1; // include the failover about to be published
-  const bound = args.connectedAccountCount + REACTIVE_ROTATION_MARGIN;
-  if (streak > bound) {
-    return { continueDelayMs: REACTIVE_CIRCUIT_BREAKER_IDLE_MS, idleUntilReset: true };
-  }
-  if (!args.cooldownPersisted) {
-    return { continueDelayMs: REACTIVE_PERSISTENCE_FAULT_FLOOR_MS, idleUntilReset: false };
-  }
-  return { continueDelayMs: 0, idleUntilReset: false };
-}
-
 /**
  * THE pure rotation ranker. `accounts` arrives in stable created_at order
  * (listCodexAccountStatuses), which deterministically breaks ranking ties.
@@ -568,68 +508,36 @@ export function chooseRotationActive(args: {
 }
 
 /**
- * Exact pre-0053 selector used while the lease cutover is off.
- *
- * Old workers keep a healthy `most_remaining` active pointer sticky and know
- * nothing about lease counts or fairness cursors. A compatible worker must do
- * the same until BOTH the deployment flag and workspace cutover are enabled;
- * otherwise a rolling fleet would run two allocators at once. When the active
- * pointer is no longer eligible, zeroing the additive metadata delegates to the
- * same capacity ranking that the old selector used.
- */
-export function chooseLegacyRotationActive(
-  args: Parameters<typeof chooseRotationActive>[0],
-): RotationDecision {
-  if (args.rotationStrategy === "most_remaining") {
-    const active = args.activeCredentialId
-      ? args.accounts.find((account) => account.id === args.activeCredentialId)
-      : undefined;
-    if (active && isCodexCredentialEligible(active, args.now)) {
-      return { kind: "active", credentialId: active.id, moved: false };
-    }
-  }
-  return chooseRotationActive({
-    ...args,
-    accounts: args.accounts.map((account) => ({
-      ...account,
-      activeLeaseCount: 0,
-      selectionCount: 0,
-      lastSelectedAt: null,
-    })),
-  });
-}
-
-/**
  * Full pure policy at the transaction boundary. A live same-turn lease is
- * idempotent; the rollout-off/manual path preserves pin>pointer behavior; a
+ * idempotent; manual and rotation-off policy preserve pin>pointer behavior; a
  * healthy pin wins only while eligible, so quota/auth quarantine cannot trap a
  * session on one subscription.
  */
-export function selectCodexCredentialLeaseForTurn(args: {
-  context: CodexCredentialLeaseSelectionContext;
-  leasingEnabled: boolean;
+export function selectCodexCredentialLeaseForTurn<
+  TPolicyScope = never,
+  TUnavailableDiagnostic = never,
+>(args: {
+  context: CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic>;
   sessionId: string;
   sessionPinnedCredentialId: string | null;
   sessionPinSource: CodexPinSource | null;
   sessionLastCredentialId: string | null;
   now: Date;
 }): CodexTurnLeaseSelection {
-  const {
-    accounts,
-    activeCredentialId,
-    rotationEnabled,
-    leaseRotationEnabled,
-    rotationStrategy,
-    existingCredentialId,
-  } = args.context;
-  const leasingEnabled = args.leasingEnabled && leaseRotationEnabled;
+  const { accounts, activeCredentialId, rotationEnabled, rotationStrategy, existingCredentialId } =
+    args.context;
+  const failedCredentialIds = new Set(args.context.failedCredentialIds ?? []);
   // Normalized: rotation-enabled always behaves as sharded (see
   // effectiveRotationStrategy); the stored value is only ever legacy residue.
   const strategy = effectiveRotationStrategy(rotationStrategy);
   const existing = existingCredentialId
     ? accounts.find((account) => account.id === existingCredentialId)
     : undefined;
-  if (existing && isCodexCredentialHealthy(existing, args.now)) {
+  if (
+    existing &&
+    !failedCredentialIds.has(existing.id) &&
+    isCodexCredentialHealthy(existing, args.now)
+  ) {
     return {
       credentialId: existing.id,
       advanceActivePointer: false,
@@ -640,10 +548,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
       },
     };
   }
-
-  const connectedIds = new Set(
-    accounts.filter((account) => account.allocatorEnabled).map((account) => account.id),
-  );
 
   const pinDisposition = classifyCodexPin({
     pinnedCredentialId: args.sessionPinnedCredentialId,
@@ -657,8 +561,15 @@ export function selectCodexCredentialLeaseForTurn(args: {
   // same-turn lease already returned above before this admission filter.
   if (pinDisposition === "manual" && args.sessionPinnedCredentialId) {
     const pinned = accounts.find((account) => account.id === args.sessionPinnedCredentialId);
-    if (!pinned?.allocatorEnabled) {
+    if (!pinned) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!pinned.allocatorEnabled) {
+      return {
+        credentialId: null,
+        decision: { kind: "allocatorDisabled", credentialId: pinned.id },
+        advanceActivePointer: false,
+      };
     }
     if (isCodexCredentialHealthy(pinned, args.now)) {
       return {
@@ -682,13 +593,14 @@ export function selectCodexCredentialLeaseForTurn(args: {
   // primary/fallback pool before this ranker runs; accounts from different pools
   // are never union-ranked here.
   if (pinDisposition === "sharded") {
-    if (accounts.length === 0) {
+    const unattemptedAccounts = accounts.filter((account) => !failedCredentialIds.has(account.id));
+    if (unattemptedAccounts.length === 0) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
     }
     const shard = chooseShardedHome({
       sessionId: args.sessionId,
       currentPolicyPin: args.sessionPinSource === "policy" ? args.sessionPinnedCredentialId : null,
-      accounts,
+      accounts: unattemptedAccounts,
       now: args.now,
     });
     if (shard.kind === "allCapped") {
@@ -718,8 +630,15 @@ export function selectCodexCredentialLeaseForTurn(args: {
     const active = activeCredentialId
       ? accounts.find((account) => account.id === activeCredentialId)
       : undefined;
-    if (!active?.allocatorEnabled) {
+    if (!active) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
+    }
+    if (!active.allocatorEnabled) {
+      return {
+        credentialId: null,
+        decision: { kind: "allocatorDisabled", credentialId: active.id },
+        advanceActivePointer: false,
+      };
     }
     if (!isCodexCredentialHealthy(active, args.now)) {
       return {
@@ -735,31 +654,15 @@ export function selectCodexCredentialLeaseForTurn(args: {
     };
   }
 
-  // Before the workspace cutover bit is enabled (or after the deployment kill
-  // switch is turned off), preserve the exact legacy policy used by old workers:
-  // a pin stays sticky; otherwise an enabled workspace runs the pure legacy
-  // rotation ranker without touching lease/cursor state.
-  if (!leasingEnabled && pinDisposition !== "clearStale" && args.sessionPinnedCredentialId) {
-    const credentialId = connectedIds.has(args.sessionPinnedCredentialId)
-      ? args.sessionPinnedCredentialId
-      : activeCredentialId && connectedIds.has(activeCredentialId)
-        ? activeCredentialId
-        : null;
-    return {
-      credentialId,
-      decision: credentialId ? { kind: "active", credentialId, moved: false } : { kind: "none" },
-    };
-  }
-
   const priorId = args.sessionLastCredentialId ?? activeCredentialId;
-  const choose = leasingEnabled ? chooseRotationActive : chooseLegacyRotationActive;
-  const decision = choose({
+  const unattemptedAccounts = accounts.filter((account) => !failedCredentialIds.has(account.id));
+  const decision = chooseRotationActive({
     rotationStrategy: strategy,
     activeCredentialId,
     // Per-session continuity is the round-robin/drain cursor. Falling back to
     // the workspace pointer is only correct when this session has never run.
     priorCredentialId: priorId,
-    accounts,
+    accounts: unattemptedAccounts,
     now: args.now,
   });
   return {

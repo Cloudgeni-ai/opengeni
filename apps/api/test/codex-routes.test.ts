@@ -3,6 +3,7 @@ import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
+import { codexWorkerReadiness } from "../src/routes/codex";
 
 const DELEGATION_SECRET = "codex-routes-delegation-secret";
 const STATE_SECRET = "codex-routes-state-secret";
@@ -55,6 +56,134 @@ const restores: Array<() => void> = [];
 afterEach(() => {
   globalThis.fetch = realFetch;
   while (restores.length) restores.pop()!();
+});
+
+describe("Codex status readiness semantics", () => {
+  const now = new Date("2026-09-03T12:00:00.000Z");
+  const healthy = {
+    id: "healthy",
+    status: "active",
+    allocatorEnabled: true,
+    primaryUsedPercent: 0,
+    primaryResetAt: null,
+    secondaryUsedPercent: 0,
+    secondaryResetAt: null,
+    exhaustedUntil: null,
+  } as const;
+
+  test("reports pool readiness separately from rotation-off pointer routability", () => {
+    const result = codexWorkerReadiness({
+      effectiveSource: "workspace",
+      rotationEnabled: false,
+      activeCredentialId: "capped",
+      accounts: [
+        healthy,
+        {
+          ...healthy,
+          id: "capped",
+          primaryUsedPercent: 100,
+          primaryResetAt: new Date("2026-09-04T12:00:00.000Z"),
+        },
+      ],
+      now,
+    });
+
+    expect(result).toEqual({ poolReady: true, workerRoutable: false });
+  });
+
+  test("reports disabled sources as neither pool-ready nor worker-routable", () => {
+    expect(
+      codexWorkerReadiness({
+        effectiveSource: "disabled",
+        rotationEnabled: true,
+        activeCredentialId: healthy.id,
+        accounts: [healthy],
+        now,
+      }),
+    ).toEqual({ poolReady: false, workerRoutable: false });
+  });
+
+  test("status response keeps active-account probe fields distinct from pool readiness", async () => {
+    const active = {
+      id: "active",
+      source: "workspace" as const,
+      chatgptAccountId: "chatgpt-active",
+      label: "Active account",
+      accountEmail: null,
+      planType: "pro",
+      status: "active",
+      allocatorEnabled: true,
+      allocatorVersion: 1,
+      allocatorUpdatedBySubjectId: null,
+      allocatorUpdatedAt: null,
+      resetCreditAvailableCount: null,
+      resetCreditsCheckedAt: null,
+      connectedBySubjectId: null,
+      isActive: true,
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastError: null,
+      primaryUsedPercent: 0,
+      primaryResetAt: null,
+      secondaryUsedPercent: 0,
+      secondaryResetAt: null,
+      usageCheckedAt: null,
+      exhaustedUntil: null,
+      exhaustedKind: null,
+    } satisfies opengeniDb.CodexAccountStatus;
+    const status = spyOn(opengeniDb, "getCodexCredentialStatus").mockResolvedValue({
+      connected: true,
+      credentialId: active.id,
+      chatgptAccountId: active.chatgptAccountId,
+      scopes: null,
+      planType: active.planType,
+      status: active.status,
+      expiresAt: null,
+      lastRefreshAt: null,
+      lastError: null,
+    });
+    const accounts = spyOn(opengeniDb, "listCodexAccountStatuses").mockResolvedValue([active]);
+    const source = spyOn(opengeniDb, "getWorkspaceCodexSubscriptionSource").mockResolvedValue({
+      accountId: ACCOUNT,
+      workspaceId: WS_A,
+      workspaceKind: "shared",
+      mode: "workspace",
+      effectiveSource: "workspace",
+      workspaceAvailable: true,
+      organizationAvailable: false,
+    });
+    const rotation = spyOn(opengeniDb, "getCodexRotationSettings").mockResolvedValue({
+      activeCredentialId: active.id,
+      rotationEnabled: true,
+      rotationStrategy: "sharded",
+    });
+    const load = spyOn(opengeniDb, "loadCodexCredentialForRun").mockResolvedValue(null);
+    restores.push(
+      () => status.mockRestore(),
+      () => accounts.mockRestore(),
+      () => source.mockRestore(),
+      () => rotation.mockRestore(),
+      () => load.mockRestore(),
+    );
+
+    const res = await app().request(`/v1/workspaces/${WS_A}/codex/status`, {
+      headers: { authorization: await bearer(WS_A, ["workspace:read"]) },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      connected: true,
+      valid: false,
+      activeAccountValid: false,
+      poolReady: true,
+      workerRoutable: true,
+      activeAccount: {
+        id: active.id,
+        label: active.label,
+        chatgptAccountId: active.chatgptAccountId,
+      },
+      accountCount: 1,
+    });
+  });
 });
 
 function mockDevice(handlers: {

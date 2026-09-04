@@ -1207,7 +1207,7 @@ export function codexUsageLimitFailurePayload(
   info: { resetsInSeconds: number | null },
   detail: string,
   opts?: { allAccounts?: boolean },
-): { error: string; code: string; retryable: boolean; detail?: string } {
+): { error: string; code: string; retryable: false; detail?: string } {
   // P3: when EVERY connected subscription is rate-limited the message names the
   // earliest reset across accounts; the single-account message is unchanged.
   const error = opts?.allAccounts

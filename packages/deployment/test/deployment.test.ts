@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
@@ -14,6 +15,7 @@ import {
   SANDBOX_REQUIRED_ENV,
   SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
+  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV,
@@ -450,13 +452,15 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications for every supported maintenance cutover", () => {
-    for (const maintenanceCutover of [
+  test("drains applications for every documented maintenance cutover", () => {
+    for (const cutover of [
       MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
       SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
+      CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
     ]) {
       const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: maintenanceCutover,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
         OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
       });
       const commands = plan.deployCommands.join("\n");
@@ -466,13 +470,26 @@ describe("deployment contract", () => {
           (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
         ),
       ).toHaveLength(2);
+      const helmCommands = plan.deployCommands.filter(
+        (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+      );
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
       expect(commands).toContain("--set migrations.enabled=false");
       expect(commands).toContain("wait --for=delete pod");
-      expect(plan.notes.join("\n")).toContain(maintenanceCutover);
+      expect(plan.notes.join("\n")).toContain(cutover);
+      expect(plan.notes.join("\n")).toContain("applications-disabled revision");
+      if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
+        expect(plan.notes.join("\n")).toContain("migration 0403");
+      }
     }
+
+    const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);
+    expect(rollingPlan.deployCommands.join("\n")).not.toContain("--atomic");
+
     expect(() =>
       stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
       }),
     ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
     expect(() =>
@@ -500,6 +517,8 @@ describe("deployment contract", () => {
         (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
       );
       expect(helmCommands).toHaveLength(2);
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
       for (const command of helmCommands) {
         expect(command).toContain(
           `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
@@ -552,6 +571,8 @@ describe("deployment contract", () => {
       }
     }
     expect(helmCommands[0]).not.toContain("if ! helm status");
+    expect(helmCommands[0]).not.toContain("--atomic");
+    expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
     expect(commands.indexOf("kind load docker-image")).toBeLessThan(
       commands.indexOf("--set api.enabled=false"),
     );

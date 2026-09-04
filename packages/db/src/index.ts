@@ -235,6 +235,8 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   latencyModeForMetadata,
   metadataWithTurnExecutionPolicyV1,
+  metadataWithCodexCredentialPolicySnapshotV1,
+  readCodexCredentialPolicySnapshotV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
   resolveWorkspaceCodexCompactionDefault,
@@ -256,6 +258,7 @@ import {
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
@@ -418,6 +421,7 @@ import {
   autoResumeGoalPausedByCapInTransaction,
   SESSION_GOAL_CAP_PAUSED_REASON,
   SESSION_GOAL_CONTINUATION_EPOCH_RESET,
+  SESSION_GOAL_SUPPRESSION_CLEARED,
   type SessionGoalAutoResumedByExternalInput,
 } from "./session-goal-pacing";
 
@@ -21869,6 +21873,67 @@ async function lockWorkspaceCodexSubscriptionSource(
   );
 }
 
+async function lockOrganizationMembershipLifecycle(
+  scopedDb: Database,
+  accountId: string,
+): Promise<void> {
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${accountId}`}, 0))`,
+  );
+}
+
+export class CodexSubscriptionSourceChangeBlockedError extends Error {
+  readonly code = "codex_subscription_source_change_blocked";
+
+  constructor() {
+    super("Codex subscription source cannot change while active turns are using it");
+    this.name = "CodexSubscriptionSourceChangeBlockedError";
+  }
+}
+
+/**
+ * Effective-source changes are a hard boundary for accepted Codex turns. A
+ * waiting turn carries the source that selected its allocator pool; allowing
+ * the live source to move underneath it would make the next reconciliation or
+ * lease insert use an authority that no longer serves the workspace. Keep the
+ * existing error text for API compatibility; "active" includes a durable
+ * capacity waiter here.
+ */
+async function assertCodexSubscriptionSourceChangeAllowed(
+  scopedDb: Database,
+  workspaceId: string,
+): Promise<void> {
+  const [activeCodexTurn] = await scopedDb
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        inArray(schema.sessionTurns.status, [
+          "running",
+          "requires_action",
+          "recovering",
+          "waiting_capacity",
+        ]),
+        sql`${schema.sessionTurns.model} like 'codex/%'`,
+      ),
+    )
+    .limit(1);
+  const [liveLease] = await scopedDb
+    .select({ id: schema.codexCredentialLeases.id })
+    .from(schema.codexCredentialLeases)
+    .where(
+      and(
+        eq(schema.codexCredentialLeases.workspaceId, workspaceId),
+        sql`${schema.codexCredentialLeases.leasedUntil} > clock_timestamp()`,
+      ),
+    )
+    .limit(1);
+  if (activeCodexTurn || liveLease) {
+    throw new CodexSubscriptionSourceChangeBlockedError();
+  }
+}
+
 function codexCredentialPoolCondition(input: {
   accountId: string;
   workspaceId: string;
@@ -21903,6 +21968,57 @@ async function effectiveCodexCredentialPoolCondition(
             source: source.effectiveSource,
           }),
   };
+}
+
+async function lockOrganizationCodexSubscriptionSources(
+  scopedDb: Database,
+  accountId: string,
+): Promise<string[]> {
+  const rows = await scopedDb.execute<{ workspace_id: string }>(sql`
+    select workspace_id
+    from list_organization_workspace_ids(${accountId}::uuid)
+    order by workspace_id
+  `);
+  const workspaceIds = rows.map((row: { workspace_id: string }) => row.workspace_id);
+  for (const workspaceId of workspaceIds) {
+    // Organization credential mutations can change automatic routing in every
+    // inheriting workspace. Acquire all workspace source locks before the
+    // organization rotation row, matching normal acquisition's source -> pool
+    // lock order and preventing a waiter from observing a half-cutover source.
+    await lockWorkspaceCodexSubscriptionSource(scopedDb, workspaceId);
+  }
+  return workspaceIds;
+}
+
+async function captureOrganizationCodexSubscriptionSources(
+  scopedDb: Database,
+  accountId: string,
+  workspaceIds: readonly string[],
+): Promise<Map<string, EffectiveCodexSubscriptionSource>> {
+  const sources = new Map<string, EffectiveCodexSubscriptionSource>();
+  for (const workspaceId of workspaceIds) {
+    await setRlsContext(scopedDb, { accountId, workspaceId });
+    const source = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, workspaceId);
+    sources.set(workspaceId, source.effectiveSource);
+  }
+  await setRlsContext(scopedDb, { accountId, workspaceId: null });
+  return sources;
+}
+
+async function assertOrganizationCodexSourceChangesAllowed(
+  scopedDb: Database,
+  accountId: string,
+  before: ReadonlyMap<string, EffectiveCodexSubscriptionSource>,
+  after: ReadonlyMap<string, EffectiveCodexSubscriptionSource>,
+): Promise<void> {
+  const workspaceIds = new Set([...before.keys(), ...after.keys()]);
+  for (const workspaceId of workspaceIds) {
+    if (before.get(workspaceId) === after.get(workspaceId)) continue;
+    if (!after.has(workspaceId)) continue;
+    await setRlsContext(scopedDb, { accountId, workspaceId });
+    await assertCodexSubscriptionSourceChangeAllowed(scopedDb, workspaceId);
+  }
+  await setRlsContext(scopedDb, { accountId, workspaceId: null });
 }
 
 export async function setWorkspaceCodexSubscriptionModeInTransaction(
@@ -21947,30 +22063,7 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
     next = await getWorkspaceCodexSubscriptionSourceScoped(scopedDb, input.workspaceId);
   }
   if (next.effectiveSource !== effectiveSourceBeforeMutation) {
-    const [activeCodexTurn] = await scopedDb
-      .select({ id: schema.sessionTurns.id })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          inArray(schema.sessionTurns.status, ["running", "requires_action", "recovering"]),
-          sql`${schema.sessionTurns.model} like 'codex/%'`,
-        ),
-      )
-      .limit(1);
-    const [liveLease] = await scopedDb
-      .select({ id: schema.codexCredentialLeases.id })
-      .from(schema.codexCredentialLeases)
-      .where(
-        and(
-          eq(schema.codexCredentialLeases.workspaceId, input.workspaceId),
-          gt(schema.codexCredentialLeases.leasedUntil, new Date()),
-        ),
-      )
-      .limit(1);
-    if (activeCodexTurn || liveLease) {
-      throw new Error("Codex subscription source cannot change while active turns are using it");
-    }
+    await assertCodexSubscriptionSourceChangeAllowed(scopedDb, input.workspaceId);
   }
   return next;
 }
@@ -22150,6 +22243,11 @@ async function withOrganizationCodexAdministrator<T>(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
+      // Shared-workspace creation and every organization membership lifecycle
+      // writer use this canonical prefix. Hold it before the administration
+      // overview and before any Codex workspace inventory so a new workspace
+      // cannot commit after the source snapshot was captured.
+      await lockOrganizationMembershipLifecycle(scopedDb, input.organizationId);
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       await scopedDb.execute(sql`
         select get_organization_administration_overview(
@@ -22169,7 +22267,7 @@ export async function ensureOrganizationCodexRotationSettings(
   await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
     await scopedDb
       .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .values({ accountId: input.organizationId })
       .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
   });
 }
@@ -22194,9 +22292,18 @@ export async function upsertOrganizationCodexSubscriptionCredential(
     await scopedDb.execute(
       sql`select pg_advisory_xact_lock(hashtextextended(${`organization-codex-upsert:${input.organizationId}:${input.chatgptAccountId ?? "null"}`}, 0))`,
     );
+    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+    );
+    const sourcesBefore = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
     await scopedDb
       .insert(schema.organizationCodexRotationSettings)
-      .values({ accountId: input.organizationId, leaseRotationEnabled: false })
+      .values({ accountId: input.organizationId })
       .onConflictDoNothing({ target: schema.organizationCodexRotationSettings.accountId });
     const [settings] = await scopedDb
       .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
@@ -22263,6 +22370,17 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           isNull(schema.organizationCodexRotationSettings.activeCredentialId),
         ),
       );
+    const sourcesAfter = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
+    await assertOrganizationCodexSourceChangesAllowed(
+      scopedDb,
+      input.organizationId,
+      sourcesBefore,
+      sourcesAfter,
+    );
     const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
       accountId: input.organizationId,
       reason: "organization_codex_credential_connected",
@@ -22354,7 +22472,6 @@ export async function getOrganizationCodexRotationSettings(
       .select({
         activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
       })
       .from(schema.organizationCodexRotationSettings)
@@ -22421,7 +22538,6 @@ export async function updateOrganizationCodexRotationSettings(
     const [current] = await scopedDb
       .select({
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
       })
       .from(schema.organizationCodexRotationSettings)
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
@@ -22432,20 +22548,16 @@ export async function updateOrganizationCodexRotationSettings(
       .update(schema.organizationCodexRotationSettings)
       .set({
         rotationEnabled: input.rotationEnabled,
-        leaseRotationEnabled: input.rotationEnabled,
         updatedAt: new Date(),
       })
       .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId))
       .returning({
         activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
         rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
       });
     if (!row) return null;
-    const changed =
-      current.rotationEnabled !== input.rotationEnabled ||
-      current.leaseRotationEnabled !== input.rotationEnabled;
+    const changed = current.rotationEnabled !== input.rotationEnabled;
     const wakeTargets = changed
       ? await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
           accountId: input.organizationId,
@@ -22491,6 +22603,15 @@ export async function disconnectOrganizationCodexAccount(
   wakeTargets: CodexCapacityWakeTarget[];
 }> {
   return await withOrganizationCodexAdministrator(db, input, async (scopedDb) => {
+    const organizationWorkspaceIds = await lockOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+    );
+    const sourcesBefore = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
     const [settings] = await scopedDb
       .select({ activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId })
       .from(schema.organizationCodexRotationSettings)
@@ -22533,6 +22654,17 @@ export async function disconnectOrganizationCodexAccount(
         .set({ activeCredentialId: newActiveCredentialId, updatedAt: new Date() })
         .where(eq(schema.organizationCodexRotationSettings.accountId, input.organizationId));
     }
+    const sourcesAfter = await captureOrganizationCodexSubscriptionSources(
+      scopedDb,
+      input.organizationId,
+      organizationWorkspaceIds,
+    );
+    await assertOrganizationCodexSourceChangesAllowed(
+      scopedDb,
+      input.organizationId,
+      sourcesBefore,
+      sourcesAfter,
+    );
     const wakeTargets = await wakeOrganizationCodexCapacityWaitersInTransaction(scopedDb, {
       accountId: input.organizationId,
       reason: "organization_codex_credential_disconnected",
@@ -23242,7 +23374,7 @@ export async function getCodexCredentialStatus(
  */
 export async function workspaceCodexSubscriptionActive(
   db: Database,
-  settings: Pick<Settings, "codexSubscriptionEnabled" | "codexCredentialLeasingEnabled">,
+  settings: Pick<Settings, "codexSubscriptionEnabled">,
   workspaceId: string,
 ): Promise<boolean> {
   if (!settings.codexSubscriptionEnabled) {
@@ -23263,45 +23395,9 @@ export async function workspaceCodexSubscriptionActive(
       return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
         const pool = await effectiveCodexCredentialPoolCondition(scopedDb, workspaceId);
         if (!pool.condition || pool.source.effectiveSource === "disabled") return false;
-        const [rotation] =
-          pool.source.effectiveSource === "organization"
-            ? await scopedDb
-                .select({
-                  rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-                  leaseRotationEnabled:
-                    schema.organizationCodexRotationSettings.leaseRotationEnabled,
-                })
-                .from(schema.organizationCodexRotationSettings)
-                .where(
-                  eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId),
-                )
-                .for("update")
-                .limit(1)
-            : await scopedDb
-                .select({
-                  rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-                  leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
-                })
-                .from(schema.codexRotationSettings)
-                .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
-                .for("update")
-                .limit(1);
-        const leaseCutoverEnabled = Boolean(
-          settings.codexCredentialLeasingEnabled &&
-          rotation?.rotationEnabled &&
-          rotation.leaseRotationEnabled,
-        );
-        if (!leaseCutoverEnabled) {
-          // Process flag alone is not a cutover. Mixed old/new workers must use
-          // the exact legacy active-pointer predicate until the synchronized DB
-          // bits are true; the row lock makes this admission decision atomic
-          // with the admin settings write.
-          const status = await getCodexCredentialStatusScoped(scopedDb, workspaceId);
-          return status?.status === "active";
-        }
-        // After cutover the workspace-global pointer is a UI/manual cursor, not
-        // the health of the pool. A broken pointer must not hide another healthy
-        // account and prevent the worker from reaching the lease selector.
+        // Provider admission is pool-aware even when rotation is disabled. The
+        // active pointer governs allocation policy, not whether the connected
+        // subscription provider exists for billing and routing.
         const [row] = await scopedDb
           .select({ id: schema.codexSubscriptionCredentials.id })
           .from(schema.codexSubscriptionCredentials)
@@ -23350,7 +23446,7 @@ const CODEX_ACTIVE_READ_RETRY_MS = 50;
  */
 export async function isCodexBilledTurn(input: {
   db: Database;
-  settings: Pick<Settings, "codexSubscriptionEnabled" | "codexCredentialLeasingEnabled">;
+  settings: Pick<Settings, "codexSubscriptionEnabled">;
   workspaceId: string;
   model: string | null | undefined;
   /**
@@ -23460,6 +23556,17 @@ export type CodexCredentialLeaseCandidateFilter<
   | readonly CodexLeaseAccountStatus[]
   | CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>;
 
+/**
+ * Codex session state read from the exact session row locked by credential
+ * acquisition. Selection and pointer movement must use this snapshot rather
+ * than an unlocked read taken before the allocator transaction.
+ */
+export type CodexCredentialLeaseSessionState = {
+  pinnedCredentialId: string | null;
+  pinSource: "manual" | "policy" | null;
+  lastCredentialId: string | null;
+};
+
 export type CodexCredentialLeaseSelectionContext<
   TPolicyScope = never,
   TUnavailableDiagnostic = never,
@@ -23467,11 +23574,11 @@ export type CodexCredentialLeaseSelectionContext<
   accounts: CodexLeaseAccountStatus[];
   activeCredentialId: string | null;
   rotationEnabled: boolean;
-  /** Workspace cutover fence. False means the additive lease table stays inert. */
-  leaseRotationEnabled: boolean;
   rotationStrategy: string;
   /** A still-live idempotent lease for this SAME turn, if one exists. */
   existingCredentialId: string | null;
+  /** Credentials already consumed by a definitive refusal on this accepted turn. */
+  failedCredentialIds?: readonly string[];
   /** Downstream-owned accepted-turn policy; absent until a resolver is supplied. */
   policyScope: TPolicyScope | null;
   /** Diagnostics produced while choosing one policy scope for this NEW allocation. */
@@ -23491,6 +23598,14 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   activeCredentialId: string | null;
   rotationEnabled: boolean;
   rotationStrategy: string;
+  /** Session state from the row locked during this acquisition. */
+  sessionCodexState: CodexCredentialLeaseSessionState;
+  /** Number of effective-pool rows before any downstream policy filter. */
+  poolAccountCount: number;
+  /** Accepted allocator policy captured with the first durable lease. */
+  codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /** True when this acquisition reused a snapshot already present on the turn. */
+  codexPolicySnapshotReused: boolean;
   credentialId: string | null;
   reused: boolean;
   holderId: string | null;
@@ -23499,7 +23614,74 @@ export type CodexCredentialLeaseResult<T, TUnavailableDiagnostic = never> = {
   unavailableDiagnostics: readonly TUnavailableDiagnostic[];
   /** Final selector decision after input policy and manual/policy pin handling. */
   advanceActivePointer: boolean;
+  /** Frozen alternate-account budget observed before the first provider request. */
+  failoverLimit: number;
 };
+
+export class CodexCredentialLeaseAttemptFencedError extends Error {
+  readonly code = "codex_credential_lease_attempt_fenced";
+
+  constructor() {
+    super("Codex credential lease acquisition lost exact attempt ownership");
+    this.name = "CodexCredentialLeaseAttemptFencedError";
+  }
+}
+
+export class CodexCredentialFailoverExhaustedError extends Error {
+  readonly code = "codex_credential_failover_exhausted";
+
+  constructor(
+    readonly failoverCount: number,
+    readonly maxFailovers: number,
+  ) {
+    super("Codex credential failover budget was already exhausted");
+    this.name = "CodexCredentialFailoverExhaustedError";
+  }
+}
+
+function codexFailoverMetadata(metadata: Record<string, unknown> | null | undefined): {
+  failedCredentialIds: Set<string>;
+  failoverCount: number;
+  maxFailovers: number | null;
+  exhausted: boolean;
+} {
+  const failedCredentialIds = new Set(
+    Array.isArray(metadata?.codexCredentialFailedIds)
+      ? metadata.codexCredentialFailedIds.filter(
+          (value): value is string => typeof value === "string" && value.length > 0,
+        )
+      : [],
+  );
+  const rawCount = metadata?.codexCredentialFailovers;
+  const failoverCount =
+    typeof rawCount === "number" && Number.isSafeInteger(rawCount) && rawCount >= 0
+      ? rawCount
+      : failedCredentialIds.size;
+  const rawLimit = metadata?.codexCredentialFailoverLimit;
+  const maxFailovers =
+    typeof rawLimit === "number" && Number.isSafeInteger(rawLimit) && rawLimit >= 1
+      ? rawLimit
+      : null;
+  return {
+    failedCredentialIds,
+    failoverCount,
+    maxFailovers,
+    exhausted:
+      metadata?.codexCredentialFailoverExhausted === true ||
+      (maxFailovers !== null && failoverCount > maxFailovers),
+  };
+}
+
+function codexCredentialFailoverLimitForLease(
+  accounts: readonly CodexLeaseAccountStatus[],
+  servingCredentialId: string | null,
+): number {
+  const allocatableCount = accounts.filter((account) => account.allocatorEnabled).length;
+  const servingIsAllocatable = accounts.some(
+    (account) => account.id === servingCredentialId && account.allocatorEnabled,
+  );
+  return Math.max(1, allocatableCount - (servingIsAllocatable ? 1 : 0));
+}
 
 /**
  * Five minutes is deliberately much longer than the one-minute heartbeat and
@@ -23641,7 +23823,7 @@ async function listCodexLeaseCandidatesInTransaction(
               ${input.excludeTurnId ?? null}::uuid
             )`
           : sql`count(l.id) filter (
-              where l.leased_until > now()
+              where l.leased_until > clock_timestamp()
                 and (${input.excludeTurnId ?? null}::uuid is null or l.turn_id <> ${input.excludeTurnId ?? null})
             )::int`
       } as active_lease_count
@@ -23687,7 +23869,14 @@ export async function acquireCodexCredentialLease<
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    workflowId: string;
+    workflowRunId: string;
+    dispatchId: string;
+    expectedRedispatches: number;
     /** Unique Temporal/local activity execution id used as the zombie fence. */
     holderId: string;
     /** Pins must not move the workspace-global cursor. */
@@ -23711,6 +23900,7 @@ export async function acquireCodexCredentialLease<
   },
   select: (
     context: CodexCredentialLeaseSelectionContext<TPolicyScope, TUnavailableDiagnostic>,
+    sessionCodexState: CodexCredentialLeaseSessionState,
   ) => CodexCredentialLeaseSelection<T>,
 ): Promise<CodexCredentialLeaseResult<T, TUnavailableDiagnostic>> {
   const leaseTtlMs = input.leaseTtlMs ?? CODEX_CREDENTIAL_LEASE_TTL_MS;
@@ -23720,7 +23910,13 @@ export async function acquireCodexCredentialLease<
   if (!input.holderId.trim()) {
     throw new Error("Codex credential lease holder id is required");
   }
-  return await withRlsContext(
+  if (!Number.isSafeInteger(input.executionGeneration) || input.executionGeneration < 1) {
+    throw new Error("Codex credential lease execution generation must be positive");
+  }
+  if (!Number.isSafeInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
+    throw new Error("Codex credential lease redispatch fence must be non-negative");
+  }
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
@@ -23729,20 +23925,19 @@ export async function acquireCodexCredentialLease<
       if (source.accountId !== input.accountId) {
         throw new Error("Codex subscription source account does not match the turn account");
       }
-      const disabledSource = source.effectiveSource === "disabled";
       const organizationSource = source.effectiveSource === "organization";
       if (organizationSource) {
         await tx.execute(sql`
           insert into organization_codex_rotation_settings
-            (account_id, lease_rotation_enabled)
-          values (${input.accountId}, false)
+            (account_id)
+          values (${input.accountId})
           on conflict (account_id) do nothing
         `);
       } else {
         await tx.execute(sql`
           insert into codex_rotation_settings
-            (account_id, workspace_id, lease_rotation_enabled)
-          values (${input.accountId}, ${input.workspaceId}, false)
+            (account_id, workspace_id)
+          values (${input.accountId}, ${input.workspaceId})
           on conflict (workspace_id) do nothing
         `);
       }
@@ -23750,11 +23945,9 @@ export async function acquireCodexCredentialLease<
         ? await tx.execute(sql<{
             active_credential_id: string | null;
             rotation_enabled: boolean;
-            lease_rotation_enabled: boolean;
             rotation_strategy: string;
           }>`
-            select active_credential_id, rotation_enabled,
-                   lease_rotation_enabled, rotation_strategy
+            select active_credential_id, rotation_enabled, rotation_strategy
             from organization_codex_rotation_settings
             where account_id = ${input.accountId}
             for update
@@ -23762,11 +23955,9 @@ export async function acquireCodexCredentialLease<
         : await tx.execute(sql<{
             active_credential_id: string | null;
             rotation_enabled: boolean;
-            lease_rotation_enabled: boolean;
             rotation_strategy: string;
           }>`
-        select active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select active_credential_id, rotation_enabled, rotation_strategy
         from codex_rotation_settings
         where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
         for update
@@ -23775,67 +23966,168 @@ export async function acquireCodexCredentialLease<
       if (!settingsRow) {
         throw new Error(`Codex rotation settings not visible for workspace ${input.workspaceId}`);
       }
+      const workspaceControl = await lockWorkspaceInferenceControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        "share",
+      );
       // Rotation row -> durable turn is the common allocator/waiter lock order.
       // Fail closed before taking a credential: the turn and allocator must be
       // inside exactly the same RLS-scoped workspace/account. A downstream
       // accepted-turn policy is parsed from this locked metadata while the
       // rotation transaction is held.
+      const sessions = await tx.execute(sql<{
+        id: string;
+        status: string;
+        active_turn_id: string | null;
+        codex_pinned_credential_id: string | null;
+        codex_pin_source: string | null;
+        codex_last_credential_id: string | null;
+      }>`
+        select id, status, active_turn_id,
+               codex_pinned_credential_id, codex_pin_source, codex_last_credential_id
+        from sessions
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and id = ${input.sessionId}
+        for share
+      `);
       const turns = await tx.execute(sql<{
         id: string;
+        session_id: string;
+        status: string;
+        active_attempt_id: string | null;
+        execution_generation: number;
         metadata: Record<string, unknown> | null;
       }>`
-        select id, metadata from session_turns
+        select id, session_id, status, active_attempt_id, execution_generation, metadata
+        from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
           and id = ${input.turnId}
+        for update
+      `);
+      const attempts = await tx.execute(sql<{
+        id: string;
+        state: string;
+        execution_generation: number;
+        temporal_workflow_id: string;
+        temporal_workflow_run_id: string;
+        temporal_activity_id: string;
+      }>`
+        select id, state, execution_generation, temporal_workflow_id,
+               temporal_workflow_run_id, temporal_activity_id
+        from session_turn_attempts
+        where account_id = ${input.accountId}
+          and workspace_id = ${input.workspaceId}
+          and session_id = ${input.sessionId}
+          and turn_id = ${input.turnId}
+          and id = ${input.attemptId}
         for share
       `);
-      if (!turns[0]) {
+      const session = sessions[0];
+      const turn = turns[0];
+      const attempt = attempts[0];
+      if (!turn) {
         throw new Error(`Session turn not found for Codex lease: ${input.turnId}`);
       }
-      const policyScope = input.resolvePolicyScope?.(turns[0].metadata ?? {}) ?? null;
-      const activeCredentialId = settingsRow.active_credential_id;
-      const rotationEnabled = settingsRow.rotation_enabled;
-      // Fail closed on a torn/manual legacy write. The user-intent bit and the
-      // revision-aware cutover bit are synchronized by the supported API; both
-      // must remain true before the additive allocator may touch lease state.
-      const leaseRotationEnabled =
-        settingsRow.rotation_enabled && settingsRow.lease_rotation_enabled;
-      const rotationStrategy = settingsRow.rotation_strategy;
-
-      // The per-workspace bit is the atomic cutover fence. Until an operator or
-      // explicit settings write enables it, a migration-compatible worker keeps
-      // the lease table/cursors completely inert and follows the legacy policy.
-      if (leaseRotationEnabled) {
-        await tx.execute(sql`
-          delete from codex_credential_leases
-          where workspace_id = ${input.workspaceId} and leased_until <= now()
-        `);
+      const dispatch = readTurnDispatchMetadata(turn.metadata);
+      const currentRedispatches = Number(turn.metadata?.workerDeathRedispatches ?? 0);
+      const effectiveControl = await evaluateSessionControl(
+        tx as unknown as Database,
+        input.workspaceId,
+        input.sessionId,
+        { workspaceControl },
+      );
+      if (
+        !session ||
+        !attempt ||
+        effectiveControl.state !== "active" ||
+        session.status !== "running" ||
+        session.active_turn_id !== input.turnId ||
+        turn.session_id !== input.sessionId ||
+        turn.status !== "running" ||
+        turn.active_attempt_id !== input.attemptId ||
+        Number(turn.execution_generation) !== input.executionGeneration ||
+        attempt.state !== "running" ||
+        Number(attempt.execution_generation) !== input.executionGeneration ||
+        attempt.temporal_workflow_id !== input.workflowId ||
+        attempt.temporal_workflow_run_id !== input.workflowRunId ||
+        attempt.temporal_activity_id !== input.dispatchId ||
+        dispatch.kind !== "valid" ||
+        dispatch.attempt?.id !== input.dispatchId ||
+        currentRedispatches !== input.expectedRedispatches
+      ) {
+        throw new CodexCredentialLeaseAttemptFencedError();
       }
-      const existingRows = leaseRotationEnabled
-        ? await tx.execute(
-            sql<{
-              credential_id: string;
-              holder_id: string;
-              generation: number;
-            }>`
-              select credential_id, holder_id, generation from codex_credential_leases
-              where workspace_id = ${input.workspaceId}
-                and turn_id = ${input.turnId}
-                and leased_until > now()
-              limit 1
-            `,
-          )
-        : [];
+      const sessionCodexState: CodexCredentialLeaseSessionState = {
+        pinnedCredentialId: session.codex_pinned_credential_id,
+        pinSource:
+          session.codex_pin_source === "manual" || session.codex_pin_source === "policy"
+            ? session.codex_pin_source
+            : null,
+        lastCredentialId: session.codex_last_credential_id,
+      };
+      const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(turn.metadata);
+      const codexPolicySnapshot =
+        acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+      // New snapshots carry the effective source because workspace/organization/
+      // disabled routing is allocator policy. Older snapshots predate that field
+      // and intentionally retain the historical live-source behavior.
+      const acceptedSource = codexPolicySnapshot?.source ?? source.effectiveSource;
+      const acceptedDisabledSource = acceptedSource === "disabled";
+      const acceptedOrganizationSource = acceptedSource === "organization";
+      const acceptedSessionCodexState: CodexCredentialLeaseSessionState = codexPolicySnapshot
+        ? {
+            pinnedCredentialId: codexPolicySnapshot.pinnedCredentialId,
+            pinSource: codexPolicySnapshot.pinSource,
+            lastCredentialId: codexPolicySnapshot.lastCredentialId,
+          }
+        : sessionCodexState;
+      const failoverMetadata = codexFailoverMetadata(turn.metadata);
+      if (failoverMetadata.exhausted && failoverMetadata.maxFailovers !== null) {
+        throw new CodexCredentialFailoverExhaustedError(
+          failoverMetadata.failoverCount,
+          failoverMetadata.maxFailovers,
+        );
+      }
+      const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
+      const activeCredentialId = codexPolicySnapshot
+        ? codexPolicySnapshot.activeCredentialId
+        : settingsRow.active_credential_id;
+      const rotationEnabled = codexPolicySnapshot
+        ? codexPolicySnapshot.rotationEnabled
+        : settingsRow.rotation_enabled;
+      const rotationStrategy = codexPolicySnapshot
+        ? codexPolicySnapshot.rotationStrategy
+        : settingsRow.rotation_strategy;
+
+      await tx.execute(sql`
+        delete from codex_credential_leases
+        where workspace_id = ${input.workspaceId} and leased_until <= clock_timestamp()
+      `);
+      const existingRows = await tx.execute(
+        sql<{
+          credential_id: string;
+          holder_id: string;
+          generation: number;
+        }>`
+          select credential_id, holder_id, generation from codex_credential_leases
+          where workspace_id = ${input.workspaceId}
+            and turn_id = ${input.turnId}
+            and leased_until > clock_timestamp()
+          limit 1
+        `,
+      );
       const existingCredentialId = existingRows[0]?.credential_id ?? null;
 
-      const allAccounts = disabledSource
+      const allAccounts = acceptedDisabledSource
         ? []
         : await listCodexLeaseCandidatesInTransaction(tx as unknown as Database, {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             activeCredentialId,
-            source: organizationSource ? "organization" : "workspace",
+            source: acceptedOrganizationSource ? "organization" : "workspace",
             excludeTurnId: input.turnId,
           });
       const sameTurnCredentialId = existingCredentialId;
@@ -23846,9 +24138,9 @@ export async function acquireCodexCredentialLease<
         accounts,
         activeCredentialId,
         rotationEnabled,
-        leaseRotationEnabled,
         rotationStrategy,
         existingCredentialId,
+        failedCredentialIds: [...failoverMetadata.failedCredentialIds],
         policyScope,
         unavailableDiagnostics,
       });
@@ -23856,7 +24148,10 @@ export async function acquireCodexCredentialLease<
       let unavailableDiagnostics: readonly TUnavailableDiagnostic[] = [];
       let selected: CodexCredentialLeaseSelection<T> | undefined;
       if (sameTurnCredentialId !== null) {
-        const sameTurnSelection = select(selectionContext(allAccounts, []));
+        const sameTurnSelection = select(
+          selectionContext(allAccounts, []),
+          acceptedSessionCodexState,
+        );
         if (sameTurnSelection.credentialId === sameTurnCredentialId) {
           selected = sameTurnSelection;
         }
@@ -23873,10 +24168,52 @@ export async function acquireCodexCredentialLease<
         );
         accounts = filtered.accounts;
         unavailableDiagnostics = filtered.unavailableDiagnostics;
-        selected = select(selectionContext(accounts, unavailableDiagnostics));
+        selected = select(
+          selectionContext(accounts, unavailableDiagnostics),
+          acceptedSessionCodexState,
+        );
+      }
+
+      // Capture the accepted policy before returning either a credential or a
+      // durable no-credential result. A turn that enters its first capacity
+      // wait must not remain free to observe later rotation/pin mutations.
+      const acceptedSnapshot =
+        codexPolicySnapshot ??
+        CodexCredentialPolicySnapshotV1.parse({
+          schemaVersion: 1,
+          activeCredentialId: settingsRow.active_credential_id,
+          rotationEnabled: settingsRow.rotation_enabled,
+          rotationStrategy: settingsRow.rotation_strategy,
+          source: source.effectiveSource,
+          pinnedCredentialId: sessionCodexState.pinnedCredentialId,
+          pinSource: sessionCodexState.pinSource,
+          lastCredentialId: sessionCodexState.lastCredentialId,
+        });
+      if (codexPolicySnapshot === null) {
+        const [snapshottedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: metadataWithCodexCredentialPolicySnapshotV1(turn.metadata, acceptedSnapshot),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.accountId, input.accountId),
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.status, "running"),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!snapshottedTurn) {
+          throw new CodexCredentialLeaseAttemptFencedError();
+        }
       }
       if (selected.credentialId === null) {
-        if (leaseRotationEnabled && existingCredentialId !== null) {
+        if (existingCredentialId !== null) {
           await tx.execute(sql`
             delete from codex_credential_leases
             where workspace_id = ${input.workspaceId} and turn_id = ${input.turnId}
@@ -23888,6 +24225,10 @@ export async function acquireCodexCredentialLease<
           activeCredentialId,
           rotationEnabled,
           rotationStrategy,
+          sessionCodexState: acceptedSessionCodexState,
+          poolAccountCount: allAccounts.length,
+          codexPolicySnapshot: acceptedSnapshot,
+          codexPolicySnapshotReused: codexPolicySnapshot !== null,
           credentialId: null,
           reused: false,
           holderId: null,
@@ -23895,6 +24236,8 @@ export async function acquireCodexCredentialLease<
           leasedUntil: null,
           unavailableDiagnostics,
           advanceActivePointer: false,
+          failoverLimit:
+            failoverMetadata.maxFailovers ?? codexCredentialFailoverLimitForLease(accounts, null),
         };
       }
       const selectedAccount = accounts.find((account) => account.id === selected.credentialId);
@@ -23906,42 +24249,10 @@ export async function acquireCodexCredentialLease<
       }
 
       const advanceActivePointer =
-        input.advanceActivePointer && selected.advanceActivePointer !== false;
-
-      // Compatible-but-not-cut-over workers may still run the legacy rotation
-      // policy under this same workspace-row lock. They can advance the active
-      // pointer, but never create a lease or mutate fairness cursors.
-      if (!leaseRotationEnabled) {
-        if (advanceActivePointer && activeCredentialId !== selected.credentialId) {
-          if (organizationSource) {
-            await tx.execute(sql`
-              update organization_codex_rotation_settings
-              set active_credential_id = ${selected.credentialId}, updated_at = now()
-              where account_id = ${input.accountId}
-            `);
-          } else {
-            await tx.execute(sql`
-              update codex_rotation_settings
-              set active_credential_id = ${selected.credentialId}, updated_at = now()
-              where account_id = ${input.accountId} and workspace_id = ${input.workspaceId}
-            `);
-          }
-        }
-        return {
-          decision: selected.decision,
-          accounts,
-          activeCredentialId,
-          rotationEnabled,
-          rotationStrategy,
-          credentialId: selected.credentialId,
-          reused: false,
-          holderId: null,
-          generation: null,
-          leasedUntil: null,
-          unavailableDiagnostics,
-          advanceActivePointer,
-        };
-      }
+        codexPolicySnapshot === null &&
+        input.advanceActivePointer &&
+        acceptedSessionCodexState.pinnedCredentialId === null &&
+        selected.advanceActivePointer !== false;
 
       const reused = existingCredentialId === selected.credentialId;
       const leaseRows = await tx.execute(
@@ -23953,7 +24264,7 @@ export async function acquireCodexCredentialLease<
         insert into codex_credential_leases
           (account_id, workspace_id, credential_id, turn_id, holder_id, generation, leased_until)
         values
-          (${input.accountId}, ${input.workspaceId}, ${selected.credentialId}, ${input.turnId}, ${input.holderId}, 1, now() + (${leaseTtlMs} * interval '1 millisecond'))
+          (${input.accountId}, ${input.workspaceId}, ${selected.credentialId}, ${input.turnId}, ${input.holderId}, 1, clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'))
         on conflict (workspace_id, turn_id) do update set
           credential_id = excluded.credential_id,
           holder_id = excluded.holder_id,
@@ -24001,6 +24312,10 @@ export async function acquireCodexCredentialLease<
         activeCredentialId,
         rotationEnabled,
         rotationStrategy,
+        sessionCodexState: acceptedSessionCodexState,
+        poolAccountCount: allAccounts.length,
+        codexPolicySnapshot: acceptedSnapshot,
+        codexPolicySnapshotReused: codexPolicySnapshot !== null,
         credentialId: selected.credentialId,
         reused,
         holderId: leaseRows[0]?.holder_id ?? input.holderId,
@@ -24008,6 +24323,9 @@ export async function acquireCodexCredentialLease<
         leasedUntil,
         unavailableDiagnostics,
         advanceActivePointer,
+        failoverLimit:
+          failoverMetadata.maxFailovers ??
+          codexCredentialFailoverLimitForLease(accounts, selected.credentialId),
       };
     },
   );
@@ -24018,7 +24336,7 @@ export async function acquireCodexCredentialLease<
 // ---------------------------------------------------------------------------
 
 export type CodexCapacityWaitStatus = "waiting" | "resumed" | "superseded";
-export type CodexCapacityResetKind = "authoritative" | "bounded_refresh";
+export type CodexCapacityResetKind = "authoritative" | "bounded_refresh" | "mutation_only";
 
 export type CodexCapacityWait = {
   id: string;
@@ -24162,25 +24480,22 @@ async function lockExistingCodexRotationSettingsForCapacity(
   workspaceId: string,
 ): Promise<{
   accountId: string;
-  source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
+  source: EffectiveCodexSubscriptionSource;
   activeCredentialId: string | null;
   rotationEnabled: boolean;
-  leaseRotationEnabled: boolean;
   rotationStrategy: string;
 } | null> {
+  await lockWorkspaceCodexSubscriptionSource(tx, workspaceId);
   const source = await getWorkspaceCodexSubscriptionSourceScoped(tx, workspaceId);
-  if (source.effectiveSource === "disabled") return null;
   const rows =
     source.effectiveSource === "organization"
       ? await tx.execute(sql<{
           account_id: string;
           active_credential_id: string | null;
           rotation_enabled: boolean;
-          lease_rotation_enabled: boolean;
           rotation_strategy: string;
         }>`
-        select account_id, active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select account_id, active_credential_id, rotation_enabled, rotation_strategy
         from organization_codex_rotation_settings
         where account_id = ${source.accountId}
         for update
@@ -24189,11 +24504,9 @@ async function lockExistingCodexRotationSettingsForCapacity(
           account_id: string;
           active_credential_id: string | null;
           rotation_enabled: boolean;
-          lease_rotation_enabled: boolean;
           rotation_strategy: string;
         }>`
-        select account_id, active_credential_id, rotation_enabled,
-               lease_rotation_enabled, rotation_strategy
+        select account_id, active_credential_id, rotation_enabled, rotation_strategy
         from codex_rotation_settings
         where workspace_id = ${workspaceId}
         for update
@@ -24205,7 +24518,6 @@ async function lockExistingCodexRotationSettingsForCapacity(
         source: source.effectiveSource,
         activeCredentialId: row.active_credential_id,
         rotationEnabled: row.rotation_enabled,
-        leaseRotationEnabled: row.rotation_enabled && row.lease_rotation_enabled,
         rotationStrategy: row.rotation_strategy,
       }
     : null;
@@ -24229,7 +24541,8 @@ function nextCodexCapacityCheckAt(
 
 /**
  * Atomically close one all-unavailable attempt and arm exactly one durable wait
- * for the same logical turn. Lock order is allocator rotation row -> workspace
+ * for the same logical turn. Lock order is workspace source advisory -> allocator
+ * rotation row -> workspace
  * control -> actual workspace -> session -> exact turn -> exact attempt ->
  * optional goal -> live lease (when a reactive failure owns one) -> waiter.
  * The waiting turn/session pointer, durable events, exact lease release, and
@@ -24312,7 +24625,7 @@ export async function armCodexCapacityWait(
               where account_id = ${input.accountId}
                 and workspace_id = ${input.workspaceId}
                 and turn_id = ${input.turnId}
-                and leased_until > now()
+                and leased_until > clock_timestamp()
               for update
             `)
           : [];
@@ -24692,12 +25005,16 @@ async function mutateCodexCapacityInTransaction<T, TDatabase extends Database>(
   mutate: (tx: TDatabase) => Promise<{ result: T; changed: boolean }>,
 ): Promise<CodexCapacityMutationResult<T>> {
   await lockWorkspaceCodexSubscriptionSource(tx, input.workspaceId);
+  const sourceBefore = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
   const rotation = await lockExistingCodexRotationSettingsForCapacity(tx, input.workspaceId);
   const mutation = await mutate(tx);
   if (!mutation.changed) {
     return { result: mutation.result, wakeTargets: [] };
   }
   const sourceAfter = await getWorkspaceCodexSubscriptionSourceScoped(tx, input.workspaceId);
+  if (sourceAfter.effectiveSource !== sourceBefore.effectiveSource) {
+    await assertCodexSubscriptionSourceChangeAllowed(tx, input.workspaceId);
+  }
   const wakeTargets =
     rotation?.source === "organization" && sourceAfter.effectiveSource === "organization"
       ? await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
@@ -24932,6 +25249,8 @@ export async function reconcileCodexCapacityWait<
     waiterId: string;
     generation: number;
     now?: Date;
+    /** True only after the caller performed the due bounded metadata refresh. */
+    boundedRefreshAttempted?: boolean;
   },
   decide: (
     context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
@@ -25071,13 +25390,41 @@ export async function reconcileCodexCapacityWait<
           return { action: "superseded", ...superseded } as const;
         }
 
-        const allAccounts = await listCodexLeaseCandidatesInTransaction(tx, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          activeCredentialId: rotation.activeCredentialId,
-          source: rotation.source,
-          excludeTurnId: waiter.blockedTurnId,
-        });
+        const acceptedCodexPolicy = readCodexCredentialPolicySnapshotV1(blockedTurn.metadata);
+        const codexPolicySnapshot =
+          acceptedCodexPolicy.kind === "valid" ? acceptedCodexPolicy.policy : null;
+        // A post-wait source cutover must not move an already accepted turn to
+        // another credential pool. Pre-source snapshots remain compatible by
+        // using the current source, which was the only available semantics.
+        const acceptedSource = codexPolicySnapshot?.source ?? rotation.source;
+        const activeCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.activeCredentialId
+          : rotation.activeCredentialId;
+        const rotationEnabled = codexPolicySnapshot
+          ? codexPolicySnapshot.rotationEnabled
+          : rotation.rotationEnabled;
+        const rotationStrategy = codexPolicySnapshot
+          ? codexPolicySnapshot.rotationStrategy
+          : rotation.rotationStrategy;
+        const sessionPinnedCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.pinnedCredentialId
+          : session.codexPinnedCredentialId;
+        const sessionPinSource = codexPolicySnapshot
+          ? codexPolicySnapshot.pinSource
+          : ((session.codexPinSource as CodexPinSource | null) ?? null);
+        const sessionLastCredentialId = codexPolicySnapshot
+          ? codexPolicySnapshot.lastCredentialId
+          : session.codexLastCredentialId;
+        const allAccounts =
+          acceptedSource === "disabled"
+            ? []
+            : await listCodexLeaseCandidatesInTransaction(tx, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                activeCredentialId,
+                source: acceptedSource,
+                excludeTurnId: waiter.blockedTurnId,
+              });
         const policyScope = policy?.resolvePolicyScope?.(blockedTurn.metadata ?? {}) ?? null;
         const filtered = filterCodexLeaseCandidatesForPolicy(
           allAccounts,
@@ -25086,28 +25433,36 @@ export async function reconcileCodexCapacityWait<
         );
         const decision = decide({
           accounts: filtered.accounts,
-          activeCredentialId: rotation.activeCredentialId,
-          rotationEnabled: rotation.rotationEnabled,
-          leaseRotationEnabled: rotation.leaseRotationEnabled,
-          rotationStrategy: rotation.rotationStrategy,
+          activeCredentialId,
+          rotationEnabled,
+          rotationStrategy,
           existingCredentialId: null,
           policyScope,
           unavailableDiagnostics: filtered.unavailableDiagnostics,
           sessionId: session.id,
-          sessionPinnedCredentialId: session.codexPinnedCredentialId,
-          sessionPinSource: (session.codexPinSource as CodexPinSource | null) ?? null,
-          sessionLastCredentialId: session.codexLastCredentialId,
+          sessionPinnedCredentialId,
+          sessionPinSource,
+          sessionLastCredentialId,
           policyHash: waiter.policyHash,
         });
         if (decision.kind === "unavailable") {
+          const boundedRefreshAdvanced =
+            decision.resetKind === "bounded_refresh" && input.boundedRefreshAttempted === true;
           const refreshAttempt =
-            decision.resetKind === "bounded_refresh" ? waiter.refreshAttempt + 1 : 0;
-          const nextCheckAt = nextCodexCapacityCheckAt(
-            decision.earliestResetAt,
-            decision.resetKind,
-            refreshAttempt,
-            now,
-          );
+            decision.resetKind === "bounded_refresh"
+              ? waiter.refreshAttempt + (boundedRefreshAdvanced ? 1 : 0)
+              : 0;
+          const nextCheckAt =
+            decision.resetKind === "bounded_refresh" &&
+            !boundedRefreshAdvanced &&
+            waiter.resetKind === "bounded_refresh"
+              ? waiter.nextCheckAt
+              : nextCodexCapacityCheckAt(
+                  decision.earliestResetAt,
+                  decision.resetKind,
+                  refreshAttempt,
+                  now,
+                );
           const [updated] = await tx
             .update(schema.codexCapacityWaiters)
             .set({
@@ -26456,7 +26811,8 @@ export async function reconcileXaiCapacityWait(
  * Extend a live holder and return the database-confirmed expiry. A
  * missing/expired/released row returns null. A successful result lets the worker
  * derive a conservative monotonic deadline from the request start and configured
- * TTL, without comparing the Postgres and worker wall clocks.
+ * TTL, without comparing the Postgres and worker wall clocks; the worker still
+ * rejects a response that returns after its prior confirmed deadline.
  */
 export async function heartbeatCodexCredentialLeaseUntil(
   db: Database,
@@ -26470,14 +26826,14 @@ export async function heartbeatCodexCredentialLeaseUntil(
   return await withRlsContext(db, { accountId, workspaceId }, async (scopedDb) => {
     const rows = await scopedDb.execute(sql<{ leased_until: Date | string }>`
       update codex_credential_leases
-      set leased_until = now() + (${leaseTtlMs} * interval '1 millisecond'),
-          updated_at = now()
+      set leased_until = clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'),
+          updated_at = clock_timestamp()
       where account_id = ${accountId}
         and workspace_id = ${workspaceId}
         and turn_id = ${turnId}
         and holder_id = ${holderId}
         and generation = ${generation}
-        and leased_until > now()
+        and leased_until > clock_timestamp()
       returning leased_until
     `);
     return codexMetadataDate(rows[0]?.leased_until);
@@ -26540,28 +26896,112 @@ export type CodexCredentialLeaseQuarantine =
     }
   | { kind: "cooldown"; until: Date; cooldownKind: CodexCredentialCooldownKind };
 
+export type CodexCredentialLeaseQuarantineResult =
+  | {
+      action: "recorded";
+      failoverCount: number;
+      maxFailovers: number;
+      exhausted: boolean;
+    }
+  | {
+      action: "credential_changed";
+      failoverCount: number;
+      maxFailovers: number;
+      currentCredentialVersion: number;
+    }
+  | { action: "stale"; failoverCount: number; maxFailovers: number };
+
 /**
- * Quarantine the credential served by one exact live holder. The lease row is
- * locked and checked before the credential write, so a superseded/expired
- * activity cannot poison status or cooldown after a successor owns the turn.
+ * Quarantine the credential served by one exact live attempt and token family.
+ * The attempt, dispatch, lease, and credential version are checked before the
+ * write. The same transaction freezes the accepted turn's alternate budget and
+ * records the attempted credential, so waiter/database recovery cannot reset
+ * accounting or return to an already-consumed account under rotation policy.
  */
 export async function quarantineCodexCredentialForLease(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    workflowId: string;
+    workflowRunId: string;
+    dispatchId: string;
+    expectedRedispatches: number;
     credentialId: string;
+    credentialVersion: number;
     holderId: string;
     generation: number;
+    maxFailovers: number;
     quarantine: CodexCredentialLeaseQuarantine;
   },
-): Promise<boolean> {
-  return await withRlsContext(
+): Promise<CodexCredentialLeaseQuarantineResult> {
+  if (!Number.isSafeInteger(input.credentialVersion) || input.credentialVersion < 1) {
+    throw new Error("Codex quarantine credential version must be positive");
+  }
+  if (!Number.isSafeInteger(input.maxFailovers) || input.maxFailovers < 1) {
+    throw new Error("Codex quarantine failover bound must be positive");
+  }
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
+        const metadata = codexFailoverMetadata(turn?.metadata);
+        const maxFailovers = metadata.maxFailovers ?? input.maxFailovers;
+        const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
+        const dispatch = readTurnDispatchMetadata(turn?.metadata);
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+          { workspaceControl: locks.control ?? undefined },
+        );
+        if (
+          !locks.workspace ||
+          !session ||
+          !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          session.activeTurnId !== input.turnId ||
+          session.status !== "running" ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          turn.status !== "running" ||
+          turn.activeAttemptId !== input.attemptId ||
+          turn.executionGeneration !== input.executionGeneration ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.state !== "running" ||
+          attempt.executionGeneration !== input.executionGeneration ||
+          attempt.temporalWorkflowId !== input.workflowId ||
+          attempt.temporalWorkflowRunId !== input.workflowRunId ||
+          attempt.temporalActivityId !== input.dispatchId ||
+          dispatch.kind !== "valid" ||
+          dispatch.attempt?.id !== input.dispatchId ||
+          currentRedispatches !== input.expectedRedispatches ||
+          effectiveControl.state !== "active"
+        ) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
         const leaseRows = await tx.execute(sql<{ id: string }>`
           select id from codex_credential_leases
           where account_id = ${input.accountId}
@@ -26570,14 +27010,51 @@ export async function quarantineCodexCredentialForLease(
             and credential_id = ${input.credentialId}
             and holder_id = ${input.holderId}
             and generation = ${input.generation}
-            and leased_until > now()
+            and leased_until > clock_timestamp()
           for update
         `);
         if (!leaseRows[0]) {
-          return false;
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
         }
         const pool = await effectiveCodexCredentialPoolCondition(tx, input.workspaceId);
-        if (!pool.condition) return false;
+        if (!pool.condition) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        const [credential] = await tx
+          .select({ version: schema.codexSubscriptionCredentials.version })
+          .from(schema.codexSubscriptionCredentials)
+          .where(
+            and(
+              eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
+              eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              pool.condition,
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!credential) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        if (credential.version !== input.credentialVersion) {
+          return {
+            action: "credential_changed",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+            currentCredentialVersion: credential.version,
+          } as const;
+        }
         const updated = await tx
           .update(schema.codexSubscriptionCredentials)
           .set(
@@ -26597,11 +27074,52 @@ export async function quarantineCodexCredentialForLease(
             and(
               eq(schema.codexSubscriptionCredentials.accountId, input.accountId),
               eq(schema.codexSubscriptionCredentials.id, input.credentialId),
+              eq(schema.codexSubscriptionCredentials.version, input.credentialVersion),
               pool.condition,
             ),
           )
           .returning({ id: schema.codexSubscriptionCredentials.id });
-        return updated.length > 0;
+        if (updated.length === 0) {
+          return {
+            action: "stale",
+            failoverCount: metadata.failoverCount,
+            maxFailovers,
+          } as const;
+        }
+        const alreadyRecorded = metadata.failedCredentialIds.has(input.credentialId);
+        const failedCredentialIds = alreadyRecorded
+          ? [...metadata.failedCredentialIds]
+          : [...metadata.failedCredentialIds, input.credentialId];
+        const failoverCount = alreadyRecorded
+          ? metadata.failoverCount
+          : Math.max(metadata.failoverCount + 1, failedCredentialIds.length);
+        const exhausted = failoverCount > maxFailovers;
+        const [accountedTurn] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            metadata: {
+              ...turn.metadata,
+              codexCredentialFailureAccountingVersion: 1,
+              codexCredentialFailedIds: failedCredentialIds,
+              codexCredentialFailovers: failoverCount,
+              codexCredentialFailoverLimit: maxFailovers,
+              codexCredentialFailoverExhausted: exhausted,
+            },
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+            ),
+          )
+          .returning({ id: schema.sessionTurns.id });
+        if (!accountedTurn) {
+          throw new Error("Codex quarantine lost its exact turn accounting fence");
+        }
+        return { action: "recorded", failoverCount, maxFailovers, exhausted } as const;
       }),
   );
 }
@@ -27704,10 +28222,8 @@ export async function recordCodexAccountUsageWithWakeTargets(
 
 export type CodexRotationSettings = {
   activeCredentialId: string | null;
-  /** Legacy selector bit; old binaries only understand this field. */
+  /** False keeps new allocations on the active account; true permits pool failover. */
   rotationEnabled: boolean;
-  /** New allocator cutover bit; ignored safely by old binaries. */
-  leaseRotationEnabled: boolean;
   rotationStrategy: string; // P1: 'most_remaining' (unused)
 };
 
@@ -27800,7 +28316,6 @@ export async function getCodexRotationSettings(
             .select({
               activeCredentialId: schema.organizationCodexRotationSettings.activeCredentialId,
               rotationEnabled: schema.organizationCodexRotationSettings.rotationEnabled,
-              leaseRotationEnabled: schema.organizationCodexRotationSettings.leaseRotationEnabled,
               rotationStrategy: schema.organizationCodexRotationSettings.rotationStrategy,
             })
             .from(schema.organizationCodexRotationSettings)
@@ -27810,7 +28325,6 @@ export async function getCodexRotationSettings(
             .select({
               activeCredentialId: schema.codexRotationSettings.activeCredentialId,
               rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-              leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
               rotationStrategy: schema.codexRotationSettings.rotationStrategy,
             })
             .from(schema.codexRotationSettings)
@@ -27832,7 +28346,6 @@ export async function ensureCodexRotationSettings(
       .values({
         accountId,
         workspaceId,
-        leaseRotationEnabled: false,
       })
       .onConflictDoNothing({
         target: [schema.codexRotationSettings.workspaceId],
@@ -27976,56 +28489,6 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
   );
 }
 
-/**
- * P3 reactive-rotation boundedness (Finding 1b): the number of CONSECUTIVE rotated
- * 429-failover turns since the session last had a SUCCESSFUL turn. Counts
- * `turn.failed` events carrying the `rotated` marker that occurred AFTER the most
- * recent `turn.completed` event (the natural reset anchor — any successful turn
- * moves the anchor past every prior failover, so the streak resets to 0). The
- * reactive 429 catch consults this to bound its otherwise-0-delay re-dispatch:
- * once the streak exceeds ~(connected accounts + margin) the path degrades to a
- * fixed positive idle instead of another hot re-dispatch (invariant 4: NO THRASH),
- * covering the double-fault where a cooldown write did not persist AND the 429
- * carried no usage headers. Derived from persisted events so it is correct across
- * the Temporal re-dispatch (each failover is a NEW turn, but its event survives).
- */
-export async function countConsecutiveReactiveRotations(
-  db: Database,
-  workspaceId: string,
-  sessionId: string,
-): Promise<number> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [lastOk] = await scopedDb
-      .select({ sequence: schema.sessionEvents.sequence })
-      .from(schema.sessionEvents)
-      .where(
-        and(
-          eq(schema.sessionEvents.workspaceId, workspaceId),
-          eq(schema.sessionEvents.sessionId, sessionId),
-          eq(schema.sessionEvents.type, "turn.completed"),
-        ),
-      )
-      .orderBy(desc(schema.sessionEvents.sequence))
-      .limit(1);
-    const conditions = [
-      eq(schema.sessionEvents.workspaceId, workspaceId),
-      eq(schema.sessionEvents.sessionId, sessionId),
-      eq(schema.sessionEvents.type, "turn.failed"),
-      sql`${schema.sessionEvents.payload} ->> 'rotated' = 'true'`,
-    ];
-    if (lastOk) {
-      conditions.push(sql`${schema.sessionEvents.sequence} > ${lastOk.sequence}`);
-    }
-    const [{ rotated } = { rotated: 0 }] = await scopedDb
-      .select({
-        rotated: sql<number>`count(*)::int`,
-      })
-      .from(schema.sessionEvents)
-      .where(and(...conditions));
-    return Number(rotated);
-  });
-}
-
 /** The supported rotation strategies (P3). */
 export const CODEX_ROTATION_STRATEGIES = [
   "most_remaining",
@@ -28064,10 +28527,6 @@ export async function updateCodexRotationSettings(
     const set: Record<string, unknown> = { updatedAt: new Date() };
     if (patch.rotationEnabled !== undefined) {
       set.rotationEnabled = patch.rotationEnabled;
-      // A manual toggle owns both generations. Turning rotation off must also
-      // disable the allocator-only default; turning it on keeps current and old
-      // binaries consistent with explicit user intent.
-      set.leaseRotationEnabled = patch.rotationEnabled;
     }
     if (patch.rotationStrategy !== undefined) {
       set.rotationStrategy = patch.rotationStrategy;
@@ -28079,7 +28538,6 @@ export async function updateCodexRotationSettings(
       .returning({
         activeCredentialId: schema.codexRotationSettings.activeCredentialId,
         rotationEnabled: schema.codexRotationSettings.rotationEnabled,
-        leaseRotationEnabled: schema.codexRotationSettings.leaseRotationEnabled,
         rotationStrategy: schema.codexRotationSettings.rotationStrategy,
       });
     return row ?? null;
@@ -56834,6 +57292,7 @@ export async function upsertSessionGoal(
           lastContinuationTurnId: null,
           versionAtLastContinuation: null,
           continuationWakeRevision: existing.continuationWakeRevision + 1,
+          ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -57441,6 +57900,7 @@ export async function updateSessionGoal(
         ...(input.successCriteria !== undefined ? { successCriteria: input.successCriteria } : {}),
         ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
         version: sql`${schema.sessionGoals.version} + 1`,
+        ...SESSION_GOAL_SUPPRESSION_CLEARED,
         updatedAt: new Date(),
       })
       .where(
@@ -57793,6 +58253,7 @@ export async function updateSessionGoalWithEvent(
           ...(input.mutationPolicy !== undefined ? { mutationPolicy: input.mutationPolicy } : {}),
           version: existing.version + 1,
           objectiveRevision: existing.objectiveRevision + 1,
+          ...SESSION_GOAL_SUPPRESSION_CLEARED,
           updatedAt: new Date(),
         })
         .where(eq(schema.sessionGoals.id, existing.id))
@@ -58455,6 +58916,7 @@ export async function setSessionGoalStatus(
         status: input.status,
         version: existing.version + 1,
         updatedAt: new Date(),
+        ...SESSION_GOAL_SUPPRESSION_CLEARED,
         ...(input.status === "completed"
           ? {
               evidence: input.evidence ?? null,
@@ -58817,13 +59279,16 @@ export async function evaluateGoalContinuation(
               "context_compaction_failed",
             )
           : false;
-        // A provider could not produce a durable checkpoint for the latest
-        // inference. Re-running the unchanged active history autonomously only
-        // repeats the same failure. Keep the active goal intact but inert until
-        // a human/API prompt, agent Steer instruction, or explicit Compact
-        // attempt creates newer truth. Ordinary internal updates stay pending;
-        // this never creates queue work or consumes counters.
-        if (contextCompactionFailure) {
+        const codexFailoverExhausted =
+          row.continuationSuppressedTurnId !== null &&
+          row.continuationSuppressedTurnId === latestFinished?.id;
+        // Some terminal failures make unchanged autonomous input unsafe:
+        // checkpoint failure would repeat the same inference without durable
+        // state, while bounded Codex failover exhaustion would create a fresh
+        // turn and reset the per-turn account budget. Keep the active goal
+        // intact but inert until newer human/API/machine work creates truth.
+        // This never creates queue work or consumes continuation counters.
+        if (contextCompactionFailure || codexFailoverExhausted) {
           return { decision: "none" } as const;
         }
         // `autoContinuations` counts only CONSECUTIVE synthesized continuations
@@ -59219,6 +59684,33 @@ export async function materializeGoalContinuation(
           ))
         ) {
           return { action: "queue", events: [] } as const;
+        }
+
+        // A bounded Codex rotation walk is terminal for this exact accepted
+        // input. Do not let the invariant-repair path below manufacture a new
+        // goal wake from equal revisions: that synthesized turn would reset
+        // the per-turn failover budget. New pending input already won above,
+        // and a later externally driven turn becomes the newest finished truth.
+        if (goalRead.continuationSuppressedTurnId) {
+          const [latestFinished] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                sql`${schema.sessionTurns.finishedAt} is not null`,
+              ),
+            )
+            .orderBy(
+              desc(schema.sessionTurns.finishedAt),
+              desc(schema.sessionTurns.position),
+              desc(schema.sessionTurns.createdAt),
+            )
+            .limit(1);
+          if (latestFinished?.id === goalRead.continuationSuppressedTurnId) {
+            return { action: "none", events: [] } as const;
+          }
         }
 
         // Idle backoff between CONSECUTIVE no-input continuations. This is
@@ -66186,6 +66678,13 @@ export type ApplySessionTurnSettlementInput = {
   turnStatus: SessionTurnStatus;
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
+  /**
+   * Finish this terminal turn without arming the active goal's autonomous
+   * continuation. The goal remains active so explicit later work can proceed,
+   * but this exact settlement cannot synthesize another turn from unchanged
+   * input after a bounded terminal condition.
+   */
+  suppressGoalContinuation?: boolean;
   events: AppendEventInput[];
   /**
    * A mid-turn requires_action freeze. Human-input rows and interaction
@@ -66553,6 +67052,14 @@ export async function applySessionTurnSettlement(
   input: ApplySessionTurnSettlementInput,
   hooks: ApplySessionTurnSettlementHooks = {},
 ): Promise<ApplySessionTurnSettlementResult> {
+  if (
+    input.suppressGoalContinuation &&
+    (!isTerminalSessionTurnStatus(input.turnStatus) || input.activeTurnId !== null)
+  ) {
+    throw new Error(
+      "Goal continuation suppression requires a terminal turn with no active turn pointer",
+    );
+  }
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   const eventTypes = [
     ...input.events.map((event) => event.type),
@@ -67291,12 +67798,36 @@ export async function applySessionTurnSettlement(
           ),
         );
       // Supersession already has newer human/Agent direction waiting. It must
-      // not also arm an autonomous goal continuation behind that Steer.
-      if (terminal && input.turnStatus !== "superseded" && input.activeTurnId === null) {
+      // not also arm or suppress an autonomous goal continuation behind that
+      // Steer.
+      if (
+        terminal &&
+        input.turnStatus !== "superseded" &&
+        input.activeTurnId === null &&
+        input.suppressGoalContinuation
+      ) {
+        await tx
+          .update(schema.sessionGoals)
+          .set({ continuationSuppressedTurnId: input.turnId, updatedAt: now })
+          .where(
+            and(
+              eq(schema.sessionGoals.workspaceId, workspaceId),
+              eq(schema.sessionGoals.sessionId, input.sessionId),
+              eq(schema.sessionGoals.status, "active"),
+            ),
+          );
+      }
+      if (
+        terminal &&
+        input.turnStatus !== "superseded" &&
+        input.activeTurnId === null &&
+        !input.suppressGoalContinuation
+      ) {
         const [armedGoal] = await tx
           .update(schema.sessionGoals)
           .set({
             continuationWakeRevision: sql`${schema.sessionGoals.continuationWakeRevision} + 1`,
+            ...SESSION_GOAL_SUPPRESSION_CLEARED,
             updatedAt: now,
           })
           .where(
@@ -67333,7 +67864,12 @@ export async function applySessionTurnSettlement(
 export type SettleCodexCredentialFailoverResult =
   | { action: "recovering"; failoverCount: number; events: SessionEvent[] }
   | { action: "stale"; failoverCount: number; events: [] }
-  | { action: "limit_exceeded"; failoverCount: number; events: [] };
+  | {
+      action: "limit_exceeded";
+      failoverCount: number;
+      maxFailovers: number;
+      events: SessionEvent[];
+    };
 
 export type SettleCodexCredentialLeaseLossResult =
   | { action: "recovering"; events: SessionEvent[] }
@@ -67610,11 +68146,13 @@ export async function settleCodexCredentialLeaseLoss(
 /**
  * Atomically settle a definitive Codex credential failover. Conversation
  * history/RunState is persisted by the caller first; this transaction then
- * fences the exact activity lease, increments the bounded same-turn counter,
- * appends both durable events, marks the same turn recoverable, updates the
- * session, and releases the lease together. The exact holder remains provable
- * if its row just expired or was reaped; a successor, redispatch, or closed
- * inference gate makes the caller stale without a second settlement path.
+ * fences the exact activity lease, consumes the quarantine transaction's
+ * bounded same-turn receipt, appends durable recovery or terminal events,
+ * updates the turn/session, and releases the lease together. Exhaustion also
+ * suppresses autonomous goal continuation and enqueues a failed-child notice in
+ * this transaction. The exact holder remains provable if its row just expired
+ * or was reaped; a successor, redispatch, or closed inference gate makes the
+ * caller stale without a second settlement path.
  */
 export async function settleCodexCredentialFailover(
   db: Database,
@@ -67624,11 +68162,12 @@ export async function settleCodexCredentialFailover(
     sessionId: string;
     turnId: string;
     attemptId: string;
-    holderId: string;
-    generation: number;
+    holderId?: string | null;
+    generation?: number | null;
     expectedRedispatches: number;
     maxFailovers: number;
     recoveryPayload: Record<string, unknown>;
+    failedPayload?: Record<string, unknown>;
   },
 ): Promise<SettleCodexCredentialFailoverResult> {
   if (!Number.isInteger(input.expectedRedispatches) || input.expectedRedispatches < 0) {
@@ -67637,19 +68176,29 @@ export async function settleCodexCredentialFailover(
   if (!Number.isInteger(input.maxFailovers) || input.maxFailovers < 1) {
     throw new Error("Codex failover bound must be a positive integer");
   }
-  return await withSessionActivityRlsContext(
+  if ((input.holderId == null) !== (input.generation == null)) {
+    throw new Error("Codex failover lease fence must be fully present or absent");
+  }
+  return await retrySessionActivityRls(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+    input.workspaceId,
+    {
+      stage: "session_lifecycle_outbox.settle_codex_credential_failover",
+      eventTypes: ["turn.recovery.requested", "turn.failed", "session.status.changed"],
+      maxAttempts: 3,
+    },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
-          workspaceId: input.workspaceId,
-          controlLock: "share",
-          sessionIds: [input.sessionId],
-          turnIds: [input.turnId],
-          attemptIds: [input.attemptId],
-        });
-        const session = locks.sessions[0];
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          input.workspaceId,
+          {
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            attemptId: input.attemptId,
+          },
+        );
+        const session = locks.session;
         const turn = locks.turns[0];
         const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
@@ -67697,6 +68246,8 @@ export async function settleCodexCredentialFailover(
         const lease = leaseRows[0];
         if (
           lease &&
+          input.holderId != null &&
+          input.generation != null &&
           (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
         ) {
           return {
@@ -67706,12 +68257,205 @@ export async function settleCodexCredentialFailover(
           } as const;
         }
 
-        const failoverCount = currentFailovers + 1;
-        if (failoverCount > input.maxFailovers) {
+        const persistedMaxFailovers = turn.metadata?.codexCredentialFailoverLimit;
+        if (
+          persistedMaxFailovers !== undefined &&
+          (typeof persistedMaxFailovers !== "number" ||
+            !Number.isSafeInteger(persistedMaxFailovers) ||
+            persistedMaxFailovers < 1)
+        ) {
+          throw new Error("Persisted Codex failover bound must be a positive safe integer");
+        }
+        const maxFailovers = persistedMaxFailovers ?? input.maxFailovers;
+        const receiptRecorded = turn.metadata?.codexCredentialFailureAccountingVersion === 1;
+        const failoverCount = receiptRecorded ? currentFailovers : currentFailovers + 1;
+        if (failoverCount > maxFailovers) {
+          const now = new Date();
+          await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
+            id: input.attemptId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            executionGeneration: turn.executionGeneration,
+            outcome: "failed",
+            closedAt: now,
+          });
+          await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+          });
+          await settleSessionMaintenanceInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+          });
+          let sequence = session.lastSequence;
+          const closedTools = await closePendingSessionToolCallsInTransaction(
+            tx as unknown as Database,
+            {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              reason: "turn_failed",
+              sequence,
+              now,
+            },
+          );
+          sequence = closedTools.sequence;
+          const [waitingPrompt] = await tx
+            .select({ id: schema.sessionTurns.id })
+            .from(schema.sessionTurns)
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.sessionId, input.sessionId),
+                eq(schema.sessionTurns.status, "queued"),
+                inArray(schema.sessionTurns.source, ["user", "api"]),
+              ),
+            )
+            .limit(1);
+          const sessionStatus = waitingPrompt ? "queued" : "idle";
+          const failurePayload = {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            ...(input.failedPayload ?? {}),
+            failoverCount,
+            maxFailovers,
+          };
+          const inserted = await tx
+            .insert(schema.sessionEvents)
+            .values(
+              withLosslessContentWriteVersion(
+                [
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "turn.failed",
+                    payload: failurePayload,
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    sequence: ++sequence,
+                    type: "session.status.changed",
+                    payload: { status: sessionStatus },
+                    turnId: input.turnId,
+                    turnGeneration: turn.executionGeneration,
+                    turnAttemptId: input.attemptId,
+                    turnAssociation: "current",
+                    occurredAt: now,
+                  },
+                ],
+                "payload",
+                "payloadCodecVersion",
+              ),
+            )
+            .returning();
+          const terminalEvent = inserted[0];
+          if (!terminalEvent) {
+            throw new Error("Codex failover exhaustion did not persist its terminal event");
+          }
+          await projectSessionRealtimeDelegationTerminalInTransaction(tx as unknown as Database, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            turnStatus: "failed",
+            terminalEvent: {
+              id: terminalEvent.id,
+              type: "turn.failed",
+              payload: sessionEventPayloadRecord(
+                terminalEvent.payload,
+                terminalEvent.payloadCodecVersion,
+              ),
+            },
+            now,
+          });
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              status: "failed",
+              activeAttemptId: null,
+              metadata: {
+                ...turn.metadata,
+                codexCredentialFailovers: failoverCount,
+                codexCredentialFailoverLimit: maxFailovers,
+                codexCredentialFailoverExhausted: true,
+              },
+              version: turn.version + 1,
+              finishedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                eq(schema.sessionTurns.id, input.turnId),
+              ),
+            );
+          await enqueueFailedChildOutboxForTurnTx(
+            tx as unknown as Database,
+            input.workspaceId,
+            session,
+            turn,
+          );
+          await tx
+            .update(schema.sessions)
+            .set({
+              status: sessionStatus,
+              activeTurnId: null,
+              lastSequence: sequence,
+              queueVersion: session.queueVersion + 1,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, input.sessionId),
+              ),
+            );
+          await tx
+            .update(schema.sessionGoals)
+            .set({ continuationSuppressedTurnId: input.turnId, updatedAt: now })
+            .where(
+              and(
+                eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                eq(schema.sessionGoals.sessionId, input.sessionId),
+                eq(schema.sessionGoals.status, "active"),
+              ),
+            );
+          await tx.execute(sql`
+            delete from codex_credential_leases
+            where account_id = ${input.accountId}
+              and workspace_id = ${input.workspaceId}
+              and turn_id = ${input.turnId}
+              and (
+                ${input.holderId ?? null}::text is null
+                or (
+                  holder_id = ${input.holderId ?? null}
+                  and generation = ${input.generation ?? null}
+                )
+              )
+          `);
           return {
             action: "limit_exceeded",
             failoverCount,
-            events: [],
+            maxFailovers,
+            events: [...closedTools.events, ...inserted.map(mapEvent)],
           } as const;
         }
         const now = new Date();
@@ -67792,6 +68536,7 @@ export async function settleCodexCredentialFailover(
             metadata: {
               ...turn.metadata,
               codexCredentialFailovers: failoverCount,
+              codexCredentialFailoverLimit: maxFailovers,
             },
             finishedAt: null,
             updatedAt: now,

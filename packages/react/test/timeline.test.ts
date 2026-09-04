@@ -203,6 +203,41 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
+  test("projects allocator-disabled policy waits without exposing credential identity", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      actualOutcome: "waiting",
+      actualCandidateKey: null,
+      actualReason: "allocator_disabled",
+    });
+    expect(JSON.stringify(item)).not.toContain("credential-secret");
+  });
+
+  test("projects authoritative allocator-disabled waits without the shadow feature", () => {
+    reset();
+    const [item] = buildTimeline([
+      event("codex.capacity.waiting", {
+        code: "codex_allocator_disabled",
+        detail: "waiting for a credential policy mutation",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "waiting for a credential policy mutation",
+    });
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [
@@ -3246,6 +3281,19 @@ describe("sessionStatusFromEvents", () => {
     ];
     expect(sessionStatusFromEvents(events)).toBe("idle");
     expect(sessionStatusFromEvents([event("user.message", { text: "x" })])).toBeNull();
+  });
+
+  test("accepts durable capacity wait and recovery statuses", () => {
+    reset();
+    expect(
+      sessionStatusFromEvents([event("session.status.changed", { status: "waiting_capacity" })]),
+    ).toBe("waiting_capacity");
+    expect(
+      sessionStatusFromEvents([
+        event("session.status.changed", { status: "waiting_capacity" }),
+        event("session.status.changed", { status: "recovering" }),
+      ]),
+    ).toBe("recovering");
   });
 });
 

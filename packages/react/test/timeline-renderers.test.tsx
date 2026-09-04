@@ -715,6 +715,31 @@ describe("FleetDecisionRow", () => {
     await r.unmount();
   });
 
+  test("renders allocator-disabled production waiting as policy-constrained capacity", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+
+    const disclosure = await fleetDecisionDisclosure(r.container);
+    await act(async () => {
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("The policy-selected subscription was disabled for new allocations");
+    expect(text).not.toContain("credential-secret");
+    await r.unmount();
+  });
+
   test("renders manager priority as standard-work pacing rather than manager admission", async () => {
     resetTimelineEvents();
     const payload = fleetDecisionEventPayload();

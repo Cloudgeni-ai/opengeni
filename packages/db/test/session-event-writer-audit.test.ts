@@ -241,7 +241,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/index.ts#settleCodexCredentialFailover": {
-    inserts: 1,
+    inserts: 2,
     contract: "canonical",
   },
   "packages/db/src/index.ts#requestSessionTurnRecovery": {
@@ -393,6 +393,7 @@ const expectedFailedChildOutboxCallers = [
   "applySessionTurnSettlement",
   "failSessionWorkBeforeAttemptClaim",
   "recoverSessionDispatch",
+  "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
   "enqueueFailedChildOutboxForTurnTx",
