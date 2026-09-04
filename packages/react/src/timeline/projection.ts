@@ -999,8 +999,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         const latestAgentResponse = takeAgentResponse(turnId);
         const finalOutput = stringValue(payload.output);
+        const visibleFinalOutput = stripOpaqueCitationTokens(finalOutput).trim();
         const pendingWaitOutcome = takePendingWaitOutcome(turnId);
-        if (finalOutput.trim()) {
+        if (visibleFinalOutput) {
           // `agent.message.completed` and `turn.completed` normally commit
           // together, but legacy or partially compacted ledgers may retain only
           // the terminal output receipt. Keep that authoritative response
@@ -1018,7 +1019,10 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
               items.splice(responseIndex, 1);
               items.push(latestAgentResponse.item);
             }
-          } else if (latestAgentResponse?.item.text.trim() !== finalOutput.trim()) {
+          } else if (
+            stripOpaqueCitationTokens(latestAgentResponse?.item.text ?? "").trim() !==
+            visibleFinalOutput
+          ) {
             items.push({
               kind: "agent-message",
               id: `${event.id}-output-message`,
@@ -1034,8 +1038,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         const hasCompletedFinalResponse =
           latestAgentResponse?.completed === true &&
           latestAgentResponse.item.phase !== "commentary" &&
-          Boolean(latestAgentResponse.item.text.trim());
-        if (!finalOutput.trim() && !hasCompletedFinalResponse && pendingWaitOutcome) {
+          Boolean(stripOpaqueCitationTokens(latestAgentResponse.item.text).trim());
+        if (!visibleFinalOutput && !hasCompletedFinalResponse && pendingWaitOutcome) {
           items.push({
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,

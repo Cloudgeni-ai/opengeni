@@ -3010,6 +3010,54 @@ describe("groupTimeline", () => {
     ).toBe(false);
   });
 
+  test.each([
+    ["the completed agent message", ""],
+    ["the retained turn output", "citeopaque-handle"],
+  ] as const)(
+    "keeps the wait outcome when only an opaque citation remains in %s",
+    (_label, output) => {
+      reset();
+      const reason = "A child review is still running.";
+      const events = [
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          reason,
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+      ];
+      if (!output) {
+        events.push(
+          event("agent.message.completed", {
+            text: "citeopaque-handle",
+            phase: "final_answer",
+          }),
+        );
+      }
+      events.push(event("turn.completed", { output }));
+
+      const groups = groupTimeline(buildTimeline(events));
+      const waitingNotices = groups.flatMap((group) =>
+        group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting"
+          ? [group.item]
+          : [],
+      );
+
+      expect(waitingNotices).toHaveLength(1);
+      expect(waitingNotices[0]).toMatchObject({
+        text: `Waiting: ${reason}`,
+      });
+    },
+  );
+
   test("recovers a retained terminal output when its message event is absent", () => {
     reset();
     const groups = groupTimeline(
