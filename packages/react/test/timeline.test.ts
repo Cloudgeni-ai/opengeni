@@ -3050,11 +3050,7 @@ describe("groupTimeline", () => {
           { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
           { turnId: "turn-retry" },
         ),
-        event(
-          "agent.toolCall.output",
-          { id: "call-1", output: "ok" },
-          { turnId: "turn-retry" },
-        ),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-retry" }),
         event("turn.completed", { output: "" }, { turnId: "turn-retry" }),
       ]),
     );
@@ -3062,9 +3058,7 @@ describe("groupTimeline", () => {
     expect(
       groups.some(
         (group) =>
-          group.kind === "item" &&
-          group.item.kind === "notice" &&
-          group.item.tone === "waiting",
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
       ),
     ).toBe(false);
   });
@@ -3073,11 +3067,7 @@ describe("groupTimeline", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
-        event(
-          "agent.message.completed",
-          { text: "Old partial result." },
-          { turnId: null },
-        ),
+        event("agent.message.completed", { text: "Old partial result." }, { turnId: null }),
         event(
           "session.wait.started",
           { actor: "agent", reason: "Waiting on obsolete work." },
@@ -3089,16 +3079,8 @@ describe("groupTimeline", () => {
           { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
           { turnId: "turn-retry" },
         ),
-        event(
-          "agent.toolCall.output",
-          { id: "call-1", output: "ok" },
-          { turnId: "turn-retry" },
-        ),
-        event(
-          "turn.completed",
-          { output: "Fresh final result." },
-          { turnId: "turn-retry" },
-        ),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-retry" }),
+        event("turn.completed", { output: "Fresh final result." }, { turnId: "turn-retry" }),
       ]),
     );
 
@@ -3113,9 +3095,7 @@ describe("groupTimeline", () => {
     expect(
       groups.some(
         (group) =>
-          group.kind === "item" &&
-          group.item.kind === "notice" &&
-          group.item.tone === "waiting",
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
       ),
     ).toBe(false);
   });
