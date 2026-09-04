@@ -350,6 +350,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  // PR #2208 changed a typed-cancelled result from a plain re-peek into a
+  // recoverDispatch activity. Version that new command so histories which
+  // already recorded the legacy re-peek remain deterministic on replay.
+  const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -1106,6 +1110,11 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     }
 
     if (outcome.result.status === "cancelled") {
+      // Histories created before session-cancelled-attempt-recovery-v1 must
+      // preserve the old command sequence. Their durable state is still safe:
+      // operator recovery or a later fresh workflow run can close a stranded
+      // owner, while new histories use the bounded exact-attempt transaction.
+      if (!cancelledAttemptRecovery) return true;
       // A typed cancellation is normally observed through the control-signal
       // branch above, after Pause/Steer has durably fenced the attempt. A
       // worker can nevertheless return the same shape after a shutdown or a
