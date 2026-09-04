@@ -137,7 +137,7 @@ export async function prepareImageGenerationOperation(
               ),
             )
             .returning();
-          if (!row) throw new Error("Failed to rebind prepared image generation operation");
+          if (!row) throw new Error("Image generation retry does not match the reserved operation");
           return { operation: mapImageGenerationOperation(row), created: false };
         }
         const [row] = await tx
