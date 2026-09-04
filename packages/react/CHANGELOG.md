@@ -1,5 +1,15 @@
 # @opengeni/react
 
+## 3.7.0
+
+### Patch Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/sdk@3.7.0
+
 ## 3.6.0
 
 ### Patch Changes
