@@ -1,11 +1,14 @@
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
+import { RowQuickActions } from "../src/components/rail/session-list";
 import {
   SessionRowContent,
   SessionRowHoverDetails,
 } from "../src/components/rail/session-row-content";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../src/components/ui/hover-card";
 import { cn } from "../src/lib/utils";
+import type { Session } from "../src/types";
 import "../src/styles.css";
 
 const neutral = { kind: "neutral", count: 1, total: 1, label: "Idle" } as const;
@@ -30,6 +33,13 @@ const cases = [
 ] as const;
 
 function SessionRailRowMetadataFixture() {
+  const [quickActionSession, setQuickActionSession] = useState({
+    id: "quick-actions",
+    archived: false,
+    parentSessionId: null,
+    pinned: false,
+  } as Session);
+
   return (
     <main className="min-h-screen bg-background p-8 text-foreground">
       <aside
@@ -90,6 +100,19 @@ function SessionRailRowMetadataFixture() {
                   />
                 </HoverCardContent>
               </HoverCard>
+              {scenario.id === "time-only" ? (
+                <RowQuickActions
+                  session={quickActionSession}
+                  onPin={async (session, pinned) => {
+                    const updated = { ...session, pinned };
+                    setQuickActionSession(updated);
+                    return updated;
+                  }}
+                  onArchive={async (session, archived) => {
+                    setQuickActionSession({ ...session, archived });
+                  }}
+                />
+              ) : null}
             </div>
           ))}
         </div>

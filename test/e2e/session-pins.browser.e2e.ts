@@ -652,7 +652,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     if (!boundarySessionId) throw new Error("expected a visible boundary session row");
     await boundaryRow.focus();
     await pageB.keyboard.press("Home");
-    const boundaryActions = pageB.locator(`button[data-session-actions="${boundarySessionId}"]`);
+    const boundaryActions = pageB.locator(
+      `button[data-session-actions="${boundarySessionId}"][data-session-actions-mode="quick"]`,
+    );
     await boundaryActions.focus();
     const boundaryRefresh = pageB.waitForResponse(
       (response) => successfulSessionPageResponse(response, workspaceId),
@@ -755,7 +757,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceA.close();
   }, 150_000);
 
-  test("restores row-actions focus after a failed unpin while allowing authoritative GET", async () => {
+  test("shows pin and archive on hover, opens the full menu on right-click, and restores quick-action focus", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -772,11 +774,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, target, true);
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
-      const actions = page.getByRole("button", { name: /^Actions for Failed row-menu rollback/ });
-      await actions.focus();
-      await page.keyboard.press("Enter");
-      const unpin = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      const targetLink = page.locator(`a[data-session-row="${target.id}"]`);
+      const targetRow = targetLink.locator("xpath=..");
+      const quickActions = targetRow.locator(`[data-session-quick-actions="${target.id}"]`);
+      const overflow = targetRow.getByRole("button", {
+        name: /^Actions for Failed row-menu rollback/,
+      });
+      const unpin = targetRow.getByRole("button", { name: "Unpin session", exact: true });
+
+      await targetLink.waitFor();
+      await page.mouse.move(1000, 700);
+      await page.waitForFunction((sessionId) => {
+        const actions = document.querySelector(`[data-session-quick-actions="${sessionId}"]`);
+        return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "0";
+      }, target.id);
+      expect(await quickActions.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      expect(await overflow.evaluate((element) => getComputedStyle(element).display)).toBe("none");
+      await targetLink.hover();
+      await page.waitForFunction((sessionId) => {
+        const actions = document.querySelector(`[data-session-quick-actions="${sessionId}"]`);
+        return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "1";
+      }, target.id);
       await unpin.waitFor();
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      await page.screenshot({
+        path: "/tmp/opengeni-session-row-quick-actions.png",
+        fullPage: true,
+      });
+
+      await targetLink.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Rename", exact: true }).waitFor();
+      await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+      await page.getByRole("menuitem", { name: "Archive", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
       await unpin.focus();
 
       let putAttempts = 0;
@@ -800,13 +830,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
 
-      // Route registration yields to background refreshes. Address the menu
-      // item directly so a refresh cannot move focus before keyboard activation.
+      // Route registration yields to background refreshes. Address the direct
+      // action so a refresh cannot move focus before keyboard activation.
       await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await targetRow.getByRole("button", { name: "Unpin session" }).waitFor();
       await page.waitForFunction(
-        (sessionId) => document.activeElement?.getAttribute("data-session-actions") === sessionId,
+        (sessionId) =>
+          document.activeElement?.getAttribute("data-session-actions") === sessionId &&
+          document.activeElement?.getAttribute("data-session-actions-mode") === "quick",
         target.id,
       );
       expect(putAttempts).toBe(1);
@@ -814,6 +846,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(
         await page.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
       ).toBe(target.id);
+      expect(
+        await page.evaluate(() =>
+          document.activeElement?.getAttribute("data-session-actions-mode"),
+        ),
+      ).toBe("quick");
     } finally {
       await context.close();
     }

@@ -412,6 +412,11 @@ const budgets = {
   // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
+  // Direct pin/archive session-row actions replace the desktop overflow
+  // trigger while the full menu remains on right-click. The configured
+  // Linux/x64 Bun 1.4 production graph measures 2,284,688 raw bytes across the
+  // same 30 files. Advance only the raw policy envelope to 2,233 KiB, retaining
+  // 1,904 bytes of headroom; gzip and every other cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,

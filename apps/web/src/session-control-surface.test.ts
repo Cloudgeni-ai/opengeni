@@ -205,6 +205,33 @@ describe("session control surface architecture", () => {
     expect(list).toContain("pinLiveAnnouncement");
   });
 
+  test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
+    const list = await source("components/rail/session-list.tsx");
+    const rowStart = list.indexOf("function SessionRow(");
+    const quickActionsStart = list.indexOf("function RowQuickActions(");
+    const overflowStart = list.indexOf("function RowActionsMenu(");
+    const row = list.slice(rowStart, quickActionsStart);
+    const quickActions = list.slice(quickActionsStart, overflowStart);
+    const overflow = list.slice(
+      overflowStart,
+      list.indexOf("function EmptySessions", overflowStart),
+    );
+
+    expect(row).toContain("<ContextMenu>");
+    expect(row).toContain("<ContextMenuContent");
+    expect(row).toContain("<RowQuickActions");
+    expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
+    expect(quickActions).toContain(
+      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+    );
+    expect(quickActions).toContain("group-hover:opacity-100");
+    expect(quickActions).toContain("group-focus-within:opacity-100");
+    expect(quickActions).toContain("pointer-coarse:hidden");
+    expect(quickActions).not.toContain("<DropdownMenu>");
+    expect(overflow).toContain('data-session-actions-mode="overflow"');
+    expect(overflow).toContain("pointer-coarse:inline-flex");
+  });
+
   test("keeps rail optimistic pin overrides out of the header projection", async () => {
     const list = await source("components/rail/session-list.tsx");
     expect(list).toContain("const serverSessions = useMemo");

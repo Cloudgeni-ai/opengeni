@@ -1713,9 +1713,21 @@ export function SessionList() {
       const current = pendingSessionFocus.current;
       if (!current || current.operation !== operation) return;
       const attribute = sessionFocusAttribute(current.target);
-      const destination = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].find(
+      const destinations = [...root.querySelectorAll<HTMLElement>(`[${attribute}]`)].filter(
         (element) => element.getAttribute(attribute) === current.sessionId,
       );
+      const actionMode =
+        current.target === "actions" &&
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(pointer: coarse)").matches
+          ? "overflow"
+          : "quick";
+      const destination =
+        current.target === "actions"
+          ? destinations.find(
+              (element) => element.getAttribute("data-session-actions-mode") === actionMode,
+            )
+          : destinations[0];
       if (
         destination &&
         shouldRestoreSessionFocus(
@@ -3130,6 +3142,11 @@ function SessionRow(props: {
               />
             </HoverCardContent>
           </HoverCard>
+          <RowQuickActions
+            session={props.session}
+            onPin={props.onPin}
+            onArchive={props.onArchive}
+          />
           <RowActionsMenu
             session={props.session}
             onRename={rename.startEditing}
@@ -3244,10 +3261,70 @@ function ActiveAccent({ active }: { active: boolean }) {
 }
 
 /**
- * The hover/focus rename affordance: a small overflow button revealed on row
- * hover (and always visible while keyboard-focused, for a11y) that opens a
- * minimal menu whose primary action is Rename. The button stops click
- * propagation so opening the menu never opens the session.
+ * The two common row actions stay one click away on desktop. Keyboard focus
+ * reveals the same controls as hover; right-click still opens the complete
+ * context menu owned by SessionRow.
+ */
+export function RowQuickActions({
+  session,
+  onPin,
+  onArchive,
+}: {
+  session: Session;
+  onPin: PinFn;
+  onArchive: ArchiveFn;
+}) {
+  const canPin = !session.archived;
+  const canArchive = session.parentSessionId === null;
+  if (!canPin && !canArchive) return null;
+
+  return (
+    <div
+      className="absolute right-0.5 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-surface-2 p-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden"
+      data-session-quick-actions={session.id}
+    >
+      {canPin ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={session.pinned ? "Unpin session" : "Pin session"}
+          aria-pressed={Boolean(session.pinned)}
+          title={session.pinned ? "Unpin" : "Pin"}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          onClick={(event) => {
+            event.stopPropagation();
+            void onPin(session, !session.pinned, "actions");
+          }}
+          className="text-fg-subtle hover:text-fg"
+        >
+          <PinIcon className={session.pinned ? "size-3.5 fill-current" : "size-3.5"} />
+        </Button>
+      ) : null}
+      {canArchive ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label={session.archived ? "Restore session" : "Archive session"}
+          title={session.archived ? "Restore" : "Archive"}
+          onClick={(event) => {
+            event.stopPropagation();
+            void onArchive(session, !session.archived);
+          }}
+          className="text-fg-subtle hover:text-fg"
+        >
+          <ArchiveIcon className="size-3.5" />
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Touch and other coarse pointers have no dependable hover or right-click, so
+ * they retain the complete overflow menu as an always-visible fallback.
  */
 function RowActionsMenu({
   session,
@@ -3281,8 +3358,9 @@ function RowActionsMenu({
           size="icon-xs"
           aria-label={`Actions for ${sessionDisplayTitle(session)}`}
           data-session-actions={session.id}
+          data-session-actions-mode="overflow"
           onClick={(event) => event.stopPropagation()}
-          className="absolute right-0.5 top-1/2 z-10 -translate-y-1/2 bg-surface-2 text-fg-subtle opacity-0 transition-opacity hover:text-fg focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100 pointer-coarse:right-0 pointer-coarse:size-11 pointer-coarse:opacity-100"
+          className="absolute right-0 top-1/2 z-10 hidden size-11 -translate-y-1/2 bg-surface-2 text-fg-subtle hover:text-fg pointer-coarse:inline-flex"
         >
           <EllipsisIcon className="size-3.5" />
         </Button>
