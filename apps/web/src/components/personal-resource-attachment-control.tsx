@@ -10,49 +10,35 @@ export function PersonalResourceAttachmentControl(props: {
   compact?: boolean;
 }) {
   const { controller } = props;
-  if (
-    !controller.eligible ||
-    (!controller.loading &&
-      controller.selected.resourceCount === 0 &&
-      !controller.sourceLost &&
-      !controller.error &&
-      !controller.truncated)
-  ) {
+  // Healthy selections are already described inside their pickers. Keep the
+  // composer-top surface for transient or actionable status only.
+  const hasVisibleStatus =
+    controller.loading ||
+    controller.notice !== null ||
+    controller.error !== null ||
+    controller.truncated;
+  if (!controller.eligible || !hasVisibleStatus) {
     return null;
   }
   const disabled = props.disabled || controller.loading || controller.refreshing;
-  const names = [
-    ...controller.selected.variableSets.map((resource) => `Variable set: ${resource.name}`),
-    ...controller.selected.rigs.map((resource) => `Rig: ${resource.name}`),
-    ...controller.selected.connectedMachines.map(
-      (resource) => `Connected machine: ${resource.name}`,
-    ),
-  ];
   return (
     <div
       data-personal-resource-attachment
-      className={cn("min-w-0", props.compact ? "mt-2" : "mt-4")}
+      className={cn("min-w-0 space-y-2", props.compact ? "mt-2" : "mt-4")}
       aria-busy={controller.loading || controller.refreshing}
     >
       {controller.loading ? (
         <p role="status" className="text-xs text-fg-subtle">
           Loading selected personal resources…
         </p>
-      ) : controller.selected.resourceCount > 0 ? (
-        <p className="text-xs text-fg-muted">
-          {names.join(" · ")}{" "}
-          {controller.visibility === "private"
-            ? "is available in this private session."
-            : "will be used only for messages you send. Other members may see the result, but cannot use your credential."}
-        </p>
       ) : null}
       {controller.notice ? (
-        <p className="mt-2 text-xs text-fg-muted" role="status" aria-live="polite">
+        <p className="text-xs text-fg-muted" role="status" aria-live="polite">
           {controller.notice}
         </p>
       ) : null}
       {controller.error ? (
-        <div className="mt-2 flex items-center justify-between gap-3" role="alert">
+        <div className="flex items-center justify-between gap-3" role="alert">
           <span className="text-xs text-danger">
             The selected personal resource is unavailable. Retry, or open Variable Sets to replace
             or remove it.
@@ -70,7 +56,7 @@ export function PersonalResourceAttachmentControl(props: {
         </div>
       ) : null}
       {controller.truncated ? (
-        <p className="mt-2 text-2xs text-fg-subtle" role="status">
+        <p className="text-2xs text-fg-subtle" role="status">
           Showing the first 400 personal resources of each supported type.
         </p>
       ) : null}

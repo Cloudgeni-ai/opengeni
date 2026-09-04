@@ -182,11 +182,15 @@ describe("session control surface architecture", () => {
       "const busy = props.busy || props.goalActive || props.voiceActive",
     );
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
+    expect(establishedPicker).toContain(
+      "Only-me Variable Sets are used only for messages you send.",
+    );
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');
     expect(establishedControl).not.toContain('type="checkbox"');
-    expect(establishedControl).toContain("is available in this private session");
+    expect(establishedControl).not.toContain("is available in this private session");
+    expect(establishedControl).not.toContain("will be used only for messages you send");
   });
 
   test("announces pin results through an independent live region", async () => {
