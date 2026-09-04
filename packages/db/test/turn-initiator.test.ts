@@ -929,7 +929,12 @@ describe("immutable session turn initiators", () => {
         instruction: "Malformed legacy steer",
         operationId: crypto.randomUUID(),
       },
-      lineage: {},
+      lineage: {
+        callerSessionId: source.id,
+        callerTurnId: sourceTurn.id,
+        // A partial historical tuple must remain isolated and fall back to the
+        // service principal instead of borrowing the referenced turn.
+      },
     });
     if (!malformedSteer.added) {
       throw new Error(`failed to add malformed Steer: ${malformedSteer.reason}`);

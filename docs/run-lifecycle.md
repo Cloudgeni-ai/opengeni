@@ -271,8 +271,9 @@ notices cannot erase the steering subject merely because they arrived in the
 same batch. Child lifecycle and goal-continuation updates freeze their exact
 target causal turn and claim separately from a Steer or a different target
 turn. A malformed historical authority-bearing update also receives an
-isolated claim instead of borrowing a coalesced principal. The session creator
-is stored separately and is
+isolated claim instead of borrowing a coalesced principal; Agent Steer lineage
+is complete only when the caller session, turn, attempt, and execution
+generation all validate. The session creator is stored separately and is
 copied only when idempotently repairing that same create command's first turn.
 Queue move/edit/resubmit preserves the original initiator, while Steer creates a
 new turn with the steering actor. Agent-created work inherits the frozen

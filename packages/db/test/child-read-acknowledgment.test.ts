@@ -517,6 +517,14 @@ describe("child read acknowledgment on parent consumption", () => {
     expect(recovered).toMatchObject({
       action: "recovered",
       restoredUpdateIds: [pendingUpdate.id],
+      event: {
+        payload: {
+          recoveredFailureEventSequence: failedSequence,
+          recoveredLastSequence: failedSequence,
+          restoredUpdateCount: 1,
+          restoredUpdateIdsSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        },
+      },
     });
     expect(
       await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
@@ -529,6 +537,28 @@ describe("child read acknowledgment on parent consumption", () => {
         failedUpdateIds: [pendingUpdate.id],
       }),
     ).toMatchObject({ action: "already_recovered" });
+    expect(
+      await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        operationId: recoveryOperationId,
+        expectedFailureEventSequence: failedSequence - 1,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [pendingUpdate.id],
+      }),
+    ).toEqual({ action: "stale", event: null });
+    expect(
+      await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        operationId: recoveryOperationId,
+        expectedFailureEventSequence: failedSequence,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [crypto.randomUUID()],
+      }),
+    ).toEqual({ action: "stale", event: null });
 
     const claimed = await claim(grant, parent.session.id);
     expect(claimed.action).toBe("claimed");

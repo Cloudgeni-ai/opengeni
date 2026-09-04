@@ -61085,6 +61085,37 @@ function systemUpdateCausalHumanTurnId(
   return value;
 }
 
+function agentSteerCausalActor(update: Pick<BoundedSystemUpdate, "kind" | "lineage">): {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+} | null {
+  if (update.kind !== "agent_steer_instruction") return null;
+  const lineage =
+    update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
+      ? (update.lineage as Record<string, unknown>)
+      : null;
+  const sessionId = lineage?.callerSessionId;
+  const turnId = lineage?.callerTurnId;
+  const attemptId = lineage?.callerAttemptId;
+  const executionGeneration = lineage?.callerExecutionGeneration;
+  if (
+    typeof sessionId !== "string" ||
+    typeof turnId !== "string" ||
+    typeof attemptId !== "string" ||
+    !UUID_PATTERN.test(sessionId) ||
+    !UUID_PATTERN.test(turnId) ||
+    !UUID_PATTERN.test(attemptId) ||
+    typeof executionGeneration !== "number" ||
+    !Number.isSafeInteger(executionGeneration) ||
+    executionGeneration < 1
+  ) {
+    return null;
+  }
+  return { sessionId, turnId, attemptId, executionGeneration };
+}
+
 function systemUpdateCausalExecutionKey(
   update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
 ): string | null {
@@ -61097,19 +61128,9 @@ function systemUpdateCausalExecutionKey(
     return `${update.kind}-update:${update.id}`;
   }
   if (update.kind !== "agent_steer_instruction") return null;
-  const lineage =
-    update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
-      ? (update.lineage as Record<string, unknown>)
-      : null;
-  const callerSessionId = lineage?.callerSessionId;
-  const callerTurnId = lineage?.callerTurnId;
-  if (
-    typeof callerSessionId === "string" &&
-    typeof callerTurnId === "string" &&
-    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(callerSessionId) &&
-    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(callerTurnId)
-  ) {
-    return `agent-steer:${callerSessionId}:${callerTurnId}`;
+  const actor = agentSteerCausalActor(update);
+  if (actor) {
+    return `agent-steer:${actor.sessionId}:${actor.turnId}:${actor.attemptId}:${actor.executionGeneration}`;
   }
   // A malformed historical Steer still owns a distinct claim. Let its existing
   // provenance fallback run without borrowing another authority-bearing
@@ -63178,19 +63199,8 @@ export async function claimSessionWorkForAttempt(
           // machine notices may coalesce into the same batch as context, but
           // their timing must not erase the steering subject's authority.
           if (agentSteerUpdate) {
-            const lineage = agentSteerUpdate.lineage;
-            const callerSessionId = lineage.callerSessionId;
-            const callerTurnId = lineage.callerTurnId;
-            const callerAttemptId = lineage.callerAttemptId;
-            const callerExecutionGeneration = lineage.callerExecutionGeneration;
-            if (
-              typeof callerSessionId !== "string" ||
-              typeof callerTurnId !== "string" ||
-              typeof callerAttemptId !== "string" ||
-              typeof callerExecutionGeneration !== "number" ||
-              !Number.isSafeInteger(callerExecutionGeneration) ||
-              callerExecutionGeneration < 1
-            ) {
+            const actor = agentSteerCausalActor(agentSteerUpdate);
+            if (!actor) {
               // Corrupt/hand-inserted historical rows must not wedge every
               // recovery claim forever. Fail closed to a named service actor
               // while retaining a bounded, non-secret diagnostic marker.
@@ -63202,10 +63212,10 @@ export async function claimSessionWorkForAttempt(
                   workspaceId,
                   {
                     type: "agent_attempt",
-                    sessionId: callerSessionId,
-                    turnId: callerTurnId,
-                    attemptId: callerAttemptId,
-                    executionGeneration: callerExecutionGeneration,
+                    sessionId: actor.sessionId,
+                    turnId: actor.turnId,
+                    attemptId: actor.attemptId,
+                    executionGeneration: actor.executionGeneration,
                   },
                 );
               } catch (error) {
@@ -66343,6 +66353,9 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
   ) {
     throw new Error("Recovery requires a non-empty unique failed-update set");
   }
+  const expectedUpdateIdsSha256 = createHash("sha256")
+    .update(stableJson(expectedUpdateIds), "utf8")
+    .digest("hex");
 
   return await retrySessionActivityRls(
     db,
@@ -66391,6 +66404,19 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
               limit 1`,
         );
         if (priorRecovery) {
+          const priorRecoveryPayload = sessionEventPayloadRecord(
+            priorRecovery.payload,
+            priorRecovery.payload_codec_version,
+          );
+          if (
+            priorRecoveryPayload?.recoveredFailureEventSequence !==
+              input.expectedFailureEventSequence ||
+            priorRecoveryPayload.recoveredLastSequence !== input.expectedLastSequence ||
+            priorRecoveryPayload.restoredUpdateCount !== expectedUpdateIds.length ||
+            priorRecoveryPayload.restoredUpdateIdsSha256 !== expectedUpdateIdsSha256
+          ) {
+            return { action: "stale", event: null } as const;
+          }
           return {
             action: "already_recovered",
             event: {
@@ -66682,7 +66708,10 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
                   status: "queued",
                   code: "pre_claim_failure_recovered",
                   recoveryOperationId: operationId,
+                  recoveredFailureEventSequence: input.expectedFailureEventSequence,
+                  recoveredLastSequence: input.expectedLastSequence,
                   restoredUpdateCount: restored.length,
+                  restoredUpdateIdsSha256: expectedUpdateIdsSha256,
                 },
                 occurredAt: now,
               },
