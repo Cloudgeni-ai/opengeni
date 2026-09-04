@@ -2928,10 +2928,11 @@ describe("groupTimeline", () => {
   test("keeps the terminal wait reason visible beside earlier commentary", () => {
     reset();
     const reason = "Two reviews are still running.";
+    const commentary = "Checking the reviewers now.";
     const groups = groupTimeline(
       buildTimeline([
         event("agent.message.completed", {
-          text: "Checking the reviewers now.",
+          text: commentary,
           phase: "commentary",
         }),
         event("agent.toolCall.created", {
@@ -2949,15 +2950,17 @@ describe("groupTimeline", () => {
           id: "wait-1",
           output: { status: "waiting_for_input" },
         }),
-        event("agent.message.completed", { text: "" }),
-        event("turn.completed", { output: "" }),
+        // The worker mirrors the stream's final output without phase metadata.
+        // A commentary echo is not a final answer and must not hide the wait.
+        event("agent.message.completed", { text: commentary }),
+        event("turn.completed", { output: commentary }),
       ]),
     );
 
     expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
     expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
       kind: "agent-message",
-      text: "Checking the reviewers now.",
+      text: commentary,
       phase: "commentary",
     });
     expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({

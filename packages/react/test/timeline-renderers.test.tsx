@@ -1094,7 +1094,8 @@ describe("MessageTimeline — settled turn folding", () => {
         id: "input-wait-1",
         output: { status: "waiting_for_input" },
       }),
-      timelineEvent("turn.completed", {}),
+      timelineEvent("agent.message.completed", { text: fallback }),
+      timelineEvent("turn.completed", { output: fallback }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
     await flush();
