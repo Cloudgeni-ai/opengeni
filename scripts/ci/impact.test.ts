@@ -41,6 +41,7 @@ const SESSION_RAIL_ROW_METADATA_E2E = "test/e2e/session-rail-row-metadata.browse
 const SETUP_ACCOUNT_TOKEN_E2E = "test/e2e/setup-account-token.browser.e2e.ts";
 const TIMELINE_SCROLL_BROWSER_E2E = "test/e2e/timeline-scroll.browser.e2e.ts";
 const TIMELINE_TIP_FOLLOW_BROWSER_E2E = "test/e2e/timeline-tip-follow.browser.e2e.ts";
+const RESTORED_ATTACHMENT_PREVIEW_E2E = "test/e2e/restored-attachment-preview.browser.e2e.ts";
 
 describe("fail-closed change impact", () => {
   test("documentation-only changes retain every non-runtime public guard", () => {
@@ -105,6 +106,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      RESTORED_ATTACHMENT_PREVIEW_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",
@@ -333,6 +335,7 @@ describe("fail-closed change impact", () => {
       PERSONAL_RESOURCE_ATTACHMENTS_E2E,
       PERSONAL_WORKSPACE_ACCESSIBILITY_E2E,
       "test/e2e/react-compiled-css.browser.e2e.ts",
+      RESTORED_ATTACHMENT_PREVIEW_E2E,
       SESSION_RAIL_ROW_METADATA_E2E,
       SETUP_ACCOUNT_TOKEN_E2E,
       "test/e2e/slack-access-link.browser.e2e.ts",

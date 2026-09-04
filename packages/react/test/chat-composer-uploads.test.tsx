@@ -5,18 +5,16 @@
    -------------------------------------------------------------------------- */
 import { afterEach, describe, expect, test } from "bun:test";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "@opengeni/sdk";
-import { act, useState } from "react";
+import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { FileAttachment, UseFileAttachmentsResult } from "../src/hooks/use-file-attachments";
 import { COMPOSER_PAYMENT_REQUIRED_MESSAGE } from "../src/lib/format";
-import { LightboxProvider } from "../src/timeline/screenshot-lightbox";
+import { LightboxProvider, useLightboxOptional } from "../src/timeline/screenshot-lightbox";
 import { registerDom } from "./render-hook";
 
 registerDom();
-
-const composerSource = await Bun.file(`${import.meta.dir}/../src/components/composer.tsx`).text();
 
 let mounted: { root: Root; container: HTMLElement } | null = null;
 
@@ -96,6 +94,41 @@ function readyPreviewChip(name: string): FileAttachment {
     ...readyChip(name),
     previewUrl: `blob:${name}`,
   };
+}
+
+function restoredPreviewChip(name: string): FileAttachment {
+  return {
+    ...readyChip(name),
+    file: {
+      id: crypto.randomUUID(),
+      workspaceId: "workspace-id",
+      status: "ready",
+      filename: name,
+      safeFilename: name,
+      contentType: "image/png",
+      sizeBytes: 2048,
+      sha256: null,
+      bucket: "private",
+      objectKey: "private",
+      createdAt: "2026-09-04T00:00:00.000Z",
+      updatedAt: "2026-09-04T00:00:00.000Z",
+    },
+  };
+}
+
+type LightboxOpen = NonNullable<ReturnType<typeof useLightboxOptional>>["open"];
+
+function LightboxOpenSpy({ onOpen }: { onOpen: LightboxOpen }) {
+  const lightbox = useLightboxOptional();
+  useEffect(() => {
+    if (!lightbox) return;
+    const original = lightbox.open;
+    lightbox.open = onOpen;
+    return () => {
+      lightbox.open = original;
+    };
+  }, [lightbox, onOpen]);
+  return null;
 }
 
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
@@ -226,9 +259,128 @@ describe("ChatComposer attachments", () => {
     expect(retained).toEqual([attachment.id]);
   });
 
-  test("uses composer message overrides for all attachment preview accessible names", async () => {
+  test("loads a restored image into the lightbox only when its preview is clicked", async () => {
+    const attachment = restoredPreviewChip("restored.png");
+    const requested: string[] = [];
+    const opened: Parameters<LightboxOpen>[] = [];
     const container = await mount(
       <LightboxProvider>
+        <LightboxOpenSpy onOpen={(...args) => opened.push(args)} />
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            loadPreview: async (id) => {
+              requested.push(id);
+              return "https://files.example/restored.png";
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    const preview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Preview restored.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(requested).toEqual([]);
+    await act(async () => {
+      preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(opened[0]?.[0]).toBe("https://files.example/restored.png");
+  });
+
+  test("replaces a stale unretained blob preview with the durable ready-file source", async () => {
+    const attachment = {
+      ...restoredPreviewChip("cached.png"),
+      previewUrl: "blob:revoked-cached-preview",
+    };
+    const requested: string[] = [];
+    const opened: Parameters<LightboxOpen>[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <LightboxOpenSpy onOpen={(...args) => opened.push(args)} />
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            retainPreview: () => undefined,
+            loadPreview: async (id) => {
+              requested.push(id);
+              return "https://files.example/cached.png";
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Preview cached.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(opened[0]?.[0]).toBe("https://files.example/cached.png");
+  });
+
+  test("a newer local preview aborts and wins over a pending restored preview", async () => {
+    const restored = restoredPreviewChip("restored.png");
+    const local = readyPreviewChip("local.png");
+    let previewSignal: AbortSignal | undefined;
+    let resolvePreview!: (src: string) => void;
+    const opened: Parameters<LightboxOpen>[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <LightboxOpenSpy onOpen={(...args) => opened.push(args)} />
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [restored, local],
+            loadPreview: async (_id, signal) => {
+              previewSignal = signal;
+              return await new Promise<string>((resolve) => {
+                resolvePreview = resolve;
+              });
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    const restoredPreview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Preview restored.png"]',
+    );
+    await act(async () => {
+      restoredPreview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(restoredPreview?.disabled).toBe(true);
+    expect(restoredPreview?.getAttribute("aria-busy")).toBe("true");
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Preview local.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(previewSignal?.aborted).toBe(true);
+    expect(opened.map(([src]) => src)).toEqual(["blob:local.png"]);
+
+    await act(async () => {
+      resolvePreview("https://files.example/restored.png");
+      await Promise.resolve();
+    });
+    expect(opened.map(([src]) => src)).toEqual(["blob:local.png"]);
+  });
+
+  test("uses composer message overrides for all attachment preview accessible names", async () => {
+    const opened: Parameters<LightboxOpen>[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <LightboxOpenSpy onOpen={(...args) => opened.push(args)} />
         <ChatComposer
           composer={makeComposer()}
           attachments={makeAttachments({ attachments: [readyPreviewChip("screenshot.png")] })}
@@ -247,11 +399,15 @@ describe("ChatComposer attachments", () => {
     );
     expect(preview).not.toBeNull();
     expect(container.querySelector('[aria-label="Preview screenshot.png"]')).toBeNull();
-
-    expect(composerSource).toContain("messages.attachmentPreviewLabel,");
-    expect(composerSource).toContain("download: messages.downloadAttachment(attachment.name),");
-    expect(composerSource).toContain("close: messages.closeAttachmentPreview,");
-    expect(composerSource).toContain("const releasePreview = onRetainPreview(attachment.id);");
+    await act(async () => {
+      preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(opened[0]?.[3]).toBe("Vista previa del archivo adjunto");
+    expect(opened[0]?.[5]).toEqual({
+      download: "Descargar screenshot.png",
+      close: "Cerrar",
+    });
   });
 
   test("degrades an image attachment to a non-interactive thumbnail without a lightbox host", async () => {
