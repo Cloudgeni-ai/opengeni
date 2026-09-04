@@ -11,6 +11,9 @@ const migrationUrl = new URL(
   "../drizzle/0403_codex_unconditional_credential_leasing.sql",
   import.meta.url,
 );
+const schemaUrl = new URL("../src/schema.ts", import.meta.url);
+const deploymentDocUrl = new URL("../../../docs/deployment.md", import.meta.url);
+const rotationDocUrl = new URL("../../../docs/codex-subscription-rotation.md", import.meta.url);
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 describe("migration 0403 unconditional Codex credential leasing", () => {
@@ -60,6 +63,35 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
     expect(source).toContain(
       "CHECK (reset_kind IN ('authoritative', 'bounded_refresh', 'mutation_only'))",
     );
+  });
+
+  test("keeps the lease index and 0403 role-list runbooks aligned", async () => {
+    const [schema, deployment, rotation] = await Promise.all([
+      readFile(schemaUrl, "utf8"),
+      readFile(deploymentDocUrl, "utf8"),
+      readFile(rotationDocUrl, "utf8"),
+    ]);
+    expect(schema).toMatch(
+      /activeCredential:\s*index\("codex_credential_leases_active_credential_idx"\)\.on\(\s*table\.credentialId,\s*table\.leasedUntil,\s*\)/su,
+    );
+    expect(schema).not.toMatch(
+      /activeCredential:\s*index\("codex_credential_leases_active_credential_idx"\)\.on\(\s*table\.workspaceId,\s*table\.credentialId,\s*table\.leasedUntil,\s*\)/su,
+    );
+    expect(deployment).toContain("OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES");
+    expect(deployment).toContain("both roles when rotating the runtime login");
+    expect(rotation).toContain("both the retiring and replacement roles");
+    expect(rotation).toContain("SQLSTATE `55000`");
+
+    if (!owned) return;
+    const [index] = await owned.admin<Array<{ indexdef: string }>>`
+      select indexdef
+      from pg_indexes
+      where schemaname = 'public'
+        and tablename = 'codex_credential_leases'
+        and indexname = 'codex_credential_leases_active_credential_idx'`;
+    const definition = index?.indexdef.replace(/\s+/gu, " ") ?? "";
+    expect(definition).toMatch(/\(credential_id, leased_until\)/u);
+    expect(definition).not.toMatch(/\(workspace_id, credential_id, leased_until\)/u);
   });
 
   test("retains rotation policy while removing both allocator cutover bits", async () => {

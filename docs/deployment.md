@@ -290,8 +290,17 @@ agent input. After it commits, never restart a pre-0402 image. This forward-only
 cutover was documented on September 3, 2026. Migration 0403 likewise requires
 a complete API and worker drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`;
-it removes the temporary Codex allocator cutover columns, so pre-0403 binaries
-must never run or restart after commit. Database migrations
+before applying it, provide
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` as the comma-separated list of
+every old and new runtime database login that may still be connected. Include
+both roles when rotating the runtime login, and use
+`MigrationRuntimeOptions.applicationDatabaseRoles` for embedded callers. The
+list must be explicit, non-empty, unique, and contain no role longer than 63
+UTF-8 bytes; migration 0403 rechecks it before and after taking its locks and
+aborts with SQLSTATE `55000` when the list is missing, malformed, or any listed
+application session remains live. It removes the temporary Codex allocator
+cutover columns, so pre-0403 binaries must never run or restart after commit.
+Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.
 

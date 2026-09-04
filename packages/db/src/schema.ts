@@ -3550,9 +3550,9 @@ export const workspaceModelPolicies = pgTable(
 // insertion happen atomically while codex_rotation_settings is locked FOR
 // UPDATE, so concurrent replicas in the SAME workspace see one another's
 // assignments before choosing. Workspaces never share or correlate lease state.
-// The composite (workspace, account), (workspace, credential), and
-// (workspace, turn) FKs are declared in migration 0053 (sessionTurns is defined
-// later in this module).
+// The turn workspace FK is declared in migration 0053 and the account/credential
+// FK is installed in migration 0381 (sessionTurns is defined later in this
+// module).
 export const codexCredentialLeases = pgTable(
   "codex_credential_leases",
   {
@@ -3565,7 +3565,7 @@ export const codexCredentialLeases = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     credentialId: uuid("credential_id").notNull(),
     turnId: uuid("turn_id").notNull(),
-    // Temporal activity execution fence. The worker holder includes the
+    // Durable turn-attempt fence. The worker holder includes the
     // durable workflow turn-attempt identity; dispatchId remains a separate
     // attempt/audit identity. A successor dispatch for the same durable turn
     // replaces holderId and increments generation atomically; stale/zombie
@@ -3583,7 +3583,6 @@ export const codexCredentialLeases = pgTable(
       table.turnId,
     ),
     activeCredential: index("codex_credential_leases_active_credential_idx").on(
-      table.workspaceId,
       table.credentialId,
       table.leasedUntil,
     ),

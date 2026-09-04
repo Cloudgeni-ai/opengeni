@@ -409,12 +409,22 @@ Safe rollout order:
 
 1. Build and pin one 0403-aware image digest. Confirm that API, control-worker,
    and turn-worker deployments all reference that same candidate.
-2. Drain every pre-0403 API, control-worker, and turn-worker. Select
+2. Before the drain, set
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` on the migration job to the
+   comma-separated, exact list of every old and new runtime database login.
+   Include both the retiring and replacement roles during a runtime-role
+   rotation; embedded callers must pass the same list through
+   `MigrationRuntimeOptions.applicationDatabaseRoles`. The list must be
+   explicit, non-empty, unique, and bounded to 63 UTF-8 bytes per role.
+3. Drain every pre-0403 API, control-worker, and turn-worker. Select
    `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`
    and confirm the maintenance preflight only after the drain is complete.
-3. Apply migration 0403, provision the runtime role, and start only the pinned
+   Migration 0403 validates the list before and after locking and fails with
+   SQLSTATE `55000` when it is missing, malformed, or any listed application
+   session remains live.
+4. Apply migration 0403, provision the runtime role, and start only the pinned
    0403-aware image. Never restart a pre-0403 binary against this schema.
-4. Verify that both rotation tables no longer contain
+5. Verify that both rotation tables no longer contain
    `lease_rotation_enabled`, every running Codex turn has an exact
    `(workspace_id, turn_id)` lease, rotation-on recovers the same turn on an
    eligible alternate, and rotation-off enters `waiting_capacity` when the
