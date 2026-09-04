@@ -21873,6 +21873,24 @@ async function lockWorkspaceCodexSubscriptionSource(
   );
 }
 
+async function lockOrganizationMembershipLifecycle(
+  scopedDb: Database,
+  accountId: string,
+): Promise<void> {
+  await scopedDb.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${`organization-membership:${accountId}`}, 0))`,
+  );
+}
+
+export class CodexSubscriptionSourceChangeBlockedError extends Error {
+  readonly code = "codex_subscription_source_change_blocked";
+
+  constructor() {
+    super("Codex subscription source cannot change while active turns are using it");
+    this.name = "CodexSubscriptionSourceChangeBlockedError";
+  }
+}
+
 /**
  * Effective-source changes are a hard boundary for accepted Codex turns. A
  * waiting turn carries the source that selected its allocator pool; allowing
@@ -21912,7 +21930,7 @@ async function assertCodexSubscriptionSourceChangeAllowed(
     )
     .limit(1);
   if (activeCodexTurn || liveLease) {
-    throw new Error("Codex subscription source cannot change while active turns are using it");
+    throw new CodexSubscriptionSourceChangeBlockedError();
   }
 }
 
@@ -22225,6 +22243,11 @@ async function withOrganizationCodexAdministrator<T>(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
+      // Shared-workspace creation and every organization membership lifecycle
+      // writer use this canonical prefix. Hold it before the administration
+      // overview and before any Codex workspace inventory so a new workspace
+      // cannot commit after the source snapshot was captured.
+      await lockOrganizationMembershipLifecycle(scopedDb, input.organizationId);
       await setSubjectRlsContext(scopedDb, input.actorSubjectId);
       await scopedDb.execute(sql`
         select get_organization_administration_overview(
@@ -24241,7 +24264,7 @@ export async function acquireCodexCredentialLease<
         insert into codex_credential_leases
           (account_id, workspace_id, credential_id, turn_id, holder_id, generation, leased_until)
         values
-          (${input.accountId}, ${input.workspaceId}, ${selected.credentialId}, ${input.turnId}, ${input.holderId}, 1, now() + (${leaseTtlMs} * interval '1 millisecond'))
+          (${input.accountId}, ${input.workspaceId}, ${selected.credentialId}, ${input.turnId}, ${input.holderId}, 1, clock_timestamp() + (${leaseTtlMs} * interval '1 millisecond'))
         on conflict (workspace_id, turn_id) do update set
           credential_id = excluded.credential_id,
           holder_id = excluded.holder_id,

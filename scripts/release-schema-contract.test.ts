@@ -177,7 +177,7 @@ describe("release schema contract", () => {
         (migration) => migration.path === "0403_codex_unconditional_credential_leasing.sql",
       ),
     ).toMatchObject({
-      sha256: "d5b2a2c51409987655d6fc3e53797071504e2abbb3787a938f961634d5005946",
+      sha256: "6ce0193214cf23026de84617150d3f23672bc188c5fc7315521ef498d53ecd3f",
       deploymentMode: "maintenance",
     });
   });

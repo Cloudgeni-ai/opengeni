@@ -65,6 +65,12 @@ describe("migration 0403 unconditional Codex credential leasing", () => {
     expect(source).toContain(
       "CHECK (reset_kind IN ('authoritative', 'bounded_refresh', 'mutation_only'))",
     );
+    expect(source).toMatch(
+      /codex_organization_live_lease_count[\s\S]*?leased_until > clock_timestamp\(\)/u,
+    );
+    expect(source).toMatch(
+      /prevent_organization_codex_disconnect_with_live_leases[\s\S]*?leased_until > clock_timestamp\(\)/u,
+    );
   });
 
   test("keeps the lease index and 0403 role-list runbooks aligned", async () => {

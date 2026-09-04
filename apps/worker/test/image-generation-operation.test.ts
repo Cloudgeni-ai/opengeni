@@ -75,6 +75,7 @@ function operationPorts(
       operation: { status: "provider_started" } as never,
       started: true,
     }),
+    resetBeforeProviderDispatch: async () => ({ status: "prepared" }) as never,
     retain: async () => ({ receipt, artifact: {} as never }),
     complete: async () => ({ status: "completed" }) as never,
     markOutcomeUnknown: async () => ({ status: "outcome_unknown" }) as never,
@@ -247,6 +248,50 @@ describe("image generation paid-operation fence", () => {
     expect(generateCalls.count).toBe(1);
     expect(ambiguousFences).toBe(1);
     expect(retentionFences).toBe(0);
+  });
+
+  test("returns a rejected pre-dispatch lease to retryable prepared state", async () => {
+    const generateCalls = { count: 0 };
+    const fenceError = new Error("Codex credential lease is not usable for provider dispatch");
+    let operationStatus: "prepared" | "provider_started" = "prepared";
+    let rejectBeforeDispatch = true;
+    let resetCalls = 0;
+    const input = executionInput(generateCalls);
+    const providerGenerate = input.generate;
+    const ports = operationPorts({
+      prepare: async () => ({
+        operation: { status: operationStatus } as never,
+        created: false,
+      }),
+      begin: async () => {
+        operationStatus = "provider_started";
+        return { operation: { status: operationStatus } as never, started: true };
+      },
+      resetBeforeProviderDispatch: async () => {
+        resetCalls += 1;
+        operationStatus = "prepared";
+        return { status: operationStatus } as never;
+      },
+    });
+    const retryableInput: ExecuteImageGenerationOperationInput = {
+      ...input,
+      generate: async () => {
+        if (rejectBeforeDispatch) {
+          rejectBeforeDispatch = false;
+          throw fenceError;
+        }
+        return await providerGenerate();
+      },
+      isProviderDispatchRejected: (error) => error === fenceError,
+    };
+
+    await expect(executeImageGenerationOperation(retryableInput, ports)).rejects.toBe(fenceError);
+    expect(generateCalls.count).toBe(0);
+    expect(resetCalls).toBe(1);
+    expect(operationStatus).toBe("prepared");
+
+    await expect(executeImageGenerationOperation(retryableInput, ports)).resolves.toEqual(receipt);
+    expect(generateCalls.count).toBe(1);
   });
 
   test("records a known provider success separately when durable retention fails", async () => {

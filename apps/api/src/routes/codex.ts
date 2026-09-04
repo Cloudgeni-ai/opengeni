@@ -952,26 +952,39 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       organizationId,
       actorSubjectId: human.subjectId,
     });
-    const upserted = await upsertOrganizationCodexSubscriptionCredential(db, {
-      organizationId,
-      actorSubjectId: human.subjectId,
-      credentialEncrypted: encryptEnvironmentValue(
-        key,
-        JSON.stringify({
-          access_token: tokens.accessToken,
-          refresh_token: tokens.refreshToken,
-          id_token: tokens.idToken,
-        }),
-      ),
-      chatgptAccountId: id.chatgptAccountId,
-      scopes: null,
-      planType: id.planType,
-      isFedramp: id.isFedramp,
-      expiresAt: accessTokenExpiry(tokens.accessToken),
-      lastRefreshAt: new Date(),
-      accountEmail: id.email ?? null,
-      label: id.email ?? id.chatgptAccountId ?? null,
-    });
+    let upserted: Awaited<ReturnType<typeof upsertOrganizationCodexSubscriptionCredential>>;
+    try {
+      upserted = await upsertOrganizationCodexSubscriptionCredential(db, {
+        organizationId,
+        actorSubjectId: human.subjectId,
+        credentialEncrypted: encryptEnvironmentValue(
+          key,
+          JSON.stringify({
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
+            id_token: tokens.idToken,
+          }),
+        ),
+        chatgptAccountId: id.chatgptAccountId,
+        scopes: null,
+        planType: id.planType,
+        isFedramp: id.isFedramp,
+        expiresAt: accessTokenExpiry(tokens.accessToken),
+        lastRefreshAt: new Date(),
+        accountEmail: id.email ?? null,
+        label: id.email ?? id.chatgptAccountId ?? null,
+      });
+    } catch (error) {
+      const cause = (error as { cause?: unknown } | null)?.cause;
+      const message =
+        cause instanceof Error ? cause.message : error instanceof Error ? error.message : "";
+      if (message.includes("active turns are using it")) {
+        throw new HTTPException(409, {
+          message: "Codex subscription source cannot change while active turns are using it",
+        });
+      }
+      throw error;
+    }
     await signalCodexCapacityTargets(deps, upserted.wakeTargets);
     const rotation = await getOrganizationCodexRotationSettings(db, {
       organizationId,

@@ -5,6 +5,7 @@ import {
   markImageGenerationOperationOutcomeUnknown,
   markImageGenerationOperationRetentionFailed,
   prepareImageGenerationOperation,
+  resetImageGenerationOperationBeforeProviderDispatch,
   type Database,
   type ImageGenerationOperationStatus,
 } from "@opengeni/db";
@@ -45,6 +46,7 @@ export class ImageGenerationRetentionFailedError extends Error {
 export type ImageGenerationOperationPorts = {
   prepare: typeof prepareImageGenerationOperation;
   begin: typeof beginImageGenerationOperation;
+  resetBeforeProviderDispatch: typeof resetImageGenerationOperationBeforeProviderDispatch;
   retain: typeof retainGeneratedImage;
   complete: typeof completeImageGenerationOperation;
   markOutcomeUnknown: typeof markImageGenerationOperationOutcomeUnknown;
@@ -55,6 +57,7 @@ export type ImageGenerationOperationPorts = {
 const imageGenerationOperationPorts: ImageGenerationOperationPorts = {
   prepare: prepareImageGenerationOperation,
   begin: beginImageGenerationOperation,
+  resetBeforeProviderDispatch: resetImageGenerationOperationBeforeProviderDispatch,
   retain: retainGeneratedImage,
   complete: completeImageGenerationOperation,
   markOutcomeUnknown: markImageGenerationOperationOutcomeUnknown,
@@ -65,9 +68,10 @@ const imageGenerationOperationPorts: ImageGenerationOperationPorts = {
 /**
  * Durable admission fence shared by every client-executed image provider.
  * Provider execution is permitted at most once after the prepared ->
- * provider_started transition. A crash at that boundary may conservatively
- * leave the outcome unknown; a retry may recover a ready artifact, but never
- * blindly replays the paid operation.
+ * provider_started transition. A verified pre-dispatch fence rejection returns
+ * the row to `prepared`; a crash or any error after dispatch admission may
+ * conservatively leave the outcome unknown. A retry may recover a ready
+ * artifact, but never blindly replays an admitted paid operation.
  */
 export type ExecuteImageGenerationOperationInput = {
   db: Database;
@@ -83,6 +87,13 @@ export type ExecuteImageGenerationOperationInput = {
   modelId: string;
   prompt: string;
   referenceDigests?: readonly Readonly<{ mediaType: string; sha256: string }>[];
+  /**
+   * Provider-specific proof that a thrown error occurred before the paid
+   * provider boundary was crossed. Such a failure may return the operation to
+   * `prepared`; every other generation error remains outcome-ambiguous after
+   * `provider_started` and is never blindly replayed.
+   */
+  isProviderDispatchRejected?: (error: unknown) => boolean;
   generate: () => Promise<GeneratedImageOutput>;
 };
 
@@ -147,6 +158,18 @@ export async function executeImageGenerationOperation(
   try {
     output = await input.generate();
   } catch (error) {
+    if (input.isProviderDispatchRejected?.(error) === true) {
+      await ports
+        .resetBeforeProviderDispatch(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          operationId: identity.operationId,
+          operationKey: identity.operationKey,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        .catch(() => undefined);
+      throw error;
+    }
     await ports
       .markOutcomeUnknown(input.db, {
         accountId: input.accountId,

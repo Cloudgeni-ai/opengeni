@@ -119,13 +119,16 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       /setWorkspaceCodexSubscriptionMode[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
     );
     expect(dbIndexSource).toMatch(
-      /assertCodexSubscriptionSourceChangeAllowed[\s\S]*?waiting_capacity[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?active turns are using it/u,
+      /assertCodexSubscriptionSourceChangeAllowed[\s\S]*?waiting_capacity[\s\S]*?codexCredentialLeases\.leasedUntil[\s\S]*?CodexSubscriptionSourceChangeBlockedError/u,
     );
     expect(dbIndexSource).toMatch(
       /mutateCodexCapacityInTransaction[\s\S]*?sourceBefore[\s\S]*?sourceAfter[\s\S]*?assertCodexSubscriptionSourceChangeAllowed/u,
     );
     expect(dbIndexSource).toMatch(
       /lockOrganizationCodexSubscriptionSources[\s\S]*?list_organization_workspace_ids[\s\S]*?lockWorkspaceCodexSubscriptionSource/u,
+    );
+    expect(dbIndexSource).toMatch(
+      /withOrganizationCodexAdministrator[\s\S]*?lockOrganizationMembershipLifecycle[\s\S]*?get_organization_administration_overview/u,
     );
     expect(dbIndexSource).toMatch(
       /acquireCodexCredentialLease[\s\S]*?lockWorkspaceCodexSubscriptionSource[\s\S]*?getWorkspaceCodexSubscriptionSourceScoped/u,
@@ -138,6 +141,9 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     );
     expect(apiCodexRouteSource).toMatch(
       /withSessionCodexCapacityMutation[\s\S]*?sourceBeforeConnect = await getWorkspaceCodexSubscriptionSource[\s\S]*?upsertCodexSubscriptionCredential[\s\S]*?ensureCodexRotationSettings[\s\S]*?setInitialActiveCodexCredential[\s\S]*?setWorkspaceCodexSubscriptionModeInTransaction[\s\S]*?effectiveSourceBeforeMutation: sourceBeforeConnect\.effectiveSource/u,
+    );
+    expect(apiCodexRouteSource).toMatch(
+      /organizations\/:organizationId\/codex\/connect\/poll[\s\S]*?upsertOrganizationCodexSubscriptionCredential[\s\S]*?active turns are using it[\s\S]*?HTTPException\(409/u,
     );
     for (const table of [
       "organization_codex_rotation_settings",

@@ -176,6 +176,41 @@ export async function beginImageGenerationOperation(
   return { operation, started };
 }
 
+/**
+ * Return a paid-operation row to its retryable prepared state when a durable
+ * provider-dispatch fence rejected before any provider request was admitted.
+ * This is intentionally narrower than outcome reconciliation: a caller must
+ * prove the provider boundary was never crossed before using this transition.
+ */
+export async function resetImageGenerationOperationBeforeProviderDispatch(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    operationId: string;
+    operationKey: string;
+    error: string;
+  },
+): Promise<ImageGenerationOperation> {
+  return await mutateImageGenerationOperation(db, input, async (tx, current) => {
+    if (current.status !== "provider_started") return current;
+    const [row] = await tx
+      .update(schema.imageGenerationOperations)
+      .set({
+        status: "prepared",
+        providerStartedAt: null,
+        completedAt: null,
+        lastError: input.error.slice(0, 4_096),
+        updatedAt: new Date(),
+      })
+      .where(eq(schema.imageGenerationOperations.id, current.id))
+      .returning();
+    if (!row)
+      throw new Error("Failed to reset image generation operation before provider dispatch");
+    return mapImageGenerationOperation(row);
+  });
+}
+
 export async function markImageGenerationOperationOutcomeUnknown(
   db: Database,
   input: {

@@ -106,3 +106,76 @@ ALTER TABLE codex_capacity_waiters
 ALTER TABLE codex_capacity_waiters
   ADD CONSTRAINT codex_capacity_waiters_reset_kind_check
   CHECK (reset_kind IN ('authoritative', 'bounded_refresh', 'mutation_only'));
+
+-- Migration 0381 installed these organization lease guards with `now()`,
+-- whose value is fixed at transaction start. Reinstall the same guards with
+-- execution-time clock semantics before the durable lease protocol becomes
+-- authoritative, so a long maintenance-adjacent transaction cannot treat an
+-- already-expired lease as live.
+DO $codex_execution_time_lease_guards$
+DECLARE data_schema text := current_schema();
+BEGIN
+  EXECUTE format($ddl$
+    CREATE OR REPLACE FUNCTION opengeni_private.codex_organization_live_lease_count(
+      p_account_id uuid,
+      p_credential_id uuid,
+      p_exclude_turn_id uuid
+    ) RETURNS integer
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I
+    AS $function$
+    DECLARE live_count integer;
+    BEGIN
+      IF p_account_id IS NULL
+        OR p_credential_id IS NULL
+        OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
+        OR opengeni_private.current_workspace_id() IS NULL
+        OR NOT EXISTS (
+          SELECT 1 FROM codex_subscription_credentials credential
+          WHERE credential.account_id = p_account_id
+            AND credential.id = p_credential_id
+            AND credential.organization_id = p_account_id
+            AND credential.authority_scope = 'organization'
+        )
+        OR NOT opengeni_private.codex_credential_serves_workspace(
+          p_account_id,
+          opengeni_private.current_workspace_id(),
+          p_credential_id
+        )
+      THEN
+        RAISE EXCEPTION 'organization Codex lease-count authority required'
+          USING ERRCODE = '42501';
+      END IF;
+      SELECT count(*)::integer INTO live_count
+      FROM codex_credential_leases lease
+      WHERE lease.account_id = p_account_id
+        AND lease.credential_id = p_credential_id
+        AND lease.leased_until > clock_timestamp()
+        AND (p_exclude_turn_id IS NULL OR lease.turn_id <> p_exclude_turn_id);
+      RETURN live_count;
+    END
+    $function$;
+
+    CREATE OR REPLACE FUNCTION opengeni_private.prevent_organization_codex_disconnect_with_live_leases()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    SECURITY DEFINER
+    SET search_path = pg_catalog, %1$I
+    AS $function$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM codex_credential_leases lease
+        WHERE lease.account_id = OLD.account_id
+          AND lease.credential_id = OLD.id
+          AND lease.leased_until > clock_timestamp()
+      ) THEN
+        RAISE EXCEPTION 'Codex subscription cannot disconnect while active turns are using it'
+          USING ERRCODE = '55006';
+      END IF;
+      RETURN OLD;
+    END
+    $function$;
+  $ddl$, data_schema);
+END
+$codex_execution_time_lease_guards$;
