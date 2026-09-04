@@ -106,6 +106,19 @@ describe("terminal semantic readiness", () => {
     ).toBe("output-only");
   });
 
+  test("a capabilities error beats waking even when the surface is otherwise ready", () => {
+    expect(
+      terminalSurfaceState({
+        ready: true,
+        acceptsInput: true,
+        inputPending: false,
+        ptyStatus: "open",
+        booting: true,
+        capabilitiesError: true,
+      }),
+    ).toBe("error");
+  });
+
   test("advertises interactivity only when the mounted terminal accepts stdin", () => {
     expect(
       terminalSurfaceState({

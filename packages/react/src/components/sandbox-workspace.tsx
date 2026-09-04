@@ -781,6 +781,8 @@ export function useSandboxWorkspaceTabs(
             }
             workspaceWaking={!liveWorkspaceExpected && !captureAvailable && workspaceWaking}
             liveWorkspaceReady={liveWorkspaceExpected}
+            capabilitiesError={caps.error}
+            onRetry={caps.renegotiate}
             onWakeWorkspace={() => requestWarmIntent("warmFiles")}
             {...(requestedFilePath
               ? {
@@ -821,6 +823,8 @@ export function useSandboxWorkspaceTabs(
               showHeader
               shell={capabilities?.Terminal.shell ?? undefined}
               liveness={liveness}
+              capabilitiesError={caps.error}
+              onRetry={caps.renegotiate}
               {...(xtermTheme ? { theme: xtermTheme } : {})}
             />
           </div>

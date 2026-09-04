@@ -1,4 +1,5 @@
 import type { TerminalCapability } from "@opengeni/sdk";
+import { TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
@@ -89,6 +90,10 @@ export type SandboxTerminalProps = {
   onActivate?: (() => void) | undefined;
   /** Re-negotiate the terminal capability after an unexpected socket failure. */
   onReconnectNeeded?: (() => void) | undefined;
+  /** Handshake/admission failure (credit drain). Stops the infinite wake line. */
+  capabilitiesError?: Error | null | undefined;
+  /** Retry the capability handshake after a sandbox-unavailable error. */
+  onRetry?: (() => void) | undefined;
   className?: string | undefined;
 };
 
@@ -134,8 +139,10 @@ export function terminalSurfaceState(input: {
   inputPending: boolean;
   ptyStatus: TerminalStreamStatus;
   booting: boolean;
+  capabilitiesError?: boolean;
 }): TerminalSurfaceState {
   if (!input.ready) return "loading";
+  if (input.capabilitiesError) return "error";
   if (input.acceptsInput) return "interactive";
   if (input.inputPending) return "connecting";
   if (input.ptyStatus === "connecting") return "connecting";
@@ -227,6 +234,8 @@ export function SandboxTerminal({
   shell,
   onActivate,
   onReconnectNeeded,
+  capabilitiesError = null,
+  onRetry,
   className,
 }: SandboxTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -295,6 +304,7 @@ export function SandboxTerminal({
   // firehose transcript to show yet (otherwise the projected output is shown).
   const warm = sandboxAcceptsLiveIo(liveness);
   const booting =
+    !capabilitiesError &&
     activated &&
     !ptyMode &&
     !warm &&
@@ -307,6 +317,7 @@ export function SandboxTerminal({
     inputPending,
     ptyStatus,
     booting,
+    capabilitiesError: Boolean(capabilitiesError),
   });
 
   function handleActivate() {
@@ -634,6 +645,32 @@ export function SandboxTerminal({
           data-opengeni-terminal-state={surfaceState}
           data-opengeni-terminal-status={ptyAttachable ? ptyStatus : "firehose"}
         />
+        {capabilitiesError && result.chunks.length === 0 ? (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center bg-og-bg p-4 text-center"
+            data-opengeni-sandbox-unavailable
+            role="alert"
+          >
+            <div className="flex max-w-sm flex-col items-center gap-2.5">
+              <span className="grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg-muted shadow-sm">
+                <TriangleAlertIcon className="size-5" aria-hidden />
+              </span>
+              <p className="font-medium text-og-fg">Sandbox unavailable</p>
+              <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
+                {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
+              </p>
+              {onRetry || onReconnectNeeded ? (
+                <button
+                  type="button"
+                  onClick={onRetry ?? onReconnectNeeded}
+                  className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent-deep px-3 py-2 text-og-sm font-medium text-og-accent-fg shadow-sm transition-opacity hover:opacity-90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
+                >
+                  Retry
+                </button>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </div>
     </div>
   );

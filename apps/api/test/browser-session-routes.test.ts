@@ -521,4 +521,47 @@ describe("BrowserSession route discipline", () => {
       expect.objectContaining({ status: 400 }),
     );
   });
+
+  test("fails a credit-drained BrowserSession create before dispatch instead of leaving it starting", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const create = source.slice(
+      source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"'),
+      source.indexOf("app.get(", source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"')),
+    );
+    const holder = create.slice(create.indexOf("ensureInteractionHolder"));
+    expect(holder).toContain("SandboxViewerAdmissionBlockedError");
+    expect(holder).toContain("sandboxViewerAdmissionInteractionError");
+    expect(holder.indexOf("SandboxViewerAdmissionBlockedError")).toBeLessThan(
+      holder.indexOf("failBrowserSessionOperation"),
+    );
+    expect(holder.indexOf("failBrowserSessionOperation")).toBeLessThan(
+      holder.indexOf("ensureDispatchedGeneration"),
+    );
+    expect(source).toContain("httpExceptionForSandboxViewerAdmission(error)");
+  });
+
+  test("fails a credit-drained BrowserSession resume as a preparation failure", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resume = source.slice(
+      resumeStart,
+      source.indexOf(
+        '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+        resumeStart,
+      ),
+    );
+    const holder = resume.slice(resume.indexOf("ensureInteractionHolder"));
+    expect(holder).toContain("SandboxViewerAdmissionBlockedError");
+    expect(holder).toContain("sandboxViewerAdmissionInteractionError");
+    expect(holder).toContain("failBrowserSessionResumePreparation");
+    expect(holder.indexOf("SandboxViewerAdmissionBlockedError")).toBeLessThan(
+      holder.indexOf("failBrowserSessionResumePreparation"),
+    );
+    expect(holder.indexOf("failBrowserSessionResumePreparation")).toBeLessThan(
+      holder.indexOf("ensureDispatchedGeneration"),
+    );
+    expect(holder).not.toContain("failBrowserSessionOperation");
+  });
 });

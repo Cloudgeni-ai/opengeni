@@ -159,4 +159,25 @@ describe("ComputerSession route discipline", () => {
       dispatched.indexOf("completeComputerSessionEnd"),
     );
   });
+
+  test("fails a credit-drained ComputerSession create before dispatch instead of leaving it starting", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const create = source.slice(
+      source.indexOf('app.post("/v1/workspaces/:workspaceId/computer-sessions"'),
+      source.indexOf(
+        "app.get(",
+        source.indexOf('app.post("/v1/workspaces/:workspaceId/computer-sessions"'),
+      ),
+    );
+    const holder = create.slice(create.indexOf("ensureInteractionHolder"));
+    expect(holder).toContain("SandboxViewerAdmissionBlockedError");
+    expect(holder).toContain("sandboxViewerAdmissionInteractionError");
+    expect(holder.indexOf("SandboxViewerAdmissionBlockedError")).toBeLessThan(
+      holder.indexOf("failComputerSessionOperation"),
+    );
+    expect(holder.indexOf("failComputerSessionOperation")).toBeLessThan(
+      holder.indexOf("ensureDispatchedGeneration"),
+    );
+    expect(source).toContain("httpExceptionForSandboxViewerAdmission(error)");
+  });
 });

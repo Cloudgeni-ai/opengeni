@@ -7,9 +7,17 @@ import {
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../lib/format";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { usePageLiveActivity } from "./internal";
+
+function creditDrainError(cause: unknown): Error | null {
+  if (cause instanceof OpenGeniApiError && cause.status === 402) {
+    return new Error(CREDIT_EXHAUSTION_MESSAGE);
+  }
+  return null;
+}
 
 // "on-demand" is the boxless-benign resting state: the lease is not currently
 // holder-backed and NOTHING asked to warm a box (no viewer/consent action, no
@@ -288,6 +296,12 @@ export function useSessionCapabilities(
                 setError(null);
                 return;
               }
+              const drained = creditDrainError(cause);
+              if (drained) {
+                setState("error");
+                setError(drained);
+                return;
+              }
               setState("error");
               setError(cause instanceof Error ? cause : new Error(String(cause)));
             }
@@ -424,6 +438,10 @@ export function useSessionCapabilities(
                 setState("error");
                 setError(cause);
                 return;
+              } else if (cause.status === 402) {
+                setState("error");
+                setError(new Error(CREDIT_EXHAUSTION_MESSAGE));
+                return;
               } else {
                 throw cause;
               }
@@ -461,6 +479,12 @@ export function useSessionCapabilities(
         if (isSandboxOwnershipDisabledError(cause)) {
           setState("on-demand");
           setError(null);
+          return;
+        }
+        const drained = creditDrainError(cause);
+        if (drained) {
+          setState("error");
+          setError(drained);
           return;
         }
         if (cause instanceof OpenGeniApiError && cause.status === 403) {

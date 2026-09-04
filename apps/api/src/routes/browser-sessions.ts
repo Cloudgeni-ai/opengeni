@@ -89,6 +89,7 @@ import {
   dispatchProtectedAuthFill,
   failBrowserSessionOperation,
   failBrowserSessionResume,
+  SandboxViewerAdmissionBlockedError,
   failBrowserSessionResumePreparation,
   failBrowserSessionSuspension,
   failBrowserRevisionPublication,
@@ -177,6 +178,10 @@ import {
 import { retryWhileMissing } from "@opengeni/storage";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import {
+  httpExceptionForSandboxViewerAdmission,
+  sandboxViewerAdmissionInteractionError,
+} from "../http/sandbox-viewer-admission-error.js";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   deriveBrowserControllerAdminToken,
@@ -405,14 +410,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               rootSecret: authority,
               placement: placement.placement,
             });
-            const interactionHeld = await ensureInteractionHolder(
-              deps,
-              grant,
-              sourceSession,
-              prepared.session.id,
-              placement,
-              context.req.raw.signal,
-            );
+            let interactionHeld = false;
+            try {
+              interactionHeld = await ensureInteractionHolder(
+                deps,
+                grant,
+                sourceSession,
+                prepared.session.id,
+                placement,
+                context.req.raw.signal,
+              );
+            } catch (error) {
+              if (error instanceof SandboxViewerAdmissionBlockedError) {
+                await failBrowserSessionOperation(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: request.operationId,
+                  browserSessionId: prepared.session.id,
+                  error: sandboxViewerAdmissionInteractionError(error),
+                });
+              }
+              throw error;
+            }
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -2360,14 +2379,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               rootSecret: authority,
               placement: placement.placement,
             });
-            const interactionHeld = await ensureInteractionHolder(
-              deps,
-              grant,
-              sourceSession,
-              browserSessionId,
-              placement,
-              context.req.raw.signal,
-            );
+            let interactionHeld = false;
+            try {
+              interactionHeld = await ensureInteractionHolder(
+                deps,
+                grant,
+                sourceSession,
+                browserSessionId,
+                placement,
+                context.req.raw.signal,
+              );
+            } catch (error) {
+              if (error instanceof SandboxViewerAdmissionBlockedError) {
+                await failBrowserSessionResumePreparation(deps.db, {
+                  accountId: grant.accountId,
+                  workspaceId,
+                  operationId: request.operationId,
+                  browserSessionId,
+                  error: sandboxViewerAdmissionInteractionError(error),
+                });
+              }
+              throw error;
+            }
             const record = await ensureDispatchedGeneration(
               deps,
               grant,
@@ -4712,6 +4745,8 @@ function browserRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "browser");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  const admission = httpExceptionForSandboxViewerAdmission(error);
+  if (admission) return admission;
   if (error instanceof BrowserSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

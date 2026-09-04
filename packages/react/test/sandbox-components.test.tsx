@@ -16,6 +16,7 @@ import { SandboxFiles } from "../src/components/sandbox-files";
 import type { UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
 import { CapturedFileUnavailableError } from "../src/hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../src/hooks/use-sandbox-git";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 
 registerDom();
 
@@ -348,6 +349,55 @@ describe("FileBrowser", () => {
     await flush();
     expect(deleted).toEqual(["README.md"]);
     expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    await r.unmount();
+  });
+});
+
+describe("SandboxFiles credit-drain overlay", () => {
+  test("a capabilities error beats the resting wake gate", async () => {
+    let retryCalls = 0;
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult({ tree: [] })}
+        git={gitResult()}
+        workspaceResting
+        capabilitiesError={new Error(CREDIT_EXHAUSTION_MESSAGE)}
+        onRetry={() => {
+          retryCalls += 1;
+        }}
+        onWakeWorkspace={() => {
+          throw new Error("wake must not run while credit-drained");
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-opengeni-sandbox-unavailable]")).not.toBeNull();
+    expect(r.container.textContent).toContain("Sandbox unavailable");
+    expect(r.container.textContent).toContain(CREDIT_EXHAUSTION_MESSAGE);
+    expect(r.container.textContent).not.toContain("Workspace is resting");
+    expect(r.container.textContent).not.toContain("Open live workspace");
+    const retry = Array.from(r.container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    expect(retryCalls).toBe(1);
+    await r.unmount();
+  });
+
+  test("a capabilities error also beats an unavailable file-system empty state", async () => {
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult({ tree: [] })}
+        git={gitResult()}
+        fileSystemAvailable={false}
+        capabilitiesError={new Error(CREDIT_EXHAUSTION_MESSAGE)}
+      />,
+    );
+    await flush();
+    expect(r.container.querySelector("[data-opengeni-sandbox-unavailable]")).not.toBeNull();
+    expect(r.container.textContent).toContain(CREDIT_EXHAUSTION_MESSAGE);
+    expect(r.container.textContent).not.toContain("Files unavailable");
     await r.unmount();
   });
 });

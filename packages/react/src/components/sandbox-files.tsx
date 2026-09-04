@@ -1,4 +1,4 @@
-import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
+import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon, TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
@@ -59,6 +59,10 @@ export type SandboxFilesProps = {
   liveWorkspaceReady?: boolean | undefined;
   /** Deliberately wake the machine to read content absent from the capture. */
   onWakeWorkspace?: (() => void) | undefined;
+  /** Handshake/admission failure (credit drain, forbidden viewer). Beats resting/waking. */
+  capabilitiesError?: Error | null | undefined;
+  /** Retry the capability handshake after a sandbox-unavailable error. */
+  onRetry?: (() => void) | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -86,8 +90,10 @@ export function SandboxFiles({
   requestedPathReady = true,
   workspaceResting = false,
   workspaceWaking = false,
+  capabilitiesError = null,
   liveWorkspaceReady = true,
   onWakeWorkspace,
+  onRetry,
   themeType,
   className,
 }: SandboxFilesProps) {
@@ -257,6 +263,26 @@ export function SandboxFiles({
     liveRequestedPath === viewPath &&
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
+
+  if (
+    capabilitiesError &&
+    (workspaceResting || workspaceWaking || !fileSystemAvailable)
+  ) {
+    return (
+      <div className={cn("h-full", className)} data-opengeni-sandbox-unavailable>
+        <Notice
+          icon={<TriangleAlertIcon className="size-5" aria-hidden />}
+          title="Sandbox unavailable"
+          announce="alert"
+        >
+          <p>{capabilitiesError.message || "Couldn't reach the sandbox for this session."}</p>
+          {onRetry || onWakeWorkspace ? (
+            <WakeButton onClick={onRetry ?? onWakeWorkspace!}>Retry</WakeButton>
+          ) : null}
+        </Notice>
+      </div>
+    );
+  }
 
   if (workspaceResting || workspaceWaking) {
     return (
