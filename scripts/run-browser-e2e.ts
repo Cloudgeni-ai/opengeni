@@ -23,6 +23,7 @@ const testFiles =
         "./test/e2e/react-compiled-css.browser.e2e.ts",
         "./test/e2e/react-demo-mobile.browser.e2e.ts",
         "./test/e2e/realtime-demo.browser.e2e.ts",
+        "./test/e2e/restored-attachment-preview.browser.e2e.ts",
         "./test/e2e/session-header.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/session-rail-row-metadata.browser.e2e.ts",

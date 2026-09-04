@@ -137,6 +137,7 @@ export type ChatComposerMessages = {
   uploading: string;
   uploadFailed: string;
   previewAttachment: (name: string) => string;
+  previewUnavailable?: string | undefined;
   attachmentPreviewLabel: string;
   downloadAttachment: (name: string) => string;
   closeAttachmentPreview: string;
@@ -204,6 +205,7 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
   uploading: "Uploading",
   uploadFailed: "Upload failed",
   previewAttachment: (name) => `Preview ${name}`,
+  previewUnavailable: "Preview unavailable",
   attachmentPreviewLabel: "Attachment preview",
   downloadAttachment: (name) => `Download ${name}`,
   closeAttachmentPreview: "Close",
@@ -947,6 +949,7 @@ export function Attachments() {
       onRemove={controller.attachments.remove}
       onRetry={controller.attachments.retry}
       onRetainPreview={controller.attachments.retainPreview}
+      onLoadPreview={controller.attachments.loadPreview}
     />
   );
 }
@@ -1638,21 +1641,98 @@ function AttachmentChips({
   onRemove,
   onRetry,
   onRetainPreview,
+  onLoadPreview,
 }: {
   attachments: UseFileAttachmentsResult["attachments"];
   messages: ChatComposerMessages;
   onRemove: (id: string) => void;
   onRetry?: ((id: string) => void) | undefined;
   onRetainPreview: UseFileAttachmentsResult["retainPreview"];
+  onLoadPreview: UseFileAttachmentsResult["loadPreview"];
 }) {
   const lightbox = useLightboxOptional();
+  const previewRequest = useRef<AbortController | null>(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
+  const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      previewRequest.current?.abort();
+    },
+    [],
+  );
+
+  const openLightbox = useCallback(
+    (
+      attachment: UseFileAttachmentsResult["attachments"][number],
+      src: string,
+      source: HTMLButtonElement,
+      releaseSource?: (() => void) | undefined,
+    ) => {
+      lightbox?.open(
+        src,
+        attachment.name,
+        source,
+        messages.attachmentPreviewLabel,
+        attachment.name,
+        {
+          download: messages.downloadAttachment(attachment.name),
+          close: messages.closeAttachmentPreview,
+        },
+        releaseSource,
+      );
+    },
+    [lightbox, messages],
+  );
+
+  const openLoadedPreview = useCallback(
+    async (
+      attachment: UseFileAttachmentsResult["attachments"][number],
+      source: HTMLButtonElement,
+    ) => {
+      if (!onLoadPreview) return;
+      previewRequest.current?.abort();
+      const controller = new AbortController();
+      previewRequest.current = controller;
+      setPreviewLoadingId(attachment.id);
+      setPreviewErrorId((current) => (current === attachment.id ? null : current));
+      try {
+        const src = await onLoadPreview(attachment.id, controller.signal);
+        if (controller.signal.aborted) return;
+        if (!src) {
+          setPreviewErrorId(attachment.id);
+          return;
+        }
+        openLightbox(attachment, src, source);
+      } catch {
+        if (!controller.signal.aborted) setPreviewErrorId(attachment.id);
+      } finally {
+        if (previewRequest.current === controller) {
+          previewRequest.current = null;
+          setPreviewLoadingId(null);
+        }
+      }
+    },
+    [onLoadPreview, openLightbox],
+  );
+
   return (
     <div className="flex flex-wrap gap-2 px-3 py-2">
       {attachments.map((attachment) => {
         const failed = attachment.status === "failed";
         const secureContextRequired = attachment.errorCode === "secure_context_required";
-        const statusText =
-          attachment.status === "uploading"
+        const previewFailed = previewErrorId === attachment.id;
+        const previewLoading = previewLoadingId === attachment.id;
+        const canLoadPreview = Boolean(
+          lightbox &&
+          onLoadPreview &&
+          attachment.status === "ready" &&
+          attachment.file &&
+          attachment.contentType.startsWith("image/"),
+        );
+        const statusText = previewFailed
+          ? (messages.previewUnavailable ?? "Preview unavailable")
+          : attachment.status === "uploading"
             ? messages.uploading
             : failed
               ? attachment.error || messages.uploadFailed
@@ -1679,18 +1759,16 @@ function AttachmentChips({
                 aria-label={messages.previewAttachment(attachment.name)}
                 onClick={(event) => {
                   const releasePreview = onRetainPreview(attachment.id);
-                  lightbox.open(
-                    attachment.previewUrl!,
-                    attachment.name,
-                    event.currentTarget,
-                    messages.attachmentPreviewLabel,
-                    attachment.name,
-                    {
-                      download: messages.downloadAttachment(attachment.name),
-                      close: messages.closeAttachmentPreview,
-                    },
-                    releasePreview,
-                  );
+                  if (releasePreview || !canLoadPreview) {
+                    openLightbox(
+                      attachment,
+                      attachment.previewUrl!,
+                      event.currentTarget,
+                      releasePreview,
+                    );
+                    return;
+                  }
+                  void openLoadedPreview(attachment, event.currentTarget);
                 }}
               >
                 <img
@@ -1698,6 +1776,21 @@ function AttachmentChips({
                   alt=""
                   className="h-full w-full object-cover transition-opacity hover:opacity-80"
                 />
+              </button>
+            ) : canLoadPreview ? (
+              <button
+                type="button"
+                className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-wait"
+                aria-label={messages.previewAttachment(attachment.name)}
+                aria-busy={previewLoading || undefined}
+                disabled={previewLoading}
+                onClick={(event) => void openLoadedPreview(attachment, event.currentTarget)}
+              >
+                {previewLoading ? (
+                  <LoaderCircleIcon className="size-4 animate-og-spin text-og-fg-muted" />
+                ) : (
+                  <ImageIcon className="size-4 text-og-fg-muted" />
+                )}
               </button>
             ) : attachment.previewUrl ? (
               <img
@@ -1716,7 +1809,7 @@ function AttachmentChips({
                 <div className="break-words text-og-xs leading-4 text-og-status-failed">
                   {statusText}
                 </div>
-              ) : failed ? (
+              ) : failed || previewFailed ? (
                 <ComposerTip tip={statusText}>
                   <div className="truncate text-og-xs text-og-status-failed">{statusText}</div>
                 </ComposerTip>

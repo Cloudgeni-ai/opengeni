@@ -551,6 +551,44 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("loads a restored image preview only after the user requests it", async () => {
+    const ready = fakeAsset({
+      id: "33333333-3333-4333-8333-333333333333",
+      filename: "restored-preview.png",
+    });
+    const requested: Array<{
+      workspaceId: string;
+      fileId: string;
+      signal: AbortSignal | undefined;
+    }> = [];
+    const client = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: async (workspaceId, fileId, options) => {
+        requested.push({ workspaceId, fileId, signal: options?.signal });
+        return { url: "https://files.example/restored-preview", expiresAt: "2026-09-04T01:00:00Z" };
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    const restored = hook.result.current.attachments[0]!;
+    expect(restored.previewUrl).toBeUndefined();
+    expect(created).toEqual([]);
+    expect(requested).toEqual([]);
+
+    const controller = new AbortController();
+    const url = await hook.result.current.loadPreview?.(restored.id, controller.signal);
+    expect(url).toBe("https://files.example/restored-preview");
+    expect(requested).toEqual([
+      { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
+    ]);
+    expect(created).toEqual([]);
+    await hook.unmount();
+  });
+
   test("a later server restoration replaces the ready set but preserves unresolved uploads", async () => {
     let resolveUpload!: (asset: FileAsset) => void;
     const client = fakeClient({

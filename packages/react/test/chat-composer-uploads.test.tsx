@@ -98,6 +98,26 @@ function readyPreviewChip(name: string): FileAttachment {
   };
 }
 
+function restoredPreviewChip(name: string): FileAttachment {
+  return {
+    ...readyChip(name),
+    file: {
+      id: crypto.randomUUID(),
+      workspaceId: "workspace-id",
+      status: "ready",
+      filename: name,
+      safeFilename: name,
+      contentType: "image/png",
+      sizeBytes: 2048,
+      sha256: null,
+      bucket: "private",
+      objectKey: "private",
+      createdAt: "2026-09-04T00:00:00.000Z",
+      updatedAt: "2026-09-04T00:00:00.000Z",
+    },
+  };
+}
+
 async function mount(node: React.ReactElement): Promise<HTMLElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -224,6 +244,70 @@ describe("ChatComposer attachments", () => {
       await Promise.resolve();
     });
     expect(retained).toEqual([attachment.id]);
+  });
+
+  test("loads a restored image into the lightbox only when its preview is clicked", async () => {
+    const attachment = restoredPreviewChip("restored.png");
+    const requested: string[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            loadPreview: async (id) => {
+              requested.push(id);
+              return "https://files.example/restored.png";
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    const preview = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Preview restored.png"]',
+    );
+    expect(preview).not.toBeNull();
+    expect(requested).toEqual([]);
+    await act(async () => {
+      preview?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(composerSource).toContain("openLightbox(attachment, src, source);");
+  });
+
+  test("replaces a stale unretained blob preview with the durable ready-file source", async () => {
+    const attachment = {
+      ...restoredPreviewChip("cached.png"),
+      previewUrl: "blob:revoked-cached-preview",
+    };
+    const requested: string[] = [];
+    const container = await mount(
+      <LightboxProvider>
+        <ChatComposer
+          composer={makeComposer()}
+          attachments={makeAttachments({
+            attachments: [attachment],
+            retainPreview: () => undefined,
+            loadPreview: async (id) => {
+              requested.push(id);
+              return "https://files.example/cached.png";
+            },
+          })}
+        />
+      </LightboxProvider>,
+    );
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Preview cached.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(requested).toEqual([attachment.id]);
+    expect(composerSource).toContain("if (releasePreview || !canLoadPreview)");
+    expect(composerSource).toContain("void openLoadedPreview(attachment, event.currentTarget);");
   });
 
   test("uses composer message overrides for all attachment preview accessible names", async () => {
