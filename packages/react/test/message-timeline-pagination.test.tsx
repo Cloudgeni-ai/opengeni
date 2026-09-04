@@ -593,6 +593,162 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a reader-driven prepend on a compact tail does not snap back to the live tip", async () => {
+    // Initial paint is a compact newest-suffix window. When that tail only
+    // barely overflows, the reader can be at the top (loading older history)
+    // while still within PIN_THRESHOLD of the live tip AFTER the prepend
+    // restores their gap. A restore write looks like a scroll-down toward the
+    // tip and used to re-pin, then the next commit snapped them to the bottom.
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    const tail = manyEvents(8).map((evt) => event(evt.sequence + 12)); // 13..20
+    const r = await renderComponent(
+      <MessageTimeline events={tail} hasOlder loadingOlder={false} />,
+    );
+    await drainFrames(frames);
+    const scroller = r.container.querySelector(".overflow-y-auto");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 440,
+      tipHeight: 80,
+      paddingBottom: 24,
+      emitScrollOnWrite: true,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(distanceFromBottom(scroller)).toBe(0);
+
+    await actRun(() => {
+      scroller.dispatchEvent(new WheelEvent("wheel", { deltaY: -80, bubbles: true }));
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(0);
+
+    await r.rerender(<MessageTimeline events={tail} hasOlder loadingOlder={false} />);
+    await flush();
+    expect(scroller.scrollTop).toBe(0);
+
+    layout.setContentHeight(2_440);
+    await r.rerender(
+      <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} />,
+    );
+    await flush();
+    await drainFrames(frames);
+
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(2_000);
+    expect(distanceFromBottom(scroller)).toBe(40);
+
+    // An actual reader move toward the now-distant live tip still re-pins.
+    await actRun(() => {
+      scroller.scrollTop = 2_040;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(distanceFromBottom(scroller)).toBeLessThan(2);
+    expect(scroller.className).toContain("[overflow-anchor:none]");
+    layout.restore();
+    await r.unmount();
+  });
+
+  test("a sentinel-owned prepend restores an unpinned compact tail instead of snapping to the tip", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const tail = manyEvents(8).map((evt) => event(evt.sequence + 12));
+    const load = deferred<boolean>();
+    const controlled = controlledOlderReceipt(load.promise);
+    const onLoadOlder: OlderHistoryLoader = () => controlled.receipt;
+    const r = await renderComponent(
+      <PublicMessageTimeline events={tail} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 440,
+      tipHeight: 80,
+      paddingBottom: 24,
+      emitScrollOnWrite: true,
+    });
+    layout.syncTipAtBottom();
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await readerScrollUp(scroller, 0);
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(scroller.scrollTop).toBe(0);
+
+    controlled.commit();
+    layout.setContentHeight(2_440);
+    await r.rerender(
+      <PublicMessageTimeline events={manyEvents(20)} hasOlder onLoadOlder={onLoadOlder} />,
+    );
+    await flush();
+    await drainFrames(frames);
+
+    expect(r.container.textContent).toContain("Jump to latest");
+    expect(scroller.scrollTop).toBe(2_000);
+    expect(distanceFromBottom(scroller)).toBe(40);
+
+    await actRun(() => load.resolve(true));
+    await flush();
+    layout.restore();
+    await r.unmount();
+  });
+
   test("near-top prepend restores place when scrollHeight is unchanged (tip truncated)", async () => {
     // loadOlder uses an oldest-directed window: older rows prepend AND the live
     // tip can be evicted. Net scrollHeight may not grow, so height-delta restore
@@ -3956,6 +4112,11 @@ function mockScrollerLayout(
     paddingBottom: number;
     /** Snap scrollTop writes to whole pixels like a real browser at dpr 1. */
     quantize?: boolean;
+    /**
+     * Chromium fires `scroll` from programmatic `scrollTop` writes. Opt in so
+     * restore/camera assignments exercise the same echo path as the browser.
+     */
+    emitScrollOnWrite?: boolean;
   },
 ) {
   let contentHeight = options.contentHeight;
@@ -3990,7 +4151,14 @@ function mockScrollerLayout(
     set: (value: number) => {
       const max = Math.max(0, contentHeight - options.clientHeight);
       const clamped = Math.max(0, Math.min(max, value));
-      currentScrollTop = options.quantize ? Math.floor(clamped) : clamped;
+      const next = options.quantize ? Math.floor(clamped) : clamped;
+      if (next === currentScrollTop) {
+        return;
+      }
+      currentScrollTop = next;
+      if (options.emitScrollOnWrite) {
+        scroller.dispatchEvent(new Event("scroll"));
+      }
     },
   });
 
