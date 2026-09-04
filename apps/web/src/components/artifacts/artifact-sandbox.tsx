@@ -18,10 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export {
-  PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
-  publishedHtmlArtifactDocument,
-};
+export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument };
 
 export function ArtifactSandbox(props: {
   html: string;
@@ -43,8 +40,7 @@ export function ArtifactSandbox(props: {
     <section
       className={cn(
         "overflow-hidden rounded-2xl border border-border/80 bg-white shadow-sm",
-        focused &&
-          "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface shadow-none",
+        focused && "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface shadow-none",
         props.className,
       )}
     >
@@ -66,9 +62,7 @@ export function ArtifactSandbox(props: {
               <Globe2Icon className="size-3.5" />
             </span>
           ) : null}
-          <span className="truncate text-xs font-semibold text-fg">
-            {props.title}
-          </span>
+          <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
           {props.versionLabel ? (
             <Badge
               variant="outline"
@@ -84,14 +78,12 @@ export function ArtifactSandbox(props: {
               title={`${props.connectedToolCount} workspace tools available to this Site`}
             >
               <PlugZapIcon className="size-3" />
-              {props.connectedToolCount}{" "}
-              {props.connectedToolCount === 1 ? "tool" : "tools"}
+              {props.connectedToolCount} {props.connectedToolCount === 1 ? "tool" : "tools"}
             </Badge>
           ) : null}
           {props.sourceFileCount ? (
             <span className="hidden text-2xs text-fg-subtle xl:inline">
-              {props.sourceFileCount} source{" "}
-              {props.sourceFileCount === 1 ? "file" : "files"}
+              {props.sourceFileCount} source {props.sourceFileCount === 1 ? "file" : "files"}
             </span>
           ) : null}
         </div>

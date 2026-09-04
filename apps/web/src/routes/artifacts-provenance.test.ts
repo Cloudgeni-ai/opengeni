@@ -9,10 +9,8 @@ describe("Site provenance navigation", () => {
 
   test("links immutable Site versions back to their source sessions", () => {
     expect(source).toContain("version.sourceSessionId");
-    expect(source).toContain(
-      'to="/workspaces/$workspaceId/sessions/$sessionId"',
-    );
-    expect(source).toContain('version.revision === 1');
+    expect(source).toContain('to="/workspaces/$workspaceId/sessions/$sessionId"');
+    expect(source).toContain("version.revision === 1");
     expect(source).toContain('"Creation session"');
     expect(source).toContain('"Publishing session"');
   });

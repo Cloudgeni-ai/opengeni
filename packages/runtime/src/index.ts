@@ -2841,7 +2841,11 @@ function installMcpApprovalPolicy(
           if (policy.connectorBacked) {
             const approvalConfirmed =
               approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
-            const preparation = preparations.get(callId);
+            const preparation =
+              preparations.get(callId) ??
+              (approvedToolCallId === callId
+                ? ({ managed: true, decision: "ask" } as const)
+                : undefined);
             preparations.delete(callId);
             return await runWithModelToolInvocation(
               {
@@ -2855,7 +2859,11 @@ function installMcpApprovalPolicy(
           }
           const approvalConfirmed =
             approvalRequiredCallIds.has(callId) || approvedToolCallId === callId;
-          const preparation = preparations.get(callId);
+          const preparation =
+            preparations.get(callId) ??
+            (approvedToolCallId === callId
+              ? ({ managed: true, decision: "ask" } as const)
+              : undefined);
           preparations.delete(callId);
           return await runWithModelToolInvocation(
             {
@@ -2955,7 +2963,11 @@ function installAttemptConnectorActionPolicy(
           }
           const approvalConfirmed =
             approvalRequiredCallIds.delete(callId) || approvedToolCallId === callId;
-          const preparation = preparations.get(callId);
+          const preparation =
+            preparations.get(callId) ??
+            (approvedToolCallId === callId
+              ? ({ managed: true, decision: "ask" } as const)
+              : undefined);
           preparations.delete(callId);
           return await runWithModelToolInvocation(
             {

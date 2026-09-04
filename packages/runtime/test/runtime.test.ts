@@ -2469,8 +2469,10 @@ describe("runtime event normalization", () => {
           } as any),
         ).toMatchObject({ isError: true });
         expect(executions).toEqual([{ title: "Quarterly" }, { title: "Resumed" }]);
-        expect(calls.slice(-4)).toEqual([
-          "prepare:call-drive-resumed:Resumed",
+        expect(calls).toEqual([
+          "prepare:call-drive:Quarterly",
+          "begin:call-drive:Quarterly",
+          "complete:request-drive:completed",
           "begin:call-drive-resumed:Resumed",
           "complete:request-drive:completed",
           "prepare:call-drive-other:Wrong call",
@@ -2919,6 +2921,84 @@ describe("runtime event normalization", () => {
           });
           expect(call.connectionId).toMatch(/^session-mcp:docs:[0-9a-f]{64}$/);
         }
+      } finally {
+        await prepared.close();
+        mcp.close();
+      }
+    });
+
+    test("legacy MCP approval resumes with a fresh agent without preparing a second request", async () => {
+      const mcp = startTestMcpServer();
+      const settings = testSettings({
+        sandboxBackend: "none",
+        mcpServers: [
+          {
+            id: "docs",
+            name: "Document Search",
+            url: mcp.url,
+            cacheToolsList: false,
+            requireApproval: true,
+          },
+        ],
+      });
+      const phases: string[] = [];
+      const hooks: ConnectorActionPolicyHooks = {
+        prepare: async () => {
+          phases.push("prepare");
+          return { managed: true, decision: "ask" };
+        },
+        begin: async () => {
+          phases.push("begin");
+          return { allowed: true, managed: true, requestId: "resumed-request" };
+        },
+        complete: async ({ outcome }) => {
+          phases.push(`complete:${outcome}`);
+        },
+      };
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        sessionId: "33333333-3333-4333-8333-333333333333",
+        turnId: "44444444-4444-4444-8444-444444444444",
+        attemptId: "55555555-5555-4555-8555-555555555555",
+        executionGeneration: 1,
+        connectorActionPolicy: hooks,
+      });
+      const callId = "fresh-agent-approved-call";
+      const input = { query: "resume-once" };
+
+      try {
+        const firstAgent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+        });
+        const [firstTool] = (await firstAgent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!firstTool || firstTool.type !== "function") throw new Error("legacy MCP tool missing");
+        expect(await firstTool.needsApproval(new RunContext(), input, callId)).toBe(true);
+
+        const resumedAgent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+          connectorActionPolicy: hooks,
+          approvedToolCallId: callId,
+        });
+        const [resumedTool] = (await resumedAgent.getMcpTools(new RunContext())).filter(
+          (candidate) =>
+            candidate.type === "function" && candidate.name === "docs__search_documents",
+        );
+        if (!resumedTool || resumedTool.type !== "function") {
+          throw new Error("resumed legacy MCP tool missing");
+        }
+        await expect(
+          resumedTool.invoke(new RunContext(), JSON.stringify(input), {
+            toolCall: { callId },
+          } as any),
+        ).resolves.toBeDefined();
+
+        expect(phases).toEqual(["prepare", "begin", "complete:completed"]);
+        expect(mcp.calls).toEqual([{ tool: "search_documents", args: input }]);
       } finally {
         await prepared.close();
         mcp.close();
