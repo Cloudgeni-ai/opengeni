@@ -13,7 +13,6 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ChevronRightIcon,
-  CircleDashedIcon,
   Clock3Icon,
   EllipsisIcon,
   FolderIcon,
@@ -45,6 +44,7 @@ import {
 
 import { useRail } from "@/components/rail/rail-context";
 import {
+  ActiveWorkMark,
   RailTrailingMetadata,
   SessionRowHoverDetails,
   SessionRowContent,
@@ -3190,7 +3190,7 @@ function SessionRow(props: {
                 })
               }
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {props.session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </ContextMenuItem>
           </>
@@ -3342,7 +3342,7 @@ function RowActionsMenu({
               }
               onClick={(event) => event.stopPropagation()}
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </DropdownMenuItem>
           </>

@@ -9,7 +9,7 @@
 // workspace-defined Custom APIs: a curated Featured strip, then a large
 // search, kind filters, an "Enabled" strip the user manages daily, a Custom
 // APIs list, and a logo tile grid over the full catalog (1,000+ items,
-// rendered incrementally). Credentialed MCP servers connect through the
+// rendered in explicit 48-item windows). Credentialed MCP servers connect through the
 // connections spine (OAuth redirect or an API-key form) in a right-hand detail
 // sheet, never by hand-editing enable headers. Bundles are Skills, Plugins,
 // and Packs: a named collection of tools and instructions rather than a live
@@ -160,7 +160,7 @@ export function canManageApiIntegrations(
  * It must wait for the catalog: on first commit Browse is a skeleton, and
  * resolving a 1000+ item catalog then inserts thousands of pixels above the
  * Bundles section, leaving a reader who followed the link stranded in the
- * middle of the Browse grid. It must also fire exactly once, so a later
+ * first Browse window. It must also fire exactly once, so a later
  * loading/settled cycle (a refresh) never yanks the page back.
  */
 export function shouldScrollToDeepLinkedBundles(
@@ -503,8 +503,8 @@ export function CapabilitiesRoute({
 
   // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
-  // still a skeleton then, and resolving a 1000+ item catalog inserts thousands
-  // of pixels above the Bundles section afterwards.
+  // still a skeleton then, and resolving and rendering the first client-side
+  // 48-item window inserts the Browse grid above the Bundles section afterwards.
   useEffect(() => {
     if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
     bundlesScrolled.current = true;

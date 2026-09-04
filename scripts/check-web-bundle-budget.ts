@@ -413,9 +413,13 @@ const budgets = {
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
   // Merging that session lifecycle with the unified Tool Gateway and Sites
-  // graph measures 2,289,466 raw bytes on Linux/x64 Bun 1.4. Advance only the
-  // PR-specific raw policy envelope to 2,237 KiB, retaining 1,222 bytes of
+  // graph measures 2,290,677 raw bytes on Linux/x64 Bun 1.4. Advance only the
+  // PR-specific raw policy envelope to 2,238 KiB, retaining 1,035 bytes of
   // headroom; gzip and every other cap remain fixed.
+  // The shared active-work action marker merged on protected main with failing
+  // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
+  // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
+  // headroom; gzip and every unrelated cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
