@@ -1,4 +1,4 @@
-import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon, TriangleAlertIcon } from "lucide-react";
+import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
@@ -14,6 +14,10 @@ import { filePathVisibility, type FileNodeVisibilityPredicate } from "../file-no
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { PierreFile } from "./pierre-file";
+import {
+  SANDBOX_UNAVAILABLE_FALLBACK,
+  SandboxUnavailableNotice,
+} from "./sandbox-unavailable-notice";
 
 export type SandboxFilesProps = {
   /** From `useSandboxFiles(...)`. */
@@ -264,22 +268,19 @@ export function SandboxFiles({
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
 
-  if (
-    capabilitiesError &&
-    (workspaceResting || workspaceWaking || !fileSystemAvailable)
-  ) {
+  if (capabilitiesError && (workspaceResting || workspaceWaking || !fileSystemAvailable)) {
     return (
-      <div className={cn("h-full", className)} data-opengeni-sandbox-unavailable>
-        <Notice
-          icon={<TriangleAlertIcon className="size-5" aria-hidden />}
-          title="Sandbox unavailable"
-          announce="alert"
-        >
-          <p>{capabilitiesError.message || "Couldn't reach the sandbox for this session."}</p>
-          {onRetry || onWakeWorkspace ? (
-            <WakeButton onClick={onRetry ?? onWakeWorkspace!}>Retry</WakeButton>
-          ) : null}
-        </Notice>
+      <div
+        className={cn(
+          "flex h-full items-center justify-center p-4 text-center text-og-sm",
+          className,
+        )}
+        role="alert"
+      >
+        <SandboxUnavailableNotice
+          message={capabilitiesError.message || SANDBOX_UNAVAILABLE_FALLBACK}
+          onRetry={onRetry ?? onWakeWorkspace}
+        />
       </div>
     );
   }

@@ -1,5 +1,4 @@
 import type { TerminalCapability } from "@opengeni/sdk";
-import { TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import { type TerminalStreamStatus, useTerminalStream } from "../hooks/use-terminal-stream";
@@ -8,6 +7,10 @@ import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
+import {
+  SANDBOX_UNAVAILABLE_FALLBACK,
+  SandboxUnavailableNotice,
+} from "./sandbox-unavailable-notice";
 
 /**
  * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
@@ -648,27 +651,12 @@ export function SandboxTerminal({
         {capabilitiesError && result.chunks.length === 0 ? (
           <div
             className="absolute inset-0 z-10 flex items-center justify-center bg-og-bg p-4 text-center"
-            data-opengeni-sandbox-unavailable
             role="alert"
           >
-            <div className="flex max-w-sm flex-col items-center gap-2.5">
-              <span className="grid size-10 place-items-center rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg-muted shadow-sm">
-                <TriangleAlertIcon className="size-5" aria-hidden />
-              </span>
-              <p className="font-medium text-og-fg">Sandbox unavailable</p>
-              <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
-                {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
-              </p>
-              {onRetry || onReconnectNeeded ? (
-                <button
-                  type="button"
-                  onClick={onRetry ?? onReconnectNeeded}
-                  className="mt-1 inline-flex min-h-11 items-center justify-center rounded-og-md bg-og-accent-deep px-3 py-2 text-og-sm font-medium text-og-accent-fg shadow-sm transition-opacity hover:opacity-90 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent focus-visible:ring-offset-2 focus-visible:ring-offset-og-bg"
-                >
-                  Retry
-                </button>
-              ) : null}
-            </div>
+            <SandboxUnavailableNotice
+              message={capabilitiesError.message || SANDBOX_UNAVAILABLE_FALLBACK}
+              onRetry={onRetry ?? onReconnectNeeded}
+            />
           </div>
         ) : null}
       </div>

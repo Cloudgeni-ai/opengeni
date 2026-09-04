@@ -11,7 +11,11 @@ const SANDBOX_GROUP_ID = "22222222-2222-4222-8222-222222222222";
 
 describe("sandbox viewer admission HTTP mapping", () => {
   test("maps a credit-balance drain to HTTP 402", () => {
-    const blocked = new SandboxViewerAdmissionBlockedError(WORKSPACE_ID, SANDBOX_GROUP_ID, "balance");
+    const blocked = new SandboxViewerAdmissionBlockedError(
+      WORKSPACE_ID,
+      SANDBOX_GROUP_ID,
+      "balance",
+    );
     const mapped = httpExceptionForSandboxViewerAdmission(blocked);
     expect(mapped).toBeInstanceOf(HTTPException);
     expect(mapped!.status).toBe(402);

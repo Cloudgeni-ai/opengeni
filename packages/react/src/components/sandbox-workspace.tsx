@@ -61,6 +61,10 @@ import type { MachineView } from "../types/machines";
 import { SandboxFiles } from "./sandbox-files";
 import { WorkbenchChanges } from "./workbench-changes";
 import { SandboxTerminal, type XtermTheme } from "./sandbox-terminal";
+import {
+  SANDBOX_UNAVAILABLE_FALLBACK,
+  SANDBOX_UNAVAILABLE_TITLE,
+} from "./sandbox-unavailable-notice";
 import { WorkspaceDock, type WorkspaceDockProps, type WorkspaceTab } from "./workspace-dock";
 
 const LazyBrowserViewer = lazy(async () => {
@@ -1378,9 +1382,9 @@ function ChangesTabContent({
   if (capabilitiesError && !captureAvailable) {
     return (
       <CenteredState icon={<TriangleAlertIcon className="size-5" aria-hidden />} tone="danger">
-        <p className="text-og-sm font-medium text-og-fg">Sandbox unavailable</p>
+        <p className="text-og-sm font-medium text-og-fg">{SANDBOX_UNAVAILABLE_TITLE}</p>
         <p data-contrast-audited className="text-og-sm leading-5 text-og-fg-muted">
-          {capabilitiesError.message || "Couldn't reach the sandbox for this session."}
+          {capabilitiesError.message || SANDBOX_UNAVAILABLE_FALLBACK}
         </p>
         <DockActionButton onClick={onRetry}>
           <RefreshCwIcon className="size-3" />

@@ -526,7 +526,10 @@ describe("BrowserSession route discipline", () => {
     const source = await readFile(routeUrl, "utf8");
     const create = source.slice(
       source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"'),
-      source.indexOf("app.get(", source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"')),
+      source.indexOf(
+        "app.get(",
+        source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"'),
+      ),
     );
     const holder = create.slice(create.indexOf("ensureInteractionHolder"));
     expect(holder).toContain("SandboxViewerAdmissionBlockedError");
