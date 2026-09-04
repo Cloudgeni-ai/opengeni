@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
+  ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT,
   CODEX_CAPACITY_LIVE_STATUS_RAW_BUDGET,
   CODEX_CAPACITY_LIVE_STATUS_RAW_MEASUREMENT,
   DIRECT_SESSION_RAW_BUDGET,
@@ -138,7 +140,16 @@ describe("web bundle budget policy", () => {
         SIDEBAR_DENSITY_CURRENT_MAIN_BROWSER_RAW_BUDGET,
         SETUP_ACCOUNT_QUERY_COMPATIBILITY_RAW_BUDGET,
         SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET,
+        ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
       ),
+    );
+  });
+
+  test("retains one KiB headroom above the shared active-work action icon graph", () => {
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT).toBe(2_284_597);
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_BUDGET).toBe(2233 * KIB);
+    expect(ACTIVE_WORK_ACTION_ICON_RAW_BUDGET - ACTIVE_WORK_ACTION_ICON_RAW_MEASUREMENT).toBe(
+      1_995,
     );
   });
 
