@@ -101,6 +101,28 @@ async function asAppScope<T>(
   })) as T;
 }
 
+async function publicCanExecuteDraftFence(sql: postgres.Sql): Promise<boolean> {
+  const [privilege] = await sql<Array<{ publicExecute: boolean }>>`
+    select exists (
+      select 1
+      from pg_catalog.pg_proc procedure
+      join pg_catalog.pg_namespace namespace
+        on namespace.oid = procedure.pronamespace
+      cross join lateral pg_catalog.aclexplode(
+        coalesce(
+          procedure.proacl,
+          pg_catalog.acldefault('f', procedure.proowner)
+        )
+      ) acl
+      where namespace.nspname = 'opengeni_private'
+        and procedure.proname = 'fence_new_session_draft_project_provenance_v1'
+        and pg_catalog.oidvectortypes(procedure.proargtypes) = ''
+        and acl.grantee = 0
+        and acl.privilege_type = 'EXECUTE'
+    ) as "publicExecute"`;
+  return privilege?.publicExecute ?? false;
+}
+
 async function waitForBlockedFinalBackfillBatch(
   admin: postgres.Sql,
   holderPid: number,
@@ -190,6 +212,9 @@ describe("phased new-session draft project provenance migration", () => {
     );
     expect(fence).toContain('NEW."selected_project_channel_id" := NULL');
     expect(fence).toContain('NEW."selected_project_compute_snapshot" := NULL');
+    expect(fence).toContain(
+      "REVOKE ALL ON FUNCTION opengeni_private.fence_new_session_draft_project_provenance_v1() FROM PUBLIC;",
+    );
     expect(fence).not.toMatch(/^\s*UPDATE\s+"?new_session_drafts"?/imu);
     expect(fence).not.toContain("VALIDATE CONSTRAINT");
     expect(fence).not.toContain("NO FORCE ROW LEVEL SECURITY");
@@ -264,6 +289,7 @@ describe("phased new-session draft project provenance migration", () => {
          and constraint_row.conrelid = 'new_session_drafts'::regclass
          and constraint_row.conname = 'new_session_drafts_project_provenance_check'`;
       expect(afterBody).toEqual({ present: true, validated: false, ledgered: false });
+      expect(await publicCanExecuteDraftFence(admin)).toBe(false);
 
       await migrate(ownerUrl);
       const [afterOutcomeUnknownReplay] = await admin<
@@ -292,6 +318,7 @@ describe("phased new-session draft project provenance migration", () => {
         ledgered: true,
         helperPresent: false,
       });
+      expect(await publicCanExecuteDraftFence(admin)).toBe(false);
 
       // A separately requested replay with the already-correct constraint must
       // also succeed and restore the missing ledger row.

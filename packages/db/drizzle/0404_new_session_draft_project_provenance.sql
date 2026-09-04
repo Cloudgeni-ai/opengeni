@@ -311,6 +311,8 @@ BEGIN
 END
 $function$;
 
+REVOKE ALL ON FUNCTION opengeni_private.fence_new_session_draft_project_provenance_v1() FROM PUBLIC;
+
 DROP TRIGGER IF EXISTS new_session_drafts_project_provenance_v1_fence
   ON "new_session_drafts";
 CREATE TRIGGER new_session_drafts_project_provenance_v1_fence
