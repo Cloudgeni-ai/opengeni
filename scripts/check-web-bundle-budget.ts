@@ -412,6 +412,10 @@ const budgets = {
   // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
+  // The shared active-work action marker merged on protected main with failing
+  // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
+  // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
+  // headroom; gzip and every unrelated cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
