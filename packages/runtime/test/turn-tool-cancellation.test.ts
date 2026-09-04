@@ -92,6 +92,33 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ]);
   });
 
+  test("eager retained-process polling uses model-observation settlement", async () => {
+    const controller = createTurnToolCancellationController();
+    let observations = 0;
+    let controls = 0;
+    const exec = functionTool("exec_command", async () => running(106, "starting\n"));
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 106,
+      writeStdinForProcessObservation: async () => {
+        observations += 1;
+        return exited(0, "finished\n");
+      },
+      writeStdinForProcessControl: async () => {
+        controls += 1;
+        return exited(0, "wrong path\n");
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    expect(await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "quick-task" }))).toContain(
+      "finished",
+    );
+    expect(observations).toBe(1);
+    expect(controls).toBe(0);
+  });
+
   test("an explicit short yield still returns a controllable running process", async () => {
     const controller = createTurnToolCancellationController();
     let writes = 0;

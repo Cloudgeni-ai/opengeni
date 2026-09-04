@@ -1094,12 +1094,13 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       afterProcessMutation: async ({ outcome }) => {
         events.push(`stdin-${outcome}`);
       },
-      settleProcess: async ({ proof }) => {
+      settleProcess: async ({ proof, backgroundCommandDelivery }) => {
         expect(proof).toEqual({
           outcome: "exited",
           exitCode: 23,
           reason: "provider_exit_banner",
         });
+        expect(backgroundCommandDelivery).toBe("observed_inline");
         events.push("parent-settled");
       },
     });
@@ -1116,6 +1117,33 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       "stdin-resolved",
       "parent-settled",
     ]);
+  });
+
+  test("eager shell observation marks terminal command delivery as inline", async () => {
+    let delivery: string | null = null;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 174\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        return "Process exited with code 0\n\nOutput:\ndone";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async (input) => {
+        delivery = input.backgroundCommandDelivery;
+      },
+    });
+
+    await proxy.execCommand({ cmd: "quick" });
+    expect(await proxy.writeStdinForProcessObservation({ sessionId: 174, chars: "" })).toContain(
+      "code 0",
+    );
+    expect(delivery).toBe("observed_inline");
   });
 
   test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {

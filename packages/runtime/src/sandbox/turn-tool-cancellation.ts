@@ -95,6 +95,12 @@ type CommandCancellationSession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  writeStdinForProcessObservation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
   execCommandForProcessControl?(
     providerSessionId: number,
     args: TurnSandboxCommandArgs,
@@ -1267,14 +1273,23 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
     while (performance.now() - startedAt < waitMs) {
       if (this.cancelled) throw cancellationError(this.reason);
-      if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) break;
+      if (
+        !state.writeInvoke &&
+        !state.processSession?.writeStdinForProcessObservation &&
+        !state.processSession?.writeStdinForProcessControl
+      ) {
+        break;
+      }
       const remainingMs = waitMs - (performance.now() - startedAt);
       if (remainingMs <= 0) break;
       const yieldTimeMs = Math.min(TURN_PROVIDER_YIELD_SLICE_MS, Math.ceil(remainingMs));
       let next: unknown;
       try {
-        next = state.processSession?.writeStdinForProcessControl
-          ? await state.processSession.writeStdinForProcessControl({
+        const processObservation =
+          state.processSession?.writeStdinForProcessObservation ??
+          state.processSession?.writeStdinForProcessControl;
+        next = processObservation
+          ? await processObservation.call(state.processSession, {
               sessionId: state.sessionId,
               chars: "",
               yieldTimeMs,

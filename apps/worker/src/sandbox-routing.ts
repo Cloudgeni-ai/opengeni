@@ -647,11 +647,12 @@ function settleRetainedProcessForTurn(
       backend: ResolvedActiveBackend;
       process: RoutingRetainedProcess;
       proof: RoutingRetainedProcessTerminalProof;
+      backgroundCommandDelivery: "notify_model" | "observed_inline";
     }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ backend, process, proof }) => {
+  return async ({ backend, process, proof, backgroundCommandDelivery }) => {
     const durable = await getRetainedProcess(services.db, {
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
@@ -679,6 +680,7 @@ function settleRetainedProcessForTurn(
       exitCode: proof.exitCode,
       reason: proof.reason,
       idleGraceMs: services.settings.sandboxIdleGraceMs,
+      backgroundCommandDelivery,
     });
     if (settlement.process.state === "active") {
       throw new Error("Retained-process settlement returned an active durable process");

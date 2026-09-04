@@ -49469,6 +49469,7 @@ export async function settleRetainedProcess(
     exitCode?: number | null;
     reason: string;
     idleGraceMs: number;
+    backgroundCommandDelivery?: "notify_model" | "observed_inline";
   },
 ): Promise<{
   settled: boolean;
@@ -49531,6 +49532,7 @@ export async function settleRetainedProcess(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
+          delivery: input.backgroundCommandDelivery ?? "notify_model",
         });
         await settleSessionBackgroundCommandForRetainedProcessInTransaction(
           tx,
@@ -49717,6 +49719,7 @@ export async function settleRetainedProcess(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        delivery: input.backgroundCommandDelivery ?? "notify_model",
       });
       await settleSessionBackgroundCommandForRetainedProcessInTransaction(
         tx,
@@ -71433,6 +71436,7 @@ function backgroundCommandTerminalMutation(input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  delivery: "notify_model" | "observed_inline";
 }): {
   events: SessionEvent[];
   prepare: (tx: SessionActivityDatabase) => Promise<void>;
@@ -71525,6 +71529,17 @@ function backgroundCommandTerminalMutation(input: {
         )
         .returning();
       if (!finishedEvent) throw new Error("Failed to append session.command.finished event");
+      // The still-open shell tool call returns this exact terminal proof to the
+      // model. Preserve command audit truth without enqueueing a duplicate
+      // machine-input turn after the current turn completes.
+      if (input.delivery === "observed_inline") {
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        events.push(mapEvent(finishedEvent));
+        return;
+      }
       // Failed/cancelled sessions are terminal and cannot claim another model
       // turn. Their terminal transition has already drained pending machine
       // input, so reopening one here would violate cancellation authority. The
@@ -71705,7 +71720,7 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     reason: string;
   },
 ): Promise<SessionBackgroundCommandTerminalSettlement | null> {
-  const mutation = backgroundCommandTerminalMutation(input);
+  const mutation = backgroundCommandTerminalMutation({ ...input, delivery: "notify_model" });
   const command = await settleConnectedMachineSessionBackgroundCommandWithMutation(
     db,
     input,
@@ -71722,6 +71737,7 @@ export async function settleClaimedConnectedMachineBackgroundCommand(
     accountId: input.claim.accountId,
     workspaceId: input.claim.workspaceId,
     sessionId: input.claim.sessionId,
+    delivery: "notify_model",
   });
   const settled = await settleClaimedConnectedMachineBackgroundCommandWithMutation(
     db,

@@ -16,6 +16,7 @@ import {
   createSession,
   getRetainedProcess,
   initializeSessionStartAtomically,
+  listOutstandingSessionSystemUpdates,
   mutateSessionControlInTransaction,
   readLease,
   recordRetainedProcessReconciliationProof,
@@ -712,6 +713,34 @@ describe("retained-process terminal-owner reconciliation", () => {
       idleGraceMs: SETTINGS.sandboxIdleGraceMs,
     });
     expect(replay).toMatchObject({ settled: false, backgroundCommandEvents: [] });
+  });
+
+  test("inline-observed command completion keeps audit without queueing model input", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "bun test --watch",
+    });
+
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      backgroundCommandDelivery: "observed_inline",
+    });
+
+    expect(settled.backgroundCommandEvents.map((event) => event.type)).toEqual([
+      "session.command.finished",
+    ]);
+    expect(
+      await listOutstandingSessionSystemUpdates(db, fixture.workspaceId, fixture.sessionId),
+    ).toEqual([]);
   });
 
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
