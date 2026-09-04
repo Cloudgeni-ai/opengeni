@@ -30,10 +30,13 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   type WorkspaceMemoryPromptMode,
+  type WorkspaceArtifactMutationResponse,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
@@ -114,6 +117,7 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
@@ -163,7 +167,6 @@ import {
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -171,6 +174,12 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
+  projectWorkspaceArtifactVersionProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -279,6 +288,10 @@ import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import {
+  prepareWorkspaceArtifactContent,
+  readWorkspaceArtifactContent,
+} from "../workspace-artifact-content";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -620,6 +633,8 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_archive: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_restore: { sessionRequired: true, allOf: ["artifacts:publish"] },
   sandbox_file_publish: {
     sessionRequired: true,
     allOf: ["files:read", "files:upload"],
@@ -2931,42 +2946,42 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
-  const prepare = (html: string) => {
+  const canReadProvenanceSession = (sourceSessionId: string): Promise<boolean> =>
+    authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+      .then(() => true)
+      .catch((error) => {
+        if (error instanceof SessionAuthorizationDeniedError) return false;
+        throw error;
+      });
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const prepare = (
+    html: string,
+    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    requestedTools?: Array<{ serverId: string; toolName: string }>,
+  ) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
-    const bytes = new TextEncoder().encode(html);
-    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
-      throw new Error(
-        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
-      );
-    }
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-    return {
-      contentKey,
-      contentSha256,
-      sizeBytes: bytes.byteLength,
-      persistContent: async () => {
-        await deps.objectStorage!.putObject({
-          key: contentKey,
-          contentType: "text/html; charset=utf-8",
-          body: bytes,
-          sha256: contentSha256,
-        });
-      },
-    };
+    return prepareWorkspaceArtifactContent(deps.objectStorage, grant.workspaceId, {
+      html,
+      ...(source ? { source } : {}),
+      ...(requestedTools ? { requestedTools } : {}),
+    });
   };
   const provenance = (
     idempotencyKey: string,
-    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+    sourceToolName:
+      | "artifacts_create"
+      | "artifacts_publish"
+      | "artifacts_rollback"
+      | "artifacts_archive"
+      | "artifacts_restore",
   ) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationKey: `attempt:${createHash("sha256")
-        .update(
-          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
-        )
+        .update(`${claims.sessionId}:${claims.turnId}:${idempotencyKey}`)
         .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
@@ -2986,7 +3001,11 @@ function registerWorkspaceArtifactTools(
     },
     async () => {
       await authorize();
-      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
     },
   );
 
@@ -3003,21 +3022,27 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
-      const [detail, ref] = await Promise.all([
+      const [rawDetail, ref] = await Promise.all([
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await retryWhileMissing(async () =>
-        deps.objectStorage!.getObjectBytes(ref.contentKey),
-      );
-      if (!object) throw new Error("Artifact content is unavailable");
-      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
-      if (actualHash !== ref.version.contentSha256)
-        throw new Error("Artifact content failed integrity verification");
+      const sourceAuthorizations = new Map<string, Promise<boolean>>();
+      const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
+        const existing = sourceAuthorizations.get(sourceSessionId);
+        if (existing) return existing;
+        const decision = canReadProvenanceSession(sourceSessionId);
+        sourceAuthorizations.set(sourceSessionId, decision);
+        return decision;
+      };
+      const [detail, projectedVersion] = await Promise.all([
+        projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
+        projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
+      ]);
+      const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
       return json({
         detail,
-        version: ref.version,
-        html: new TextDecoder().decode(object.bytes),
+        version: projectedVersion,
+        ...content,
       });
     },
   );
@@ -3036,23 +3061,49 @@ function registerWorkspaceArtifactTools(
           .max(96)
           .optional(),
         html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ title, description, slug, html, idempotencyKey }) => {
+    async ({ title, description, slug, html, source, requestedTools, idempotencyKey }) => {
       await authorize();
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await createWorkspaceArtifact(deps.db, {
-          artifactId,
-          slug: resolvedSlug,
-          title,
-          description: description ?? null,
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_create"),
-        }),
+        await mutation(
+          await createWorkspaceArtifact(deps.db, {
+            artifactId,
+            slug: resolvedSlug,
+            requestedSlug: slug ?? null,
+            title,
+            description: description ?? null,
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_create"),
+          }),
+        ),
       );
     },
   );
@@ -3068,20 +3119,54 @@ function registerWorkspaceArtifactTools(
         title: z4.string().min(1).max(120).optional(),
         description: z4.string().max(2000).nullable().optional(),
         html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+    async ({
+      artifactId,
+      expectedCurrentVersionId,
+      title,
+      description,
+      html,
+      source,
+      requestedTools,
+      idempotencyKey,
+    }) => {
       await authorize();
       return json(
-        await publishWorkspaceArtifactVersion(deps.db, {
-          artifactId,
-          expectedCurrentVersionId,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_publish"),
-        }),
+        await mutation(
+          await publishWorkspaceArtifactVersion(deps.db, {
+            artifactId,
+            expectedCurrentVersionId,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_publish"),
+          }),
+        ),
       );
     },
   );
@@ -3102,13 +3187,71 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await rollbackWorkspaceArtifact(deps.db, {
-          artifactId,
-          versionId,
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_rollback"),
-        }),
+        await mutation(
+          await rollbackWorkspaceArtifact(deps.db, {
+            artifactId,
+            versionId,
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_rollback"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_archive",
+    {
+      description:
+        "Unpublish an active workspace artifact without deleting its immutable versions or retained source.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "archived",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_archive"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_restore",
+    {
+      description:
+        "Republish an archived workspace artifact at its unchanged current immutable version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "active",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_restore"),
+          }),
+        ),
       );
     },
   );

@@ -24049,7 +24049,7 @@ export async function acquireCodexCredentialLease<
         turn.status !== "running" ||
         turn.active_attempt_id !== input.attemptId ||
         Number(turn.execution_generation) !== input.executionGeneration ||
-        attempt.state !== "running" ||
+        (attempt.state !== "claimed" && attempt.state !== "running") ||
         Number(attempt.execution_generation) !== input.executionGeneration ||
         attempt.temporal_workflow_id !== input.workflowId ||
         attempt.temporal_workflow_run_id !== input.workflowRunId ||
@@ -26986,7 +26986,7 @@ export async function quarantineCodexCredentialForLease(
           attempt.accountId !== input.accountId ||
           attempt.sessionId !== input.sessionId ||
           attempt.turnId !== input.turnId ||
-          attempt.state !== "running" ||
+          (attempt.state !== "claimed" && attempt.state !== "running") ||
           attempt.executionGeneration !== input.executionGeneration ||
           attempt.temporalWorkflowId !== input.workflowId ||
           attempt.temporalWorkflowRunId !== input.workflowRunId ||
@@ -30113,6 +30113,49 @@ export async function prepareConnectorActionApproval(
           actionFingerprint: row.actionFingerprint,
         } as const;
       }),
+  );
+}
+
+/** Resolve the frozen connector policy without creating approval or audit state. */
+export async function previewConnectorActionApproval(
+  db: Database,
+  identity: ConnectorActionAttemptIdentity,
+  invocation: ConnectorActionInvocation,
+): Promise<PrepareConnectorActionApprovalResult> {
+  const normalized = normalizedConnectorActionInvocation(identity, invocation);
+  if (!normalized.connectionId) {
+    return { managed: false, decision: "unmanaged" };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: identity.accountId, workspaceId: identity.workspaceId },
+    async (scopedDb) => {
+      const snapshot = await connectorActionAttemptSnapshot(scopedDb, identity);
+      const resolved =
+        normalized.approvalMode === "session_mcp"
+          ? resolvedSessionMcpApproval(normalized.policyActionSelector)
+          : resolvedConnectorWriteApproval(
+              resolveConnectorActionPolicy(snapshot, {
+                connectionId: normalized.connectionId!,
+                serverId: normalized.serverId,
+                toolName: normalized.toolName,
+                actionName: normalized.policyActionSelector,
+              }),
+              normalized.approvalMode,
+              normalized.policyActionSelector,
+            );
+      if (!resolved.managed) return { managed: false, decision: "unmanaged" } as const;
+      const durable = durableConnectorActionInvocation(
+        identity,
+        { ...normalized, connectionId: normalized.connectionId! },
+        resolved,
+      );
+      return {
+        managed: true,
+        decision: connectorActionPolicyDecision(resolved),
+        actionFingerprint: durable.actionFingerprint,
+      } as const;
+    },
   );
 }
 
@@ -36666,6 +36709,42 @@ export async function getSessionEventByClientEventId(
   });
 }
 
+/**
+ * Resolve the visible creation event for one exact tool operation. This is a
+ * rolling-upgrade compatibility lookup for producers that predate deterministic
+ * client event ids; the operation id remains bound to the same turn attempt.
+ */
+export async function getSessionToolCallCreatedEventByOperationId(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    operationId: string;
+  },
+): Promise<SessionEvent | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.turnId, input.turnId),
+          eq(schema.sessionEvents.turnAttemptId, input.attemptId),
+          eq(schema.sessionEvents.turnAssociation, "current"),
+          eq(schema.sessionEvents.type, "agent.toolCall.created"),
+          eq(sql<string>`${schema.sessionEvents.payload} ->> 'id'`, input.operationId),
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    return row ? mapEvent(row) : null;
+  });
+}
+
 export const APPROVAL_RUN_STATE_MAX_JSON_BYTES = 3 * 1024 * 1024;
 export const APPROVAL_RUN_STATE_MAX_JSON_NODES = 65_536;
 export const APPROVAL_RUN_STATE_MAX_JSON_PROPERTIES = 32_768;
@@ -37887,6 +37966,80 @@ export async function adoptConnectedMachineSessionBackgroundCommand(
           throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
         }
         return await insertConnectedMachineSessionBackgroundCommandInTransaction(tx, input);
+      }),
+  );
+}
+
+/** Transfer one exact managed retained process from a live turn attempt to its
+ * session. Retaining the provider process and backgrounding it are deliberately
+ * separate: a provider yield only preserves physical ownership; this adoption
+ * occurs immediately before the running receipt becomes model-visible. */
+export async function adoptManagedSessionBackgroundCommand(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    command: string;
+  },
+) {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockBackgroundCommandWorkspaceLifecycle(tx, [input.workspaceId], "share");
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          throw new SessionBackgroundCommandAdoptionFencedError(fence.reason);
+        }
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          fence.session.accountId !== input.accountId ||
+          !process ||
+          process.state !== "active" ||
+          process.ownerActorKind !== "turn" ||
+          process.ownerActorId !== input.attemptId ||
+          process.ownerTurnId !== input.turnId ||
+          process.ownerAttemptId !== input.attemptId ||
+          process.ownerExecutionGeneration !== input.executionGeneration ||
+          process.sandboxGroupId !== fence.session.sandboxGroupId ||
+          !retainedProcessMatchesSettlementIdentity(process, input.expected)
+        ) {
+          throw new SessionBackgroundCommandAdoptionFencedError("attempt_changed");
+        }
+        return await insertManagedSessionBackgroundCommandInTransaction(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          commandId: input.processId,
+          retainedProcessId: input.processId,
+          command: input.command,
+        });
       }),
   );
 }
@@ -74732,6 +74885,8 @@ export {
 } from "./plugin-packages";
 
 export * from "./workspace-artifacts";
+export * from "./mcp-oauth";
+export * from "./tool-gateway-approvals";
 export * from "./transcription-recordings";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-materialization";

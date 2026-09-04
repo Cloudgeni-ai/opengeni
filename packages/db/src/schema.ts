@@ -8,6 +8,7 @@ import type {
   McpPersonalConnectionDelegation,
   PersonalResourceAttachmentIntent,
   PersonalResourceAttachmentSummary,
+  Permission,
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
@@ -18,6 +19,7 @@ import type {
   SessionGoalSnapshot,
   SlackUserLinkAccessRequest,
   TimelineAnnotation,
+  ToolGatewayIdentity,
   UserResourceDelegation,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
@@ -194,6 +196,11 @@ export const workspaceArtifacts = pgTable(
     ),
     workspaceId: uniqueIndex("workspace_artifacts_workspace_id_uq").on(table.workspaceId, table.id),
     list: index("workspace_artifacts_list_idx").on(table.workspaceId, table.updatedAt),
+    statusList: index("workspace_artifacts_status_list_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
   }),
 );
 
@@ -213,6 +220,10 @@ export const workspaceArtifactVersions = pgTable(
     contentType: text("content_type").$type<"text/html">().notNull().default("text/html"),
     contentSha256: text("content_sha256").notNull(),
     sizeBytes: integer("size_bytes").notNull(),
+    sourceKey: text("source_key"),
+    sourceSha256: text("source_sha256"),
+    sourceSizeBytes: integer("source_size_bytes"),
+    requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
@@ -273,10 +284,11 @@ export const workspaceArtifactEvents = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     artifactId: uuid("artifact_id").notNull(),
-    type: text("type").$type<"published" | "rolled_back">().notNull(),
+    type: text("type").$type<"published" | "rolled_back" | "archived" | "restored">().notNull(),
     fromVersionId: uuid("from_version_id"),
     toVersionId: uuid("to_version_id").notNull(),
     operationKey: text("operation_key").notNull(),
+    requestDigest: text("request_digest"),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
     sourceAttemptId: uuid("source_attempt_id"),
@@ -3479,6 +3491,219 @@ export const integrationOauthStateNonces = pgTable(
   (table) => ({
     workspace: index("integration_oauth_state_nonces_workspace_idx").on(table.workspaceId),
     expires: index("integration_oauth_state_nonces_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthClients = pgTable(
+  "mcp_oauth_clients",
+  {
+    clientId: text("client_id").primaryKey(),
+    redirectUris: jsonb("redirect_uris").$type<string[]>().notNull(),
+    clientName: text("client_name"),
+    tokenEndpointAuthMethod: text("token_endpoint_auth_method").notNull().default("none"),
+    grantTypes: jsonb("grant_types")
+      .$type<Array<"authorization_code" | "refresh_token">>()
+      .notNull(),
+    responseTypes: jsonb("response_types").$type<["code"]>().notNull(),
+    registrationScopeHash: text("registration_scope_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    created: index("mcp_oauth_clients_created_idx").on(table.createdAt),
+    scopeCreated: index("mcp_oauth_clients_scope_created_idx").on(
+      table.registrationScopeHash,
+      table.createdAt,
+    ),
+    expires: index("mcp_oauth_clients_expires_idx").on(table.expiresAt, table.clientId),
+  }),
+);
+
+const mcpOauthGrantColumns = () => ({
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  resource: text("resource").notNull(),
+  permissions: jsonb("permissions").$type<Permission[]>().notNull(),
+  toolIdentities: jsonb("tool_identities").$type<ToolGatewayIdentity[]>().notNull(),
+});
+
+export const mcpOauthAuthorizationRequests = pgTable(
+  "mcp_oauth_authorization_requests",
+  {
+    requestHash: text("request_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    state: text("state"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_authorization_requests_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expires: index("mcp_oauth_authorization_requests_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthAuthorizationCodes = pgTable(
+  "mcp_oauth_authorization_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_authorization_codes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    expires: index("mcp_oauth_authorization_codes_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthRefreshTokens = pgTable(
+  "mcp_oauth_refresh_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    familyId: uuid("family_id").notNull(),
+    generation: integer("generation").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_refresh_tokens_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    familyGeneration: uniqueIndex("mcp_oauth_refresh_tokens_family_generation_uq").on(
+      table.familyId,
+      table.generation,
+    ),
+    expires: index("mcp_oauth_refresh_tokens_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const mcpOauthAccessTokens = pgTable(
+  "mcp_oauth_access_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    refreshFamilyId: uuid("refresh_family_id").notNull(),
+    refreshGeneration: integer("refresh_generation").notNull(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
+    ...mcpOauthGrantColumns(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "mcp_oauth_access_tokens_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    family: index("mcp_oauth_access_tokens_family_idx").on(
+      table.refreshFamilyId,
+      table.refreshGeneration,
+    ),
+    expires: index("mcp_oauth_access_tokens_expires_idx").on(table.expiresAt),
+  }),
+);
+
+export const toolGatewayApprovalCapabilities = pgTable(
+  "tool_gateway_approval_capabilities",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    catalogDigest: text("catalog_digest").notNull(),
+    serverId: text("server_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    argumentsDigest: text("arguments_digest").notNull(),
+    authorityDigest: text("authority_digest").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "tool_gateway_approval_capabilities_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("tool_gateway_approval_capabilities_operation_uq").on(
+      table.workspaceId,
+      table.subjectId,
+      table.operationId,
+    ),
+    expires: index("tool_gateway_approval_capabilities_expires_idx").on(
+      table.expiresAt,
+      table.tokenHash,
+    ),
+    liveSubjectExpiry: index("tool_gateway_approval_capabilities_live_subject_expiry_idx")
+      .on(table.workspaceId, table.subjectId, table.expiresAt, table.tokenHash)
+      .where(sql`${table.consumedAt} is null`),
+    tokenHashValid: check(
+      "tool_gateway_approval_capabilities_token_hash_chk",
+      sql`${table.tokenHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    catalogDigestValid: check(
+      "tool_gateway_approval_capabilities_catalog_digest_chk",
+      sql`${table.catalogDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    argumentsDigestValid: check(
+      "tool_gateway_approval_capabilities_arguments_digest_chk",
+      sql`${table.argumentsDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    authorityDigestValid: check(
+      "tool_gateway_approval_capabilities_authority_digest_chk",
+      sql`${table.authorityDigest} ~ '^[0-9a-f]{64}$'`,
+    ),
+    subjectValid: check(
+      "tool_gateway_approval_capabilities_subject_chk",
+      sql`length(btrim(${table.subjectId})) between 1 and 1024`,
+    ),
+    identityValid: check(
+      "tool_gateway_approval_capabilities_identity_chk",
+      sql`length(${table.serverId}) between 1 and 256
+        and length(${table.toolName}) between 1 and 512`,
+    ),
+    expiryValid: check(
+      "tool_gateway_approval_capabilities_expiry_chk",
+      sql`${table.expiresAt} > ${table.createdAt}
+        and ${table.expiresAt} <= ${table.createdAt} + interval '10 minutes'`,
+    ),
   }),
 );
 

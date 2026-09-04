@@ -6,7 +6,7 @@ import {
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
-} from "./web-bundle-budget-policy";
+} from "./web-bundle-budget-unified-tool-gateway";
 
 type ManifestEntry = {
   file: string;
@@ -412,6 +412,10 @@ const budgets = {
   // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
+  // Merging that session lifecycle with the unified Tool Gateway and Sites
+  // graph measures 2,290,677 raw bytes on Linux/x64 Bun 1.4. Advance only the
+  // PR-specific raw policy envelope to 2,238 KiB, retaining 1,035 bytes of
+  // headroom; gzip and every other cap remain fixed.
   // The shared active-work action marker merged on protected main with failing
   // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
   // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of

@@ -1,0 +1,255 @@
+import { describe, expect, test } from "bun:test";
+import {
+  ToolGatewayApprovalRequiredError,
+  ToolGatewayCatalogIntegrityError,
+  ToolGatewayInputValidationError,
+  ToolGatewayPathCollisionError,
+  createWorkspaceToolGateway,
+  parseVerifiedToolGatewayCatalog,
+  type ToolGatewayDefinition,
+} from "../src";
+
+const definition: ToolGatewayDefinition = {
+  identity: { serverId: "docs", toolName: "search" },
+  modelName: "docs__search",
+  description: "Search docs",
+  inputSchema: {
+    type: "object",
+    properties: { query: { type: "string" } },
+    required: ["query"],
+    additionalProperties: false,
+  },
+  source: "docs",
+  approval: "none",
+  execute: async (argumentsValue, context) => ({
+    content: [{ type: "text", text: `${context.caller.kind}:${String(argumentsValue.query)}` }],
+    structuredContent: { ok: true },
+  }),
+};
+
+describe("ToolGateway", () => {
+  test("executes HTTP, MCP, browser, model, and Codemode callers through one core", async () => {
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      createdAt: new Date("2026-09-02T00:00:00.000Z"),
+      definitions: [definition],
+    });
+    for (const kind of ["http", "mcp", "browser", "codemode"] as const) {
+      const result = await gateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: kind },
+        caller: { kind, subjectId: "human:test" },
+      });
+      expect(result.content[0]).toEqual({ type: "text", text: `${kind}:${kind}` });
+    }
+    const model = await gateway.callModel({
+      modelName: definition.modelName,
+      arguments: { query: "model" },
+      subjectId: "agent:test",
+    });
+    expect(model.content[0]).toEqual({ type: "text", text: "model:model" });
+  });
+
+  test("validates arguments and supports adapter-owned approval decisions", async () => {
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [{ ...definition, approval: "human" }],
+      requireApproval: (entry, caller, context) =>
+        entry.approval === "human" &&
+        caller.kind !== "model" &&
+        context.transportMeta?.approvalConfirmed !== true,
+    });
+    await expect(
+      gateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: 1 },
+        caller: { kind: "model", subjectId: "agent:test" },
+      }),
+    ).rejects.toBeInstanceOf(ToolGatewayInputValidationError);
+    await expect(
+      gateway.callModel({
+        modelName: definition.modelName,
+        arguments: { query: "model-bypass" },
+        subjectId: "agent:test",
+      }),
+    ).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    await expect(
+      gateway.call({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: "blocked" },
+        caller: { kind: "browser", subjectId: "human:test" },
+      }),
+    ).rejects.toBeInstanceOf(ToolGatewayApprovalRequiredError);
+    await expect(
+      gateway.call(
+        {
+          operationId: crypto.randomUUID(),
+          catalogDigest: catalog.digest,
+          identity: definition.identity,
+          arguments: { query: "approved" },
+          caller: { kind: "browser", subjectId: "human:test" },
+        },
+        { transportMeta: { approvalConfirmed: true } },
+      ),
+    ).resolves.toMatchObject({ structuredContent: { ok: true } });
+  });
+
+  test("owns prepare, execution-boundary begin, and terminal lifecycle settlement", async () => {
+    const phases: string[] = [];
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          lifecycle: {
+            prepare: ({ call }) => {
+              phases.push(`prepare:${String(call.arguments.query)}`);
+              return {
+                begin: () => {
+                  phases.push("begin");
+                },
+                complete: ({ outcome }) => {
+                  phases.push(`complete:${outcome}`);
+                },
+              };
+            },
+          },
+          execute: async (argumentsValue, context) => {
+            phases.push("execute");
+            return await definition.execute(argumentsValue, context);
+          },
+        },
+      ],
+    });
+    expect(catalog.entries[0]).not.toHaveProperty("lifecycle");
+    const prepared = await gateway.prepareCall({
+      operationId: crypto.randomUUID(),
+      catalogDigest: catalog.digest,
+      identity: definition.identity,
+      arguments: { query: "ordered" },
+      caller: { kind: "codemode", subjectId: "agent:test" },
+    });
+    expect(phases).toEqual(["prepare:ordered"]);
+    await expect(prepared.execute()).resolves.toMatchObject({ structuredContent: { ok: true } });
+    expect(phases).toEqual(["prepare:ordered", "begin", "execute", "complete:completed"]);
+  });
+
+  test("keeps approval authority private while binding prepared calls to its exact revision", async () => {
+    const firstAuthority = "a".repeat(64);
+    const secondAuthority = "b".repeat(64);
+    const first = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      createdAt: new Date("2026-09-03T00:00:00.000Z"),
+      definitions: [{ ...definition, approval: "human", approvalAuthorityDigest: firstAuthority }],
+    });
+    const second = createWorkspaceToolGateway({
+      accountId: first.catalog.accountId,
+      workspaceId: first.catalog.workspaceId,
+      generation: first.catalog.generation,
+      createdAt: new Date(first.catalog.createdAt),
+      definitions: [{ ...definition, approval: "human", approvalAuthorityDigest: secondAuthority }],
+    });
+    expect(first.catalog.digest).toBe(second.catalog.digest);
+    expect(first.catalog.entries[0]).not.toHaveProperty("approvalAuthorityDigest");
+    const call = {
+      operationId: crypto.randomUUID(),
+      catalogDigest: first.catalog.digest,
+      identity: definition.identity,
+      arguments: { query: "authority" },
+      caller: { kind: "http" as const, subjectId: "human:test" },
+    };
+    expect((await first.gateway.prepareCall(call)).approvalAuthorityDigest).toBe(firstAuthority);
+    expect((await second.gateway.prepareCall(call)).approvalAuthorityDigest).toBe(secondAuthority);
+  });
+
+  test("fails lifecycle preparation before begin or executor dispatch", async () => {
+    const phases: string[] = [];
+    const { catalog, gateway } = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      definitions: [
+        {
+          ...definition,
+          lifecycle: {
+            prepare: () => {
+              phases.push("prepare");
+              throw new Error("policy unavailable");
+            },
+          },
+          execute: async () => {
+            phases.push("execute");
+            return { content: [{ type: "text", text: "unreachable" }] };
+          },
+        },
+      ],
+    });
+    await expect(
+      gateway.prepareCall({
+        operationId: crypto.randomUUID(),
+        catalogDigest: catalog.digest,
+        identity: definition.identity,
+        arguments: { query: "blocked" },
+        caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toThrow("policy unavailable");
+    expect(phases).toEqual(["prepare"]);
+  });
+
+  test("verifies catalog integrity independently of creation time", () => {
+    const first = createWorkspaceToolGateway({
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      generation: 1,
+      createdAt: new Date("2026-09-02T00:00:00.000Z"),
+      definitions: [definition],
+    }).catalog;
+    const later = createWorkspaceToolGateway({
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      generation: 1,
+      createdAt: new Date("2026-09-02T01:00:00.000Z"),
+      definitions: [definition],
+    }).catalog;
+    expect(first.digest).toBe(later.digest);
+    expect(() =>
+      parseVerifiedToolGatewayCatalog({
+        ...first,
+        entries: [{ ...first.entries[0], description: "tampered" }],
+      }),
+    ).toThrow(ToolGatewayCatalogIntegrityError);
+  });
+
+  test("rejects namespace paths that use a tool leaf as a prefix", () => {
+    expect(() =>
+      createWorkspaceToolGateway({
+        accountId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        definitions: [
+          { ...definition, codemodePath: ["docs", "search"] },
+          {
+            ...definition,
+            identity: { serverId: "docs", toolName: "search_advanced" },
+            modelName: "docs__search_advanced",
+            codemodePath: ["docs", "search", "advanced"],
+          },
+        ],
+      }),
+    ).toThrow(ToolGatewayPathCollisionError);
+  });
+});

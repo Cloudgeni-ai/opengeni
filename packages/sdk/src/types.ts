@@ -72,6 +72,80 @@ export type GatewayRealtimeConnectResponse = {
   replay: false;
 };
 
+export type ToolGatewayIdentity = {
+  serverId: string;
+  toolName: string;
+};
+
+export type ToolGatewayCatalogEntry = {
+  identity: ToolGatewayIdentity;
+  modelName: string;
+  codemodePath: string[];
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown> | undefined;
+  annotations?: Record<string, unknown> | undefined;
+  icons?: Array<Record<string, unknown>> | undefined;
+  source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
+  approval: "none" | "human" | "policy";
+};
+
+export type ToolGatewayCatalog = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  generation: number;
+  digest: string;
+  createdAt: string;
+  entries: ToolGatewayCatalogEntry[];
+};
+
+export type ToolGatewayResult = {
+  content: Array<{ type: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown> | undefined;
+  isError?: boolean | undefined;
+  _meta?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+};
+
+export type ToolGatewayCallRequest = {
+  operationId?: string | undefined;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+  siteArtifactId?: string | undefined;
+  siteVersionId?: string | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  approvalToken: string;
+  expiresAt: string;
+};
+
+export type ToolGatewayCallResponse = {
+  operationId: string;
+  catalogDigest: string;
+  result: ToolGatewayResult;
+};
+
+export type ToolGatewayDeclarationsResponse = {
+  catalogDigest: string;
+  moduleSpecifier: string;
+  source: string;
+};
+
 export type ActivateCodexRealtimeConnectionRequest = {
   operationId: string;
   browserInstanceId: string;
@@ -3012,6 +3086,8 @@ export type FirstPartyMcpToolName =
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"

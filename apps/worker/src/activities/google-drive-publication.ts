@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AttemptToolApprovalRequiredError, type AttemptToolDefinition } from "@opengeni/codemode";
+import type { AttemptToolDefinition } from "@opengeni/codemode";
 import type { McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
   GOOGLE_DRIVE_FILE_SCOPE,
@@ -17,10 +17,7 @@ import {
   type GoogleDrivePublicationToolInput as GoogleDrivePublicationToolInputValue,
 } from "@opengeni/contracts/google-drive";
 import {
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
   getConnectionMetadata,
-  prepareConnectorActionApproval,
   requireFile,
   namedSubjectHasLiveWorkspaceAuthority,
   type ConnectorActionAttemptIdentity,
@@ -34,6 +31,7 @@ import {
   type PersistedEditableArtifactMaterializationJob,
 } from "@opengeni/db/editable-artifact-durable-export";
 import { readResponseJsonBounded, undiciFetch, type FetchLike } from "@opengeni/network";
+import { ConnectorActionExecutionError } from "@opengeni/runtime";
 import { retryWhileMissing, type ObjectStorage } from "@opengeni/storage";
 
 const DRIVE_API = "https://www.googleapis.com/drive/v3";
@@ -66,9 +64,6 @@ export type GoogleDrivePublicationPorts = {
   getMembership: typeof namedSubjectHasLiveWorkspaceAuthority;
   readMaterialization: typeof readAuthorizedEditableArtifactMaterialization;
   requireFile: typeof requireFile;
-  prepare: typeof prepareConnectorActionApproval;
-  begin: typeof beginConnectorActionExecution;
-  complete: typeof completeConnectorActionExecution;
   fetch: FetchLike;
 };
 
@@ -77,9 +72,6 @@ const defaultPorts: GoogleDrivePublicationPorts = {
   getMembership: namedSubjectHasLiveWorkspaceAuthority,
   readMaterialization: readAuthorizedEditableArtifactMaterialization,
   requireFile,
-  prepare: prepareConnectorActionApproval,
-  begin: beginConnectorActionExecution,
-  complete: completeConnectorActionExecution,
   fetch: undiciFetch,
 };
 
@@ -303,35 +295,6 @@ export function createGoogleDrivePublicationAttemptTool(input: {
     approval: "policy",
     execute: async (raw, context) => {
       const request = GoogleDrivePublicationToolInput.parse(raw);
-      const connectorCall = googleDrivePublicationConnectorCall(
-        input.target,
-        request,
-        context.operationId,
-      );
-      // Every caller is behind exactly one durable execute-once fence. Model
-      // callers arrive through the attempt connector-action wrapper, which has
-      // already registered this call under its durable SDK call id and moved
-      // the approved row to executing - a second inner begin here would mint a
-      // second row under an unrelated operation id and deadlock the default
-      // ask policy. Codemode callers bypass that wrapper, so the tool
-      // registers the fence itself with the shared Codemode operation id.
-      let requestId: string | null = null;
-      if (context.caller.kind === "codemode") {
-        const admission = await ports.begin(input.db, input.identity, connectorCall);
-        if (!admission.allowed) {
-          throw new Error(
-            admission.reason === "uncertain_retry" || admission.reason === "already_executed"
-              ? "Google Drive publication outcome is unknown: a previous attempt may have already sent this publication to Google Drive. Verify in Drive before retrying with a new idempotency key."
-              : admission.reason === "not_executed"
-                ? "Google Drive publication was not executed: the previous attempt failed before any request reached Google Drive. Retrying with a new call is safe."
-                : `Google Drive publication was not executed: ${admission.reason}. No request reached Google Drive.`,
-          );
-        }
-        if (!admission.managed) {
-          throw new Error("Google Drive publication has no explicit connector action policy");
-        }
-        requestId = admission.requestId;
-      }
       let providerRequestStarted = false;
       try {
         const receipt = await executeGoogleDrivePublication(
@@ -350,62 +313,22 @@ export function createGoogleDrivePublicationAttemptTool(input: {
           },
           ports,
         );
-        if (requestId) {
-          await ports.complete(input.db, {
-            accountId: input.identity.accountId,
-            workspaceId: input.identity.workspaceId,
-            requestId,
-            attemptId: input.identity.attemptId,
-            outcome: "completed",
-          });
-        }
         return {
           content: [{ type: "text", text: JSON.stringify(receipt) }],
           structuredContent: receipt,
         };
       } catch (error) {
-        if (requestId) {
-          await ports.complete(input.db, {
-            accountId: input.identity.accountId,
-            workspaceId: input.identity.workspaceId,
-            requestId,
-            attemptId: input.identity.attemptId,
-            outcome: providerRequestStarted ? "uncertain" : "not_executed",
-          });
-        }
         const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(
+        throw new ConnectorActionExecutionError(
           providerRequestStarted
             ? `Google Drive publication outcome is unknown: a provider request may have been sent before the failure. Verify in Drive before retrying. Cause: ${detail}`
             : `Google Drive publication was not executed: no request reached Google Drive. Cause: ${detail}`,
+          providerRequestStarted ? "uncertain" : "not_executed",
           { cause: error },
         );
       }
     },
   };
-}
-
-export async function authorizeGoogleDrivePublicationAttempt(input: {
-  db: Database;
-  identity: ConnectorActionAttemptIdentity;
-  target: GoogleDrivePublicationTarget;
-  approvalId: string;
-  arguments: unknown;
-  ports?: Pick<GoogleDrivePublicationPorts, "prepare">;
-}): Promise<void> {
-  const request = GoogleDrivePublicationToolInput.parse(input.arguments);
-  const preparation = await (input.ports ?? defaultPorts).prepare(
-    input.db,
-    input.identity,
-    googleDrivePublicationConnectorCall(input.target, request, input.approvalId),
-  );
-  if (!preparation.managed) {
-    throw new Error("Google Drive publication has no explicit connector action policy");
-  }
-  if (preparation.decision === "ask") throw new AttemptToolApprovalRequiredError();
-  if (preparation.decision === "block") {
-    throw new Error("Google Drive publication is blocked by connector action policy");
-  }
 }
 
 export async function executeGoogleDrivePublication(

@@ -3078,6 +3078,18 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     // The Modal writeStdin non-throwing banner when the exec-session is gone.
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 1", 1)).toBe(true);
     expect(isExecSessionLostBanner("session not found: 1", 1)).toBe(true);
+    expect(
+      isExecSessionLostBanner(
+        "Wall time: 0.001 seconds\nProcess exited with code 1\nOutput:\nwrite_stdin failed: session not found: 1",
+        1,
+      ),
+    ).toBe(true);
+    expect(
+      isExecSessionLostBanner(
+        "untrusted prelude\nOutput:\nwrite_stdin failed: session not found: 1",
+        1,
+      ),
+    ).toBe(false);
     // The hard fence requires the exact tracked numeric id and known complete
     // banner. Generic, malformed, mismatched, and ambiguous text fails closed.
     expect(isExecSessionLostBanner("session not found", 1)).toBe(false);

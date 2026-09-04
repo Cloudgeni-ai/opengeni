@@ -998,6 +998,7 @@ handlers because its host owns process lifecycle.
 | `packages/storage` | `@opengeni/storage` | Object-storage abstraction for files, recordings, and retained bytes |
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
+| `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -1109,9 +1110,102 @@ Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
 
+`@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
+authorization, approval-classification, and execution boundary. Runtime prepares
+one canonical provider set from enabled first-party and integration MCP servers;
+the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
+workspace HTTP/SDK adapter project that same catalog and invoke the same executor
+closures. Friendly model names and JavaScript paths are projections of the
+opaque `{serverId, toolName}` identity and never authority. Canonical allocation
+adds an identity-derived suffix whenever a requested path must be normalized, so
+the resulting path does not change when neighboring catalog entries appear or
+disappear, and rejects every remaining namespace/tool prefix or exact collision
+before a catalog can be published. In-process local model tools
+bind only to the final combined local-plus-MCP attempt environment used by
+Codemode, never to a provisional local-only gateway.
+
+Codemode adds only attempt scope, active-attempt fencing, its durable operation
+journal, sandbox delivery, and recovery semantics. Input and authorization
+preflight finish before its execution-start marker. The API exposes a stable
+pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
+and path/identity re-resolution without retrying an existing or ambiguous
+operation. Deterministic submission conflicts are never reconciled to an
+existing row; ambiguous submission failures may adopt a row only after exact
+attempt scope, catalog, identity, and canonical-argument comparison. Once an
+exact operation has been admitted, a later deterministic wake failure
+reconciles through that exact journal row; if the recovery read is unavailable,
+the client returns a typed outcome-unknown error carrying the same operation id.
+While an admitted operation remains queued or running, the client periodically
+re-notifies the owning dispatcher with that same id. This does not replay the
+tool: a live claim answers already-running, an expired pre-execution claim may
+be reclaimed, and an expired post-execution claim settles outcome-unknown with
+its visible `agent.toolCall.output` in the same PostgreSQL commit as the
+terminal journal state.
+Concurrent first submissions serialize on the caller-owned operation id and
+converge to one creation plus one replay. Client abort is observer-only; server
+cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
+rebuilds live authority for each request. Browser callers use
+`client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
+parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
+credentials nor workspace routing context. The active immutable Site version's
+retained tool identities are its direct-call allowlist: the parent intersects
+them with the current viewer's live gateway, and the API revalidates the exact
+active version and identity on every call. Publishing grants no tool authority:
+requested identities are only a maximum allowlist, and ordinary live gateway
+approval still applies at execution. An agent-authored version may retain any
+identity present in its exact attempt catalog. The host
+injects a pre-application bootstrap receiver into the exact iframe document so
+a Site client constructed after `load` can use the retained document port; the
+port and every derived tool-call port are revoked on navigation or replacement.
+Archived Sites receive no bridge.
+Every immutable version retains its causal session/turn/attempt provenance.
+List projections omit those source identifiers, and artifact detail exposes a
+source-session link only when the current viewer can read that session; private
+session relationships otherwise remain redacted.
+Provider construction is permission-filtered and resource-filtered before any
+connection or `tools/list` traffic.
+
+Current-human approval capabilities bind a private provider-authority digest in
+addition to the public catalog identity and arguments. Integration revision,
+instance, or connection changes therefore invalidate older approvals without
+changing the public catalog. Connection-backed approval issuance uses a
+credential preflight mode that never refreshes tokens or records provider usage;
+an approval-required provider adapter without that seam is omitted from the
+current-human catalog until it can fail safely before capability issuance. A
+pre-execution reapproval may replace an unconsumed capability, but consumption
+retains a hash-only operation tombstone permanently: an ambiguous provider
+outcome cannot reapprove and replay the same operation id. Live issuance and
+expiry queries use a subject-scoped partial index that excludes those permanent
+tombstones, so replay evidence does not make later approvals progressively more
+expensive.
+
+External MCP clients may use the opt-in OAuth authorization server. Its public
+metadata and dynamic registration lead to an authorization-code flow with
+mandatory PKCE S256, one exact RFC 8707 workspace MCP resource, issuer-bound
+redirects, opaque short-lived access tokens, and rotating refresh tokens.
+Consent freezes the current human's permissions and tool identities; every MCP
+request intersects that snapshot with live workspace authority and the current
+gateway catalog. OAuth persistence accepts the same 4,096-entry ceiling as the
+canonical gateway catalog. Reuse of a rotated refresh-token generation revokes
+every refresh and access token in that family. OAuth bearer tokens are never
+accepted as REST credentials. Because MCP currently has no server-verifiable one-shot
+human approval capability, the MCP projection omits entries classified for
+human approval and rejects direct calls to their projected names; those entries
+remain available through the current-human HTTP/SDK approval path and the Site
+direct-call path.
+
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
+
+The attempt-frozen connector Allow/Ask/Block policy and
+`connector_action_requests` ledger apply to model and Codemode execution only.
+Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
+use the ordinary `requireApproval` classification and preserve a caller-generated
+operation id only for provider-specific handling. Sites bypass that per-call
+approval after active-version allowlist revalidation. These direct surfaces do
+not synthesize attempt-owned connector rows or a second generalized exactly-once
+journal.
 
 GitHub App binding keeps account selection explicit whenever owner-authorized
 installations already exist: the owner may choose one of them or enter GitHub's
@@ -1142,7 +1236,12 @@ remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
-are different products and must not share mutable truth accidentally.
+are different products and must not share mutable truth accidentally. Workspace
+Sites are immutable versions of the existing HTML artifact primitive: one
+self-contained HTML runtime, one retained source bundle, an exact requested-tool
+allowlist, rollback, and recoverable archive/restore. They run in the existing
+opaque-origin iframe; there is no second host, wildcard domain, or compute
+runtime.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and

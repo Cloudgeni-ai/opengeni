@@ -620,10 +620,17 @@ export async function selectCodexTurnCapacity(
           new Date(),
           CODEX_USAGE_LIMIT_MAX_RESUME_MS,
         );
+        const allConnectedAccountsWereConsidered =
+          leased.rotationEnabled && selectedPinDisposition !== "manual";
+        const capacityDetail = allConnectedAccountsWereConsidered
+          ? "all connected Codex subscriptions are rate-limited"
+          : selectedPinDisposition === "manual"
+            ? "the pinned Codex subscription is rate-limited"
+            : "the active Codex subscription is rate-limited";
         const failurePayload = codexUsageLimitFailurePayload(
           { resetsInSeconds: Math.ceil(resumeMs / 1000) },
-          "all connected Codex subscriptions are rate-limited",
-          { allAccounts: true },
+          capacityDetail,
+          { allAccounts: allConnectedAccountsWereConsidered },
         );
         const authoritativeResetAt = authoritativeCodexCapacityResetAt(leased.accounts, new Date());
         const evaluated = await armAndReconcileCodexCapacityWait(

@@ -108,6 +108,7 @@ COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
 COPY packages/testing/package.json packages/testing/package.json
+COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json
 COPY patches patches
 # The cache mount only holds Bun's download cache; the exact lock-resolved
@@ -125,19 +126,27 @@ RUN set -eux; \
     runtime=/out/codemode-runtime; \
     install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
                         "$runtime/node_modules/@opengeni/contracts" \
+                        "$runtime/node_modules/@opengeni/sdk" \
+                        "$runtime/node_modules/@opengeni/tool-gateway" \
                         "$runtime/node_modules/@noble"; \
     install -m 0644 packages/codemode/package.json "$runtime/node_modules/@opengeni/codemode/package.json"; \
     cp -a packages/codemode/src "$runtime/node_modules/@opengeni/codemode/src"; \
     install -m 0644 packages/contracts/package.json "$runtime/node_modules/@opengeni/contracts/package.json"; \
     cp -a packages/contracts/src "$runtime/node_modules/@opengeni/contracts/src"; \
-    cp -aL packages/codemode/node_modules/ajv "$runtime/node_modules/ajv"; \
-    ajv_modules="$(dirname "$(readlink -f packages/codemode/node_modules/ajv)")"; \
+    install -m 0644 packages/sdk/package.json "$runtime/node_modules/@opengeni/sdk/package.json"; \
+    cp -a packages/sdk/src "$runtime/node_modules/@opengeni/sdk/src"; \
+    install -m 0644 packages/tool-gateway/package.json "$runtime/node_modules/@opengeni/tool-gateway/package.json"; \
+    cp -a packages/tool-gateway/src "$runtime/node_modules/@opengeni/tool-gateway/src"; \
+    cp -aL packages/tool-gateway/node_modules/ajv "$runtime/node_modules/ajv"; \
+    ajv_modules="$(dirname "$(readlink -f packages/tool-gateway/node_modules/ajv)")"; \
     for dependency in fast-deep-equal fast-uri json-schema-traverse require-from-string; do \
       cp -aL "$ajv_modules/$dependency" "$runtime/node_modules/$dependency"; \
     done; \
     cp -aL packages/contracts/node_modules/zod "$runtime/node_modules/zod"; \
     cp -aL packages/contracts/node_modules/@noble/hashes "$runtime/node_modules/@noble/hashes"; \
-    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"
+    test -f "$runtime/node_modules/@opengeni/codemode/src/index.ts"; \
+    test -f "$runtime/node_modules/@opengeni/sdk/src/site.ts"; \
+    test -f "$runtime/node_modules/@opengeni/tool-gateway/src/index.ts"
 
 RUN cd packages/ogtool && bun run build
 
@@ -460,6 +469,7 @@ COPY --from=anydoc-runtime-builder /out /opt/opengeni/anydoc
 COPY docker/anydoc/LICENSE /usr/local/share/licenses/anydoc/LICENSE
 COPY docker/anydoc/THIRD-PARTY-NOTICES /usr/local/share/opengeni/anydoc-THIRD-PARTY-NOTICES
 RUN set -eux; \
+    ln -s /opt/opengeni/codemode-runtime/node_modules /node_modules; \
     chmod 0755 /usr/local/bin/opengeni-desktop-up /usr/local/bin/opengeni-desktop-down \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
@@ -478,7 +488,7 @@ RUN set -eux; \
     anydoc /tmp/anydoc-smoke.csv | grep -q alpha; \
     printf '{\\rtf1\\ansi AnyDoc smoke}' >/tmp/anydoc-smoke.rtf; \
     anydoc /tmp/anydoc-smoke.rtf | grep -q 'AnyDoc smoke'; \
-    NODE_PATH=/opt/opengeni/codemode-runtime/node_modules bun -e 'const module = await import("@opengeni/codemode"); if (typeof module.CodemodeClient !== "function" || typeof module.openGeni !== "object") process.exit(1)'; \
+    NODE_PATH=/opt/opengeni/codemode-runtime/node_modules bun -e 'const codemode = await import("@opengeni/codemode"); const site = await import("@opengeni/sdk/site"); if (typeof codemode.CodemodeClient !== "function" || typeof codemode.openGeni !== "object" || typeof site.createOpenGeniSiteClient !== "function") process.exit(1)'; \
     bash -n /usr/local/bin/opengeni-desktop-up; \
     bash -n /usr/local/bin/opengeni-desktop-down; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
