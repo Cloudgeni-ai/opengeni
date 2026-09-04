@@ -103,7 +103,8 @@ identities. Friendly names are never authority.
 3. Do not request tools the Site does not call. A Site with no direct workspace
    operations should publish `requestedTools: []`.
 4. The immutable requested set is only a maximum allowlist; publishing it grants
-   no tool authority and requires no separate tool approval.
+   no tool authority and requires no separate tool approval. Site calls do not open
+   per-call approval dialogs.
 5. The host intersects that set with the viewer's
    live workspace, permission, and connection authority on every call. Handle
    missing tools, revoked connections, stale catalogs, and access loss as normal
