@@ -1,5 +1,4 @@
 import { GlobeIcon, Loader2Icon, PlugIcon, SearchIcon } from "lucide-react";
-import { useLayoutEffect, useRef } from "react";
 
 import { CapabilityLogo } from "@/components/capabilities/capability-logo";
 import { CapabilityTile } from "@/components/capabilities/capability-tile";
@@ -166,21 +165,6 @@ export function CapabilityBrowseSection({
   /** The icon quick-connect fast path; omitted for items with no dialog-free or one-dialog connect action. */
   onQuickConnect?: (item: CapabilityCatalogItem) => (() => void) | undefined;
 }) {
-  const pendingFinalExpansionFocusIndexRef = useRef<number | null>(null);
-
-  useLayoutEffect(() => {
-    const focusIndex = pendingFinalExpansionFocusIndexRef.current;
-    if (focusIndex === null || visibleBrowse.length <= focusIndex) return;
-
-    pendingFinalExpansionFocusIndexRef.current = null;
-    if (visibleBrowse.length < browseItems.length) return;
-
-    document
-      .querySelectorAll<HTMLElement>("[data-capability-catalog-tile]")
-      [focusIndex]?.querySelector<HTMLButtonElement>("button")
-      ?.focus();
-  }, [browseItems.length, visibleBrowse.length]);
-
   return (
     <section className="space-y-4" aria-labelledby="browse-capabilities-heading">
       {filter === "all" || enabledCount > 0 ? (
@@ -225,9 +209,15 @@ export function CapabilityBrowseSection({
                 variant="outline"
                 size="sm"
                 className="pointer-coarse:min-h-11"
-                onClick={() => {
-                  pendingFinalExpansionFocusIndexRef.current = visibleBrowse.length;
+                onClick={(event) => {
+                  const button = event.currentTarget;
+                  const grid = button.parentElement?.previousElementSibling;
+                  const focusIndex = visibleBrowse.length;
                   onLoadMore();
+                  queueMicrotask(() => {
+                    if (button.isConnected || !grid?.isConnected) return;
+                    grid.children[focusIndex]?.querySelector<HTMLButtonElement>("button")?.focus();
+                  });
                 }}
               >
                 See more

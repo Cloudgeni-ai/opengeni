@@ -9,6 +9,7 @@ import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
+const secondWorkspaceId = "00000000-0000-4000-8000-000000000117";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "mcp:browser-focus";
 const capabilityName = "Example capability connector with a deterministically long provider name";
@@ -451,6 +452,48 @@ describe("capabilities browser e2e", () => {
         return [...document.querySelectorAll("[data-capability-catalog-tile]")].indexOf(activeTile);
       });
       expect(activeTileIndex).toBeGreaterThanOrEqual(48);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("in-place workspace navigation resets Browse to the first 48-item window", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installWorkspaceCatalogApi(page, 120, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.click();
+      expect(await tiles.count()).toBe(96);
+      await expectFocused(seeMore);
+
+      await page.evaluate((nextWorkspaceId) => {
+        window.history.pushState(null, "", `/workspaces/${nextWorkspaceId}/plugins`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, secondWorkspaceId);
+      await page.waitForURL(`**/workspaces/${secondWorkspaceId}/plugins`);
+      await expectVisible(
+        page.locator('[data-capability-catalog-tile^="mcp:workspace-b-"]').first(),
+      );
+
+      expect(await tiles.count()).toBe(48);
+      await expectVisible(page.getByRole("button", { name: "See more" }));
+      expect(await page.locator('[data-capability-catalog-tile^="mcp:workspace-a-"]').count()).toBe(
+        0,
+      );
+      expect(
+        (await page.evaluate(() =>
+          document.activeElement
+            ?.closest("[data-capability-catalog-tile]")
+            ?.getAttribute("data-capability-catalog-tile"),
+        )) ?? "",
+      ).not.toMatch(/^mcp:workspace-a-/);
     } finally {
       await context.close();
     }
@@ -1083,6 +1126,108 @@ async function installLargeCatalogApi(
     }
     return json({});
   });
+}
+
+async function installWorkspaceCatalogApi(
+  page: Page,
+  firstCatalogSize: number,
+  secondCatalogSize: number,
+): Promise<void> {
+  const catalogs = new Map([
+    [workspaceId, largeCatalog("workspace-a", firstCatalogSize)],
+    [secondWorkspaceId, largeCatalog("workspace-b", secondCatalogSize)],
+  ]);
+  const workspaces = [
+    workspace(),
+    { ...workspace(), id: secondWorkspaceId, name: "Second Focus Test Workspace" },
+  ];
+
+  await page.route("http://127.0.0.1:9/**", async (route) => {
+    const url = new URL(route.request().url());
+    const headers = { "x-opengeni-api-contract": apiContractRevision };
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({
+        status,
+        headers,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+
+    if (url.pathname === "/v1/config/client") {
+      return json({
+        deploymentRevision: "workspace-catalog-browser-test",
+        apiContractRevision,
+        defaultModel: "gpt-5.6-sol",
+        allowedModels: ["gpt-5.6-sol"],
+        models: [],
+        defaultReasoningEffort: "low",
+        allowedReasoningEfforts: ["low"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
+        productAccessMode: "configured",
+        auth: { mode: "none" },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      });
+    }
+    if (url.pathname === "/v1/access/me") {
+      return json({
+        mode: "configured",
+        subjectId: "workspace-catalog-subject",
+        subjectLabel: "Workspace catalog test",
+        accountGrants: [
+          {
+            accountId,
+            subjectId: "workspace-catalog-subject",
+            role: "owner",
+            permissions: ["account:admin", "workspace:admin", "capabilities:read"],
+          },
+        ],
+        workspaceGrants: workspaces.map((candidate) => ({
+          workspaceId: candidate.id,
+          accountId,
+          subjectId: "workspace-catalog-subject",
+          permissions: ["workspace:admin", "capabilities:read", "connections:read"],
+        })),
+        defaultAccountId: accountId,
+        defaultWorkspaceId: workspaceId,
+      });
+    }
+    if (url.pathname === "/v1/workspaces") return json(workspaces);
+
+    const match = /^\/v1\/workspaces\/([^/]+)\/(.+)$/.exec(url.pathname);
+    const routeWorkspaceId = match?.[1];
+    const resource = match?.[2];
+    if (!routeWorkspaceId || !catalogs.has(routeWorkspaceId)) return json({});
+    if (resource === "capabilities") {
+      return json({ items: catalogs.get(routeWorkspaceId), installations: [] });
+    }
+    if (resource === "connections") return json({ connections: [] });
+    if (resource === "social/connections") return json([]);
+    if (resource === "integrations/definitions") return json({ definitions: [] });
+    if (resource === "integrations") return json({ integrations: [] });
+    if (resource === "skills") return json({ skills: [] });
+    if (resource === "plugins") return json({ plugins: [] });
+    if (resource === "packs") return json({ packs: [], installations: [] });
+    if (resource === "variable-sets" || resource === "rigs" || resource === "channels") {
+      return json([]);
+    }
+    if (resource === "github/app") {
+      return json({ configured: false, missing: [], installUrl: null });
+    }
+    if (resource === "sessions") {
+      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+    }
+    return json({});
+  });
+}
+
+function largeCatalog(prefix: string, size: number) {
+  return Array.from({ length: size }, (_, index) => ({
+    ...capability(false),
+    id: `mcp:${prefix}-${index}`,
+    source: "public_registry",
+    name: `${prefix} Capability ${index}`,
+  }));
 }
 
 function workspace() {

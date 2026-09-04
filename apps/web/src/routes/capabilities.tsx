@@ -499,7 +499,7 @@ export function CapabilitiesRoute({
   }, [slackLinkToken, workspaceId]);
 
   // Reset the incremental window whenever the result set changes.
-  useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query]);
+  useEffect(() => setVisibleCount(PAGE_SIZE), [filter, query, workspaceId]);
 
   // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
@@ -1823,6 +1823,7 @@ export function CapabilitiesRoute({
             ) : null}
 
             <CapabilityBrowseSection
+              key={workspaceId}
               filter={filter}
               query={query}
               catalogView={catalogView}
