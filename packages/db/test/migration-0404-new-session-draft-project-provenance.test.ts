@@ -66,6 +66,20 @@ async function applyThrough(url: string, upperBound: string): Promise<void> {
   }
 }
 
+async function markAfterApplied(sql: postgres.Sql, lowerBound: string): Promise<string[]> {
+  const deferred = (await migrationFiles()).filter((file) => file > lowerBound);
+  for (const file of deferred) {
+    await sql`insert into schema_migrations (name) values (${file}) on conflict do nothing`;
+  }
+  return deferred;
+}
+
+async function unmarkApplied(sql: postgres.Sql, files: readonly string[]): Promise<void> {
+  for (const file of files) {
+    await sql`delete from schema_migrations where name = ${file}`;
+  }
+}
+
 function appUrl(database: OwnerMigratedTestDatabase): string {
   const value = new URL(database.adminUrl);
   value.username = "opengeni_app";
@@ -141,6 +155,23 @@ describe("phased new-session draft project provenance migration", () => {
     expect(fence.startsWith("-- deployment-mode: rolling\n")).toBe(true);
     expect(fence).toContain('ADD COLUMN IF NOT EXISTS "selected_project_channel_id" uuid');
     expect(fence).toContain("NOT VALID");
+    expect(fence).toContain("LOCK TABLE %I.%I IN ACCESS EXCLUSIVE MODE");
+    expect(fence).toContain("FROM pg_catalog.pg_namespace namespace");
+    expect(fence).toContain("FROM pg_catalog.pg_class relation");
+    expect(fence).toContain("FROM pg_catalog.pg_constraint constraint_row");
+    expect(fence).toContain("constraint_row.connamespace = target_schema_oid");
+    expect(fence).toContain("constraint_row.conrelid = target_table_oid");
+    expect(fence).toContain(
+      "constraint_row.conname = 'new_session_drafts_project_provenance_check'",
+    );
+    expect(fence).toContain("pg_catalog.pg_get_expr(");
+    expect(fence).toContain("existing_constraint.expression IS DISTINCT FROM");
+    expect(fence).toContain("existing_constraint.canonical_definition");
+    expect(fence).toContain("' NOT VALID$'");
+    expect(fence).toContain(
+      "new_session_drafts_project_provenance_check has an incompatible definition",
+    );
+    expect(fence).toContain("Validation state is deliberately");
     expect(fence).toContain("new_session_drafts_project_provenance_backfill_v1");
     expect(fence).toContain("current_user = (");
     expect(fence).toContain("pg_catalog.pg_get_userbyid(relation.relowner)");
@@ -199,6 +230,157 @@ describe("phased new-session draft project provenance migration", () => {
     expect(validation).toContain("VALIDATE CONSTRAINT");
     expect(validation).not.toContain("NO FORCE ROW LEVEL SECURITY");
   });
+
+  test("replays a committed 0404 body without its ledger and rejects same-name semantic drift", async () => {
+    if (!owned) return;
+    const { admin, ownerUrl } = owned;
+    const owner = postgres(ownerUrl, { max: 1, prepare: false, onnotice: () => undefined });
+    let deferred: string[] = [];
+    try {
+      await applyBelow(ownerUrl, fenceMigration);
+      deferred = await markAfterApplied(admin, fenceMigration);
+      const fence = await migrationSource(fenceMigration);
+
+      // Reproduce the outcome-unknown window exactly: the ordinary migration
+      // body commits, but the runner's separately committed ledger insert does
+      // not happen.
+      await owner.unsafe(
+        `SELECT
+          pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
+          pg_catalog.set_config('opengeni.session_variable_set_attachments_v1', '1', true);\n${fence}`,
+      );
+      const [afterBody] = await admin<
+        Array<{ present: boolean; validated: boolean | null; ledgered: boolean }>
+      >`
+        select
+          constraint_row.oid is not null as present,
+          constraint_row.convalidated as validated,
+          exists (
+            select 1 from schema_migrations where name = ${fenceMigration}
+          ) as ledgered
+        from (values (true)) sentinel(value)
+        left join pg_catalog.pg_constraint constraint_row
+          on constraint_row.connamespace = current_schema()::regnamespace
+         and constraint_row.conrelid = 'new_session_drafts'::regclass
+         and constraint_row.conname = 'new_session_drafts_project_provenance_check'`;
+      expect(afterBody).toEqual({ present: true, validated: false, ledgered: false });
+
+      await migrate(ownerUrl);
+      const [afterOutcomeUnknownReplay] = await admin<
+        Array<{ count: number; validated: boolean; ledgered: boolean; helperPresent: boolean }>
+      >`
+        select
+          count(*)::integer as count,
+          bool_and(constraint_row.convalidated) as validated,
+          exists (
+            select 1 from schema_migrations where name = ${fenceMigration}
+          ) as ledgered,
+          exists (
+            select 1
+            from pg_catalog.pg_constraint helper
+            where helper.connamespace = current_schema()::regnamespace
+              and helper.conrelid = 'new_session_drafts'::regclass
+              and helper.conname = 'new_session_drafts_project_provenance_expected_v1'
+          ) as "helperPresent"
+        from pg_catalog.pg_constraint constraint_row
+        where constraint_row.connamespace = current_schema()::regnamespace
+          and constraint_row.conrelid = 'new_session_drafts'::regclass
+          and constraint_row.conname = 'new_session_drafts_project_provenance_check'`;
+      expect(afterOutcomeUnknownReplay).toEqual({
+        count: 1,
+        validated: false,
+        ledgered: true,
+        helperPresent: false,
+      });
+
+      // A separately requested replay with the already-correct constraint must
+      // also succeed and restore the missing ledger row.
+      await admin`delete from schema_migrations where name = ${fenceMigration}`;
+      await migrate(ownerUrl);
+      const [correctReplay] = await admin<Array<{ ledgered: boolean }>>`
+        select exists (
+          select 1 from schema_migrations where name = ${fenceMigration}
+        ) as ledgered`;
+      expect(correctReplay).toEqual({ ledgered: true });
+
+      // 0407 may already have validated the exact constraint before an
+      // operator repairs a missing 0404 ledger row. The replay guard accepts
+      // that stronger state and never returns it to NOT VALID.
+      await owner.unsafe(`
+        ALTER TABLE "new_session_drafts"
+          VALIDATE CONSTRAINT "new_session_drafts_project_provenance_check"
+      `);
+      await admin`delete from schema_migrations where name = ${fenceMigration}`;
+      await migrate(ownerUrl);
+      const [validatedReplay] = await admin<Array<{ validated: boolean; ledgered: boolean }>>`
+        select
+          constraint_row.convalidated as validated,
+          exists (
+            select 1 from schema_migrations where name = ${fenceMigration}
+          ) as ledgered
+        from pg_catalog.pg_constraint constraint_row
+        where constraint_row.connamespace = current_schema()::regnamespace
+          and constraint_row.conrelid = 'new_session_drafts'::regclass
+          and constraint_row.conname = 'new_session_drafts_project_provenance_check'`;
+      expect(validatedReplay).toEqual({ validated: true, ledgered: true });
+
+      await owner.unsafe(`
+        ALTER TABLE "new_session_drafts"
+          DROP CONSTRAINT "new_session_drafts_project_provenance_check";
+        ALTER TABLE "new_session_drafts"
+          ADD CONSTRAINT "new_session_drafts_project_provenance_check"
+          CHECK ("selected_project_compute_snapshot" IS NULL) NOT VALID
+      `);
+      await admin`delete from schema_migrations where name = ${fenceMigration}`;
+
+      await expect(migrate(ownerUrl)).rejects.toThrow(
+        "new_session_drafts_project_provenance_check has an incompatible definition",
+      );
+      const [afterWrongDefinition] = await admin<
+        Array<{ definition: string; ledgered: boolean; helperPresent: boolean }>
+      >`
+        select
+          pg_catalog.pg_get_constraintdef(constraint_row.oid, false) as definition,
+          exists (
+            select 1 from schema_migrations where name = ${fenceMigration}
+          ) as ledgered,
+          exists (
+            select 1
+            from pg_catalog.pg_constraint helper
+            where helper.connamespace = current_schema()::regnamespace
+              and helper.conrelid = 'new_session_drafts'::regclass
+              and helper.conname = 'new_session_drafts_project_provenance_expected_v1'
+          ) as "helperPresent"
+        from pg_catalog.pg_constraint constraint_row
+        where constraint_row.connamespace = current_schema()::regnamespace
+          and constraint_row.conrelid = 'new_session_drafts'::regclass
+          and constraint_row.conname = 'new_session_drafts_project_provenance_check'`;
+      expect(afterWrongDefinition?.definition).toContain(
+        "selected_project_compute_snapshot IS NULL",
+      );
+      expect(afterWrongDefinition?.definition).not.toContain("selected_project_channel_id");
+      expect(afterWrongDefinition?.definition).not.toContain("jsonb_typeof");
+      expect(afterWrongDefinition).toMatchObject({ ledgered: false, helperPresent: false });
+    } finally {
+      await owner
+        .unsafe(`
+          DROP TRIGGER IF EXISTS new_session_drafts_project_provenance_v1_fence
+            ON "new_session_drafts";
+          DROP FUNCTION IF EXISTS opengeni_private.fence_new_session_draft_project_provenance_v1();
+          DROP POLICY IF EXISTS new_session_drafts_project_provenance_backfill_v1
+            ON "new_session_drafts";
+          ALTER TABLE "new_session_drafts"
+            DROP CONSTRAINT IF EXISTS "new_session_drafts_project_provenance_expected_v1",
+            DROP CONSTRAINT IF EXISTS "new_session_drafts_project_provenance_check",
+            DROP COLUMN IF EXISTS "selected_project_compute_snapshot",
+            DROP COLUMN IF EXISTS "selected_project_channel_id"
+        `)
+        .catch(() => undefined);
+      await admin`delete from schema_migrations where name = ${fenceMigration}`;
+      await unmarkApplied(admin, deferred);
+      await owner.end({ timeout: 5 }).catch(() => undefined);
+    }
+  }, 900_000);
 
   test("fences mixed writers, resumes locked batches, and validates under the real owner posture", async () => {
     if (!owned) return;
