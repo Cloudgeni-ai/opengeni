@@ -1102,6 +1102,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Waiting: child still running");
 
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1110,6 +1111,7 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Waiting: child still running");
     expect(r.container.textContent).toContain("Wait for input");
 
     await r.unmount();

@@ -2794,7 +2794,7 @@ describe("groupTimeline", () => {
 
     expect((items[0] as AgentMessageItem).streaming).toBe(false);
     expect((items[0] as AgentMessageItem).phase).toBe("commentary");
-    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
     const visible = groups[1]?.kind === "item" ? groups[1].item : null;
     expect(visible).toMatchObject({
       kind: "agent-message",
@@ -2819,6 +2819,11 @@ describe("groupTimeline", () => {
           group.item.text === "I am checking the worker.",
       ),
     ).toBe(true);
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "Waiting: child still running",
+    });
 
     expect(groupTimeline(buildTimeline(events))).toEqual(groups);
   });
@@ -2920,13 +2925,13 @@ describe("groupTimeline", () => {
     );
   });
 
-  test("does not add a wait notice when completed assistant prose is already visible", () => {
+  test("keeps the terminal wait reason visible beside earlier commentary", () => {
     reset();
-    const reason = "The child is still running.";
+    const reason = "Two reviews are still running.";
     const groups = groupTimeline(
       buildTimeline([
         event("agent.message.completed", {
-          text: reason,
+          text: "Checking the reviewers now.",
           phase: "commentary",
         }),
         event("agent.toolCall.created", {
@@ -2949,21 +2954,69 @@ describe("groupTimeline", () => {
       ]),
     );
 
-    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
     expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
       kind: "agent-message",
-      text: reason,
+      text: "Checking the reviewers now.",
       phase: "commentary",
     });
-    expect(groups.some((group) => group.kind === "item" && group.item.kind === "notice")).toBe(
-      false,
-    );
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
   });
 
   test("recovers a retained terminal output when its message event is absent", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("completes a retained partial delta from the authoritative terminal output", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.delta", { text: "All checks" }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("promotes an exact retained delta when its completion event is absent", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.delta", { text: "All checks passed." }),
         event("agent.toolCall.created", {
           id: "call-1",
           name: "exec_command",
@@ -3006,6 +3059,57 @@ describe("groupTimeline", () => {
       ]),
     );
 
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "notice" &&
+          group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
+  test("does not carry unscoped legacy response state across a new user boundary", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event(
+          "agent.message.completed",
+          { text: "Old partial result." },
+          { turnId: null },
+        ),
+        event(
+          "session.wait.started",
+          { actor: "agent", reason: "Waiting on obsolete work." },
+          { turnId: null },
+        ),
+        event("user.message", { text: "Start fresh." }, { turnId: null }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
+          { turnId: "turn-retry" },
+        ),
+        event(
+          "agent.toolCall.output",
+          { id: "call-1", output: "ok" },
+          { turnId: "turn-retry" },
+        ),
+        event(
+          "turn.completed",
+          { output: "Fresh final result." },
+          { turnId: "turn-retry" },
+        ),
+      ]),
+    );
+
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === "Fresh final result.",
+      ),
+    ).toBe(true);
     expect(
       groups.some(
         (group) =>

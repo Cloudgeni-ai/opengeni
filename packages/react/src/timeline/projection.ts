@@ -59,6 +59,7 @@ const WORKER_MESSAGE_TOOL = "session_send_message";
 const WORKER_FAILURE_CODE_MAX_LENGTH = 128;
 const WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
 type PendingWaitOutcome = { id: string; reason: string; occurredAt: string };
+type TrackedAgentResponse = { item: AgentMessageItem; completed: boolean };
 
 /**
  * Tools whose durable side-effect events already own the timeline (MemoryRow).
@@ -133,8 +134,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
   const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
-  const turnsWithAgentResponse = new Set<string>();
-  let hasUnscopedAgentResponse = false;
+  const latestAgentResponseByTurn = new Map<string | null, TrackedAgentResponse>();
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -224,30 +224,29 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
 
-  const rememberAgentResponse = (turnId: string | null): void => {
-    if (turnId) {
-      turnsWithAgentResponse.add(turnId);
-    } else {
-      hasUnscopedAgentResponse = true;
-    }
-  };
-
-  const takePendingWaitOutcome = (
+  const rememberAgentResponse = (
     turnId: string | null,
-  ): PendingWaitOutcome | undefined => {
-    const exact = pendingWaitOutcomeByTurn.get(turnId);
-    const fallback = turnId ? pendingWaitOutcomeByTurn.get(null) : undefined;
-    pendingWaitOutcomeByTurn.delete(turnId);
-    if (turnId) pendingWaitOutcomeByTurn.delete(null);
-    return exact ?? fallback;
+    item: AgentMessageItem,
+    completed: boolean,
+  ): void => {
+    latestAgentResponseByTurn.set(turnId, { item, completed });
   };
 
-  const settleAgentResponseTracking = (turnId: string | null): boolean => {
-    const hadResponse =
-      (turnId ? turnsWithAgentResponse.has(turnId) : false) || hasUnscopedAgentResponse;
-    if (turnId) turnsWithAgentResponse.delete(turnId);
-    hasUnscopedAgentResponse = false;
-    return hadResponse;
+  const takePendingWaitOutcome = (turnId: string | null): PendingWaitOutcome | undefined => {
+    const outcome = pendingWaitOutcomeByTurn.get(turnId);
+    pendingWaitOutcomeByTurn.delete(turnId);
+    return outcome;
+  };
+
+  const takeAgentResponse = (turnId: string | null): TrackedAgentResponse | undefined => {
+    const response = latestAgentResponseByTurn.get(turnId);
+    latestAgentResponseByTurn.delete(turnId);
+    return response;
+  };
+
+  const clearUnscopedTerminalTracking = (): void => {
+    latestAgentResponseByTurn.delete(null);
+    pendingWaitOutcomeByTurn.delete(null);
   };
 
   /** A new item of a different kind ends whatever was streaming at the tail. */
@@ -328,6 +327,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "user.message": {
         // A steering message must not mark in-flight tools complete; it only
         // ends whatever text was streaming. Turn lifecycle events finalize.
+        clearUnscopedTerminalTracking();
         closeStreamingTail();
         const childCompletion = workerCompletionPayload(payload.childCompletion);
         if (childCompletion) {
@@ -408,32 +408,29 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!text) {
           break;
         }
-        if (text.trim()) {
-          rememberAgentResponse(turnId);
-        }
         const open = last();
         if (open?.kind === "agent-message" && open.streaming && open.turnId === turnId) {
           open.text += text;
+          rememberAgentResponse(turnId, open, false);
           break;
         }
         closeStreamingTail();
-        items.push({
+        const item: AgentMessageItem = {
           kind: "agent-message",
           id: event.id,
           turnId,
           text,
           streaming: true,
           occurredAt: event.occurredAt,
-        });
+        };
+        items.push(item);
+        rememberAgentResponse(turnId, item, false);
         break;
       }
 
       case "agent.message.completed": {
         const text = stringValue(payload.text);
         const phase = assistantMessagePhase(payload.phase);
-        if (text.trim()) {
-          rememberAgentResponse(turnId);
-        }
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
@@ -483,10 +480,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             items.splice(openIndex, 1);
             items.push(open);
           }
+          rememberAgentResponse(turnId, open, true);
           break;
         }
         if (text) {
-          items.push({
+          const item: AgentMessageItem = {
             kind: "agent-message",
             id: event.id,
             turnId,
@@ -502,7 +500,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
               turnId,
               text,
             },
-          });
+          };
+          items.push(item);
+          rememberAgentResponse(turnId, item, true);
         }
         break;
       }
@@ -652,6 +652,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.started": {
+        if (turnId) clearUnscopedTerminalTracking();
         if (!turnId) break;
         const queuedAt = queuedAtByTurn.get(turnId);
         if (!queuedAt) break;
@@ -972,7 +973,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // extra agent response.
         if (payload.maintenance === "context_compaction") {
           finalizeOpen(turnId, "complete", event.occurredAt);
-          settleAgentResponseTracking(turnId);
+          takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
           break;
         }
@@ -984,7 +985,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // projects exactly like a failed turn plus an explicit notice.
         if (isCreditExhaustionPayload(payload)) {
           finalizeOpen(turnId, "complete", event.occurredAt);
-          settleAgentResponseTracking(turnId);
+          takeAgentResponse(turnId);
           takePendingWaitOutcome(turnId);
           items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
           items.push({
@@ -996,26 +997,41 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
-        const hadAgentResponse = settleAgentResponseTracking(turnId);
+        const latestAgentResponse = takeAgentResponse(turnId);
         const finalOutput = stringValue(payload.output);
         const pendingWaitOutcome = takePendingWaitOutcome(turnId);
-        if (!hadAgentResponse && finalOutput.trim()) {
+        if (finalOutput.trim()) {
           // `agent.message.completed` and `turn.completed` normally commit
           // together, but legacy or partially compacted ledgers may retain only
           // the terminal output receipt. Keep that authoritative response
           // visible instead of leaving it trapped in raw audit data.
-          items.push({
-            kind: "agent-message",
-            id: `${event.id}-output-message`,
-            turnId,
-            text: finalOutput,
-            streaming: false,
-            occurredAt: event.occurredAt,
-          });
+          if (
+            latestAgentResponse &&
+            !latestAgentResponse.completed &&
+            finalOutput.startsWith(latestAgentResponse.item.text)
+          ) {
+            latestAgentResponse.item.text = finalOutput;
+            latestAgentResponse.item.streaming = false;
+            latestAgentResponse.item.occurredAt = event.occurredAt;
+            const responseIndex = items.indexOf(latestAgentResponse.item);
+            if (responseIndex >= 0 && responseIndex < items.length - 1) {
+              items.splice(responseIndex, 1);
+              items.push(latestAgentResponse.item);
+            }
+          } else if (latestAgentResponse?.item.text.trim() !== finalOutput.trim()) {
+            items.push({
+              kind: "agent-message",
+              id: `${event.id}-output-message`,
+              turnId,
+              text: finalOutput,
+              streaming: false,
+              occurredAt: event.occurredAt,
+            });
+          }
         }
         finalizeOpen(turnId, "complete", event.occurredAt);
         items.push(turnEndItem(event, "complete", null));
-        if (!hadAgentResponse && !finalOutput.trim() && pendingWaitOutcome) {
+        if (!finalOutput.trim() && pendingWaitOutcome) {
           items.push({
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,
@@ -1028,7 +1044,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       }
 
       case "turn.failed": {
-        settleAgentResponseTracking(turnId);
+        takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
         // Credit death can hide behind fields `failureMessage` doesn't read
@@ -1062,7 +1078,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
-        settleAgentResponseTracking(turnId);
+        takeAgentResponse(turnId);
         takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
         finalizeOpen(turnId, "cancelled", event.occurredAt);
