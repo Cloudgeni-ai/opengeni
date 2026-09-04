@@ -614,21 +614,36 @@ describe("phased new-session draft project provenance migration", () => {
       expect(await migrationRun).toMatchObject({ code: "55P03" });
 
       const [partialState] = await admin<
-        Array<{ converted: number; legacy: number; backfillLedgered: boolean }>
+        Array<{
+          convertedLegacy: number;
+          remainingLegacy: number;
+          markerlessWriterRows: number;
+          backfillLedgered: boolean;
+        }>
       >`
         select
           count(*) filter (
             where not (session_options ? 'selectedProjectChannelId')
-              and id <> ${mixedWriterDraftId}::uuid
-          )::integer as converted,
+              and subject_id like 'subject:0404-legacy-%'
+          )::integer as "convertedLegacy",
           count(*) filter (
             where session_options ? 'selectedProjectChannelId'
-          )::integer as legacy,
+              and subject_id like 'subject:0404-legacy-%'
+          )::integer as "remainingLegacy",
+          count(*) filter (
+            where not (session_options ? 'selectedProjectChannelId')
+              and id in (${mixedWriterDraftId}::uuid, ${newWriterInsertDraftId}::uuid)
+          )::integer as "markerlessWriterRows",
           exists (
             select 1 from schema_migrations where name = ${backfillMigration}
           ) as "backfillLedgered"
         from new_session_drafts`;
-      expect(partialState).toEqual({ converted: 500, legacy: 1, backfillLedgered: false });
+      expect(partialState).toEqual({
+        convertedLegacy: 500,
+        remainingLegacy: 1,
+        markerlessWriterRows: 2,
+        backfillLedgered: false,
+      });
 
       const edgeRows = await admin<
         Array<{
