@@ -66,11 +66,20 @@ function reprojectedItem(timelineItem: TimelineItem): TimelineItem {
 }
 
 function Harness() {
-  const adjacentPrepend = new URLSearchParams(window.location.search).has("adjacent");
-  const [items, setItems] = useState(() => [
-    ...(adjacentPrepend ? range(1_040, 80) : range(1_000, 120)),
-    streamedItem("Initial streamed response"),
-  ]);
+  const params = new URLSearchParams(window.location.search);
+  const adjacentPrepend = params.has("adjacent");
+  // Compact newest-suffix: barely overflows a 400px shell so the reader can
+  // sit at the top (loading older history) while still inside PIN_THRESHOLD
+  // of the live tip after a prepend restore.
+  const compactTail = params.has("compact-tail");
+  const [items, setItems] = useState(() =>
+    compactTail
+      ? range(13, 6)
+      : [
+          ...(adjacentPrepend ? range(1_040, 80) : range(1_000, 120)),
+          streamedItem("Initial streamed response"),
+        ],
+  );
   const [grown, setGrown] = useState(false);
   const [streamed, setStreamed] = useState(false);
   const [nextSequence, setNextSequence] = useState(1_120);
@@ -104,11 +113,11 @@ function Harness() {
   const prepend = useCallback(() => {
     flushSync(() =>
       setItems((current) => [
-        ...(adjacentPrepend ? range(1_000, 40) : range(900, 100)),
+        ...(compactTail ? range(1, 14) : adjacentPrepend ? range(1_000, 40) : range(900, 100)),
         ...current,
       ]),
     );
-  }, [adjacentPrepend]);
+  }, [adjacentPrepend, compactTail]);
   const prependDeferred = useCallback(() => {
     startTransition(() => {
       setItems((current) => [
@@ -149,13 +158,23 @@ function Harness() {
     <main style={{ padding: 32 }} data-og-theme="light">
       <section data-timeline-test style={{ margin: "0 auto", maxWidth: 900 }}>
         <MessageTimeline
-          className="timeline-test-shell"
+          className={
+            compactTail
+              ? "timeline-test-shell timeline-test-shell-compact"
+              : "timeline-test-shell"
+          }
           items={items}
           hasOlder
           renderMessageText={(text, timelineItem) => {
             const isStream = timelineItem.id === "stream-1";
             const sequence = Number(timelineItem.id.replace("row-", ""));
-            const baseHeight = isStream ? (streamed ? 220 : 48) : 34 + (sequence % 7) * 13;
+            const baseHeight = compactTail
+              ? 48
+              : isStream
+                ? streamed
+                  ? 220
+                  : 48
+                : 34 + (sequence % 7) * 13;
             // Models delayed image/font/tool-fold measurement strictly ABOVE the
             // reader (anchored near row 1040). Native scroll anchoring owns this
             // compensation; browsers intentionally suppress it when the anchor
