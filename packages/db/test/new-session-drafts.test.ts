@@ -5,8 +5,10 @@ import type {
   ResourceRef,
   ToolRef,
 } from "@opengeni/contracts";
+import { stableJson } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, eq, sql } from "drizzle-orm";
+import { bigint, jsonb, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 import {
   bootstrapWorkspace,
   consumeNewSessionDraftInTransaction,
@@ -17,13 +19,43 @@ import {
   initializeSessionStartAtomically,
   NewSessionDraftAccessError,
   NewSessionDraftConflictError,
+  newSessionDraftSelectedProjectChannelId,
   newSessionDraftToolsProvided,
+  publicNewSessionDraftOptions,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
   seedNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "../src/index";
+import { parseBatchedBackfillMigration } from "../src/migrate";
 import * as schema from "../src/schema";
+
+const projectProvenanceBackfill = parseBatchedBackfillMigration(
+  "0406_new_session_draft_project_provenance_backfill.sql",
+  await Bun.file(
+    new URL("../drizzle/0406_new_session_draft_project_provenance_backfill.sql", import.meta.url),
+  ).text(),
+);
+if (!projectProvenanceBackfill) throw new Error("project provenance backfill is not governed");
+
+// Exact pre-0404 table shape. Using a separate Drizzle table object proves an
+// old binary neither selects nor writes the additive provenance columns.
+const legacyNewSessionDrafts = pgTable("new_session_drafts", {
+  id: uuid("id").primaryKey(),
+  accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(),
+  subjectId: text("subject_id").notNull(),
+  revision: bigint("revision", { mode: "number" }).notNull(),
+  text: text("text").notNull(),
+  resources: jsonb("resources").$type<unknown[]>().notNull(),
+  tools: jsonb("tools").$type<unknown[]>().notNull(),
+  model: text("model").notNull(),
+  reasoningEffort: text("reasoning_effort").notNull(),
+  latencyMode: text("latency_mode").notNull(),
+  sessionOptions: jsonb("session_options").$type<Record<string, unknown>>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+});
 
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -65,6 +97,7 @@ function draftInput(
     model: string;
     reasoningEffort: ReasoningEffort;
     latencyMode: "standard" | "priority" | "fast";
+    selectedProjectChannelId: string | null;
     options: NewSessionDraftOptions;
   }> = {},
 ) {
@@ -80,6 +113,9 @@ function draftInput(
     model: overrides.model ?? "scripted-model",
     reasoningEffort: overrides.reasoningEffort ?? ("low" as const),
     latencyMode: overrides.latencyMode ?? ("standard" as const),
+    ...(Object.hasOwn(overrides, "selectedProjectChannelId")
+      ? { selectedProjectChannelId: overrides.selectedProjectChannelId }
+      : {}),
     options: overrides.options ?? {},
   };
 }
@@ -144,6 +180,317 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
+  test("0406 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted",
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/legacy-project",
+    };
+    const saved = await saveDraft(context, 0);
+
+    await shared.admin`alter table new_session_drafts disable trigger new_session_drafts_project_provenance_v1_fence`;
+    try {
+      await shared.admin`
+        update new_session_drafts
+        set
+          session_options = ${shared.admin.json({
+            ...compute,
+            toolsProvided: false,
+            selectionHistory: { projects: [] },
+            selectedProjectChannelId: projectId,
+          })},
+          selected_project_channel_id = null,
+          selected_project_compute_snapshot = null
+        where id = ${saved.id}`;
+    } finally {
+      await shared.admin`alter table new_session_drafts enable trigger new_session_drafts_project_provenance_v1_fence`;
+    }
+
+    await shared.admin.begin(async (tx) => {
+      await tx.unsafe(projectProvenanceBackfill.statement);
+    });
+
+    const migrated = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(migrated).toMatchObject({
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: compute,
+      sessionOptions: {
+        ...compute,
+        toolsProvided: false,
+        selectionHistory: { projects: [] },
+      },
+    });
+    expect(Object.hasOwn(migrated!.sessionOptions, "selectedProjectChannelId")).toBe(false);
+    expect(newSessionDraftSelectedProjectChannelId(migrated!)).toBe(projectId);
+  });
+
+  test("stores legacy, Default, and named-project provenance distinctly", async () => {
+    const context = await fixture();
+    const legacy = await saveDraft(context, 0);
+    expect(newSessionDraftSelectedProjectChannelId(legacy)).toBeUndefined();
+    expect(Object.hasOwn(legacy.sessionOptions, "selectedProjectChannelId")).toBe(false);
+    expect(legacy).toMatchObject({
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
+    });
+
+    const explicitDefault = await saveDraft(context, 1, { selectedProjectChannelId: null });
+    expect(newSessionDraftSelectedProjectChannelId(explicitDefault)).toBeNull();
+    expect(explicitDefault).toMatchObject({
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: {},
+    });
+    expect(Object.hasOwn(explicitDefault.sessionOptions, "selectedProjectChannelId")).toBe(false);
+
+    const projectId = crypto.randomUUID();
+    const namedProject = await saveDraft(context, 2, { selectedProjectChannelId: projectId });
+    expect(newSessionDraftSelectedProjectChannelId(namedProject)).toBe(projectId);
+    expect(namedProject).toMatchObject({
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: {},
+    });
+    expect(Object.hasOwn(namedProject.sessionOptions, "selectedProjectChannelId")).toBe(false);
+  });
+
+  test("legacy text-only omission preserves compatible provenance and explicit values remain exact", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-a",
+    };
+    const namedProject = await saveDraft(context, 0, {
+      text: "named-project draft",
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+
+    const legacySave = await saveDraft(context, namedProject.revision, {
+      text: "older client edit without provenance",
+      options: compute,
+    });
+    expect(legacySave.revision).toBe(namedProject.revision + 1);
+    expect(newSessionDraftSelectedProjectChannelId(legacySave)).toBe(projectId);
+    expect(legacySave).toMatchObject({
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: compute,
+    });
+    expect(Object.hasOwn(legacySave.sessionOptions, "selectedProjectChannelId")).toBe(false);
+
+    const explicitDefault = await saveDraft(context, legacySave.revision, {
+      text: "new client explicitly selected Default",
+      selectedProjectChannelId: null,
+      options: compute,
+    });
+    expect(explicitDefault.revision).toBe(legacySave.revision + 1);
+    expect(newSessionDraftSelectedProjectChannelId(explicitDefault)).toBeNull();
+    expect(explicitDefault).toMatchObject({
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: compute,
+    });
+
+    const explicitNamed = await saveDraft(context, explicitDefault.revision, {
+      text: "new client explicitly restored the named project",
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+    expect(newSessionDraftSelectedProjectChannelId(explicitNamed)).toBe(projectId);
+    expect(explicitNamed).toMatchObject({
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: compute,
+    });
+  });
+
+  test("pre-0404 Drizzle writes permanently clear provenance on markerless compute ABA", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-a",
+    };
+    await saveDraft(context, 0, {
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+
+    const legacyRead = await withWorkspaceSubjectRls(
+      client.db,
+      context.grant.workspaceId!,
+      context.subjectId,
+      (db) =>
+        db
+          .select()
+          .from(legacyNewSessionDrafts)
+          .where(eq(legacyNewSessionDrafts.workspaceId, context.grant.workspaceId!))
+          .limit(1),
+    );
+    expect(legacyRead).toHaveLength(1);
+    expect(Object.hasOwn(legacyRead[0]!, "selectedProjectChannelId")).toBe(false);
+    expect(Object.hasOwn(legacyRead[0]!, "selectedProjectComputeSnapshot")).toBe(false);
+
+    const [legacyTextOnly] = await withWorkspaceSubjectRls(
+      client.db,
+      context.grant.workspaceId!,
+      context.subjectId,
+      (db) =>
+        db
+          .update(legacyNewSessionDrafts)
+          .set({
+            text: "old binary text/tools-only edit",
+            tools: [{ kind: "mcp", id: "docs" }],
+            sessionOptions: {
+              ...compute,
+              toolsProvided: true,
+              selectionHistory: { projects: [] },
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(legacyNewSessionDrafts.id, legacyRead[0]!.id))
+          .returning(),
+    );
+    expect(Object.hasOwn(legacyTextOnly!, "selectedProjectChannelId")).toBe(false);
+    const afterTextOnly = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(newSessionDraftSelectedProjectChannelId(afterTextOnly!)).toBe(projectId);
+    expect(afterTextOnly).toMatchObject({
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: compute,
+    });
+    const oldExactTextOnlyOptions = { ...afterTextOnly!.sessionOptions };
+    delete oldExactTextOnlyOptions.toolsProvided;
+    delete oldExactTextOnlyOptions.selectionHistory;
+    expect(stableJson(oldExactTextOnlyOptions)).toBe(stableJson(compute));
+
+    const changedCompute = {
+      sandboxBackend: "selfhosted",
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-b",
+    };
+    await withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
+      db
+        .update(legacyNewSessionDrafts)
+        .set({
+          sessionOptions: {
+            ...changedCompute,
+            toolsProvided: false,
+            selectionHistory: { projects: [] },
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(legacyNewSessionDrafts.id, legacyRead[0]!.id)),
+    );
+    const afterOldComputeChange = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(Object.hasOwn(afterOldComputeChange!.sessionOptions, "selectedProjectChannelId")).toBe(
+      false,
+    );
+    expect(afterOldComputeChange).toMatchObject({
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
+    });
+    expect(newSessionDraftSelectedProjectChannelId(afterOldComputeChange!)).toBeUndefined();
+    const oldExactCreateOptions = { ...afterOldComputeChange!.sessionOptions };
+    delete oldExactCreateOptions.toolsProvided;
+    delete oldExactCreateOptions.selectionHistory;
+    expect(stableJson(oldExactCreateOptions)).toBe(stableJson(changedCompute));
+
+    await withWorkspaceSubjectRls(client.db, context.grant.workspaceId!, context.subjectId, (db) =>
+      db
+        .update(legacyNewSessionDrafts)
+        .set({
+          sessionOptions: {
+            ...compute,
+            toolsProvided: false,
+            selectionHistory: { projects: [] },
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(legacyNewSessionDrafts.id, legacyRead[0]!.id)),
+    );
+    const afterLegacyAba = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(afterLegacyAba).toMatchObject({
+      sessionOptions: {
+        ...compute,
+        toolsProvided: false,
+        selectionHistory: { projects: [] },
+      },
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
+    });
+    expect(newSessionDraftSelectedProjectChannelId(afterLegacyAba!)).toBeUndefined();
+  });
+
+  test("legacy omission clears named-project provenance when machine placement changes", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const firstMachine = crypto.randomUUID();
+    const namedProject = await saveDraft(context, 0, {
+      selectedProjectChannelId: projectId,
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: firstMachine,
+        workingDir: "/workspace/project-a",
+      },
+    });
+
+    const changedMachine = await saveDraft(context, namedProject.revision, {
+      text: "older client changed the project-dependent compute",
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-b",
+      },
+    });
+
+    expect(newSessionDraftSelectedProjectChannelId(changedMachine)).toBeUndefined();
+    expect(Object.hasOwn(changedMachine.sessionOptions, "selectedProjectChannelId")).toBe(false);
+    expect(changedMachine).toMatchObject({
+      selectedProjectChannelId: null,
+      selectedProjectComputeSnapshot: null,
+    });
+  });
+
+  test("stale provenance-omitting compute edits still fail OCC without changing the row", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-a",
+    };
+    const first = await saveDraft(context, 0, {
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+    const current = await saveDraft(context, first.revision, {
+      text: "current text-only edit",
+      options: compute,
+    });
+
+    await expect(
+      saveDraft(context, first.revision, {
+        text: "stale compute edit",
+        options: {
+          sandboxBackend: "selfhosted",
+          targetSandboxId: crypto.randomUUID(),
+          workingDir: "/workspace/other",
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "NewSessionDraftConflictError",
+      currentRevision: current.revision,
+    });
+    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+      revision: current.revision,
+      text: "current text-only edit",
+      sessionOptions: compute,
+      selectedProjectChannelId: projectId,
+      selectedProjectComputeSnapshot: compute,
+    });
+  });
+
   test("markerless legacy rows preserve narrowed and empty tool intent through seeding", async () => {
     for (const tools of [[{ kind: "mcp", id: "docs" }], []] as ToolRef[][]) {
       const context = await fixture();
@@ -368,6 +715,7 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
     await saveDraft(exact, 0, {
       text: "private prompt",
+      selectedProjectChannelId: channelId,
       resources: [
         {
           kind: "repository",
@@ -441,6 +789,14 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         ],
       },
     });
+    expect(seeded).toMatchObject({
+      selectedProjectChannelId: channelId,
+      selectedProjectComputeSnapshot: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId,
+        workingDir,
+      },
+    });
 
     const advanced = await fixture();
     await saveDraft(advanced, 0);
@@ -510,7 +866,10 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const channelId = crypto.randomUUID();
     const targetSandboxId = crypto.randomUUID();
     const workingDir = "/workspace/realtime";
-    await saveDraft(context, 0, { text: "keep for a later text session" });
+    await saveDraft(context, 0, {
+      text: "keep for a later text session",
+      selectedProjectChannelId: channelId,
+    });
     const session = await createUninitializedSession(context);
 
     await initializeSessionStartAtomically(client.db, {
@@ -529,6 +888,8 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
       revision: 1,
       text: "keep for a later text session",
+      selectedProjectChannelId: channelId,
+      selectedProjectComputeSnapshot: {},
       sessionOptions: {
         selectionHistory: {
           projects: [
@@ -541,6 +902,145 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
         },
       },
     });
+  });
+
+  test("a stale realtime selection-history update preserves a newer draft and provenance", async () => {
+    const context = await fixture();
+    const projectA = crypto.randomUUID();
+    const projectB = crypto.randomUUID();
+    const sandboxA = crypto.randomUUID();
+    const sandboxB = crypto.randomUUID();
+    const variableSetIds = [crypto.randomUUID(), crypto.randomUUID()];
+    await saveDraft(context, 0, {
+      text: "Project A draft",
+      selectedProjectChannelId: projectA,
+      options: { targetSandboxId: sandboxA, workingDir: "/workspace/project-a" },
+    });
+    const staleRealtimeSession = await createUninitializedSession(context);
+
+    const projectBResources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/project-b.git",
+        ref: "main",
+        mountPath: "repos/project-b",
+      },
+    ];
+    const projectBTools: ToolRef[] = [{ kind: "mcp", id: "project-b-docs" }];
+    const projectBOptions: NewSessionDraftOptions = {
+      sandboxBackend: "selfhosted",
+      targetSandboxId: sandboxB,
+      workingDir: "/workspace/project-b",
+      variableSetIds,
+      variableSetId: variableSetIds[1],
+      rigId: crypto.randomUUID(),
+    };
+    const projectBDraft = await saveDraft(context, 1, {
+      text: "Project B draft from the newer tab",
+      resources: projectBResources,
+      tools: projectBTools,
+      toolsProvided: true,
+      model: "project-b-model",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      selectedProjectChannelId: projectB,
+      options: projectBOptions,
+    });
+
+    await initializeSessionStartAtomically(client.db, {
+      accountId: context.grant.accountId,
+      workspaceId: context.grant.workspaceId!,
+      sessionId: staleRealtimeSession.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      rememberNewSessionSelection: {
+        subjectId: context.subjectId,
+        acceptedSelection: {
+          channelId: projectA,
+          targetSandboxId: sandboxA,
+          workingDir: "/workspace/project-a",
+        },
+      },
+      deferInitialTurn: true,
+    });
+
+    const afterStaleRealtime = await readDraft(context.grant.workspaceId!, context.subjectId);
+    expect(afterStaleRealtime).toMatchObject({
+      revision: projectBDraft.revision,
+      text: projectBDraft.text,
+      resources: projectBResources,
+      tools: projectBTools,
+      model: projectBDraft.model,
+      reasoningEffort: projectBDraft.reasoningEffort,
+      latencyMode: projectBDraft.latencyMode,
+      updatedAt: projectBDraft.updatedAt,
+    });
+    expect(publicNewSessionDraftOptions(afterStaleRealtime!)).toEqual(projectBOptions);
+    expect(newSessionDraftToolsProvided(afterStaleRealtime!)).toBe(true);
+    expect(newSessionDraftSelectedProjectChannelId(afterStaleRealtime!)).toBe(projectB);
+    expect(afterStaleRealtime?.sessionOptions).toEqual({
+      ...projectBOptions,
+      toolsProvided: true,
+      selectionHistory: {
+        projects: [
+          {
+            channelId: projectA,
+            targetSandboxId: sandboxA,
+            machines: [{ sandboxId: sandboxA, workingDir: "/workspace/project-a" }],
+          },
+        ],
+      },
+    });
+    expect(afterStaleRealtime).toMatchObject({
+      selectedProjectChannelId: projectB,
+      selectedProjectComputeSnapshot: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: sandboxB,
+        workingDir: "/workspace/project-b",
+      },
+    });
+  });
+
+  test("realtime selection history preserves Default and legacy-missing provenance", async () => {
+    for (const provenance of [
+      { label: "Default", present: true, value: null },
+      { label: "legacy missing", present: false, value: undefined },
+    ] as const) {
+      const context = await fixture();
+      const projectA = crypto.randomUUID();
+      const saved = await saveDraft(context, 0, {
+        text: `${provenance.label} draft`,
+        ...(provenance.present ? { selectedProjectChannelId: provenance.value } : {}),
+      });
+      const session = await createUninitializedSession(context);
+
+      await initializeSessionStartAtomically(client.db, {
+        accountId: context.grant.accountId,
+        workspaceId: context.grant.workspaceId!,
+        sessionId: session.id,
+        reasoningEffortFallback: "low",
+        createdEventPayload: {},
+        rememberNewSessionSelection: {
+          subjectId: context.subjectId,
+          acceptedSelection: { channelId: projectA, targetSandboxId: null, workingDir: null },
+        },
+        deferInitialTurn: true,
+      });
+
+      const remembered = await readDraft(context.grant.workspaceId!, context.subjectId);
+      expect(remembered).toMatchObject({ revision: saved.revision, text: saved.text });
+      expect(Object.hasOwn(remembered!.sessionOptions, "selectedProjectChannelId")).toBe(false);
+      expect(newSessionDraftSelectedProjectChannelId(remembered!)).toBe(provenance.value);
+      expect(remembered).toMatchObject({
+        selectedProjectChannelId: provenance.value ?? null,
+        selectedProjectComputeSnapshot: provenance.present ? {} : null,
+      });
+      expect(remembered?.sessionOptions).toMatchObject({
+        selectionHistory: {
+          projects: [{ channelId: projectA, targetSandboxId: null, machines: [] }],
+        },
+      });
+    }
   });
 
   test("an idempotent initialization retry cannot consume a later draft with a reused revision", async () => {
@@ -594,7 +1094,14 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
 
   test("a member removal that wins the lock rejects a stale authorized draft write", async () => {
     const context = await fixture();
-    await saveDraft(context, 0);
+    await saveDraft(context, 0, {
+      selectedProjectChannelId: crypto.randomUUID(),
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-a",
+      },
+    });
     let removalLocked!: () => void;
     let finishRemoval!: () => void;
     const locked = new Promise<void>((resolve) => {
@@ -638,7 +1145,14 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     );
     await locked;
 
-    const staleSave = saveDraft(context, 1, { text: "must not survive removal" });
+    const staleSave = saveDraft(context, 1, {
+      text: "must not survive removal",
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-b",
+      },
+    });
     let stateBeforeRelease: "blocked" | "settled";
     try {
       stateBeforeRelease = await Promise.race([

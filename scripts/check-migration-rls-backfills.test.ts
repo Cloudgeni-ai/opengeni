@@ -214,6 +214,53 @@ WHERE capability.enabled = '1';
     expect(analyzeMigrationRlsBackfills(directory)).toHaveLength(0);
   });
 
+  test("accepts only the exact governed runner capability for its batched migration", () => {
+    const policy = `
+CREATE TABLE new_session_drafts (id uuid PRIMARY KEY);
+ALTER TABLE new_session_drafts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE new_session_drafts FORCE ROW LEVEL SECURITY;
+CREATE POLICY draft_owner_repair ON new_session_drafts
+FOR ALL
+USING (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'new_session_drafts'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.new_session_draft_project_provenance_backfill_v1', true
+  ) = '1'
+)
+WITH CHECK (
+  current_user = (
+    SELECT pg_catalog.pg_get_userbyid(relation.relowner)
+    FROM pg_catalog.pg_class relation
+    WHERE relation.oid = 'new_session_drafts'::regclass
+  )
+  AND pg_catalog.current_setting(
+    'opengeni.new_session_draft_project_provenance_backfill_v1', true
+  ) = '1'
+);
+`;
+    const backfill = `-- deployment-mode: rolling
+-- opengeni:batched-backfill batch-size=500 lock-timeout=1s statement-timeout=10s
+WITH candidates AS (SELECT id FROM new_session_drafts LIMIT 500)
+UPDATE new_session_drafts SET id = new_session_drafts.id FROM candidates
+WHERE new_session_drafts.id = candidates.id RETURNING new_session_drafts.id;
+`;
+    const accepted = fixture({
+      "0404_new_session_draft_project_provenance.sql": policy,
+      "0406_new_session_draft_project_provenance_backfill.sql": backfill,
+    });
+    expect(analyzeMigrationRlsBackfills(accepted)).toHaveLength(0);
+
+    const wrongFile = fixture({
+      "0404_new_session_draft_project_provenance.sql": policy,
+      "0408_unrelated_backfill.sql": backfill,
+    });
+    expect(analyzeMigrationRlsBackfills(wrongFile)).toHaveLength(1);
+  });
+
   test("does not trust a custom capability without an exact owner-pinned policy", () => {
     const directory = fixture({
       "0001_base.sql": FORCED_TABLE,

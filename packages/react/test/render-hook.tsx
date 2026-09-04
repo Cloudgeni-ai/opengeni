@@ -8,7 +8,7 @@
    -------------------------------------------------------------------------- */
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { afterAll } from "bun:test";
-import { act, type ReactElement, type ReactNode } from "react";
+import { act, type ReactElement, type ReactNode, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 declare global {
@@ -37,6 +37,12 @@ export type RenderedHook<T, P> = {
   result: { current: T };
   /** Re-render with new props (or the previous props). */
   rerender: (props?: P) => Promise<void>;
+  /**
+   * Commit a render through layout effects and resolve before its passive
+   * effects. This intentionally does not use `act`, whose contract closes that
+   * browser-observable scheduling window before returning.
+   */
+  rerenderThroughLayout: (props?: P) => Promise<void>;
   unmount: () => Promise<void>;
 };
 
@@ -53,9 +59,14 @@ export async function renderHook<T, P = void>(
   document.body.appendChild(container);
   const result = { current: undefined as T };
   let lastProps = initialProps;
+  let resolveLayoutCommit: (() => void) | null = null;
 
   function Harness({ props }: { props: P }) {
     result.current = useHook(props);
+    useLayoutEffect(() => {
+      resolveLayoutCommit?.();
+      resolveLayoutCommit = null;
+    });
     return null;
   }
 
@@ -72,6 +83,24 @@ export async function renderHook<T, P = void>(
       await act(async () => {
         root?.render(<Harness props={lastProps} />);
       });
+    },
+    rerenderThroughLayout: async (props?: P) => {
+      lastProps = props === undefined ? lastProps : props;
+      if (!root) throw new Error("hook root is unavailable");
+      const committed = new Promise<void>((resolve) => {
+        resolveLayoutCommit = resolve;
+      });
+      // The point of this helper is to expose the layout-to-passive interval
+      // that `act` deliberately hides. Disable only the warning classifier for
+      // this one scheduled render; callers must return to `act` for settlement.
+      const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+      globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+      try {
+        root.render(<Harness props={lastProps} />);
+      } finally {
+        globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      }
+      await committed;
     },
     unmount: async () => {
       await act(async () => {

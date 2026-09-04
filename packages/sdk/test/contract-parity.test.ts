@@ -647,13 +647,22 @@ describe("SDK / contracts parity", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: {
         sandboxBackend: "modal",
         goal: { text: "finish", maxAutoContinuations: 8 },
         firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
       },
     };
-    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
+    const parsed = ContractSaveNewSessionDraftRequest.parse(save);
+    expect(parsed.selectedProjectChannelId).toBeNull();
+    const { selectedProjectChannelId: _selectedProjectChannelId, ...legacySave } = save;
+    expect(
+      Object.hasOwn(
+        ContractSaveNewSessionDraftRequest.parse(legacySave),
+        "selectedProjectChannelId",
+      ),
+    ).toBe(false);
   });
 
   test("established-session submit requires one exact policy snapshot", () => {

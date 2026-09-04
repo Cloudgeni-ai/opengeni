@@ -97,6 +97,7 @@ describe("core new-session draft hydration", () => {
         model: settings.openaiModel,
         reasoningEffort: settings.openaiReasoningEffort,
         latencyMode: "standard",
+        selectedProjectChannelId: null,
         options: { visibility: "workspace" },
       },
     );
@@ -305,6 +306,7 @@ describe("core new-session draft hydration", () => {
         model: "scripted-model",
         reasoningEffort: "high",
         latencyMode: "fast",
+        selectedProjectChannelId: null,
         options: {
           sandboxBackend: "selfhosted",
           targetSandboxId: crypto.randomUUID(),
@@ -320,6 +322,7 @@ describe("core new-session draft hydration", () => {
     expect(hydrated.resources).toEqual([resources[0], resources[2]]);
     expect(hydrated.tools).toEqual([mcp("opengeni")]);
     expect(hydrated.toolsProvided).toBe(true);
+    expect(hydrated.selectedProjectChannelId).toBeNull();
     expect(hydrated.options).toEqual({});
     expect(hydrated.model).toBe("scripted-model");
     expect(hydrated.reasoningEffort).toBe("high");

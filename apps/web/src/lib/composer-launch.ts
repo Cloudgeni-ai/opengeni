@@ -12,7 +12,7 @@ export type ComposerLaunchSearch = {
   effort?: ReasoningEffortT;
   latency?: LatencyModeT;
   realtime?: SessionRealtimeModel;
-  /** File a newly created session in this workspace folder. */
+  /** File a newly created session in this workspace folder (`default` selects Default). */
   channelId?: string;
   /** One installed session-selected Skill to freeze onto the new session. */
   skillCapabilityId?: string;
@@ -33,13 +33,16 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
   if (latency.success) out.latency = latency.data;
   const realtime = SessionRealtimeModelSchema.safeParse(search.realtime);
   if (realtime.success) out.realtime = realtime.data;
-  if (
-    typeof search.channelId === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-      search.channelId,
-    )
-  ) {
-    out.channelId = search.channelId;
+  if (typeof search.channelId === "string") {
+    if (search.channelId === "default") {
+      out.channelId = "default";
+    } else if (
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        search.channelId,
+      )
+    ) {
+      out.channelId = search.channelId;
+    }
   }
   if (typeof search.skillCapabilityId === "string") {
     const skillCapabilityId = search.skillCapabilityId.trim();

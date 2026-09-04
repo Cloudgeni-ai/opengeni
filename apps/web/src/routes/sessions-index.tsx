@@ -52,6 +52,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -93,7 +94,10 @@ import {
   composerLaunchSearchKey,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
-import { FOCUS_CREATE_COMPOSER_EVENT } from "@/lib/create-composer-focus";
+import {
+  FOCUS_CREATE_COMPOSER_EVENT,
+  type CreateComposerFocusIntent,
+} from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
 import { displayModel } from "@/lib/format";
 import {
@@ -131,7 +135,6 @@ import {
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
   rememberedMachineFolder,
-  rememberedProjectCompute,
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
@@ -152,7 +155,18 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
+import {
+  hydratedNewSessionProjectProvenancePresent,
+  initialNewSessionProjectLaunchIntent,
+  newSessionProjectSelection,
+  nextFocusedNewSessionProjectLaunchIntent,
+  nextNewSessionProjectLaunchIntent,
+  resolveAmbientNewSessionProjectChannelId,
+  resolveHydratedNewSessionProjectSelection,
+} from "@/routes/sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "@/types";
+
+const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -204,12 +218,25 @@ function SessionsIndexRouteContent({
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
+  const launchChannelId = launch.channelId === "default" ? null : launch.channelId;
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
-    launch.channelId ?? null,
+    launchChannelId ?? null,
   );
+  const selectedChannelIdRef = useRef(selectedChannelId);
+  const setSelectedProjectChannelId = useCallback((channelId: string | null) => {
+    selectedChannelIdRef.current = channelId;
+    setSelectedChannelId(channelId);
+  }, []);
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
   });
+  const [projectProvenancePresent, setProjectProvenancePresent] = useState(
+    launchChannelId !== undefined,
+  );
+  const remoteDraftHydratedRef = useRef(false);
+  const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);
+  const launchProjectIntentRef = useRef(initialNewSessionProjectLaunchIntent(launchChannelId));
+  const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
@@ -549,17 +576,55 @@ function SessionsIndexRouteContent({
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
   const [createComposerFocusGen, setCreateComposerFocusGen] = useState(0);
+  const selectProject = useLatestCallback((channelId: string | null, explicit = true) => {
+    const previousChannelId = selectedChannelIdRef.current;
+    if (explicit) setProjectProvenancePresent(true);
+    setSelectedProjectChannelId(channelId);
+    setDraft((current) => {
+      const selection = newSessionProjectSelection(
+        selectionHistory,
+        channelId,
+        { channelId: previousChannelId, compute: current.compute },
+        defaultSandboxBackend,
+      );
+      return selection.compute === current.compute
+        ? current
+        : { ...current, compute: selection.compute };
+    });
+  });
+  const setExplicitComputeDraft = useLatestCallback((nextDraft: SessionDraft) => {
+    setProjectProvenancePresent(true);
+    setDraft(nextDraft);
+  });
 
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
 
-  // Folder-launch links preselect their destination, while the ordinary New
-  // session entry starts in Recents. Keep the selection local so choosing a
-  // folder does not turn the composer URL into application state.
-  useEffect(() => {
-    setSelectedChannelId(launch.channelId ?? null);
-  }, [launch.channelId]);
+  // Folder-launch links preselect their exact destination, including Default,
+  // while the ordinary New session entry starts in Recents. Commit this intent
+  // before pending draft continuations can run; keeping it in an effect also
+  // preserves render purity and the useEffect server fallback preserves SSR.
+  useCommitSynchronousEffect(() => {
+    const previousLaunchChannelId = previousLaunchChannelIdRef.current;
+    previousLaunchChannelIdRef.current = launchChannelId;
+    launchProjectIntentRef.current = nextNewSessionProjectLaunchIntent(
+      launchProjectIntentRef.current,
+      previousLaunchChannelId,
+      launchChannelId,
+    );
+    const channelId = resolveAmbientNewSessionProjectChannelId({
+      launchChannelId,
+      previousLaunchChannelId,
+      recentChannelId,
+      remoteDraftHydrated: remoteDraftHydratedRef.current,
+    });
+    if (channelId === undefined) return;
+    if (launchChannelId === undefined && previousLaunchChannelId !== undefined) {
+      setProjectProvenancePresent(false);
+    }
+    selectProject(channelId, launchChannelId !== undefined);
+  }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
     if (
@@ -567,13 +632,9 @@ function SessionsIndexRouteContent({
       !channelsQuery.loading &&
       !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
     ) {
-      setSelectedChannelId(null);
-      const rememberedCompute = rememberedProjectCompute(selectionHistory, null);
-      if (rememberedCompute) {
-        setDraft((current) => ({ ...current, compute: rememberedCompute }));
-      }
+      selectProject(null, false);
     }
-  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectionHistory]);
+  }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectProject]);
   const createProject = useCallback(async () => {
     const name = projectNameDraft.trim();
     if (!name) return;
@@ -582,16 +643,30 @@ function SessionsIndexRouteContent({
       toast.error("Couldn't create the project. The name may already be in use.");
       return;
     }
-    setSelectedChannelId(project.id);
+    selectProject(project.id);
     setProjectDialogOpen(false);
     setProjectNameDraft("");
-  }, [channelsQuery, projectNameDraft]);
+  }, [channelsQuery, projectNameDraft, selectProject]);
 
   useEffect(() => {
-    const onRequest = () => setCreateComposerFocusGen((current) => current + 1);
+    const onRequest = (event: Event) => {
+      const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
+        ?.channelId;
+      launchProjectIntentRef.current = nextFocusedNewSessionProjectLaunchIntent(
+        launchProjectIntentRef.current,
+        requestedChannelId,
+      );
+      if (requestedChannelId !== undefined) {
+        selectProject(requestedChannelId);
+      } else if (remoteDraftHydratedRef.current) {
+        setProjectProvenancePresent(false);
+        selectProject(recentChannelId, false);
+      }
+      setCreateComposerFocusGen((current) => current + 1);
+    };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
     return () => window.removeEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
-  }, []);
+  }, [recentChannelId, selectProject]);
 
   const computeReady =
     isSessionDraftComputeReady(draft) &&
@@ -623,6 +698,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
+      ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
@@ -640,6 +716,8 @@ function SessionsIndexRouteContent({
       message,
       personalWorkspace,
       persistedToolPolicy,
+      projectProvenancePresent,
+      selectedChannelId,
     ],
   );
   useEffect(() => {
@@ -684,11 +762,23 @@ function SessionsIndexRouteContent({
         defaultFirstPartyMcpTools,
         defaultSandboxBackend,
       );
-      const channelId = launch.channelId ?? history.projects[0]?.channelId ?? null;
-      const rememberedCompute = rememberedProjectCompute(history, channelId, defaultSandboxBackend);
+      const projectSelection = resolveHydratedNewSessionProjectSelection({
+        launchIntent: launchProjectIntentRef.current,
+        remote,
+        history,
+        restoredCompute: restored.compute,
+        defaultSandboxBackend,
+      });
+      // Fence the ambient Recents effect before installing history. That state
+      // update changes recentChannelId, but must not replace this hydrated
+      // explicit/persisted selection (or the legacy fallback resolved above).
+      remoteDraftHydratedRef.current = true;
       setSelectionHistory(history);
-      setSelectedChannelId(channelId);
-      setDraft(rememberedCompute ? { ...restored, compute: rememberedCompute } : restored);
+      setProjectProvenancePresent(
+        hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote),
+      );
+      setSelectedProjectChannelId(projectSelection.channelId);
+      setDraft({ ...restored, compute: projectSelection.compute });
       setModel(remote.model);
       setReasoningEffort(remote.reasoningEffort);
       setLatencyMode(remote.latencyMode);
@@ -719,23 +809,9 @@ function SessionsIndexRouteContent({
       githubRepos,
       defaultFirstPartyMcpTools,
       defaultSandboxBackend,
-      launch.channelId,
+      setSelectedProjectChannelId,
       workspaceDefaultToolIdsForHydration,
     ],
-  );
-  const selectProject = useCallback(
-    (channelId: string | null) => {
-      setSelectedChannelId(channelId);
-      const rememberedCompute = rememberedProjectCompute(
-        selectionHistory,
-        channelId,
-        defaultSandboxBackend,
-      );
-      if (rememberedCompute) {
-        setDraft((current) => ({ ...current, compute: rememberedCompute }));
-      }
-    },
-    [defaultSandboxBackend, selectionHistory],
   );
   const newSessionDraft = useNewSessionDraft({
     workspaceId,
@@ -1285,6 +1361,7 @@ function SessionsIndexRouteContent({
             defaultSandboxBackend={defaultSandboxBackend}
             draft={draft}
             onChange={setDraft}
+            onComputeChange={setExplicitComputeDraft}
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
@@ -1832,6 +1909,7 @@ function ComputeTargetControl(props: {
   defaultSandboxBackend?: SandboxBackend;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
+  onComputeChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalResourceAccess: NewSessionPersonalResourceAccess;
   fleet: ReturnType<typeof useMachines>;
@@ -1969,7 +2047,7 @@ function ComputeTargetControl(props: {
     if (kind === "sandbox") {
       // Composer no longer exposes a managed-backend override — always the
       // deployment default (empty wire field).
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+      props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
       return;
     }
     // Auto-pick the first selectable machine so the common single-machine case is
@@ -1989,7 +2067,7 @@ function ComputeTargetControl(props: {
         : null) ??
       machines.find((machine) => isMachineComputeSelectable(machine.state)) ??
       null;
-    onChange({
+    props.onComputeChange({
       ...draft,
       compute: {
         kind: "machine",
@@ -2090,7 +2168,7 @@ function ComputeTargetControl(props: {
           draft={draft}
           compute={draft.compute}
           machines={machines}
-          onChange={onChange}
+          onChange={props.onComputeChange}
           disabled={props.disabled}
           selectedChannelId={props.selectedChannelId}
           selectionHistory={props.selectionHistory}

@@ -107,6 +107,78 @@ describe("session control surface architecture", () => {
     expect(setupImplementation).not.toContain("<ModelPicker");
   });
 
+  test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
+    const [rail, route, focusRequest, hydration] = await Promise.all([
+      source("components/rail/session-list.tsx"),
+      source("routes/sessions-index.tsx"),
+      source("lib/create-composer-focus.ts"),
+      source("routes/sessions-index-hydration.ts"),
+    ]);
+    expect(rail).toContain(
+      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
+    );
+    expect(rail).toContain("channelId={props.channelId}");
+    expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
+    expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
+    expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
+    expect(route).toContain("const requestedChannelId = (");
+    expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
+    expect(route).toContain("else if (remoteDraftHydratedRef.current)");
+    expect(route).toContain("selectProject(recentChannelId, false);");
+    expect(hydration).toContain("return newSessionProjectSelection(");
+  });
+
+  test("keeps manual folder selection from retriggering launch selection", async () => {
+    const route = await source("routes/sessions-index.tsx");
+    const selectionStart = route.indexOf("const selectedChannelIdRef = useRef(selectedChannelId);");
+    const selectionEnd = route.indexOf(
+      "useEffect(() => {\n    resetSessionView();",
+      selectionStart,
+    );
+    const selection = route.slice(selectionStart, selectionEnd);
+
+    expect(selectionStart).toBeGreaterThan(-1);
+    expect(selectionEnd).toBeGreaterThan(selectionStart);
+    expect(selection).toContain("const selectProject = useLatestCallback(");
+    expect(selection).toContain("const previousChannelId = selectedChannelIdRef.current;");
+    expect(selection).toContain("setSelectedProjectChannelId(channelId);");
+    expect(selection).not.toContain("const selectProject = useCallback(");
+    expect(selection).not.toContain("[defaultSandboxBackend, selectedChannelId, selectionHistory]");
+    expect(route).toContain(
+      "const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);",
+    );
+    expect(route).toContain("const launchProjectIntentRef = useRef(");
+    expect(route).toContain(
+      'const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;',
+    );
+    expect(route).toContain("useCommitSynchronousEffect(() => {");
+    expect(route).toContain("nextNewSessionProjectLaunchIntent(");
+    expect(route).toContain("previousLaunchChannelIdRef.current = launchChannelId;");
+    expect(route).toContain("setProjectProvenancePresent(false);");
+    expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
+    expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
+    expect(route).toContain("onChange={props.onComputeChange}");
+    expect(route).toContain("props.onComputeChange({");
+  });
+
+  test("hydrates durable project provenance before normal and realtime create", async () => {
+    const route = await source("routes/sessions-index.tsx");
+
+    expect(route).toContain(
+      "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
+    );
+    expect(route).toContain(
+      "hydratedNewSessionProjectProvenancePresent(launchProjectIntentRef.current, remote)",
+    );
+    expect(route).toContain("resolveHydratedNewSessionProjectSelection({");
+    expect(route).toContain("remote,");
+    expect(route).toContain("restoredCompute: restored.compute,");
+    expect(route.match(/const submission = submissionFromSessionDraft\(/g)).toHaveLength(2);
+    expect(route.match(/targetSandboxId: submission\.options\.targetSandboxId/g)).toHaveLength(2);
+    expect(route.match(/workingDir: submission\.options\.workingDir/g)).toHaveLength(2);
+    expect(route.match(/channelId: selectedChannelId/g)).toHaveLength(2);
+  });
+
   test("keeps Variable Sets editable at create time and beside an established composer", async () => {
     const [route, establishedRoute, establishedControl, establishedPicker] = await Promise.all([
       source("routes/sessions-index.tsx"),
