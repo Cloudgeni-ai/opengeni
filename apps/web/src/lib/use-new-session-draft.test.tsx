@@ -2,11 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type {
   FileAsset,
   NewSessionDraft,
+  NewSessionSelectionHistory,
   OpenGeniClient,
   SaveNewSessionDraftRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import {
   actRun,
@@ -17,6 +18,8 @@ import {
 import {
   hydratedNewSessionProjectProvenancePresent,
   initialNewSessionProjectLaunchIntent,
+  newSessionProjectSelection,
+  nextFocusedNewSessionProjectLaunchIntent,
   nextNewSessionProjectLaunchIntent,
   resolveHydratedNewSessionProjectSelection,
 } from "../routes/sessions-index-hydration";
@@ -81,6 +84,11 @@ function asset(id: string, overrides: Partial<FileAsset> = {}): FileAsset {
 
 type DraftClient = Pick<OpenGeniClient, "getNewSessionDraft" | "saveNewSessionDraft" | "getFile">;
 
+type RouteDraftHookProps = {
+  launchChannelId: string | null | undefined;
+  resolveRemoteAfterCommit?: (() => void) | undefined;
+};
+
 function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
   return renderHook(
     (props: { client: DraftClient; workspaceId: string }) => {
@@ -104,27 +112,60 @@ function renderRouteDraftHook(
   initialLaunchChannelId: string | null | undefined = undefined,
 ) {
   return renderHook(
-    (props: { launchChannelId: string | null | undefined }) => {
+    (props: RouteDraftHookProps) => {
+      const { launchChannelId, resolveRemoteAfterCommit } = props;
       const [remoteValue, setRemoteValue] = useState(() => editable());
       const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
-        props.launchChannelId ?? null,
+        launchChannelId ?? null,
       );
+      const selectedChannelIdRef = useRef(selectedChannelId);
+      const setSelectedProjectChannelId = (channelId: string | null) => {
+        selectedChannelIdRef.current = channelId;
+        setSelectedChannelId(channelId);
+      };
+      const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
+        projects: [],
+      });
       const [projectProvenancePresent, setProjectProvenancePresent] = useState(
-        props.launchChannelId !== undefined,
+        launchChannelId !== undefined,
       );
-      const launchIntentRef = useRef(initialNewSessionProjectLaunchIntent(props.launchChannelId));
-      const previousLaunchChannelIdRef = useRef(props.launchChannelId);
-      useEffect(() => {
+      const remoteDraftHydratedRef = useRef(false);
+      const [, setCreateComposerFocusGen] = useState(0);
+      const launchIntentRef = useRef(initialNewSessionProjectLaunchIntent(launchChannelId));
+      const previousLaunchChannelIdRef = useRef(launchChannelId);
+      useLayoutEffect(() => {
         launchIntentRef.current = nextNewSessionProjectLaunchIntent(
           launchIntentRef.current,
           previousLaunchChannelIdRef.current,
-          props.launchChannelId,
+          launchChannelId,
         );
-        previousLaunchChannelIdRef.current = props.launchChannelId;
-      }, [props.launchChannelId]);
+        previousLaunchChannelIdRef.current = launchChannelId;
+        resolveRemoteAfterCommit?.();
+      }, [launchChannelId, resolveRemoteAfterCommit]);
       const value = {
         ...remoteValue,
         ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
+      };
+      const selectProject = (channelId: string | null, explicit = true) => {
+        const previousChannelId = selectedChannelIdRef.current;
+        if (explicit) setProjectProvenancePresent(true);
+        setSelectedProjectChannelId(channelId);
+        setRemoteValue((current) => {
+          const restored = sessionDraftFromNewSessionDraftOptions(current.options);
+          const selection = newSessionProjectSelection(selectionHistory, channelId, {
+            channelId: previousChannelId,
+            compute: restored.compute,
+          });
+          return selection.compute === restored.compute
+            ? current
+            : {
+                ...current,
+                options: newSessionDraftOptionsFromSessionDraft({
+                  ...restored,
+                  compute: selection.compute,
+                }),
+              };
+        });
       };
       const draft = useNewSessionDraft({
         client: draftClient,
@@ -142,6 +183,8 @@ function renderRouteDraftHook(
             history,
             restoredCompute: restored.compute,
           });
+          remoteDraftHydratedRef.current = true;
+          setSelectionHistory(history);
           setRemoteValue({
             ...nextRemoteWithoutProvenance,
             options: newSessionDraftOptionsFromSessionDraft({
@@ -149,7 +192,7 @@ function renderRouteDraftHook(
               compute: selection.compute,
             }),
           });
-          setSelectedChannelId(selection.channelId);
+          setSelectedProjectChannelId(selection.channelId);
           setProjectProvenancePresent(
             hydratedNewSessionProjectProvenancePresent(launchIntentRef.current, nextRemote),
           );
@@ -161,13 +204,36 @@ function renderRouteDraftHook(
         value,
         setValue: setRemoteValue,
         selectedChannelId,
-        selectProject: (channelId: string | null) => {
-          setSelectedChannelId(channelId);
+        launchIntent: launchIntentRef.current,
+        selectProject,
+        selectCompute: (
+          compute: ReturnType<typeof sessionDraftFromNewSessionDraftOptions>["compute"],
+        ) => {
           setProjectProvenancePresent(true);
+          setRemoteValue((current) => {
+            const restored = sessionDraftFromNewSessionDraftOptions(current.options);
+            return {
+              ...current,
+              options: newSessionDraftOptionsFromSessionDraft({ ...restored, compute }),
+            };
+          });
+        },
+        requestComposerFocus: (channelId?: string | null) => {
+          launchIntentRef.current = nextFocusedNewSessionProjectLaunchIntent(
+            launchIntentRef.current,
+            channelId,
+          );
+          if (channelId !== undefined) {
+            selectProject(channelId);
+          } else if (remoteDraftHydratedRef.current) {
+            setProjectProvenancePresent(false);
+            selectProject(selectionHistory.projects[0]?.channelId ?? null, false);
+          }
+          setCreateComposerFocusGen((current) => current + 1);
         },
       };
     },
-    { launchChannelId: initialLaunchChannelId },
+    { launchChannelId: initialLaunchChannelId } as RouteDraftHookProps,
   );
 }
 
@@ -431,6 +497,7 @@ describe("useNewSessionDraft", () => {
     async (_label, initialLaunchChannelId) => {
       const pending = deferred<NewSessionDraft>();
       const requests: SaveNewSessionDraftRequest[] = [];
+      let resolvedAfterCommit = false;
       const history = {
         projects: [
           {
@@ -439,6 +506,17 @@ describe("useNewSessionDraft", () => {
             machines: [{ sandboxId: MACHINE_A, workingDir: "/workspace/project-a" }],
           },
         ],
+      };
+      const hydratedRemote = {
+        ...remote(3, {
+          selectedProjectChannelId: PROJECT_B,
+          options: {
+            visibility: "workspace" as const,
+            targetSandboxId: MACHINE_B,
+            workingDir: "/workspace/project-b",
+          },
+        }),
+        selectionHistory: history,
       };
       const hook = await renderRouteDraftHook(
         client({
@@ -451,22 +529,16 @@ describe("useNewSessionDraft", () => {
         initialLaunchChannelId,
       );
 
-      await hook.rerender({ launchChannelId: undefined });
-      await actRun(() =>
-        pending.resolve({
-          ...remote(3, {
-            selectedProjectChannelId: PROJECT_B,
-            options: {
-              visibility: "workspace",
-              targetSandboxId: MACHINE_B,
-              workingDir: "/workspace/project-b",
-            },
-          }),
-          selectionHistory: history,
-        }),
-      );
+      await hook.rerender({
+        launchChannelId: undefined,
+        resolveRemoteAfterCommit: () => {
+          resolvedAfterCommit = true;
+          pending.resolve(hydratedRemote);
+        },
+      });
       await flush(550);
 
+      expect(resolvedAfterCommit).toBe(true);
       expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
       expect(hook.result.current.value.options).toMatchObject({
         targetSandboxId: MACHINE_A,
@@ -477,6 +549,166 @@ describe("useNewSessionDraft", () => {
       await hook.unmount();
     },
   );
+
+  test("repeated omitted focus requests defer Recents until pending history hydrates", async () => {
+    const pending = deferred<NewSessionDraft>();
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const history = {
+      projects: [
+        {
+          channelId: PROJECT_A,
+          targetSandboxId: MACHINE_A,
+          machines: [{ sandboxId: MACHINE_A, workingDir: "/workspace/project-a" }],
+        },
+      ],
+    };
+    const hook = await renderRouteDraftHook(
+      client({
+        getNewSessionDraft: async () => await pending.promise,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+
+    await actRun(() => {
+      hook.result.current.requestComposerFocus();
+      hook.result.current.requestComposerFocus();
+    });
+    expect(hook.result.current.launchIntent).toEqual({
+      generation: 2,
+      kind: "omitted_after_explicit",
+    });
+    expect(hook.result.current.selectedChannelId).toBeNull();
+
+    await actRun(() =>
+      pending.resolve({
+        ...remote(4, {
+          selectedProjectChannelId: PROJECT_B,
+          options: {
+            visibility: "workspace",
+            targetSandboxId: MACHINE_B,
+            workingDir: "/workspace/project-b",
+          },
+        }),
+        selectionHistory: history,
+      }),
+    );
+    await flush(550);
+
+    expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
+    expect(hook.result.current.value.options).toMatchObject({
+      targetSandboxId: MACHINE_A,
+      workingDir: "/workspace/project-a",
+    });
+    expect(Object.hasOwn(hook.result.current.value, "selectedProjectChannelId")).toBe(false);
+    expect(requests).toHaveLength(0);
+    await hook.unmount();
+  });
+
+  test("explicit machine and folder changes persist provenance across autosave and reload", async () => {
+    const history = {
+      projects: [
+        {
+          channelId: PROJECT_A,
+          targetSandboxId: MACHINE_A,
+          machines: [{ sandboxId: MACHINE_A, workingDir: "/workspace/project-a" }],
+        },
+      ],
+    };
+    let authoritative = {
+      ...remote(2, {
+        options: {
+          visibility: "workspace",
+          targetSandboxId: MACHINE_B,
+          workingDir: "/workspace/project-b",
+        },
+      }),
+      selectionHistory: history,
+    };
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderRouteDraftHook(
+      client({
+        getNewSessionDraft: async () => authoritative,
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          authoritative = {
+            ...remote(request.expectedRevision + 1, request),
+            selectionHistory: history,
+          };
+          return authoritative;
+        },
+      }),
+    );
+    await flush(550);
+
+    expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
+    expect(hook.result.current.value.options).toMatchObject({
+      targetSandboxId: MACHINE_A,
+      workingDir: "/workspace/project-a",
+    });
+    expect(Object.hasOwn(hook.result.current.value, "selectedProjectChannelId")).toBe(false);
+    expect(requests).toHaveLength(0);
+
+    await actRun(() =>
+      hook.result.current.selectCompute({
+        kind: "machine",
+        sandboxId: MACHINE_B,
+        folder: { kind: "path", path: "/workspace/project-b" },
+      }),
+    );
+    await flush(550);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 2,
+      selectedProjectChannelId: PROJECT_A,
+      options: {
+        targetSandboxId: MACHINE_B,
+        workingDir: "/workspace/project-b",
+      },
+    });
+
+    await actRun(() => hook.result.current.draft.reload());
+    await flush(550);
+
+    expect(hook.result.current.selectedChannelId).toBe(PROJECT_A);
+    expect(hook.result.current.value.selectedProjectChannelId).toBe(PROJECT_A);
+    expect(hook.result.current.value.options).toMatchObject({
+      targetSandboxId: MACHINE_B,
+      workingDir: "/workspace/project-b",
+    });
+    expect(requests).toHaveLength(1);
+    await hook.unmount();
+  });
+
+  test("an explicit compute interaction persists an explicit Default provenance", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderRouteDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+
+    await actRun(() =>
+      hook.result.current.selectCompute({
+        kind: "machine",
+        sandboxId: MACHINE_B,
+        folder: { kind: "root" },
+      }),
+    );
+    await flush(550);
+
+    expect(requests).toHaveLength(1);
+    expect(Object.hasOwn(requests[0]!, "selectedProjectChannelId")).toBe(true);
+    expect(requests[0]?.selectedProjectChannelId).toBeNull();
+    await hook.unmount();
+  });
 
   test("catalog callback identity changes do not reset an in-flight newest edit", async () => {
     const pendingSave = deferred<NewSessionDraft>();

@@ -31,6 +31,17 @@ export function nextNewSessionProjectLaunchIntent(
     : { generation: current.generation + 1, kind: "explicit", channelId: launchChannelId };
 }
 
+export function nextFocusedNewSessionProjectLaunchIntent(
+  current: NewSessionProjectLaunchIntent,
+  channelId: string | null | undefined,
+): NewSessionProjectLaunchIntent {
+  // Same-route New session requests are meaningful even when the URL/search
+  // value is unchanged, so every request gets a fresh committed generation.
+  return channelId === undefined
+    ? { generation: current.generation + 1, kind: "omitted_after_explicit" }
+    : { generation: current.generation + 1, kind: "explicit", channelId };
+}
+
 /**
  * Resolve the route's ambient project-selection effect. Undefined means the
  * effect must not mutate an authority already installed by remote hydration;

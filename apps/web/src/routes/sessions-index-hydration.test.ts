@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   initialNewSessionProjectLaunchIntent,
   newSessionProjectSelection,
+  nextFocusedNewSessionProjectLaunchIntent,
   nextNewSessionProjectLaunchIntent,
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
@@ -126,6 +127,19 @@ describe("sessions-index project hydration", () => {
       });
     },
   );
+
+  test("same-route focus requests record repeated explicit and omitted launch generations", () => {
+    const initial = initialNewSessionProjectLaunchIntent(undefined);
+    const named = nextFocusedNewSessionProjectLaunchIntent(initial, PROJECT_B);
+    const firstRecents = nextFocusedNewSessionProjectLaunchIntent(named, undefined);
+    const secondRecents = nextFocusedNewSessionProjectLaunchIntent(firstRecents, undefined);
+    const explicitDefault = nextFocusedNewSessionProjectLaunchIntent(secondRecents, null);
+
+    expect(named).toEqual({ generation: 1, kind: "explicit", channelId: PROJECT_B });
+    expect(firstRecents).toEqual({ generation: 2, kind: "omitted_after_explicit" });
+    expect(secondRecents).toEqual({ generation: 3, kind: "omitted_after_explicit" });
+    expect(explicitDefault).toEqual({ generation: 4, kind: "explicit", channelId: null });
+  });
 
   test("ambient Recents applies before hydration without overwriting hydrated selection history", () => {
     expect(

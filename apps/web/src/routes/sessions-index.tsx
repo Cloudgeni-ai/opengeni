@@ -52,6 +52,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -158,11 +159,14 @@ import {
   hydratedNewSessionProjectProvenancePresent,
   initialNewSessionProjectLaunchIntent,
   newSessionProjectSelection,
+  nextFocusedNewSessionProjectLaunchIntent,
   nextNewSessionProjectLaunchIntent,
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "@/routes/sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "@/types";
+
+const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -588,16 +592,20 @@ function SessionsIndexRouteContent({
         : { ...current, compute: selection.compute };
     });
   });
+  const setExplicitComputeDraft = useLatestCallback((nextDraft: SessionDraft) => {
+    setProjectProvenancePresent(true);
+    setDraft(nextDraft);
+  });
 
   useEffect(() => {
     resetSessionView();
   }, [resetSessionView, workspaceId]);
 
   // Folder-launch links preselect their exact destination, including Default,
-  // while the ordinary New session entry starts in Recents. Keep the selection
-  // local so choosing a folder does not turn the composer URL into application
-  // state.
-  useEffect(() => {
+  // while the ordinary New session entry starts in Recents. Commit this intent
+  // before pending draft continuations can run; keeping it in an effect also
+  // preserves render purity and the useEffect server fallback preserves SSR.
+  useCommitSynchronousEffect(() => {
     const previousLaunchChannelId = previousLaunchChannelIdRef.current;
     previousLaunchChannelIdRef.current = launchChannelId;
     launchProjectIntentRef.current = nextNewSessionProjectLaunchIntent(
@@ -644,7 +652,16 @@ function SessionsIndexRouteContent({
     const onRequest = (event: Event) => {
       const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
         ?.channelId;
-      selectProject(requestedChannelId !== undefined ? requestedChannelId : recentChannelId);
+      launchProjectIntentRef.current = nextFocusedNewSessionProjectLaunchIntent(
+        launchProjectIntentRef.current,
+        requestedChannelId,
+      );
+      if (requestedChannelId !== undefined) {
+        selectProject(requestedChannelId);
+      } else if (remoteDraftHydratedRef.current) {
+        setProjectProvenancePresent(false);
+        selectProject(recentChannelId, false);
+      }
       setCreateComposerFocusGen((current) => current + 1);
     };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);
@@ -1344,6 +1361,7 @@ function SessionsIndexRouteContent({
             defaultSandboxBackend={defaultSandboxBackend}
             draft={draft}
             onChange={setDraft}
+            onComputeChange={setExplicitComputeDraft}
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
@@ -1891,6 +1909,7 @@ function ComputeTargetControl(props: {
   defaultSandboxBackend?: SandboxBackend;
   draft: SessionDraft;
   onChange: (draft: SessionDraft) => void;
+  onComputeChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalResourceAccess: NewSessionPersonalResourceAccess;
   fleet: ReturnType<typeof useMachines>;
@@ -2028,7 +2047,7 @@ function ComputeTargetControl(props: {
     if (kind === "sandbox") {
       // Composer no longer exposes a managed-backend override — always the
       // deployment default (empty wire field).
-      onChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+      props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
       return;
     }
     // Auto-pick the first selectable machine so the common single-machine case is
@@ -2048,7 +2067,7 @@ function ComputeTargetControl(props: {
         : null) ??
       machines.find((machine) => isMachineComputeSelectable(machine.state)) ??
       null;
-    onChange({
+    props.onComputeChange({
       ...draft,
       compute: {
         kind: "machine",
@@ -2149,7 +2168,7 @@ function ComputeTargetControl(props: {
           draft={draft}
           compute={draft.compute}
           machines={machines}
-          onChange={onChange}
+          onChange={props.onComputeChange}
           disabled={props.disabled}
           selectedChannelId={props.selectedChannelId}
           selectionHistory={props.selectionHistory}

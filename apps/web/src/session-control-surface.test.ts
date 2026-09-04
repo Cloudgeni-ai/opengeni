@@ -122,9 +122,9 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
     expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
-    expect(route).toContain(
-      "selectProject(requestedChannelId !== undefined ? requestedChannelId : recentChannelId);",
-    );
+    expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
+    expect(route).toContain("else if (remoteDraftHydratedRef.current)");
+    expect(route).toContain("selectProject(recentChannelId, false);");
     expect(hydration).toContain("return newSessionProjectSelection(");
   });
 
@@ -148,10 +148,17 @@ describe("session control surface architecture", () => {
       "const previousLaunchChannelIdRef = useRef<string | null | undefined>(launchChannelId);",
     );
     expect(route).toContain("const launchProjectIntentRef = useRef(");
+    expect(route).toContain(
+      'const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;',
+    );
+    expect(route).toContain("useCommitSynchronousEffect(() => {");
     expect(route).toContain("nextNewSessionProjectLaunchIntent(");
     expect(route).toContain("previousLaunchChannelIdRef.current = launchChannelId;");
     expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
+    expect(route).toContain("onComputeChange={setExplicitComputeDraft}");
+    expect(route).toContain("onChange={props.onComputeChange}");
+    expect(route).toContain("props.onComputeChange({");
   });
 
   test("hydrates durable project provenance before normal and realtime create", async () => {
