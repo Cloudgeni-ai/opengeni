@@ -1950,7 +1950,12 @@ describe("OpenGeniClient", () => {
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
-        ? jsonResponse({ pinned: [], sessions: [], nextCursor: null })
+        ? jsonResponse({
+            pinned: [],
+            sessions: [],
+            nextCursor: null,
+            ...(request.url.includes("channelId=") ? { filtersApplied: true } : {}),
+          })
         : jsonResponse([]),
     );
     await client.listSessions(WORKSPACE_ID, { limit: 5, parentSessionId: null });
@@ -1961,6 +1966,12 @@ describe("OpenGeniClient", () => {
       search: "  pinned work  ",
     });
     await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true });
+    await client.listSessionPage(WORKSPACE_ID, {
+      channelId: null,
+      createdBy: { kind: "subject", subjectId: "user:ada" },
+      updatedFrom: "2026-09-04T00:00:00.000Z",
+      updatedBefore: "2026-09-05T00:00:00.000Z",
+    });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
@@ -1975,6 +1986,9 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&pinsOnly=true`,
     );
     expect(requests[4]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&channelId=null&createdByKind=subject&createdBySubjectId=user%3Aada&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z`,
+    );
+    expect(requests[5]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
     );
   });
@@ -2049,6 +2063,20 @@ describe("OpenGeniClient", () => {
     await expect(client.listSessionPage(WORKSPACE_ID, { pinsOnly: true })).rejects.toThrow(
       "does not support pins-only session lists",
     );
+    await expect(client.listSessionPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
+      "does not support filtered session lists",
+    );
+  });
+
+  test("filtered session pages fail closed when an older page response lacks filter support", async () => {
+    const { client } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, {
+        createdBy: { kind: "subject", subjectId: "user:ada" },
+      }),
+    ).rejects.toThrow("does not support filtered session lists");
   });
 
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {

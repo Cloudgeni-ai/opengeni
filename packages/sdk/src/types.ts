@@ -1393,6 +1393,8 @@ export type SessionListResponse = {
   pinned: Session[];
   /** True when the server omitted older pins from its bounded pinned section. */
   pinnedTruncated?: boolean;
+  /** Present only when the server recognized and applied additive list filters. */
+  filtersApplied?: true;
   sessions: Session[];
   nextCursor: string | null;
 };

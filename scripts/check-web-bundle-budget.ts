@@ -412,6 +412,11 @@ const budgets = {
   // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
+  // Group-bound project, creator, and date pagination adds the exact filtered
+  // session-page SDK/UI surface. The configured-API Linux/x64 Bun 1.4 browser
+  // build measures 2,285,208 raw bytes across the same 30 files. Advance only
+  // the policy-derived raw envelope to 2,233 KiB, retaining 1,384 bytes of
+  // headroom; gzip and every other cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,

@@ -173,6 +173,102 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
+  test("loads older sessions only in the project whose end enters the viewport", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const suffix = Date.now();
+      const projectA = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Pagination project A ${suffix}`,
+      );
+      const projectB = await createChannelThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        `Pagination project B ${suffix}`,
+      );
+      for (let index = 0; index < 56; index += 1) {
+        await createSession(dbClient.db, {
+          accountId: projectA.accountId,
+          workspaceId,
+          initialMessage: `Project A older row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          channelId: projectA.id,
+        });
+        await createSession(dbClient.db, {
+          accountId: projectB.accountId,
+          workspaceId,
+          initialMessage: `Project B older row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          channelId: projectB.id,
+        });
+      }
+
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      const projectAGroup = page.getByRole("group", { name: projectA.name });
+      const projectBGroup = page.getByRole("group", { name: projectB.name });
+      await projectAGroup.waitFor();
+      await projectBGroup.waitFor();
+      const projectARows = projectAGroup.locator("a[data-session-row]");
+      const projectBRows = projectBGroup.locator("a[data-session-row]");
+      const initialProjectACount = await projectARows.count();
+      const initialProjectBCount = await projectBRows.count();
+      expect(initialProjectACount).toBeGreaterThan(0);
+      expect(initialProjectBCount).toBeGreaterThan(0);
+      expect(initialProjectACount + initialProjectBCount).toBe(50);
+
+      const filteredRequests: URL[] = [];
+      page.on("request", (request) => {
+        const url = new URL(request.url());
+        if (
+          request.method() === "GET" &&
+          url.pathname === `/v1/workspaces/${workspaceId}/sessions` &&
+          url.searchParams.get("view") === "page" &&
+          url.searchParams.has("channelId")
+        ) {
+          filteredRequests.push(url);
+        }
+      });
+      const loadProjectA = projectAGroup.getByRole("button", {
+        name: `Load older sessions in ${projectA.name}`,
+      });
+      await loadProjectA.waitFor();
+      await loadProjectA.scrollIntoViewIfNeeded();
+      await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
+        timeoutMs: 30_000,
+      });
+
+      expect(await projectBRows.count()).toBe(initialProjectBCount);
+      expect(filteredRequests.length).toBeGreaterThan(0);
+      expect(
+        filteredRequests.every((request) => request.searchParams.get("channelId") === projectA.id),
+      ).toBe(true);
+      expect(
+        filteredRequests.some((request) => request.searchParams.get("channelId") === projectB.id),
+      ).toBe(false);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   test("normalizes search-only creators and counts hierarchical browse roots", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -819,7 +915,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
-  test("rebases one expired cursor while retaining rows and leaves unrelated failures retryable", async () => {
+  test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -859,21 +955,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(firstPage.sessions).toHaveLength(50);
       expect(firstPage.nextCursor).toBeTruthy();
 
-      const loadOlder = page.getByRole("button", { name: "Load older sessions" });
+      const todayGroup = page.getByRole("group", { name: "Today" });
+      const loadOlder = todayGroup.getByRole("button", {
+        name: "Load older sessions in Today",
+      });
       await loadOlder.waitFor({ timeout: 15_000 });
-      const secondPageResponse = page.waitForResponse(
-        (response) =>
-          successfulSessionPageResponse(response, workspaceId, {
-            search: batch,
-            cursor: firstPage.nextCursor,
-          }),
+      const filteredFirstPageResponse = page.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return (
+            successfulSessionPageResponse(response, workspaceId, {
+              search: batch,
+              cursor: null,
+            }) && url.searchParams.has("updatedFrom")
+          );
+        },
         { timeout: 10_000 },
       );
-      await loadOlder.click();
-      const secondPage = (await (await secondPageResponse).json()) as BrowserSessionPage;
-      expect(secondPage.sessions).toHaveLength(50);
-      expect(secondPage.nextCursor).toBeTruthy();
-      const retainedId = secondPage.sessions[0]!.id;
+      await loadOlder.scrollIntoViewIfNeeded();
+      const filteredFirstPage = (await (
+        await filteredFirstPageResponse
+      ).json()) as BrowserSessionPage;
+      expect(filteredFirstPage.sessions).toHaveLength(100);
+      expect(filteredFirstPage.nextCursor).toBeTruthy();
+      const retainedId = filteredFirstPage.sessions[0]!.id;
       const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
       expect(await visibleRows.count()).toBe(100);
@@ -885,7 +990,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         const url = new URL(route.request().url());
         if (
           !injectedFailure &&
-          url.searchParams.get("cursor") === secondPage.nextCursor &&
+          url.searchParams.get("cursor") === filteredFirstPage.nextCursor &&
           url.searchParams.get("search") === batch
         ) {
           injectedFailure = true;
@@ -898,8 +1003,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         }
         await route.continue();
       });
-      await loadOlder.click();
-      const retryOlder = page.getByRole("button", { name: "Retry older sessions" });
+      await loadOlder.scrollIntoViewIfNeeded();
+      const retryOlder = todayGroup.getByRole("button", {
+        name: "Retry older sessions in Today",
+      });
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
       expect(await visibleRows.count()).toBe(100);
@@ -912,15 +1019,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         (response) =>
           successfulSessionPageResponse(response, workspaceId, {
             search: batch,
-            cursor: secondPage.nextCursor,
+            cursor: filteredFirstPage.nextCursor,
           }),
         { timeout: 10_000 },
       );
-      await retryOlder.click();
+      await retryOlder.focus();
+      await retryOlder.press("Enter");
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
       await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
+      await page.waitForFunction(
+        () => document.activeElement?.id === "session-group-today",
+        undefined,
+        { timeout: 10_000 },
+      );
       const visibleIds = await visibleRows.evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-session-row")),
       );
@@ -1940,6 +2053,11 @@ type BrowserSession = {
   pinned: boolean;
   pinVersion: number;
 };
+type BrowserChannel = {
+  id: string;
+  accountId: string;
+  name: string;
+};
 type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
@@ -2082,6 +2200,7 @@ async function createSessionThroughApi(
   workspaceId: string,
   initialMessage: string,
   options: {
+    channelId?: string;
     goal?: {
       text: string;
       successCriteria?: string;
@@ -2133,6 +2252,35 @@ async function createSessionThroughApi(
       return (await renameResponse.json()) as BrowserSession;
     },
     { apiBaseUrl, workspaceId, initialMessage, options },
+  );
+}
+
+async function createChannelThroughApi(
+  page: Page,
+  apiBaseUrl: string,
+  workspaceId: string,
+  name: string,
+): Promise<BrowserChannel> {
+  return await page.evaluate(
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      name: projectName,
+    }) => {
+      const response = await fetch(
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/channels`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name: projectName }),
+        },
+      );
+      if (!response.ok) {
+        throw new Error(`channel create failed: ${response.status} ${await response.text()}`);
+      }
+      return (await response.json()) as BrowserChannel;
+    },
+    { apiBaseUrl, workspaceId, name },
   );
 }
 
