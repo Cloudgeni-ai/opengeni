@@ -16,7 +16,7 @@ beforeAll(() => {
 afterAll(() => GlobalRegistrator.unregister());
 
 describe("CapabilityBrowseSection", () => {
-  test("renders 48 connectors initially, then 96 after See more", async () => {
+  test("focuses the first appended connector when the final See more is activated", async () => {
     const items = Array.from({ length: 96 }, (_, index) =>
       catalogItem(`mcp:${index}`, `Connector ${index}`),
     );
@@ -32,10 +32,40 @@ describe("CapabilityBrowseSection", () => {
       );
       expect(seeMore).toBeDefined();
 
+      seeMore!.focus();
       await act(async () => seeMore!.click());
       expect(rendered.container.querySelectorAll("[data-capability-catalog-tile]")).toHaveLength(
         96,
       );
+      const firstAppendedAction = rendered.container
+        .querySelectorAll<HTMLElement>("[data-capability-catalog-tile]")[48]
+        ?.querySelector("button");
+      expect(firstAppendedAction === document.activeElement).toBe(true);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("does not move focus while See more remains", async () => {
+    const items = Array.from({ length: 120 }, (_, index) =>
+      catalogItem(`mcp:${index}`, `Connector ${index}`),
+    );
+    const rendered = await render(<PaginatedBrowseFixture items={items} />);
+
+    try {
+      const seeMore = [...rendered.container.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "See more",
+      );
+      expect(seeMore).toBeDefined();
+
+      seeMore!.focus();
+      await act(async () => seeMore!.click());
+
+      expect(rendered.container.querySelectorAll("[data-capability-catalog-tile]")).toHaveLength(
+        96,
+      );
+      expect(document.activeElement === seeMore).toBe(true);
+      expect(seeMore!.isConnected).toBe(true);
     } finally {
       await rendered.unmount();
     }

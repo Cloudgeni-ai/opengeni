@@ -421,6 +421,41 @@ describe("capabilities browser e2e", () => {
     }
   }, 90_000);
 
+  test("final See more keyboard activation enters the appended results", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installLargeCatalogApi(page, 0, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.focus();
+      await expectFocused(seeMore);
+      await page.keyboard.press("Enter");
+
+      expect(await tiles.count()).toBe(96);
+      expect(await seeMore.count()).toBe(0);
+      await expectFocused(tiles.nth(48).locator("button").first());
+
+      await page.keyboard.press("Tab");
+      const activeTileIndex = await page.evaluate(() => {
+        const activeTile = document.activeElement?.closest<HTMLElement>(
+          "[data-capability-catalog-tile]",
+        );
+        if (!activeTile) return -1;
+        return [...document.querySelectorAll("[data-capability-catalog-tile]")].indexOf(activeTile);
+      });
+      expect(activeTileIndex).toBeGreaterThanOrEqual(48);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Google Drive folders configure only the exact named Integration instance", async () => {
     const state: DriveUiState = {
       driveSaves: 0,
@@ -944,8 +979,12 @@ async function installCapabilityApi(
   });
 }
 
-async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promise<void> {
-  const catalog = Array.from({ length: 5_000 }, (_, index) => ({
+async function installLargeCatalogApi(
+  page: Page,
+  catalogDelayMs: number,
+  catalogSize = 5_000,
+): Promise<void> {
+  const catalog = Array.from({ length: catalogSize }, (_, index) => ({
     ...capability(false),
     id: `mcp:large-${index}`,
     kind: "mcp",
