@@ -215,7 +215,10 @@ describe("GitHub action approval controls", () => {
             ],
           }),
     );
-    const context = appContext(["github:manage"], mock(async () => ({})));
+    const context = appContext(
+      ["github:manage"],
+      mock(async () => ({})),
+    );
     (context.client as { getGitHubActionPolicies: typeof getPolicies }).getGitHubActionPolicies =
       getPolicies;
     const rendered = await renderAdapter(context);
