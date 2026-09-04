@@ -537,6 +537,13 @@ Google Drive accounts beyond the primary knowledge connection) into that one
 row's rolled-up state. The row and the sheet contain no provider-specific
 branch; every account/provider difference lives in the adapters.
 
+GitHub's Options block includes the attempt-frozen action approval policy for
+each available acting identity. `Create and update work`, `Submit reviews`, and
+`Merge pull requests` each select Ask every time, Allow, or Block. They are
+separate so autonomous pull-request creation never implies autonomous review or
+merge. The stock UI reads and writes the public GitHub action-policy endpoints;
+it does not mutate connector-policy rows directly.
+
 - Each row shows mark, name, one-line description, and a compact circular
   connection-state indicator in place of a text chip: a filled check for
   `Connected`, a triangle for `Needs attention`, a plus for `Not connected`

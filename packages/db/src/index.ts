@@ -29818,23 +29818,27 @@ async function insertConnectorActionRequest(
   return { row: existing, inserted: false };
 }
 
-export async function upsertConnectorActionPolicy(
-  db: Database,
-  input: {
-    accountId: string;
-    workspaceId: string;
-    subjectId: string;
-    connectionId: string;
-    serverId: string;
-    toolName: string;
-    actionName: string;
-    policy: ConnectorActionPolicyDecision;
-  },
-): Promise<{
-  policy: typeof schema.connectorActionPolicies.$inferSelect;
-  changed: boolean;
-}> {
-  const scope = {
+export type ConnectorActionPolicyWrite = {
+  accountId: string;
+  workspaceId: string;
+  subjectId: string;
+  connectionId: string;
+  serverId: string;
+  toolName: string;
+  actionName: string;
+  policy: ConnectorActionPolicyDecision;
+};
+
+type NormalizedConnectorActionPolicyWrite = ConnectorActionPolicyWrite & {
+  subjectId: string;
+};
+
+function normalizeConnectorActionPolicyWrite(
+  input: ConnectorActionPolicyWrite,
+): NormalizedConnectorActionPolicyWrite {
+  return {
+    ...input,
+    subjectId: boundedConnectorActionText(input.subjectId, "policy actor", 1024),
     connectionId: boundedConnectorActionText(
       input.connectionId,
       "connector connection id",
@@ -29856,78 +29860,205 @@ export async function upsertConnectorActionPolicy(
       CONNECTOR_ACTION_NAME_MAX,
     ),
   };
-  const subjectId = boundedConnectorActionText(input.subjectId, "policy actor", 1024);
+}
+
+function connectorActionPolicyScopeKey(input: ConnectorActionPolicyWrite): string {
+  return [input.connectionId, input.serverId, input.toolName, input.actionName].join("\0");
+}
+
+async function upsertConnectorActionPolicyInTransaction(
+  db: Database,
+  input: NormalizedConnectorActionPolicyWrite,
+): Promise<{
+  policy: typeof schema.connectorActionPolicies.$inferSelect;
+  changed: boolean;
+}> {
+  const [existing] = await db
+    .select()
+    .from(schema.connectorActionPolicies)
+    .where(
+      and(
+        eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+        eq(schema.connectorActionPolicies.connectionId, input.connectionId),
+        eq(schema.connectorActionPolicies.serverId, input.serverId),
+        eq(schema.connectorActionPolicies.toolName, input.toolName),
+        eq(schema.connectorActionPolicies.actionName, input.actionName),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (existing?.policy === input.policy) return { policy: existing, changed: false };
+  const now = new Date();
+  const [row] = existing
+    ? await db
+        .update(schema.connectorActionPolicies)
+        .set({
+          policy: input.policy,
+          version: existing.version + 1,
+          updatedBySubjectId: input.subjectId,
+          updatedAt: now,
+        })
+        .where(eq(schema.connectorActionPolicies.id, existing.id))
+        .returning()
+    : await db
+        .insert(schema.connectorActionPolicies)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          connectionId: input.connectionId,
+          serverId: input.serverId,
+          toolName: input.toolName,
+          actionName: input.actionName,
+          policy: input.policy,
+          createdBySubjectId: input.subjectId,
+          updatedBySubjectId: input.subjectId,
+        })
+        .returning();
+  if (!row) throw new Error("Failed to persist connector action policy");
+  await db.insert(schema.auditEvents).values(
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "connector.action.policy_changed",
+        targetType: "connector_action_policy",
+        targetId: row.id,
+        metadata: {
+          connectionId: row.connectionId,
+          serverId: row.serverId,
+          toolName: row.toolName,
+          actionName: row.actionName,
+          policy: row.policy,
+          version: row.version,
+          previousPolicy: existing?.policy ?? null,
+          previousVersion: existing?.version ?? null,
+        },
+      },
+      "metadata",
+      "metadataCodecVersion",
+    ),
+  );
+  return { policy: row, changed: true };
+}
+
+export async function upsertConnectorActionPolicies(
+  db: Database,
+  inputs: readonly ConnectorActionPolicyWrite[],
+): Promise<
+  Array<{
+    policy: typeof schema.connectorActionPolicies.$inferSelect;
+    changed: boolean;
+  }>
+> {
+  if (inputs.length === 0 || inputs.length > 128) {
+    throw new Error("connector action policy batch must contain between 1 and 128 entries");
+  }
+  const normalized = inputs.map(normalizeConnectorActionPolicyWrite);
+  const first = normalized[0]!;
+  if (
+    normalized.some(
+      (input) =>
+        input.accountId !== first.accountId ||
+        input.workspaceId !== first.workspaceId ||
+        input.subjectId !== first.subjectId,
+    )
+  ) {
+    throw new Error("connector action policy batch must share one workspace and actor");
+  }
+  const sorted = [...normalized].sort((left, right) =>
+    connectorActionPolicyScopeKey(left).localeCompare(connectorActionPolicyScopeKey(right)),
+  );
+  if (
+    sorted.some(
+      (input, index) =>
+        index > 0 &&
+        connectorActionPolicyScopeKey(input) === connectorActionPolicyScopeKey(sorted[index - 1]!),
+    )
+  ) {
+    throw new Error("connector action policy batch contains duplicate scopes");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: first.accountId, workspaceId: first.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        await assertWorkspaceAccountPairInScope(tx, first.accountId, first.workspaceId);
+        const results = [];
+        for (const input of sorted) {
+          results.push(
+            await upsertConnectorActionPolicyInTransaction(tx as unknown as Database, input),
+          );
+        }
+        return results;
+      }),
+  );
+}
+
+export async function upsertConnectorActionPolicy(
+  db: Database,
+  input: ConnectorActionPolicyWrite,
+): Promise<{
+  policy: typeof schema.connectorActionPolicies.$inferSelect;
+  changed: boolean;
+}> {
+  return (await upsertConnectorActionPolicies(db, [input]))[0]!;
+}
+
+export async function listConnectorActionPolicies(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionIds: readonly string[];
+  },
+): Promise<ConnectorActionPolicySnapshotEntry[]> {
+  if (input.connectionIds.length === 0) return [];
+  if (input.connectionIds.length > 128) {
+    throw new Error("connector action policy read exceeds 128 connections");
+  }
+  const connectionIds = [
+    ...new Set(
+      input.connectionIds.map((connectionId) =>
+        boundedConnectorActionText(
+          connectionId,
+          "connector connection id",
+          CONNECTOR_ACTION_CONNECTION_ID_MAX,
+        ),
+      ),
+    ),
+  ];
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await assertWorkspaceAccountPairInScope(tx, input.accountId, input.workspaceId);
-        const [existing] = await tx
-          .select()
-          .from(schema.connectorActionPolicies)
-          .where(
-            and(
-              eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
-              eq(schema.connectorActionPolicies.connectionId, scope.connectionId),
-              eq(schema.connectorActionPolicies.serverId, scope.serverId),
-              eq(schema.connectorActionPolicies.toolName, scope.toolName),
-              eq(schema.connectorActionPolicies.actionName, scope.actionName),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (existing?.policy === input.policy) return { policy: existing, changed: false };
-        const now = new Date();
-        const [row] = existing
-          ? await tx
-              .update(schema.connectorActionPolicies)
-              .set({
-                policy: input.policy,
-                version: existing.version + 1,
-                updatedBySubjectId: subjectId,
-                updatedAt: now,
-              })
-              .where(eq(schema.connectorActionPolicies.id, existing.id))
-              .returning()
-          : await tx
-              .insert(schema.connectorActionPolicies)
-              .values({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                ...scope,
-                policy: input.policy,
-                createdBySubjectId: subjectId,
-                updatedBySubjectId: subjectId,
-              })
-              .returning();
-        if (!row) throw new Error("Failed to persist connector action policy");
-        await tx.insert(schema.auditEvents).values(
-          withLosslessContentWriteVersion(
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              subjectId,
-              action: "connector.action.policy_changed",
-              targetType: "connector_action_policy",
-              targetId: row.id,
-              metadata: {
-                connectionId: row.connectionId,
-                serverId: row.serverId,
-                toolName: row.toolName,
-                actionName: row.actionName,
-                policy: row.policy,
-                version: row.version,
-                previousPolicy: existing?.policy ?? null,
-                previousVersion: existing?.version ?? null,
-              },
-            },
-            "metadata",
-            "metadataCodecVersion",
+    async (scopedDb) => {
+      await assertWorkspaceAccountPairInScope(scopedDb, input.accountId, input.workspaceId);
+      return await scopedDb
+        .select({
+          id: schema.connectorActionPolicies.id,
+          connectionId: schema.connectorActionPolicies.connectionId,
+          serverId: schema.connectorActionPolicies.serverId,
+          toolName: schema.connectorActionPolicies.toolName,
+          actionName: schema.connectorActionPolicies.actionName,
+          policy: schema.connectorActionPolicies.policy,
+          version: schema.connectorActionPolicies.version,
+        })
+        .from(schema.connectorActionPolicies)
+        .where(
+          and(
+            eq(schema.connectorActionPolicies.accountId, input.accountId),
+            eq(schema.connectorActionPolicies.workspaceId, input.workspaceId),
+            inArray(schema.connectorActionPolicies.connectionId, connectionIds),
           ),
+        )
+        .orderBy(
+          asc(schema.connectorActionPolicies.connectionId),
+          asc(schema.connectorActionPolicies.serverId),
+          asc(schema.connectorActionPolicies.toolName),
+          asc(schema.connectorActionPolicies.actionName),
+          asc(schema.connectorActionPolicies.id),
         );
-        return { policy: row, changed: true };
-      }),
+    },
   );
 }
 

@@ -631,6 +631,9 @@ describe("API helpers", () => {
     expect(
       routeLabel(`/v1/workspaces/${workspace}/connections/connection-1/github/repositories/verify`),
     ).toBe("/v1/workspaces/:workspaceId/connections/:connectionId/github/repositories/verify");
+    expect(routeLabel(`/v1/workspaces/${workspace}/github/action-policies`)).toBe(
+      "/v1/workspaces/:workspaceId/github/action-policies",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
       "/v1/workspaces/:workspaceId/control-events/stream",
     );

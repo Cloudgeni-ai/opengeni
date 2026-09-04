@@ -189,6 +189,18 @@ review submission (`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`), and merge
 (`merge`, `squash`, or `rebase`). Merge is marked destructive and all writes
 remain subject to the configured confirmation policy.
 
+The GitHub integration sheet exposes that policy per acting identity in three
+independent groups: routine creation/update work, review submission, and merge.
+Routine work includes branch, issue, pull-request, comment, and reviewer-request
+writes. Choosing Allow there does not broaden review or merge. Existing or
+missing policy rows project as Ask, and a pre-existing per-tool split projects
+as Mixed until the user chooses one group decision. The API surface is
+`GET`/`PATCH /v1/workspaces/:workspaceId/github/action-policies`; workspace App
+changes require `github:manage`, while a Personal policy requires the exact
+authenticated connection owner with `connections:write`. Updates are effective
+for the next attempt snapshot. An approval request that is already open keeps
+its original decision.
+
 ## Durable propagation
 
 Durable propagation means accepted follow-up work, goal continuations, recovery,

@@ -2148,6 +2148,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/github/app",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/action-policies$/,
+    label: "/v1/workspaces/:workspaceId/github/action-policies",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories$/,
     label: "/v1/workspaces/:workspaceId/github/repositories",
   },
