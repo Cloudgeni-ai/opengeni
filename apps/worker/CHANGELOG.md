@@ -1,5 +1,33 @@
 # @opengeni/worker-bundle
 
+## 0.26.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/db@4.0.0
+  - @opengeni/runtime@2.3.0
+  - @opengeni/core@2.7.5
+  - @opengeni/config@1.0.0
+  - @opengeni/capabilities@0.3.2
+  - @opengeni/codex@0.2.21
+  - @opengeni/github@0.7.3
+  - @opengeni/xai-subscription@0.1.3
+  - @opengeni/codemode@0.4.27
+  - @opengeni/documents@0.8.19
+  - @opengeni/events@0.4.17
+  - @opengeni/observability@0.8.19
+  - @opengeni/storage@0.2.120
+
 ## 0.25.1
 
 ### Patch Changes

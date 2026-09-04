@@ -1,5 +1,22 @@
 # @opengeni/core
 
+## 2.7.5
+
+### Patch Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/contracts@2.13.0
+  - @opengeni/db@4.0.0
+  - @opengeni/runtime@2.3.0
+  - @opengeni/config@1.0.0
+  - @opengeni/codex@0.2.21
+  - @opengeni/documents@0.8.19
+  - @opengeni/events@0.4.17
+  - @opengeni/observability@0.8.19
+  - @opengeni/storage@0.2.120
+
 ## 2.7.4
 
 ### Patch Changes
