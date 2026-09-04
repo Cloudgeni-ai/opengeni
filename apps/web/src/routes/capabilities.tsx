@@ -503,8 +503,8 @@ export function CapabilitiesRoute({
 
   // Honour the `?section=packs` deep link exactly once, after the catalog has
   // settled. Scrolling on first commit lands in the wrong place: Browse is
-  // still a skeleton then, and resolving the first catalog page inserts the
-  // Browse grid above the Bundles section afterwards.
+  // still a skeleton then, and resolving and rendering the first client-side
+  // 48-item window inserts the Browse grid above the Bundles section afterwards.
   useEffect(() => {
     if (!shouldScrollToDeepLinkedBundles(initialSection, loading, bundlesScrolled.current)) return;
     bundlesScrolled.current = true;

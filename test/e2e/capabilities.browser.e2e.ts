@@ -395,8 +395,7 @@ describe("capabilities browser e2e", () => {
       const tiles = page.locator("[data-capability-catalog-tile]");
       await expectVisible(tiles.first());
       const initialCount = await tiles.count();
-      expect(initialCount).toBeGreaterThan(0);
-      expect(initialCount).toBeLessThanOrEqual(48);
+      expect(initialCount).toBe(48);
 
       const seeMore = page.getByRole("button", { name: "See more" });
       await expectVisible(seeMore);
@@ -405,7 +404,7 @@ describe("capabilities browser e2e", () => {
       expect(await tiles.count()).toBe(initialCount);
 
       await seeMore.click();
-      expect(await tiles.count()).toBe(initialCount + 48);
+      expect(await tiles.count()).toBe(96);
 
       const startedAt = performance.now();
       await page.getByLabel("Search connectors").fill("Capability 4999");
