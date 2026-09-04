@@ -25,8 +25,7 @@ export const GITHUB_APP_DESCRIPTION =
 // GitHub is the workspace App binding, not a catalog item, so there is no
 // catalogAssetUrl logo path for it; like the other integration marks this is a
 // provider-hosted logo with the monogram as the offline fallback.
-export const GITHUB_LOGO_URL =
-  "https://github.githubassets.com/favicons/favicon.svg";
+export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon.svg";
 
 const GITHUB_ACTION_POLICY_GROUPS: Array<{
   id: GitHubActionPolicyGroup;
@@ -36,8 +35,7 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
   {
     id: "routine",
     label: "Create and update work",
-    description:
-      "Branches, issues, pull requests, comments, and reviewer requests.",
+    description: "Branches, issues, pull requests, comments, and reviewer requests.",
   },
   {
     id: "review",
@@ -47,8 +45,7 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
   {
     id: "merge",
     label: "Merge pull requests",
-    description:
-      "Merge, squash, or rebase a pull request. This can change protected branches.",
+    description: "Merge, squash, or rebase a pull request. This can change protected branches.",
   },
 ];
 
@@ -58,17 +55,9 @@ const GITHUB_ACTION_POLICY_GROUPS: Array<{
  * context (the repository picker uses the same data), so this adapter reads
  * from there instead of fetching again.
  */
-export function useGitHubIntegration({
-  workspaceId,
-}: {
-  workspaceId: string;
-}): IntegrationAdapter {
+export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): IntegrationAdapter {
   const context = useAppContext();
-  const canManage = hasWorkspacePermission(
-    context.accessContext,
-    workspaceId,
-    "github:manage",
-  );
+  const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
   const canManagePersonal = hasWorkspacePermission(
     context.accessContext,
     workspaceId,
@@ -80,8 +69,7 @@ export function useGitHubIntegration({
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
-  const [actionPolicies, setActionPolicies] =
-    useState<GitHubActionPoliciesResponse | null>(null);
+  const [actionPolicies, setActionPolicies] = useState<GitHubActionPoliciesResponse | null>(null);
   const [actionPolicyFailed, setActionPolicyFailed] = useState(false);
   const [actionPolicyBusy, setActionPolicyBusy] = useState<string | null>(null);
   const actionPolicyRequest = useRef(0);
@@ -90,8 +78,7 @@ export function useGitHubIntegration({
 
   // A failed status fetch with no prior snapshot is unknown, not unbound: show a
   // visible failure with a retry instead of pinning the tile at Loading.
-  const statusFailed =
-    status === null && !context.repoBusy && context.githubStatusFailed;
+  const statusFailed = status === null && !context.repoBusy && context.githubStatusFailed;
   const catalogLoading = context.repoBusy || !context.githubCatalogReady;
   const personalConnection = context.personalGitHubStatus?.connection ?? null;
   const personalConnected = personalConnection?.status === "active";
@@ -99,9 +86,7 @@ export function useGitHubIntegration({
     personalConnection && personalConnection.status !== "active",
   );
   const bound = status?.status === "bound" && installations.length > 0;
-  const broken =
-    bound &&
-    installations.some((installation) => installation.lifecycle !== "active");
+  const broken = bound && installations.some((installation) => installation.lifecycle !== "active");
   const chip =
     personalNeedsAttention || broken || statusFailed
       ? ({ label: "Needs attention", tone: "warn" } as const)
@@ -110,9 +95,7 @@ export function useGitHubIntegration({
         : githubChip(status, canManage, statusFailed);
   const connectUrl = status?.installUrl ?? status?.linkUrl ?? null;
   const actionPolicyActorKey = [
-    ...installations.map(
-      (installation) => `app:${installation.installationId}`,
-    ),
+    ...installations.map((installation) => `app:${installation.installationId}`),
     personalConnection ? `personal:${personalConnection.id}` : "",
   ].join("|");
 
@@ -120,8 +103,7 @@ export function useGitHubIntegration({
     const request = ++actionPolicyRequest.current;
     setActionPolicyFailed(false);
     try {
-      const policies =
-        await context.client.getGitHubActionPolicies(workspaceId);
+      const policies = await context.client.getGitHubActionPolicies(workspaceId);
       if (actionPolicyRequest.current !== request) return;
       setActionPolicies(policies);
     } catch {
@@ -146,25 +128,20 @@ export function useGitHubIntegration({
     const key = githubActionPolicyOptionId(actor, group);
     setActionPolicyBusy(key);
     try {
-      const updated = await context.client.updateGitHubActionPolicy(
-        workspaceId,
-        {
-          actor:
-            actor.kind === "workspace_app"
-              ? { kind: "workspace_app", installationId: actor.installationId }
-              : { kind: "personal", connectionId: actor.connectionId },
-          group,
-          decision,
-        },
-      );
+      const updated = await context.client.updateGitHubActionPolicy(workspaceId, {
+        actor:
+          actor.kind === "workspace_app"
+            ? { kind: "workspace_app", installationId: actor.installationId }
+            : { kind: "personal", connectionId: actor.connectionId },
+        group,
+        decision,
+      });
       setActionPolicies((current) =>
         current
           ? {
               ...current,
               actors: current.actors.map((candidate) =>
-                sameGitHubActionPolicyActor(candidate, updated)
-                  ? updated
-                  : candidate,
+                sameGitHubActionPolicyActor(candidate, updated) ? updated : candidate,
               ),
             }
           : current,
@@ -181,13 +158,8 @@ export function useGitHubIntegration({
   const facts: IntegrationViewModel["connection"] = [];
   for (const installation of installations) {
     facts.push({
-      label:
-        installation.accountType === "Organization"
-          ? "Organization"
-          : "GitHub account",
-      value:
-        installation.accountLogin ??
-        `Installation ${installation.installationId}`,
+      label: installation.accountType === "Organization" ? "Organization" : "GitHub account",
+      value: installation.accountLogin ?? `Installation ${installation.installationId}`,
     });
     if (installation.lifecycle !== "active") {
       facts.push({ label: "GitHub status", value: installation.lifecycle });
@@ -199,10 +171,7 @@ export function useGitHubIntegration({
     status.setupMode === "operator" &&
     !status.configured
   ) {
-    facts.push({
-      label: "GitHub App",
-      value: "Not registered for this deployment",
-    });
+    facts.push({ label: "GitHub App", value: "Not registered for this deployment" });
   }
   if (personalConnection) {
     facts.push({
@@ -256,8 +225,7 @@ export function useGitHubIntegration({
             kind: "setup",
             onSetup: reconnect,
             disabled:
-              connectUrl === null &&
-              !(status.setupMode === "operator" && !status.configured),
+              connectUrl === null && !(status.setupMode === "operator" && !status.configured),
             busy,
           };
   const footer: IntegrationFooter =
@@ -275,9 +243,7 @@ export function useGitHubIntegration({
           ? {
               kind: "actions",
               primary: {
-                label: broken
-                  ? "Repair workspace App"
-                  : "Connect another account",
+                label: broken ? "Repair workspace App" : "Connect another account",
                 onClick: reconnect,
                 disabled: connectUrl === null,
               },
@@ -294,8 +260,7 @@ export function useGitHubIntegration({
                 label: "Set up workspace App",
                 onClick: reconnect,
                 disabled:
-                  connectUrl === null &&
-                  !(status.setupMode === "operator" && !status.configured),
+                  connectUrl === null && !(status.setupMode === "operator" && !status.configured),
               },
               busy,
             }
@@ -314,9 +279,7 @@ export function useGitHubIntegration({
       ? configurableInstallations.map((installation) => ({
           kind: "link" as const,
           id: `github-repositories-${installation.installationId}`,
-          label:
-            installation.accountLogin ??
-            `GitHub installation ${installation.installationId}`,
+          label: installation.accountLogin ?? `GitHub installation ${installation.installationId}`,
           description: "Choose which repositories this installation shares.",
           action: {
             label: "Change repositories",
@@ -324,8 +287,7 @@ export function useGitHubIntegration({
           },
         }))
       : [];
-  const personalOption: IntegrationOption[] = context.personalGitHubStatus
-    ?.enabled
+  const personalOption: IntegrationOption[] = context.personalGitHubStatus?.enabled
     ? [
         {
           kind: "link" as const,
@@ -337,15 +299,10 @@ export function useGitHubIntegration({
               ? "Reconnect to keep reviewing and merging as yourself."
               : "Approve, review, and merge as yourself.",
           action: {
-            label: personalConnected
-              ? "Manage"
-              : personalNeedsAttention
-                ? "Reconnect"
-                : "Connect",
+            label: personalConnected ? "Manage" : personalNeedsAttention ? "Reconnect" : "Connect",
             onClick: () => {
               if (personalConnected) setPersonalOpen(true);
-              else if (personalNeedsAttention)
-                void context.reconnectPersonalGitHub(workspaceId);
+              else if (personalNeedsAttention) void context.reconnectPersonalGitHub(workspaceId);
               else void context.connectPersonalGitHub(workspaceId);
             },
           },
@@ -360,10 +317,7 @@ export function useGitHubIntegration({
           id: "github-action-policy-retry",
           label: "Action approvals",
           description: "Approval settings could not be loaded.",
-          action: {
-            label: "Retry",
-            onClick: () => void refreshActionPolicies(),
-          },
+          action: { label: "Retry", onClick: () => void refreshActionPolicies() },
         },
       ]
     : actionPolicies?.enabled
@@ -378,17 +332,12 @@ export function useGitHubIntegration({
               description: group.description,
               value,
               choices: [
-                ...(value === "mixed"
-                  ? [{ value: "mixed", label: "Mixed", disabled: true }]
-                  : []),
+                ...(value === "mixed" ? [{ value: "mixed", label: "Mixed", disabled: true }] : []),
                 { value: "ask", label: "Ask every time" },
                 { value: "allow", label: "Allow" },
                 { value: "block", label: "Block" },
               ],
-              disabled:
-                actor.kind === "workspace_app"
-                  ? !canManage
-                  : !canManagePersonal,
+              disabled: actor.kind === "workspace_app" ? !canManage : !canManagePersonal,
               busy: actionPolicyBusy === optionId,
               onChange: (next: string) => {
                 if (next === "allow" || next === "ask" || next === "block") {
@@ -399,11 +348,7 @@ export function useGitHubIntegration({
           }),
         )
       : [];
-  const options = [
-    ...personalOption,
-    ...installationOptions,
-    ...actionPolicyOptions,
-  ];
+  const options = [...personalOption, ...installationOptions, ...actionPolicyOptions];
 
   const model: IntegrationViewModel = {
     id: "github",
@@ -423,9 +368,7 @@ export function useGitHubIntegration({
             emptyMessage: catalogLoading
               ? "Loading repositories…"
               : githubEmptyRepositoriesMessage(installations),
-            ...(canManage &&
-            configureUrl &&
-            configurableInstallations.length === 1
+            ...(canManage && configureUrl && configurableInstallations.length === 1
               ? {
                   editLabel: "Change repositories",
                   onEdit: () => window.location.assign(configureUrl),
@@ -441,8 +384,7 @@ export function useGitHubIntegration({
           notice: {
             tone: "failed" as const,
             title: "GitHub status could not be loaded.",
-            description:
-              "The GitHub App binding is unknown until the status loads.",
+            description: "The GitHub App binding is unknown until the status loads.",
             action: {
               label: "Retry",
               onClick: () => void context.refreshGitHub(workspaceId),
@@ -453,8 +395,7 @@ export function useGitHubIntegration({
         ? {
             notice: {
               tone: "muted" as const,
-              title:
-                "GitHub is temporarily unavailable for this OpenGeni deployment.",
+              title: "GitHub is temporarily unavailable for this OpenGeni deployment.",
             },
           }
         : {}),
@@ -482,9 +423,7 @@ export function useGitHubIntegration({
           login={String(personalConnection.metadata.githubLogin ?? "connected")}
           repositories={context.personalGitHubRepositories}
           busy={context.personalGitHubBusy}
-          onSave={(selections) =>
-            context.savePersonalGitHubRepositories(workspaceId, selections)
-          }
+          onSave={(selections) => context.savePersonalGitHubRepositories(workspaceId, selections)}
           onReconnect={() => void context.reconnectPersonalGitHub(workspaceId)}
           onDisconnect={() => setPersonalDisconnectOpen(true)}
         />
@@ -497,8 +436,7 @@ export function useGitHubIntegration({
         confirmLabel="Disconnect"
         cancelAutoFocus
         onConfirm={async () => {
-          const disconnected =
-            await context.disconnectPersonalGitHub(workspaceId);
+          const disconnected = await context.disconnectPersonalGitHub(workspaceId);
           if (disconnected) setPersonalOpen(false);
           return disconnected;
         }}
@@ -521,11 +459,7 @@ export function githubChip(
   }
   const bound = status.status === "bound" && status.installations.length > 0;
   if (bound) {
-    if (
-      status.installations.some(
-        (installation) => installation.lifecycle !== "active",
-      )
-    ) {
+    if (status.installations.some((installation) => installation.lifecycle !== "active")) {
       return { label: "Needs attention", tone: "warn" };
     }
     return canManage
@@ -535,12 +469,8 @@ export function githubChip(
   return { label: "Not connected", tone: "idle" };
 }
 
-function githubEmptyRepositoriesMessage(
-  installations: GitHubAppInfo["installations"],
-): string {
-  return installations.some(
-    (installation) => installation.repositoryScope === "all",
-  )
+function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installations"]): string {
+  return installations.some((installation) => installation.repositoryScope === "all")
     ? "This installation shares every repository it can see."
     : "No repositories are shared with OpenGeni yet. Change repositories on GitHub to allow some.";
 }
