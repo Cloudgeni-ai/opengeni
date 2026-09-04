@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import postgres from "postgres";
 import {
   beginImageGenerationOperation,
   bootstrapWorkspace,
@@ -7,6 +8,7 @@ import {
   completeImageGenerationOperation,
   createDb,
   createSession,
+  getImageGenerationOperation,
   initializeSessionStartAtomically,
   prepareGeneratedImageArtifact,
   prepareImageGenerationOperation,
@@ -19,6 +21,7 @@ const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 let available = true;
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
+const auxiliaryClients: DbClient[] = [];
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("image-generation-operations");
@@ -31,9 +34,31 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  await Promise.all(auxiliaryClients.map(async (auxiliaryClient) => await auxiliaryClient.close()));
   await client?.close();
   await shared?.release();
 }, 60_000);
+
+async function waitForImageOperationLockWait(
+  connection: postgres.Sql,
+  minimumWaiters: number,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [row] = await connection<{ count: number }[]>`
+      select count(*)::integer as count
+      from pg_stat_activity
+      where datname = current_database()
+        and pid <> pg_backend_pid()
+        and wait_event_type = 'Lock'
+        and query like '%image_generation_operations%'`;
+    if ((row?.count ?? 0) >= minimumWaiters) return;
+    await Bun.sleep(10);
+  }
+  throw new Error(
+    `timed out waiting for ${minimumWaiters} image-generation operation lock waiter(s)`,
+  );
+}
 
 describe("durable image generation operation rebinding", () => {
   test("rebinds only before provider admission and completes with the failover credential", async () => {
@@ -79,6 +104,10 @@ describe("durable image generation operation rebinding", () => {
     });
     if (claim.action !== "claimed")
       throw new Error(`Could not claim image fixture: ${claim.reason}`);
+
+    const staleClient = createDb(shared!.appUrl, { max: 1 });
+    const rebindClient = createDb(shared!.appUrl, { max: 1 });
+    auxiliaryClients.push(staleClient, rebindClient);
 
     const operationKey = "d".repeat(64);
     const operationId = crypto.randomUUID();
@@ -134,7 +163,7 @@ describe("durable image generation operation rebinding", () => {
     });
     expect(reset.status).toBe("prepared");
 
-    const reboundB = await prepareImageGenerationOperation(client.db, {
+    const reboundB = await prepareImageGenerationOperation(rebindClient.db, {
       ...common,
       providerBindingHash: bindingB,
       expectedArtifactId: artifactB,
@@ -148,7 +177,25 @@ describe("durable image generation operation rebinding", () => {
       status: "prepared",
     });
 
-    const begunB = await beginImageGenerationOperation(client.db, {
+    await expect(
+      beginImageGenerationOperation(staleClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId,
+        operationKey,
+        providerBindingHash: bindingA,
+        expectedArtifactId: artifactA,
+      }),
+    ).rejects.toThrow("binding changed");
+    await expect(
+      getImageGenerationOperation(staleClient.db, grant.workspaceId, operationId),
+    ).resolves.toMatchObject({
+      providerBindingHash: bindingB,
+      expectedArtifactId: artifactB,
+      status: "prepared",
+    });
+
+    const begunB = await beginImageGenerationOperation(rebindClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationId,
@@ -158,6 +205,103 @@ describe("durable image generation operation rebinding", () => {
     });
     expect(begunB.started).toBe(true);
     expect(begunB.operation.status).toBe("provider_started");
+
+    const raceOperationId = crypto.randomUUID();
+    const raceOperationKey = "r".repeat(64);
+    const raceArtifactA = crypto.randomUUID();
+    const raceArtifactB = crypto.randomUUID();
+    const raceCommon = {
+      ...common,
+      id: raceOperationId,
+      operationKey: raceOperationKey,
+      toolCallId: "call-image-rebind-race",
+    };
+    const preparedRace = await prepareImageGenerationOperation(client.db, {
+      ...raceCommon,
+      providerBindingHash: bindingA,
+      expectedArtifactId: raceArtifactA,
+    });
+    expect(preparedRace.created).toBe(true);
+
+    const barrierKey = 2_240_271;
+    const blocker = postgres(shared!.adminUrl, { max: 1, prepare: false });
+    let barrierHeld = false;
+    try {
+      await shared!.admin.unsafe(`
+        CREATE OR REPLACE FUNCTION image_generation_operation_test_begin_barrier()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $$
+        BEGIN
+          IF OLD.id = '${raceOperationId}'::uuid
+            AND OLD.status = 'prepared'
+            AND NEW.status = 'provider_started'
+          THEN
+            PERFORM pg_advisory_xact_lock(${barrierKey});
+          END IF;
+          RETURN NEW;
+        END;
+        $$;
+        DROP TRIGGER IF EXISTS image_generation_operation_test_begin_barrier
+          ON image_generation_operations;
+        CREATE TRIGGER image_generation_operation_test_begin_barrier
+          BEFORE UPDATE OF status ON image_generation_operations
+          FOR EACH ROW EXECUTE FUNCTION image_generation_operation_test_begin_barrier();
+      `);
+      await blocker`select pg_advisory_lock(${barrierKey})`;
+      barrierHeld = true;
+
+      const raceBeginA = beginImageGenerationOperation(staleClient.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        operationId: raceOperationId,
+        operationKey: raceOperationKey,
+        providerBindingHash: bindingA,
+        expectedArtifactId: raceArtifactA,
+      });
+      await waitForImageOperationLockWait(shared!.admin, 1);
+
+      const raceRebindB = prepareImageGenerationOperation(rebindClient.db, {
+        ...raceCommon,
+        providerBindingHash: bindingB,
+        expectedArtifactId: raceArtifactB,
+      });
+      await waitForImageOperationLockWait(shared!.admin, 2);
+      await expect(
+        getImageGenerationOperation(client.db, grant.workspaceId, raceOperationId),
+      ).resolves.toMatchObject({
+        providerBindingHash: bindingA,
+        expectedArtifactId: raceArtifactA,
+        status: "prepared",
+      });
+
+      const [unlocked] = await blocker<Array<{ unlocked: boolean }>>`
+        select pg_advisory_unlock(${barrierKey}) as unlocked`;
+      expect(unlocked?.unlocked).toBe(true);
+      barrierHeld = false;
+
+      const begunRaceA = await raceBeginA;
+      expect(begunRaceA.started).toBe(true);
+      expect(begunRaceA.operation.status).toBe("provider_started");
+      await expect(raceRebindB).rejects.toThrow("reserved operation");
+      await expect(
+        getImageGenerationOperation(client.db, grant.workspaceId, raceOperationId),
+      ).resolves.toMatchObject({
+        providerBindingHash: bindingA,
+        expectedArtifactId: raceArtifactA,
+        status: "provider_started",
+      });
+    } finally {
+      if (barrierHeld) {
+        await blocker`select pg_advisory_unlock(${barrierKey})`.catch(() => undefined);
+      }
+      await shared!.admin.unsafe(`
+        DROP TRIGGER IF EXISTS image_generation_operation_test_begin_barrier
+          ON image_generation_operations;
+        DROP FUNCTION IF EXISTS image_generation_operation_test_begin_barrier();
+      `);
+      await blocker.end();
+    }
 
     await expect(
       prepareImageGenerationOperation(client.db, {
