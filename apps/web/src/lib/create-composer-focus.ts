@@ -6,15 +6,11 @@ export type CreateComposerFocusIntent = {
   channelId?: string | null;
 };
 
-export function createComposerFocusEvent(
-  channelId?: string | null,
-): CustomEvent<CreateComposerFocusIntent> {
-  return new CustomEvent<CreateComposerFocusIntent>(FOCUS_CREATE_COMPOSER_EVENT, {
-    detail: { channelId },
-  });
-}
-
 export function requestCreateComposerFocus(channelId?: string | null): void {
   if (typeof window === "undefined") return;
-  window.dispatchEvent(createComposerFocusEvent(channelId));
+  window.dispatchEvent(
+    new CustomEvent<CreateComposerFocusIntent>(FOCUS_CREATE_COMPOSER_EVENT, {
+      detail: { channelId },
+    }),
+  );
 }

@@ -90,9 +90,7 @@ import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
   EMPTY_COMPOSER_LAUNCH,
-  composerLaunchChannelId,
   composerLaunchSearchKey,
-  resolveComposerLaunchChannelId,
   type ComposerLaunchSearch,
 } from "@/lib/composer-launch";
 import {
@@ -135,7 +133,6 @@ import {
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
-  newSessionProjectSelection,
   rememberedMachineFolder,
   selfhostedCapabilityChips,
   sessionDraftFromNewSessionDraftOptions,
@@ -157,7 +154,10 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
-import { resolveHydratedNewSessionProjectSelection } from "@/routes/sessions-index-hydration";
+import {
+  newSessionProjectSelection,
+  resolveHydratedNewSessionProjectSelection,
+} from "@/routes/sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "@/types";
 
 export function SessionsIndexRoute({
@@ -210,7 +210,7 @@ function SessionsIndexRouteContent({
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const attachments = useDraftAttachments(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
-  const launchChannelId = composerLaunchChannelId(launch);
+  const launchChannelId = launch.channelId === "default" ? null : launch.channelId;
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(
     launchChannelId ?? null,
   );
@@ -587,7 +587,7 @@ function SessionsIndexRouteContent({
   // local so choosing a folder does not turn the composer URL into application
   // state.
   useEffect(() => {
-    selectProject(resolveComposerLaunchChannelId(launchChannelId, recentChannelId));
+    selectProject(launchChannelId !== undefined ? launchChannelId : recentChannelId);
   }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
@@ -616,7 +616,7 @@ function SessionsIndexRouteContent({
     const onRequest = (event: Event) => {
       const requestedChannelId = (event as CustomEvent<CreateComposerFocusIntent>).detail
         ?.channelId;
-      selectProject(resolveComposerLaunchChannelId(requestedChannelId, recentChannelId));
+      selectProject(requestedChannelId !== undefined ? requestedChannelId : recentChannelId);
       setCreateComposerFocusGen((current) => current + 1);
     };
     window.addEventListener(FOCUS_CREATE_COMPOSER_EVENT, onRequest);

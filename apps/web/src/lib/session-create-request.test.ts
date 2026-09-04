@@ -7,7 +7,6 @@ import {
   emptySessionDraft,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
-  newSessionProjectSelection,
   prepareCreateSessionAttempt,
   rememberedMachineFolder,
   rememberedProjectCompute,
@@ -15,6 +14,7 @@ import {
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
 } from "./session-create";
+import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
 
 const fileA = "00000000-0000-4000-8000-0000000000a1";
 const fileB = "00000000-0000-4000-8000-0000000000b2";

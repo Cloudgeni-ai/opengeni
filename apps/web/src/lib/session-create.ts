@@ -64,12 +64,6 @@ export type ConnectedMachineTarget = {
 
 export type ComputeTarget = ManagedSandboxTarget | ConnectedMachineTarget;
 
-function defaultComputeTarget(defaultSandboxBackend?: SandboxBackend): ComputeTarget {
-  return defaultSandboxBackend === "selfhosted"
-    ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
-    : { kind: "sandbox", backend: "" };
-}
-
 export function rememberedProjectCompute(
   history: NewSessionSelectionHistory,
   channelId: string | null,
@@ -89,27 +83,6 @@ export function rememberedProjectCompute(
     kind: "machine",
     sandboxId: project.targetSandboxId,
     folder: machine?.workingDir ? { kind: "path", path: machine.workingDir } : { kind: "root" },
-  };
-}
-
-/** Apply a project change without leaving compute from the prior project behind. */
-export function newSessionProjectSelection(
-  history: NewSessionSelectionHistory,
-  channelId: string | null,
-  currentSelection: {
-    /** Undefined means the current compute came from a draft with unknown project provenance. */
-    channelId: string | null | undefined;
-    compute: ComputeTarget;
-  },
-  defaultSandboxBackend?: SandboxBackend,
-): { channelId: string | null; compute: ComputeTarget } {
-  return {
-    channelId,
-    compute:
-      rememberedProjectCompute(history, channelId, defaultSandboxBackend) ??
-      (currentSelection.channelId === channelId
-        ? currentSelection.compute
-        : defaultComputeTarget(defaultSandboxBackend)),
   };
 }
 
@@ -151,7 +124,10 @@ export function emptySessionDraft(
 ): SessionDraft {
   return {
     visibility: "workspace",
-    compute: defaultComputeTarget(defaultSandboxBackend),
+    compute:
+      defaultSandboxBackend === "selfhosted"
+        ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+        : { kind: "sandbox", backend: "" },
     variableSetIds: [],
     variableSetId: "",
     rigId: "",

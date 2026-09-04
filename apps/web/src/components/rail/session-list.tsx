@@ -183,7 +183,6 @@ import {
   type SessionBranchPage,
 } from "@/lib/session-branch-cache";
 import { cn } from "@/lib/utils";
-import { composerLaunchSearchForChannel } from "@/lib/composer-launch";
 import type { Channel, Session } from "@/types";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
@@ -206,7 +205,7 @@ export function NewSessionLink(props: {
     <Link
       to="/workspaces/$workspaceId/sessions"
       params={{ workspaceId: rail.workspaceId }}
-      search={composerLaunchSearchForChannel(props.channelId)}
+      search={props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }}
       aria-label={props["aria-label"]}
       aria-keyshortcuts="Meta+Shift+O Control+Shift+O"
       className={props.className}

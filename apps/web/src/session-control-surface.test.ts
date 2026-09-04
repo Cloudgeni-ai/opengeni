@@ -114,15 +114,17 @@ describe("session control surface architecture", () => {
       source("lib/create-composer-focus.ts"),
       source("routes/sessions-index-hydration.ts"),
     ]);
-    expect(rail).toContain("search={composerLaunchSearchForChannel(props.channelId)}");
+    expect(rail).toContain(
+      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
+    );
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
     expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
-    expect(focusRequest).toContain("window.dispatchEvent(createComposerFocusEvent(channelId))");
+    expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
-    expect(
-      `${route}\n${hydration}`.match(/resolveComposerLaunchChannelId\(/g)?.length,
-    ).toBeGreaterThanOrEqual(3);
+    expect(route).toContain(
+      "selectProject(requestedChannelId !== undefined ? requestedChannelId : recentChannelId);",
+    );
     expect(hydration).toContain("return newSessionProjectSelection(");
   });
 
