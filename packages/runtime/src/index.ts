@@ -2277,38 +2277,6 @@ export function hasCanonicalEditableArtifactToolSurface(
   });
 }
 
-const SITE_CREATE_TOOL_SURFACE = ["artifacts_create"] as const;
-const SITE_EDIT_TOOL_SURFACE = ["artifacts_get_source", "artifacts_publish"] as const;
-
-/** True when the frozen attempt catalog can complete one Site authoring workflow. */
-export function hasCanonicalSiteAuthoringToolSurface(
-  catalog: AttemptToolCatalog | null | undefined,
-): boolean {
-  if (!catalog) return false;
-  let verified: AttemptToolCatalog;
-  try {
-    verified = parseVerifiedAttemptToolCatalog(catalog);
-  } catch {
-    return false;
-  }
-  const contains = (toolNames: readonly string[]) =>
-    toolNames.every((toolName) => {
-      const matches = verified.entries.filter(
-        (entry) => entry.identity.serverId === "opengeni" && entry.identity.toolName === toolName,
-      );
-      if (matches.length !== 1) return false;
-      const entry = matches[0]!;
-      return (
-        entry.source === "opengeni" &&
-        entry.modelName === sharedPrefixedMcpToolName("opengeni", toolName) &&
-        entry.codemodePath.length === 2 &&
-        entry.codemodePath[0] === "opengeni" &&
-        entry.codemodePath[1] === toolName
-      );
-    });
-  return contains(SITE_CREATE_TOOL_SURFACE) || contains(SITE_EDIT_TOOL_SURFACE);
-}
-
 export function buildOpenGeniAgent(
   settings: Settings,
   resources: ResourceRef[],
@@ -2322,9 +2290,6 @@ export function buildOpenGeniAgent(
   }
   const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
-    options.attemptToolCatalog,
-  );
-  const siteAuthoringToolsAvailable = hasCanonicalSiteAuthoringToolSurface(
     options.attemptToolCatalog,
   );
   // Resolved per-turn gating. Each override defaults to today's settings-derived
@@ -2550,9 +2515,9 @@ export function buildOpenGeniAgent(
 
   const skillComposition = composeRuntimeSkills(options.skillActivations ?? [], {
     editableArtifacts: editableArtifactToolsAvailable,
-    sites:
-      siteAuthoringToolsAvailable &&
-      (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
+    // Sites guidance is bundled capability metadata, not eager tool authority.
+    // Tool discovery/execution remains governed by the lazy attempt gateway.
+    sites: (options.activeSandboxBackend ?? settings.sandboxBackend) !== "selfhosted",
     // A connected machine owns its filesystem, and its session deliberately
     // does not materialize host-local lazy entries. Advertising this bundled
     // skill there makes load_skill report a path that does not exist. Keep the
@@ -3303,7 +3268,6 @@ export function buildAgentCapabilities(
   skillActivations: readonly RuntimeSkillActivation[] = [],
   options: {
     editableArtifactToolsAvailable?: boolean;
-    siteAuthoringToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;
@@ -3321,7 +3285,7 @@ export function buildAgentCapabilities(
     settings,
     composeRuntimeSkills(skillActivations, {
       editableArtifacts: options.editableArtifactToolsAvailable === true,
-      sites: options.siteAuthoringToolsAvailable === true,
+      sites: true,
       videoGeneration: options.videoGenerationAvailable === true,
     }),
     options,
@@ -3333,7 +3297,6 @@ function buildAgentCapabilitiesFromComposition(
   skillComposition: RuntimeSkillComposition,
   options: {
     editableArtifactToolsAvailable?: boolean;
-    siteAuthoringToolsAvailable?: boolean;
     videoGenerationAvailable?: boolean;
     workspaceSkillPaths?: readonly WorkspaceSkillSearchPath[];
     structuredToolTransport?: boolean;

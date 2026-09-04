@@ -10943,7 +10943,7 @@ describe("runtime Skill activation", () => {
     );
   });
 
-  test("the bundled Site Skill follows the exact executable attempt catalog", () => {
+  test("the bundled Site Skill always joins sandbox agent indexes", () => {
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
       sites: true,
@@ -10961,18 +10961,16 @@ describe("runtime Skill activation", () => {
     });
     expect(
       indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
-          attemptToolCatalog: editableArtifactAttemptToolCatalog(),
-        }),
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
         emptyManifest,
       ),
     ).toContain("opengeni-sites");
     expect(
       indexedSkillNames(
-        buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), []),
+        buildOpenGeniAgent(testSettings({ sandboxBackend: "modal" }), []),
         emptyManifest,
       ),
-    ).not.toContain("opengeni-sites");
+    ).toContain("opengeni-sites");
   });
 
   test("does not advertise the worker-bundled Site Skill on Connected Machine attempts", () => {
