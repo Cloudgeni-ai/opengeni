@@ -51,7 +51,7 @@ function RestoredAttachmentPreviewFixture() {
         setPreviewRequests((current) => current + 1);
         return {
           url: IMAGE_DATA_URL,
-          expiresAt: "2026-09-04T01:00:00.000Z",
+          expiresAt: "2026-09-05T01:00:00.000Z",
         };
       },
     }),

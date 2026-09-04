@@ -1655,66 +1655,51 @@ function AttachmentChips({
   const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
   const [previewErrorId, setPreviewErrorId] = useState<string | null>(null);
 
-  useEffect(
-    () => () => {
-      previewRequest.current?.abort();
-    },
-    [],
-  );
+  useEffect(() => () => previewRequest.current?.abort(), [onLoadPreview]);
 
-  const openLightbox = useCallback(
-    (
-      attachment: UseFileAttachmentsResult["attachments"][number],
-      src: string,
-      source: HTMLButtonElement,
-      releaseSource?: (() => void) | undefined,
-    ) => {
-      lightbox?.open(
-        src,
-        attachment.name,
-        source,
-        messages.attachmentPreviewLabel,
-        attachment.name,
-        {
-          download: messages.downloadAttachment(attachment.name),
-          close: messages.closeAttachmentPreview,
-        },
-        releaseSource,
-      );
-    },
-    [lightbox, messages],
-  );
-
-  const openLoadedPreview = useCallback(
-    async (
-      attachment: UseFileAttachmentsResult["attachments"][number],
-      source: HTMLButtonElement,
-    ) => {
-      if (!onLoadPreview) return;
-      previewRequest.current?.abort();
+  async function openPreview(
+    attachment: UseFileAttachmentsResult["attachments"][number],
+    source: HTMLButtonElement,
+    canLoadPreview: boolean,
+  ) {
+    previewRequest.current?.abort();
+    const attachmentId = attachment.id;
+    const releaseSource = onRetainPreview(attachmentId);
+    let src = attachment.previewUrl;
+    if (!releaseSource && canLoadPreview) {
       const controller = new AbortController();
       previewRequest.current = controller;
-      setPreviewLoadingId(attachment.id);
-      setPreviewErrorId((current) => (current === attachment.id ? null : current));
+      setPreviewLoadingId(attachmentId);
+      setPreviewErrorId(null);
       try {
-        const src = await onLoadPreview(attachment.id, controller.signal);
+        src = await onLoadPreview!(attachmentId, controller.signal);
         if (controller.signal.aborted) return;
         if (!src) {
-          setPreviewErrorId(attachment.id);
+          setPreviewErrorId(attachmentId);
           return;
         }
-        openLightbox(attachment, src, source);
       } catch {
-        if (!controller.signal.aborted) setPreviewErrorId(attachment.id);
+        if (!controller.signal.aborted) setPreviewErrorId(attachmentId);
+        return;
       } finally {
         if (previewRequest.current === controller) {
-          previewRequest.current = null;
           setPreviewLoadingId(null);
         }
       }
-    },
-    [onLoadPreview, openLightbox],
-  );
+    }
+    lightbox!.open(
+      src!,
+      attachment.name,
+      source,
+      messages.attachmentPreviewLabel,
+      attachment.name,
+      {
+        download: messages.downloadAttachment(attachment.name),
+        close: messages.closeAttachmentPreview,
+      },
+      releaseSource,
+    );
+  }
 
   return (
     <div className="flex flex-wrap gap-2 px-3 py-2">
@@ -1752,41 +1737,27 @@ function AttachmentChips({
                 : "max-w-[240px] border-og-border bg-og-surface-2",
             )}
           >
-            {attachment.previewUrl && lightbox ? (
+            {lightbox && (attachment.previewUrl || canLoadPreview) ? (
               <button
                 type="button"
-                className="size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent"
-                aria-label={messages.previewAttachment(attachment.name)}
-                onClick={(event) => {
-                  const releasePreview = onRetainPreview(attachment.id);
-                  if (releasePreview || !canLoadPreview) {
-                    openLightbox(
-                      attachment,
-                      attachment.previewUrl!,
-                      event.currentTarget,
-                      releasePreview,
-                    );
-                    return;
-                  }
-                  void openLoadedPreview(attachment, event.currentTarget);
-                }}
-              >
-                <img
-                  src={attachment.previewUrl}
-                  alt=""
-                  className="h-full w-full object-cover transition-opacity hover:opacity-80"
-                />
-              </button>
-            ) : canLoadPreview ? (
-              <button
-                type="button"
-                className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-wait"
+                className={cn(
+                  "size-8 shrink-0 overflow-hidden rounded outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent",
+                  !attachment.previewUrl && "flex items-center justify-center disabled:cursor-wait",
+                )}
                 aria-label={messages.previewAttachment(attachment.name)}
                 aria-busy={previewLoading || undefined}
                 disabled={previewLoading}
-                onClick={(event) => void openLoadedPreview(attachment, event.currentTarget)}
+                onClick={(event) =>
+                  void openPreview(attachment, event.currentTarget, canLoadPreview)
+                }
               >
-                {previewLoading ? (
+                {attachment.previewUrl ? (
+                  <img
+                    src={attachment.previewUrl}
+                    alt=""
+                    className="h-full w-full object-cover transition-opacity hover:opacity-80"
+                  />
+                ) : previewLoading ? (
                   <LoaderCircleIcon className="size-4 animate-og-spin text-og-fg-muted" />
                 ) : (
                   <ImageIcon className="size-4 text-og-fg-muted" />

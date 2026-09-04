@@ -506,12 +506,12 @@ describe("useFileAttachments", () => {
 
   test("restores only same-workspace ready assets without previews or duplicate ids", async () => {
     let resolveUpload!: (asset: FileAsset) => void;
-    const client = fakeClient({
+    const client = {
       uploadFile: () =>
         new Promise<FileAsset>((resolve) => {
           resolveUpload = resolve;
         }),
-    });
+    };
     const hook = await renderHook(
       () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
       undefined,
@@ -546,6 +546,7 @@ describe("useFileAttachments", () => {
     expect(hook.result.current.readyResources).toEqual([
       { kind: "file", fileId: "restored-ready" },
     ]);
+    expect(hook.result.current.loadPreview).toBeUndefined();
 
     await flushing(() => resolveUpload(fakeAsset({ id: "local-ready" })));
     await hook.unmount();
@@ -565,7 +566,7 @@ describe("useFileAttachments", () => {
       uploadFile: async () => ready,
       createFileDownloadUrl: async (workspaceId, fileId, options) => {
         requested.push({ workspaceId, fileId, signal: options?.signal });
-        return { url: "https://files.example/restored-preview", expiresAt: "2026-09-04T01:00:00Z" };
+        return { url: "https://files.example/restored-preview", expiresAt: "2026-09-05T01:00:00Z" };
       },
     });
     const hook = await renderHook(
@@ -586,6 +587,51 @@ describe("useFileAttachments", () => {
       { workspaceId: WORKSPACE_ID, fileId: ready.id, signal: controller.signal },
     ]);
     expect(created).toEqual([]);
+    await hook.unmount();
+  });
+
+  test("rejects a signed preview minted by a previous client scope", async () => {
+    const ready = fakeAsset({
+      id: "33333333-3333-4333-8333-333333333333",
+      filename: "restored-preview.png",
+    });
+    let resolvePreviousPreview!: (value: { url: string; expiresAt: string }) => void;
+    const previousClient = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: () =>
+        new Promise((resolve) => {
+          resolvePreviousPreview = resolve;
+        }),
+    });
+    const nextClient = fakeClient({
+      uploadFile: async () => ready,
+      createFileDownloadUrl: async () => ({
+        url: "https://files.example/next-client-preview",
+        expiresAt: "2026-09-05T01:00:00Z",
+      }),
+    });
+    const hook = await renderHook(
+      ({ client }: { client: typeof previousClient }) =>
+        useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      { client: previousClient },
+    );
+
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    const previousPreview = hook.result.current.loadPreview?.(
+      hook.result.current.attachments[0]!.id,
+    );
+
+    await hook.rerender({ client: nextClient });
+    await flushing(() => hook.result.current.restoreReadyFiles([ready]));
+    resolvePreviousPreview({
+      url: "https://files.example/previous-client-preview",
+      expiresAt: "2026-09-05T01:00:00Z",
+    });
+
+    expect(await previousPreview).toBeUndefined();
+    expect(await hook.result.current.loadPreview?.(hook.result.current.attachments[0]!.id)).toBe(
+      "https://files.example/next-client-preview",
+    );
     await hook.unmount();
   });
 

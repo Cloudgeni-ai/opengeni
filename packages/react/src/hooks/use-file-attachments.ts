@@ -363,6 +363,7 @@ export function useFileAttachments(
 
   const loadPreview = useCallback(
     async (id: string, signal?: AbortSignal): Promise<string | undefined> => {
+      const generation = scopeGeneration.current;
       const attachment = attachmentsRef.current.find((candidate) => candidate.id === id);
       const createDownloadUrl = client.createFileDownloadUrl;
       if (
@@ -377,7 +378,7 @@ export function useFileAttachments(
       }
       const fileId = attachment.file.id;
       const signed = await createDownloadUrl.call(client, workspaceId, fileId, { signal });
-      if (signal?.aborted) return undefined;
+      if (scopeGeneration.current !== generation || signal?.aborted) return undefined;
       const current = attachmentsRef.current.find((candidate) => candidate.id === id);
       if (current?.status !== "ready" || current.file?.id !== fileId) return undefined;
       return signed.url;
