@@ -4184,6 +4184,8 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-astra":
+      return "6 Astra";
     default:
       return null;
   }
@@ -4219,7 +4221,11 @@ function builtinLatencyModesForModel(modelId: string): Array<{
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
+  if (
+    isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("codex/gpt-5.6-") ||
+    modelId === "codex/gpt-6-astra"
+  ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -4598,7 +4604,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-"),
+          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
