@@ -220,6 +220,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
     inserts: 2,
     contract: "canonical",
