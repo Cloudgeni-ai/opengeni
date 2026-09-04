@@ -266,9 +266,13 @@ Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;
 schedules, goal continuation, compaction, and coalesced internal batches use
 explicit service principals. An Agent Steer remains the causal initiator when
-ordinary machine notices coalesce into its inference; those notices cannot
-erase the steering subject merely because they arrived in the same batch. The
-session creator is stored separately and is
+authority-neutral ordinary machine notices coalesce into its inference; those
+notices cannot erase the steering subject merely because they arrived in the
+same batch. Child lifecycle and goal-continuation updates freeze their exact
+target causal turn and claim separately from a Steer or a different target
+turn. A malformed historical authority-bearing update also receives an
+isolated claim instead of borrowing a coalesced principal. The session creator
+is stored separately and is
 copied only when idempotently repairing that same create command's first turn.
 Queue move/edit/resubmit preserves the original initiator, while Steer creates a
 new turn with the steering actor. Agent-created work inherits the frozen

@@ -3,4 +3,4 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Preserve the exact causal human on child lifecycle follow-up turns so personal session resources remain admissible, keep atomic pre-claim database failures retryable instead of terminally discarding pending work, and provide an exact-fenced repair for sessions terminalized by older workers.
+Preserve the exact causal human on child lifecycle follow-up turns so personal session resources remain admissible, isolate child/goal causal claims from Agent Steer and malformed authority-bearing updates, keep atomic pre-claim database failures—including replay-compatible disposition-only results—retryable instead of terminally discarding pending work, and provide a root-only, failure-epoch-fenced repair for sessions terminalized by older workers.

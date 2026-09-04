@@ -263,6 +263,65 @@ describe("failSessionAttempt child-terminal identity", () => {
     expect(terminalSettlement).not.toHaveBeenCalled();
   });
 
+  test("recovers an ambiguously committed v3 claim from disposition-only retryable truth", async () => {
+    const recoveryCalls: unknown[] = [];
+    const terminalSettlement = mock(async () => ({ action: "settled" as const, events: [] }));
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: {},
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        requireSession: mock(async () => ({ status: "running" }) as any),
+        getSessionTurnForAttempt: mock(
+          async () =>
+            ({
+              id: "turn-v3-claim-commit",
+              triggerEventId: "trigger-v3-claim-commit",
+              executionGeneration: 1,
+            }) as any,
+        ),
+        requestSessionTurnRecovery: mock(async (...args: unknown[]) => {
+          recoveryCalls.push(args[2]);
+          return { action: "recovering" as const, events: [] } as any;
+        }),
+        applySessionTurnSettlement: terminalSettlement as any,
+        publishDurableSessionEvents: mock(async () => undefined),
+        countQueuedTurns: mock(async () => 0),
+        recordTurnsQueuedGauge: mock(() => undefined),
+      },
+    );
+
+    expect(
+      await activities.failSessionAttempt({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-v3-claim-commit",
+        workflowId: "session-session-1",
+        preClaimFailureDisposition: "retryable",
+      }),
+    ).toEqual({ action: "recovering" });
+    expect(recoveryCalls).toEqual([
+      expect.objectContaining({
+        sessionId: "session-1",
+        turnId: "turn-v3-claim-commit",
+        triggerEventId: "trigger-v3-claim-commit",
+        attemptId: "attempt-v3-claim-commit",
+        reason: "claimed_attempt_database_failure",
+        detail: expect.objectContaining({
+          code: "legacy_retryable_preclaim_database_failure",
+          retryable: true,
+        }),
+      }),
+    ]);
+    expect(terminalSettlement).not.toHaveBeenCalled();
+  });
+
   test("durably re-wakes a recovering turn when the activity failed before claim", async () => {
     const wakeCalls: unknown[][] = [];
     const settle = mock(async () => ({ action: "settled" as const, events: [] }));

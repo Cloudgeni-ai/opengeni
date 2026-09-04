@@ -61085,6 +61085,38 @@ function systemUpdateCausalHumanTurnId(
   return value;
 }
 
+function systemUpdateCausalExecutionKey(
+  update: Pick<BoundedSystemUpdate, "id" | "kind" | "lineage">,
+): string | null {
+  const targetTurnId = systemUpdateCausalHumanTurnId(update);
+  if (targetTurnId) return `target-turn:${targetTurnId}`;
+  if (isChildLifecycleSystemUpdateKind(update.kind) || update.kind === "goal_continuation") {
+    // Malformed historical authority-bearing rows still own distinct claims.
+    // They may carry ordinary authority-neutral context, but they must never
+    // borrow another child, goal, or Steer's causal principal.
+    return `${update.kind}-update:${update.id}`;
+  }
+  if (update.kind !== "agent_steer_instruction") return null;
+  const lineage =
+    update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
+      ? (update.lineage as Record<string, unknown>)
+      : null;
+  const callerSessionId = lineage?.callerSessionId;
+  const callerTurnId = lineage?.callerTurnId;
+  if (
+    typeof callerSessionId === "string" &&
+    typeof callerTurnId === "string" &&
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(callerSessionId) &&
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(callerTurnId)
+  ) {
+    return `agent-steer:${callerSessionId}:${callerTurnId}`;
+  }
+  // A malformed historical Steer still owns a distinct claim. Let its existing
+  // provenance fallback run without borrowing another authority-bearing
+  // update's causal principal.
+  return `agent-steer-update:${update.id}`;
+}
+
 function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
   selected: readonly T[],
   candidate: T,
@@ -61097,16 +61129,18 @@ function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
     return false;
   }
   // Null is compatible context (for example an ordinary notice riding with a
-  // goal continuation). Once a batch contains frozen causal-human lineage,
-  // every further lineage-bearing member must name that same exact turn.
-  const selectedCausalTurnId = selected
-    .map((update) => systemUpdateCausalHumanTurnId(update))
-    .find((turnId): turnId is string => turnId !== null);
-  const candidateCausalTurnId = systemUpdateCausalHumanTurnId(candidate);
+  // goal continuation). Once a batch contains frozen causal execution, every
+  // further authority-bearing member must name that exact same origin. Agent
+  // Steer uses its caller identity and therefore never borrows a child/goal
+  // continuation's target-turn human.
+  const selectedCausalKey = selected
+    .map((update) => systemUpdateCausalExecutionKey(update))
+    .find((key): key is string => key !== null);
+  const candidateCausalKey = systemUpdateCausalExecutionKey(candidate);
   return (
-    selectedCausalTurnId === undefined ||
-    candidateCausalTurnId === null ||
-    selectedCausalTurnId === candidateCausalTurnId
+    selectedCausalKey === undefined ||
+    candidateCausalKey === null ||
+    selectedCausalKey === candidateCausalKey
   );
 }
 
@@ -66020,6 +66054,7 @@ export async function failSessionWorkBeforeAttemptClaim(
           questions: HumanInputQuestion[];
           turnGeneration: number;
         }> = [];
+        let failedSystemUpdateIds: string[] = [];
         if (turn) {
           await cancelTurnInteractionInterventionsInTransaction(tx as unknown as Database, {
             accountId: session.accountId,
@@ -66088,16 +66123,21 @@ export async function failSessionWorkBeforeAttemptClaim(
           sessionId: input.sessionId,
         });
         if (!turn) {
-          await tx
-            .update(schema.sessionSystemUpdates)
-            .set({ state: "failed" })
-            .where(
-              and(
-                eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
-                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
-                eq(schema.sessionSystemUpdates.state, "pending"),
-              ),
-            );
+          failedSystemUpdateIds = (
+            await tx
+              .update(schema.sessionSystemUpdates)
+              .set({ state: "failed" })
+              .where(
+                and(
+                  eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+                  eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                  eq(schema.sessionSystemUpdates.state, "pending"),
+                ),
+              )
+              .returning({ id: schema.sessionSystemUpdates.id })
+          )
+            .map((update) => update.id)
+            .sort();
         }
         const values = [
           ...(turn
@@ -66145,7 +66185,11 @@ export async function failSessionWorkBeforeAttemptClaim(
             sessionId: input.sessionId,
             sequence: ++sequence,
             type: "session.status.changed" as const,
-            payload: { status: "failed", code: "pre_claim_failure" },
+            payload: {
+              status: "failed",
+              code: "pre_claim_failure",
+              ...(!turn ? { failedSystemUpdateIds } : {}),
+            },
             turnId: turn?.id ?? null,
             turnGeneration: turn?.executionGeneration ?? null,
             turnAttemptId: null,
@@ -66269,8 +66313,9 @@ export async function failSessionWorkBeforeAttemptClaim(
  * Repair the exact terminal shape written by an older worker after a
  * session-level pre-claim database failure. This is deliberately narrower than
  * Resume: it accepts only a failed session with no live turn/attempt, an exact
- * `pre_claim_failure` status event, and the caller-named complete set of
- * undelivered failed child updates whose frozen parent turns still carry human
+ * root-session `pre_claim_failure` status event with no turn association, and
+ * the caller-named complete set of undelivered failed child updates durably
+ * tied to that failure epoch whose frozen parent turns still carry human
  * authority. The restored updates, audit event, runnable session state, and
  * signal-with-start wake commit atomically.
  */
@@ -66375,6 +66420,7 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
         if (
           session.status !== "failed" ||
           session.activeTurnId !== null ||
+          session.parentSessionId !== null ||
           session.lastSequence !== input.expectedLastSequence ||
           !session.temporalWorkflowId
         ) {
@@ -66395,6 +66441,7 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
             sequence: schema.sessionEvents.sequence,
             payload: schema.sessionEvents.payload,
             payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+            turnId: schema.sessionEvents.turnId,
           })
           .from(schema.sessionEvents)
           .where(
@@ -66412,7 +66459,8 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
         if (
           failureEvent?.sequence !== input.expectedFailureEventSequence ||
           failurePayload?.status !== "failed" ||
-          failurePayload.code !== "pre_claim_failure"
+          failurePayload.code !== "pre_claim_failure" ||
+          failureEvent.turnId !== null
         ) {
           return { action: "stale", event: null } as const;
         }
@@ -66474,6 +66522,86 @@ export async function recoverSessionWorkFailedBeforeAttemptClaim(
           actualFailedUpdateIds.some((updateId, index) => updateId !== expectedUpdateIds[index])
         ) {
           return { action: "stale", event: null } as const;
+        }
+
+        const failurePayloadUpdateIdsValue = failurePayload.failedSystemUpdateIds;
+        if (failurePayloadUpdateIdsValue !== undefined) {
+          if (
+            !Array.isArray(failurePayloadUpdateIdsValue) ||
+            failurePayloadUpdateIdsValue.some((updateId) => typeof updateId !== "string")
+          ) {
+            return { action: "stale", event: null } as const;
+          }
+          const failurePayloadUpdateIds = [...failurePayloadUpdateIdsValue].sort();
+          if (
+            failurePayloadUpdateIds.length !== expectedUpdateIds.length ||
+            failurePayloadUpdateIds.some((updateId, index) => updateId !== expectedUpdateIds[index])
+          ) {
+            return { action: "stale", event: null } as const;
+          }
+        } else {
+          // Older workers did not persist the exact failed set on the status
+          // event. Recover only when durable event history still proves that
+          // every named row entered the pending queue after the previous
+          // pre-claim failure and has no independent lifecycle settlement.
+          const [previousFailure] = await rawRows<{ sequence: number }>(
+            tx as unknown as Database,
+            sql`select sequence
+                from session_events
+                where workspace_id = ${workspaceId}
+                  and session_id = ${input.sessionId}
+                  and type = 'session.status.changed'
+                  and payload->>'code' = 'pre_claim_failure'
+                  and sequence < ${input.expectedFailureEventSequence}
+                order by sequence desc
+                limit 1`,
+          );
+          const expectedUpdateValues = sql.join(
+            expectedUpdateIds.map((updateId) => sql`(${updateId}::text)`),
+            sql`, `,
+          );
+          const legacyProof = await rawRows<{
+            update_id: string;
+            pending_count: number;
+            terminal_count: number;
+          }>(
+            tx as unknown as Database,
+            sql`with expected(update_id) as (values ${expectedUpdateValues})
+                select
+                  expected.update_id,
+                  count(*) filter (
+                    where event.type = 'system.update.pending'
+                      and event.sequence > ${previousFailure?.sequence ?? 0}
+                      and event.sequence < ${input.expectedFailureEventSequence}
+                      and event.payload->>'updateId' = expected.update_id
+                  )::int as pending_count,
+                  count(*) filter (
+                    where event.type in (
+                      'system.update.delivered',
+                      'system.update.cancelled',
+                      'system.update.superseded',
+                      'system.update.settled'
+                    )
+                      and (
+                        event.payload->>'updateId' = expected.update_id
+                        or event.payload @> jsonb_build_object(
+                          'updateIds', jsonb_build_array(expected.update_id)
+                        )
+                      )
+                  )::int as terminal_count
+                from expected
+                left join session_events event
+                  on event.workspace_id = ${workspaceId}
+                 and event.session_id = ${input.sessionId}
+                 and event.sequence <= ${input.expectedLastSequence}
+                group by expected.update_id`,
+          );
+          if (
+            legacyProof.length !== expectedUpdateIds.length ||
+            legacyProof.some((proof) => proof.pending_count !== 1 || proof.terminal_count !== 0)
+          ) {
+            return { action: "stale", event: null } as const;
+          }
         }
 
         const causalTurnIds = new Set<string>();

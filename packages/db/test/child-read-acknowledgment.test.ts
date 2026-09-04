@@ -462,6 +462,33 @@ describe("child read acknowledgment on parent consumption", () => {
     });
     expect(failed.action).toBe("failed");
     const failedSequence = await lastSequence(parent.session.id);
+    const [failureEvent] = await shared.admin<
+      Array<{
+        payload: { status: string; code: string; failedSystemUpdateIds?: string[] };
+        turnId: string | null;
+      }>
+    >`
+      select payload, turn_id as "turnId"
+      from session_events
+      where session_id = ${parent.session.id}
+        and sequence = ${failedSequence}`;
+    expect(failureEvent).toEqual({
+      payload: {
+        status: "failed",
+        code: "pre_claim_failure",
+        failedSystemUpdateIds: [pendingUpdate.id],
+      },
+      turnId: null,
+    });
+    // Test-only fixture rewrite: simulate the immutable event shape emitted by
+    // the worker version that produced the September 2026 incident. New writers
+    // bind the exact failed set above; recovery must also prove the old set from
+    // durable pending and terminal lifecycle history.
+    await shared.admin`
+      update session_events
+      set payload = payload - 'failedSystemUpdateIds'
+      where session_id = ${parent.session.id}
+        and sequence = ${failedSequence}`;
     const recoveryOperationId = `child-read-recovery-${crypto.randomUUID()}`;
     expect(
       await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
@@ -517,6 +544,41 @@ describe("child read acknowledgment on parent consumption", () => {
     expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
       acknowledged_sequence: await lastSequence(child.session.id),
     });
+  }, 240_000);
+
+  test("pre-claim recovery refuses a nested session with parent-facing terminal truth", async () => {
+    const grant = await workspace();
+    const root = await startSession(grant, { message: "orchestrate" });
+    const child = await startSession(grant, { parent: root, message: "delegate" });
+    const grandchild = await startSession(grant, { parent: child, message: "work" });
+    await settleIdle(grant, grandchild);
+    expect(await deliverOutboxTo(child.session.id)).toBe(1);
+    await settleIdle(grant, child);
+
+    const [pendingUpdate] = await shared.admin<Array<{ id: string }>>`
+      select id from session_system_updates
+      where session_id = ${child.session.id} and state = 'pending'`;
+    if (!pendingUpdate) throw new Error("nested child result update was not pending");
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+      accountId: grant.accountId,
+      sessionId: child.session.id,
+      workflowId: `session-${child.session.id}`,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+    });
+    expect(failed.action).toBe("failed");
+    const failedSequence = await lastSequence(child.session.id);
+    expect(
+      await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        sessionId: child.session.id,
+        workflowId: `session-${child.session.id}`,
+        operationId: `nested-recovery-${crypto.randomUUID()}`,
+        expectedFailureEventSequence: failedSequence,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [pendingUpdate.id],
+      }),
+    ).toEqual({ action: "stale", event: null });
   }, 240_000);
 
   test("child results from different causal humans are claimed in separate turns", async () => {
