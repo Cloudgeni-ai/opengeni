@@ -108,10 +108,11 @@ describe("session control surface architecture", () => {
   });
 
   test("preserves an explicit Default-folder target from the rail into new-session launch", async () => {
-    const [rail, route, focusRequest] = await Promise.all([
+    const [rail, route, focusRequest, hydration] = await Promise.all([
       source("components/rail/session-list.tsx"),
       source("routes/sessions-index.tsx"),
       source("lib/create-composer-focus.ts"),
+      source("routes/sessions-index-hydration.ts"),
     ]);
     expect(rail).toContain("search={composerLaunchSearchForChannel(props.channelId)}");
     expect(rail).toContain("channelId={props.channelId}");
@@ -119,8 +120,10 @@ describe("session control surface architecture", () => {
     expect(rail).toContain("requestCreateComposerFocus(props.channelId)");
     expect(focusRequest).toContain("window.dispatchEvent(createComposerFocusEvent(channelId))");
     expect(route).toContain("const requestedChannelId = (");
-    expect(route.match(/resolveComposerLaunchChannelId\(/g)?.length).toBeGreaterThanOrEqual(3);
-    expect(route).toContain("const projectSelection = newSessionProjectSelection(");
+    expect(
+      `${route}\n${hydration}`.match(/resolveComposerLaunchChannelId\(/g)?.length,
+    ).toBeGreaterThanOrEqual(3);
+    expect(hydration).toContain("return newSessionProjectSelection(");
   });
 
   test("keeps manual folder selection from retriggering launch selection", async () => {
@@ -146,7 +149,9 @@ describe("session control surface architecture", () => {
     const route = await source("routes/sessions-index.tsx");
 
     expect(route).toContain("selectedProjectChannelId: selectedChannelId,");
-    expect(route).toContain("channelId: remote.selectedProjectChannelId,");
+    expect(route).toContain("resolveHydratedNewSessionProjectSelection({");
+    expect(route).toContain("remote,");
+    expect(route).toContain("restoredCompute: restored.compute,");
     expect(route.match(/const submission = submissionFromSessionDraft\(/g)).toHaveLength(2);
     expect(route.match(/targetSandboxId: submission\.options\.targetSandboxId/g)).toHaveLength(2);
     expect(route.match(/workingDir: submission\.options\.workingDir/g)).toHaveLength(2);

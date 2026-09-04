@@ -157,6 +157,7 @@ import {
   runNewSessionRouteSubmission,
   type CreatedSessionRouteAuthority,
 } from "@/routes/sessions-index-submission";
+import { resolveHydratedNewSessionProjectSelection } from "@/routes/sessions-index-hydration";
 import type { Channel, SandboxBackend, Session } from "@/types";
 
 export function SessionsIndexRoute({
@@ -715,19 +716,13 @@ function SessionsIndexRouteContent({
         defaultFirstPartyMcpTools,
         defaultSandboxBackend,
       );
-      const channelId = resolveComposerLaunchChannelId(
+      const projectSelection = resolveHydratedNewSessionProjectSelection({
         launchChannelId,
-        history.projects[0]?.channelId ?? null,
-      );
-      const projectSelection = newSessionProjectSelection(
+        remote,
         history,
-        channelId,
-        {
-          channelId: remote.selectedProjectChannelId,
-          compute: restored.compute,
-        },
+        restoredCompute: restored.compute,
         defaultSandboxBackend,
-      );
+      });
       setSelectionHistory(history);
       setSelectedProjectChannelId(projectSelection.channelId);
       setDraft({ ...restored, compute: projectSelection.compute });
