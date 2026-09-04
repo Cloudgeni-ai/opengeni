@@ -4183,6 +4183,18 @@ describe("worker shutdown preemption", () => {
     await Bun.sleep(0);
   });
 
+  test("a completed activity never waits forever for hung finalizer housekeeping", async () => {
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    await expect(waitForTurnFinalizerStep(hung, undefined, 10)).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
   test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
     const controller = new AbortController();
     let rejectFlush: ((error: Error) => void) | undefined;
