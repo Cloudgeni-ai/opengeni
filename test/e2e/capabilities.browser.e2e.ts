@@ -9,6 +9,7 @@ import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
+const secondWorkspaceId = "00000000-0000-4000-8000-000000000117";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "mcp:browser-focus";
 const capabilityName = "Example capability connector with a deterministically long provider name";
@@ -395,15 +396,23 @@ describe("capabilities browser e2e", () => {
       const tiles = page.locator("[data-capability-catalog-tile]");
       await expectVisible(tiles.first());
       const initialCount = await tiles.count();
-      expect(initialCount).toBeGreaterThan(0);
-      expect(initialCount).toBeLessThanOrEqual(48);
+      expect(initialCount).toBe(48);
+
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await expectVisible(seeMore);
+      await page.getByRole("heading", { name: "Bundles" }).scrollIntoViewIfNeeded();
+      await page.waitForTimeout(100);
+      expect(await tiles.count()).toBe(initialCount);
+
+      await seeMore.click();
+      expect(await tiles.count()).toBe(96);
 
       const startedAt = performance.now();
       await page.getByLabel("Search connectors").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);
-      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
       await page.screenshot({
         path: `${evidenceDir}large-catalog-filtered-1280.png`,
         fullPage: true,
@@ -412,6 +421,134 @@ describe("capabilities browser e2e", () => {
       await context.close();
     }
   }, 90_000);
+
+  test("final See more keyboard activation enters the appended results", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installLargeCatalogApi(page, 0, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.focus();
+      await expectFocused(seeMore);
+      await page.keyboard.press("Enter");
+
+      expect(await tiles.count()).toBe(96);
+      expect(await seeMore.count()).toBe(0);
+      await expectFocused(tiles.nth(48).locator("button").first());
+
+      await page.keyboard.press("Tab");
+      const activeTileIndex = await page.evaluate(() => {
+        const activeTile = document.activeElement?.closest<HTMLElement>(
+          "[data-capability-catalog-tile]",
+        );
+        if (!activeTile) return -1;
+        return [...document.querySelectorAll("[data-capability-catalog-tile]")].indexOf(activeTile);
+      });
+      expect(activeTileIndex).toBeGreaterThanOrEqual(48);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("in-place workspace navigation clears Browse while the next workspace loads", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      const catalog = await installWorkspaceCatalogApi(page, 120, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.click();
+      expect(await tiles.count()).toBe(96);
+      await expectFocused(seeMore);
+
+      const focusedWorkspaceATile = tiles.nth(95).locator("button").first();
+      await focusedWorkspaceATile.focus();
+      await expectFocused(focusedWorkspaceATile);
+
+      await page.evaluate((nextWorkspaceId) => {
+        window.history.pushState(null, "", `/workspaces/${nextWorkspaceId}/plugins`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, secondWorkspaceId);
+      await page.waitForURL(`**/workspaces/${secondWorkspaceId}/plugins`);
+      await catalog.waitForSecondCatalogRequest();
+      // The B request starts only after B's first route commit. At that boundary,
+      // no A catalog or focused A action may survive while the request stays held.
+      await expectNoWorkspaceATileOrFocus(page);
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+      expect(await tiles.count()).toBe(0);
+
+      await page.waitForTimeout(100);
+      expect(await tiles.count()).toBe(0);
+      await expectNoWorkspaceATileOrFocus(page);
+
+      catalog.resolveSecondCatalog();
+      await expectVisible(
+        page.locator('[data-capability-catalog-tile^="mcp:workspace-b-"]').first(),
+      );
+
+      expect(await tiles.count()).toBe(48);
+      await expectVisible(page.getByRole("button", { name: "See more" }));
+      await expectNoWorkspaceATileOrFocus(page);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
+  test("a rejected next-workspace catalog never restores the previous workspace", async () => {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const page = await context.newPage();
+    try {
+      const catalog = await installWorkspaceCatalogApi(page, 120, 96);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      const tiles = page.locator("[data-capability-catalog-tile]");
+      expect(await tiles.count()).toBe(48);
+      const seeMore = page.getByRole("button", { name: "See more" });
+      await seeMore.click();
+      expect(await tiles.count()).toBe(96);
+
+      const focusedWorkspaceATile = tiles.nth(95).locator("button").first();
+      await focusedWorkspaceATile.focus();
+      await expectFocused(focusedWorkspaceATile);
+
+      await page.evaluate((nextWorkspaceId) => {
+        window.history.pushState(null, "", `/workspaces/${nextWorkspaceId}/plugins`);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, secondWorkspaceId);
+      await page.waitForURL(`**/workspaces/${secondWorkspaceId}/plugins`);
+      await catalog.waitForSecondCatalogRequest();
+      // The rejected path must be isolated at B's first commit too, before its
+      // held catalog request is allowed to fail.
+      await expectNoWorkspaceATileOrFocus(page);
+      await expectVisible(page.locator("[data-capability-catalog-skeleton]"));
+      expect(await tiles.count()).toBe(0);
+
+      catalog.rejectSecondCatalog();
+      const error = page.getByRole("alert").filter({ hasText: "Couldn't load plugins" });
+      await expectVisible(error);
+      await expectText(error, "Workspace B catalog rejected");
+      await expectVisible(error.getByRole("button", { name: "Retry" }));
+      expect(await tiles.count()).toBe(0);
+      expect(await page.getByRole("button", { name: "See more" }).count()).toBe(0);
+      await expectNoWorkspaceATileOrFocus(page);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("Google Drive folders configure only the exact named Integration instance", async () => {
     const state: DriveUiState = {
@@ -936,8 +1073,12 @@ async function installCapabilityApi(
   });
 }
 
-async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promise<void> {
-  const catalog = Array.from({ length: 5_000 }, (_, index) => ({
+async function installLargeCatalogApi(
+  page: Page,
+  catalogDelayMs: number,
+  catalogSize = 5_000,
+): Promise<void> {
+  const catalog = Array.from({ length: catalogSize }, (_, index) => ({
     ...capability(false),
     id: `mcp:large-${index}`,
     kind: "mcp",
@@ -1036,6 +1177,145 @@ async function installLargeCatalogApi(page: Page, catalogDelayMs: number): Promi
     }
     return json({});
   });
+}
+
+async function installWorkspaceCatalogApi(
+  page: Page,
+  firstCatalogSize: number,
+  secondCatalogSize: number,
+): Promise<{
+  waitForSecondCatalogRequest: () => Promise<void>;
+  resolveSecondCatalog: () => void;
+  rejectSecondCatalog: () => void;
+}> {
+  const catalogs = new Map([
+    [workspaceId, largeCatalog("workspace-a", firstCatalogSize)],
+    [secondWorkspaceId, largeCatalog("workspace-b", secondCatalogSize)],
+  ]);
+  const secondCatalogRequested = deferred<void>();
+  const secondCatalogOutcome = deferred<"resolve" | "reject">();
+  const workspaces = [
+    workspace(),
+    { ...workspace(), id: secondWorkspaceId, name: "Second Focus Test Workspace" },
+  ];
+
+  await page.route("http://127.0.0.1:9/**", async (route) => {
+    const url = new URL(route.request().url());
+    const headers = { "x-opengeni-api-contract": apiContractRevision };
+    const json = (body: unknown, status = 200) =>
+      route.fulfill({
+        status,
+        headers,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+
+    if (url.pathname === "/v1/config/client") {
+      return json({
+        deploymentRevision: "workspace-catalog-browser-test",
+        apiContractRevision,
+        defaultModel: "gpt-5.6-sol",
+        allowedModels: ["gpt-5.6-sol"],
+        models: [],
+        defaultReasoningEffort: "low",
+        allowedReasoningEfforts: ["low"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 1_048_576 },
+        productAccessMode: "configured",
+        auth: { mode: "none" },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      });
+    }
+    if (url.pathname === "/v1/access/me") {
+      return json({
+        mode: "configured",
+        subjectId: "workspace-catalog-subject",
+        subjectLabel: "Workspace catalog test",
+        accountGrants: [
+          {
+            accountId,
+            subjectId: "workspace-catalog-subject",
+            role: "owner",
+            permissions: ["account:admin", "workspace:admin", "capabilities:read"],
+          },
+        ],
+        workspaceGrants: workspaces.map((candidate) => ({
+          workspaceId: candidate.id,
+          accountId,
+          subjectId: "workspace-catalog-subject",
+          permissions: ["workspace:admin", "capabilities:read", "connections:read"],
+        })),
+        defaultAccountId: accountId,
+        defaultWorkspaceId: workspaceId,
+      });
+    }
+    if (url.pathname === "/v1/workspaces") return json(workspaces);
+
+    const match = /^\/v1\/workspaces\/([^/]+)\/(.+)$/.exec(url.pathname);
+    const routeWorkspaceId = match?.[1];
+    const resource = match?.[2];
+    if (!routeWorkspaceId || !catalogs.has(routeWorkspaceId)) return json({});
+    if (resource === "capabilities") {
+      if (routeWorkspaceId === secondWorkspaceId) {
+        secondCatalogRequested.resolve();
+        if ((await secondCatalogOutcome.promise) === "reject") {
+          return json({ message: "Workspace B catalog rejected" }, 500);
+        }
+      }
+      return json({ items: catalogs.get(routeWorkspaceId), installations: [] });
+    }
+    if (resource === "connections") return json({ connections: [] });
+    if (resource === "social/connections") return json([]);
+    if (resource === "integrations/definitions") return json({ definitions: [] });
+    if (resource === "integrations") return json({ integrations: [] });
+    if (resource === "skills") return json({ skills: [] });
+    if (resource === "plugins") return json({ plugins: [] });
+    if (resource === "packs") return json({ packs: [], installations: [] });
+    if (resource === "variable-sets" || resource === "rigs" || resource === "channels") {
+      return json([]);
+    }
+    if (resource === "github/app") {
+      return json({ configured: false, missing: [], installUrl: null });
+    }
+    if (resource === "sessions") {
+      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+    }
+    return json({});
+  });
+
+  return {
+    waitForSecondCatalogRequest: async () => await secondCatalogRequested.promise,
+    resolveSecondCatalog: () => secondCatalogOutcome.resolve("resolve"),
+    rejectSecondCatalog: () => secondCatalogOutcome.resolve("reject"),
+  };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
+
+async function expectNoWorkspaceATileOrFocus(page: Page): Promise<void> {
+  expect(await page.locator('[data-capability-catalog-tile^="mcp:workspace-a-"]').count()).toBe(0);
+  expect(
+    (await page.evaluate(() =>
+      document.activeElement
+        ?.closest("[data-capability-catalog-tile]")
+        ?.getAttribute("data-capability-catalog-tile"),
+    )) ?? "",
+  ).not.toMatch(/^mcp:workspace-a-/);
+}
+
+function largeCatalog(prefix: string, size: number) {
+  return Array.from({ length: size }, (_, index) => ({
+    ...capability(false),
+    id: `mcp:${prefix}-${index}`,
+    source: "public_registry",
+    name: `${prefix} Capability ${index}`,
+  }));
 }
 
 function workspace() {
