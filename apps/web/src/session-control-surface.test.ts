@@ -150,7 +150,12 @@ describe("session control surface architecture", () => {
   test("hydrates durable project provenance before normal and realtime create", async () => {
     const route = await source("routes/sessions-index.tsx");
 
-    expect(route).toContain("selectedProjectChannelId: selectedChannelId,");
+    expect(route).toContain(
+      "projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}",
+    );
+    expect(route).toContain(
+      'launchChannelId !== undefined || Object.hasOwn(remote, "selectedProjectChannelId")',
+    );
     expect(route).toContain("resolveHydratedNewSessionProjectSelection({");
     expect(route).toContain("remote,");
     expect(route).toContain("restoredCompute: restored.compute,");

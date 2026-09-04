@@ -36,12 +36,12 @@ export function newSessionProjectSelection(
   return {
     channelId,
     compute:
-      rememberedProjectCompute(history, channelId, defaultSandboxBackend) ??
-      (currentSelection.channelId === channelId
+      currentSelection.channelId === channelId
         ? currentSelection.compute
-        : defaultSandboxBackend === "selfhosted"
-          ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
-          : { kind: "sandbox", backend: "" }),
+        : (rememberedProjectCompute(history, channelId, defaultSandboxBackend) ??
+          (defaultSandboxBackend === "selfhosted"
+            ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
+            : { kind: "sandbox", backend: "" })),
   };
 }
 

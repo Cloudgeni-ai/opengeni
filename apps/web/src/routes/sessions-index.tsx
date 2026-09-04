@@ -223,6 +223,9 @@ function SessionsIndexRouteContent({
   const [selectionHistory, setSelectionHistory] = useState<NewSessionSelectionHistory>({
     projects: [],
   });
+  const [projectProvenancePresent, setProjectProvenancePresent] = useState(
+    launchChannelId !== undefined,
+  );
   const remoteDraftHydratedRef = useRef(false);
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
@@ -564,8 +567,9 @@ function SessionsIndexRouteContent({
   // 0 = no explicit request (mount uses ConsoleComposer autoFocus). >0 = same-route
   // new-session / shortcut asked us to put the caret back in the create composer.
   const [createComposerFocusGen, setCreateComposerFocusGen] = useState(0);
-  const selectProject = useLatestCallback((channelId: string | null) => {
+  const selectProject = useLatestCallback((channelId: string | null, explicit = true) => {
     const previousChannelId = selectedChannelIdRef.current;
+    if (explicit) setProjectProvenancePresent(true);
     setSelectedProjectChannelId(channelId);
     setDraft((current) => {
       const selection = newSessionProjectSelection(
@@ -594,7 +598,7 @@ function SessionsIndexRouteContent({
       recentChannelId,
       remoteDraftHydrated: remoteDraftHydratedRef.current,
     });
-    if (channelId !== undefined) selectProject(channelId);
+    if (channelId !== undefined) selectProject(channelId, launchChannelId !== undefined);
   }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {
@@ -603,7 +607,7 @@ function SessionsIndexRouteContent({
       !channelsQuery.loading &&
       !channelsQuery.channels.some((channel) => channel.id === selectedChannelId)
     ) {
-      selectProject(null);
+      selectProject(null, false);
     }
   }, [channelsQuery.channels, channelsQuery.loading, selectedChannelId, selectProject]);
   const createProject = useCallback(async () => {
@@ -660,7 +664,7 @@ function SessionsIndexRouteContent({
       model: context.model,
       reasoningEffort: context.reasoningEffort,
       latencyMode: context.latencyMode,
-      selectedProjectChannelId: selectedChannelId,
+      ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
@@ -678,6 +682,7 @@ function SessionsIndexRouteContent({
       message,
       personalWorkspace,
       persistedToolPolicy,
+      projectProvenancePresent,
       selectedChannelId,
     ],
   );
@@ -735,6 +740,9 @@ function SessionsIndexRouteContent({
       // explicit/persisted selection (or the legacy fallback resolved above).
       remoteDraftHydratedRef.current = true;
       setSelectionHistory(history);
+      setProjectProvenancePresent(
+        launchChannelId !== undefined || Object.hasOwn(remote, "selectedProjectChannelId"),
+      );
       setSelectedProjectChannelId(projectSelection.channelId);
       setDraft({ ...restored, compute: projectSelection.compute });
       setModel(remote.model);

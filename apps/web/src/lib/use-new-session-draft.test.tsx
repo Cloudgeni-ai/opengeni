@@ -14,6 +14,7 @@ import {
   registerDom,
   renderHook,
 } from "../../../../packages/react/test/render-hook";
+import { resolveHydratedNewSessionProjectSelection } from "../routes/sessions-index-hydration";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "./use-new-session-draft";
 
 registerDom();
@@ -84,6 +85,45 @@ function renderDraftHook(draftClient: DraftClient, workspaceId = WORKSPACE_A) {
     },
     { client: draftClient, workspaceId },
   );
+}
+
+function renderRouteDraftHook(draftClient: DraftClient) {
+  return renderHook(() => {
+    const [remoteValue, setRemoteValue] = useState(() => editable());
+    const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+    const [projectProvenancePresent, setProjectProvenancePresent] = useState(false);
+    const value = {
+      ...remoteValue,
+      ...(projectProvenancePresent ? { selectedProjectChannelId: selectedChannelId } : {}),
+    };
+    const draft = useNewSessionDraft({
+      client: draftClient,
+      workspaceId: WORKSPACE_A,
+      value,
+      onApplyRemote: (nextRemote, history) => {
+        setRemoteValue(nextRemote);
+        setSelectedChannelId(
+          resolveHydratedNewSessionProjectSelection({
+            launchChannelId: undefined,
+            remote: nextRemote,
+            history,
+            restoredCompute: { kind: "sandbox", backend: "" },
+          }).channelId,
+        );
+        setProjectProvenancePresent(Object.hasOwn(nextRemote, "selectedProjectChannelId"));
+      },
+      restoreReadyFiles: () => {},
+    });
+    return {
+      draft,
+      value,
+      selectedChannelId,
+      selectProject: (channelId: string | null) => {
+        setSelectedChannelId(channelId);
+        setProjectProvenancePresent(true);
+      },
+    };
+  }, undefined);
 }
 
 function client(overrides: Partial<DraftClient> = {}): DraftClient {
@@ -210,6 +250,66 @@ describe("useNewSessionDraft", () => {
     expect(requests[0]?.selectedProjectChannelId).toBeNull();
     expect(Object.hasOwn(requests[0]!, "selectedProjectChannelId")).toBe(true);
     await hook.unmount();
+  });
+
+  test("legacy route hydration stays read-only across concurrent initial readers until explicit selection", async () => {
+    const history = {
+      projects: [{ channelId: PROJECT_A, targetSandboxId: null, machines: [] }],
+    };
+    let authoritative = { ...remote(0), selectionHistory: history };
+    const initialReads = [deferred<NewSessionDraft>(), deferred<NewSessionDraft>()];
+    let reads = 0;
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const draftClient = client({
+      getNewSessionDraft: async () => {
+        const pending = initialReads[reads];
+        reads += 1;
+        return pending ? await pending.promise : authoritative;
+      },
+      saveNewSessionDraft: async (_workspaceId, request) => {
+        requests.push(request);
+        if (request.expectedRevision !== authoritative.revision) throw conflict();
+        authoritative = {
+          ...remote(request.expectedRevision + 1, request),
+          selectionHistory: history,
+        };
+        return authoritative;
+      },
+    });
+    const first = await renderRouteDraftHook(draftClient);
+    const second = await renderRouteDraftHook(draftClient);
+    expect(reads).toBe(2);
+    await actRun(() => {
+      initialReads[0]?.resolve(authoritative);
+      initialReads[1]?.resolve(authoritative);
+    });
+    await flush(550);
+
+    expect(first.result.current.selectedChannelId).toBe(PROJECT_A);
+    expect(second.result.current.selectedChannelId).toBe(PROJECT_A);
+    expect(Object.hasOwn(first.result.current.value, "selectedProjectChannelId")).toBe(false);
+    expect(Object.hasOwn(second.result.current.value, "selectedProjectChannelId")).toBe(false);
+    expect(requests).toHaveLength(0);
+
+    await actRun(() => first.result.current.selectProject(PROJECT_A));
+    await flush(550);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      expectedRevision: 0,
+      selectedProjectChannelId: PROJECT_A,
+    });
+
+    await actRun(() => second.result.current.selectProject(null));
+    expect(await actRun(() => second.result.current.draft.flush())).toBeNull();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({
+      expectedRevision: 0,
+      selectedProjectChannelId: null,
+    });
+    expect(second.result.current.draft.conflict).not.toBeNull();
+
+    await first.unmount();
+    await second.unmount();
   });
 
   test("catalog callback identity changes do not reset an in-flight newest edit", async () => {

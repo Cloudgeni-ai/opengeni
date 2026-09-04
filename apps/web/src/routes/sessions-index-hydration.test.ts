@@ -28,15 +28,15 @@ const restoredProjectBCompute = {
 };
 
 describe("sessions-index project hydration", () => {
-  test("persisted project provenance wins over stale selection history", () => {
+  test("newer same-project draft compute wins over stale selection history", () => {
     const hydrated = resolveHydratedNewSessionProjectSelection({
       launchChannelId: undefined,
-      remote: { selectedProjectChannelId: PROJECT_B },
+      remote: { selectedProjectChannelId: PROJECT_A },
       history: staleProjectAHistory,
       restoredCompute: restoredProjectBCompute,
     });
 
-    expect(hydrated).toEqual({ channelId: PROJECT_B, compute: restoredProjectBCompute });
+    expect(hydrated).toEqual({ channelId: PROJECT_A, compute: restoredProjectBCompute });
     expect(
       resolveAmbientNewSessionProjectChannelId({
         launchChannelId: undefined,
