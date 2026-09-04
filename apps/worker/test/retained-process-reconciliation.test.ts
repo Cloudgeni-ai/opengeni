@@ -845,6 +845,19 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
     expect(
       classifyRetainedProcessPollResult(
+        "Wall time: 0.001 seconds\nProcess exited with code 1\nOutput:\nwrite_stdin failed: session not found: 9",
+        9,
+      ),
+    ).toEqual({
+      status: "proved",
+      proof: {
+        outcome: "lost",
+        exitCode: null,
+        reason: "provider_session_lost_banner",
+      },
+    });
+    expect(
+      classifyRetainedProcessPollResult(
         "Process running with session ID 9\n\nOutput:\nstill working",
         9,
       ),

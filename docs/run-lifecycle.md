@@ -1312,16 +1312,19 @@ authority remain capture blockers until settled.
 A yielded managed process first promotes its parent admission to retained state
 and creates the non-TTL process holder before the internal provider locator can
 leave the routing layer. The holder preserves exact cleanup authority while the
-same shell tool continues a bounded foreground wait. A command that proves
-terminal during that wait returns inline and never becomes session background
-state. Only a command still running when the tool must return takes a second,
-exact-attempt-fenced adoption transaction that inserts its session-owned command
-row immediately before the model receives the live locator. A yielded Connected
-Machine exec likewise creates its session-owned background-command row before
-returning; that row freezes the physical control workspace, enrollment,
-connection instance, and op ID. The exact parent admission/process UUID/provider
-locator or Connected Machine locator remains pinned across active-pointer
-movement.
+same shell tool continues its foreground wait. A command that proves terminal
+during that wait returns inline and never becomes session background state.
+Only providers whose process locator is controllable from another worker may
+end that wait with a second, exact-attempt-fenced adoption transaction that
+inserts its session-owned command row immediately before the model receives the
+live locator. The SDK Local and Docker locators index an in-memory table on one
+worker session object, so those providers remain turn-owned until terminal or
+turn cancellation instead of publishing a false background locator. A yielded
+Connected Machine exec likewise creates its session-owned background-command
+row before returning; that row freezes the physical control workspace,
+enrollment, connection instance, and op ID. The exact parent admission,
+process UUID, and provider locator or Connected Machine locator remain pinned
+across active-pointer movement.
 Both provider paths serialize session adoption with Steer, Pause, terminal
 Cancel, and session-tree deletion through the canonical workspace-control,
 workspace, session, turn, and exact-attempt fence. Managed retention and session

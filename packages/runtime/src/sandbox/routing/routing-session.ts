@@ -1594,6 +1594,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
+  /** Local and Docker SDK process ids address an in-memory table on one worker
+   * session object. They are not valid durable locators for the independently
+   * scheduled reaper, so those providers stay turn-owned until terminal. */
+  canAdoptRetainedProcessAsBackgroundCommand(providerSessionId: number): boolean {
+    const record = this.retainedProcesses.get(providerSessionId);
+    return (
+      record !== undefined && record.backend.kind !== "local" && record.backend.kind !== "docker"
+    );
+  }
+
   /** Return only OpenGeni's durable UUID + provider locator. Backend/session
    * objects remain private so a caller cannot forge route authority from this
    * diagnostic handoff. */
@@ -1607,6 +1617,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * return inline during the model-facing eager-wait window. */
   async adoptRetainedProcessAsBackgroundCommand(providerSessionId: number): Promise<void> {
     const record = this.retainedProcess(providerSessionId);
+    if (!this.canAdoptRetainedProcessAsBackgroundCommand(providerSessionId)) {
+      throw new RoutingUnsupportedError("backgroundCommandAdoption", record.backend.kind);
+    }
     await this.ensureParentPromotion(record);
     if (!this.deps.adoptProcessAsBackgroundCommand) {
       throw new RoutingMutationOutcomeUnknownError(

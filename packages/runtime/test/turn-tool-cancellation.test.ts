@@ -137,6 +137,37 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(1);
   });
 
+  test("a process-local retained command stays foreground until terminal", async () => {
+    const controller = createTurnToolCancellationController();
+    let writes = 0;
+    let adoptions = 0;
+    const exec = functionTool("exec_command", async () => running(118, "ready\n"));
+    const write = functionTool("write_stdin", async () => {
+      writes += 1;
+      return writes === 1 ? running(118) : exited(0, "finished\n");
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 118,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions += 1;
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec, write], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    const output = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: "local-task", yield_time_ms: 0 }),
+    );
+
+    expect(output).toContain("Process exited with code 0");
+    expect(output).toContain("ready\nfinished");
+    expect(writes).toBe(2);
+    expect(adoptions).toBe(0);
+  });
+
   test("failed background adoption never exposes a live process receipt", async () => {
     const controller = createTurnToolCancellationController();
     const exec = functionTool("exec_command", async () => running(117, "ready\n"));
@@ -638,6 +669,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
   test("resolves a lazy routing backend before choosing its cancellation transport", async () => {
     const controller = createTurnToolCancellationController();
     let resolves = 0;
+    let backgroundAdoptions = 0;
     let wrappedInput: Record<string, unknown> | null = null;
     const backend = {
       supportsPty: () => true,
@@ -654,6 +686,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       resolveActiveBackend: async () => {
         resolves += 1;
         return { session: backend, sandboxId: null, kind: "modal" };
+      },
+      adoptProcessAsBackgroundCommand: async () => {
+        backgroundAdoptions += 1;
       },
     });
     const exec = functionTool("exec_command", async (_runContext, input) => {
@@ -679,6 +714,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       ),
     ).toContain("Process running with session ID 41");
     expect(resolves).toBe(1);
+    expect(backgroundAdoptions).toBe(1);
     expect(wrappedInput?.yield_time_ms).toBe(0);
     expect(String(wrappedInput?.cmd)).toContain("/tmp/opengeni-turn-shell/");
 
