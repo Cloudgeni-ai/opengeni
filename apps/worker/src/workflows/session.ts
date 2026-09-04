@@ -95,6 +95,14 @@ export function deferredResultMayContinue(entryWakeups: number, currentWakeups: 
   return currentWakeups !== entryWakeups;
 }
 
+/** A typed activity cancellation is recoverable unless its exact-attempt
+ * redispatch budget was atomically exhausted. */
+export function cancelledAttemptRecoveryMayContinue(
+  action: activities.RecoverDispatchResult["action"],
+): boolean {
+  return action !== "exceeded";
+}
+
 /**
  * Bound repeated failures that happen before an attempt row exists. The
  * activity mirrors this deterministic delay into the durable wake outbox, so
@@ -1093,8 +1101,28 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return true;
     }
 
-    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
-      return outcome.result.status === "cancelled";
+    if (outcome.result.status === "failed") {
+      return false;
+    }
+
+    if (outcome.result.status === "cancelled") {
+      // A typed cancellation is normally observed through the control-signal
+      // branch above, after Pause/Steer has durably fenced the attempt. A
+      // worker can nevertheless return the same shape after a shutdown or a
+      // stale settlement race without closing its attempt row. Blindly
+      // re-peeking then retries forever against `turn.status = running` and
+      // strands every later prompt. Reconcile the exact attempt through the
+      // same bounded, generation-fenced redispatch transaction used after an
+      // activity heartbeat loss. If the attempt actually settled meanwhile,
+      // the transaction is a stale no-op and the next peek observes truth.
+      const recovery = await activity.recoverDispatch({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId: outcome.result.attemptId,
+        timeoutType: "HEARTBEAT",
+      });
+      return cancelledAttemptRecoveryMayContinue(recovery.action);
     }
 
     if (outcome.result.capacityWait) {
