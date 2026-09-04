@@ -2,21 +2,27 @@ import { randomUUID } from "node:crypto";
 import {
   AttemptToolApprovalRequiredError,
   AttemptToolCatalogStaleError,
+  AttemptToolInputValidationError,
   AttemptToolNotFoundError,
   codemodeDispatchSubject,
   decodeCodemodeDispatchRequest,
   encodeCodemodeDispatchAck,
+  type AttemptToolCatalogEntry,
   type AttemptToolEnvironment,
 } from "@opengeni/codemode";
 import {
+  CODEMODE_CLAIM_LEASE_MS,
   CODEMODE_CLAIM_HEARTBEAT_MS,
   CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
   type CodemodeOperation,
+  type SessionEvent,
 } from "@opengeni/contracts";
 import {
   cancelQueuedCodemodeOperationsForAttempt,
   claimCodemodeOperation,
   failCodemodeOperation,
+  getSessionEventByClientEventId,
+  getSessionToolCallCreatedEventByOperationId,
   markCodemodeOperationExecutionStarted,
   renewCodemodeOperationClaim,
   settleCodemodeOperationWithOutput,
@@ -37,6 +43,11 @@ export type CodemodeDispatcherScope = {
   executionGeneration: number;
 };
 
+export type CodemodeDispatcherTimings = {
+  claimLeaseMs?: number;
+  claimHeartbeatMs?: number;
+};
+
 /**
  * Owns the only Codemode execution edge for one exact attempt. NATS carries a
  * wake-up only; the durable row is claimed before any side effect and the call
@@ -48,6 +59,8 @@ export class CodemodeAttemptDispatcher {
   private pendingClaims = 0;
   private unsubscribe: (() => void) | null = null;
   private closing = false;
+  private readonly claimLeaseMs: number;
+  private readonly claimHeartbeatMs: number;
 
   constructor(
     private readonly db: Database,
@@ -56,6 +69,7 @@ export class CodemodeAttemptDispatcher {
     private readonly scope: CodemodeDispatcherScope,
     private readonly turnSignal?: AbortSignal,
     private readonly maxConcurrentCalls = CODEMODE_MAX_CONCURRENT_CALLS_PER_ATTEMPT,
+    timings: CodemodeDispatcherTimings = {},
   ) {
     if (
       environment.catalog.accountId !== scope.accountId ||
@@ -69,6 +83,22 @@ export class CodemodeAttemptDispatcher {
     }
     if (!Number.isSafeInteger(maxConcurrentCalls) || maxConcurrentCalls < 1) {
       throw new Error("Codemode dispatcher concurrency must be a positive safe integer");
+    }
+    this.claimLeaseMs = timings.claimLeaseMs ?? CODEMODE_CLAIM_LEASE_MS;
+    this.claimHeartbeatMs = timings.claimHeartbeatMs ?? CODEMODE_CLAIM_HEARTBEAT_MS;
+    if (
+      !Number.isSafeInteger(this.claimLeaseMs) ||
+      this.claimLeaseMs < 1_000 ||
+      this.claimLeaseMs > 10 * 60_000
+    ) {
+      throw new Error("Codemode dispatcher claim lease must be between 1 second and 10 minutes");
+    }
+    if (
+      !Number.isSafeInteger(this.claimHeartbeatMs) ||
+      this.claimHeartbeatMs < 1 ||
+      this.claimHeartbeatMs >= this.claimLeaseMs
+    ) {
+      throw new Error("Codemode dispatcher heartbeat must be positive and shorter than its lease");
     }
   }
 
@@ -103,16 +133,32 @@ export class CodemodeAttemptDispatcher {
             catalogDigest: request.catalogDigest,
             operationId: request.operationId,
             claimId: randomUUID(),
+            claimLeaseMs: this.claimLeaseMs,
           });
           if (claim.status === "claimed") {
-            const execution = this.execute(claim.operation, claim.claimId).finally(() => {
-              this.inFlight.delete(request.operationId);
-            });
+            const execution = this.execute(claim.operation, claim.claimId, claim.reclaimed).finally(
+              () => {
+                this.inFlight.delete(request.operationId);
+              },
+            );
             this.inFlight.set(request.operationId, execution);
             return encodeCodemodeDispatchAck({
               version: 1,
               operationId: request.operationId,
               status: "accepted",
+            });
+          }
+          if (claim.status === "execution_owner_lost") {
+            await this.settleWithOutput(claim.operation, claim.claimId, {
+              state: "outcome_unknown",
+              errorCode: "worker_lost_during_execution",
+              errorMessage:
+                "The execution owner disappeared after the tool call began. Inspect actual state before retrying.",
+            });
+            return encodeCodemodeDispatchAck({
+              version: 1,
+              operationId: request.operationId,
+              status: "terminal",
             });
           }
           return encodeCodemodeDispatchAck({
@@ -145,7 +191,39 @@ export class CodemodeAttemptDispatcher {
     await Promise.allSettled([...this.inFlight.values()]);
   }
 
-  private async execute(operation: CodemodeOperation, claimId: string): Promise<void> {
+  private async execute(
+    operation: CodemodeOperation,
+    claimId: string,
+    reclaimed: boolean,
+  ): Promise<void> {
+    const claimAuthority = {
+      accountId: this.scope.accountId,
+      workspaceId: this.scope.workspaceId,
+      attemptId: this.scope.attemptId,
+      operationId: operation.operationId,
+      claimId,
+      claimLeaseMs: this.claimLeaseMs,
+    };
+    // Preparation may include provider preflight and policy resolution. Keep the
+    // durable claim alive from the moment execution is accepted, not only after
+    // the provider side-effect marker, so a slow preflight cannot be reclaimed.
+    const heartbeat = setInterval(() => {
+      void renewCodemodeOperationClaim(this.db, claimAuthority).catch(() => undefined);
+    }, this.claimHeartbeatMs);
+    heartbeat.unref?.();
+    try {
+      await this.executeClaimed(operation, claimId, reclaimed, claimAuthority);
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
+  private async executeClaimed(
+    operation: CodemodeOperation,
+    claimId: string,
+    reclaimed: boolean,
+    claimAuthority: Parameters<typeof markCodemodeOperationExecutionStarted>[1],
+  ): Promise<void> {
     const entry = this.environment.catalog.entries.find(
       (candidate) =>
         candidate.identity.serverId === operation.identity.serverId &&
@@ -170,38 +248,7 @@ export class CodemodeAttemptDispatcher {
       );
       return;
     }
-    const created = await appendAndPublishTurnEventsFenced(
-      this.db,
-      this.bus,
-      this.scope.workspaceId,
-      this.scope.sessionId,
-      this.scope.turnId,
-      this.scope.executionGeneration,
-      this.scope.attemptId,
-      [
-        {
-          type: "agent.toolCall.created",
-          turnId: this.scope.turnId,
-          turnGeneration: this.scope.executionGeneration,
-          turnAttemptId: this.scope.attemptId,
-          producerId: operation.caller.subjectId,
-          payload: {
-            id: operation.operationId,
-            name: entry.modelName,
-            arguments: operation.arguments,
-            origin: "codemode",
-            subjectId: operation.caller.subjectId,
-            raw: {
-              type: "codemode_call",
-              serverId: operation.identity.serverId,
-              toolName: operation.identity.toolName,
-              catalogDigest: operation.catalogDigest,
-            },
-          },
-        },
-      ],
-    ).catch(() => ({ accepted: false }));
-    if (!created.accepted) {
+    if (!(await this.ensureToolCallCreated(operation, entry, reclaimed))) {
       await this.failBeforeExecution(
         operation.operationId,
         claimId,
@@ -219,24 +266,9 @@ export class CodemodeAttemptDispatcher {
       return;
     }
 
-    const claimAuthority = {
-      accountId: this.scope.accountId,
-      workspaceId: this.scope.workspaceId,
-      attemptId: this.scope.attemptId,
-      operationId: operation.operationId,
-      claimId,
-    };
-    const crossedExecutionBoundary = await markCodemodeOperationExecutionStarted(
-      this.db,
-      claimAuthority,
-    );
-    if (!crossedExecutionBoundary) return;
-    const heartbeat = setInterval(() => {
-      void renewCodemodeOperationClaim(this.db, claimAuthority).catch(() => undefined);
-    }, CODEMODE_CLAIM_HEARTBEAT_MS);
-    heartbeat.unref?.();
+    let preparedCall: Awaited<ReturnType<AttemptToolEnvironment["prepareCall"]>>;
     try {
-      const result = await this.environment.call(
+      preparedCall = await this.environment.prepareCall(
         {
           operationId: operation.operationId,
           catalogDigest: operation.catalogDigest,
@@ -246,7 +278,34 @@ export class CodemodeAttemptDispatcher {
         },
         { signal },
       );
-      await this.settleWithOutput(operation, claimId, { state: "completed", result });
+    } catch (error) {
+      await this.settleWithOutput(operation, claimId, {
+        state: "failed",
+        errorCode: errorCode(error, signal, false),
+        errorMessage: safeErrorMessage(error),
+      });
+      return;
+    }
+    if (signal.aborted) {
+      await this.settleWithOutput(operation, claimId, {
+        state: "failed",
+        errorCode: "attempt_cancelled",
+        errorMessage: "Execution attempt ended before the Codemode call started",
+      });
+      return;
+    }
+
+    const crossedExecutionBoundary = await markCodemodeOperationExecutionStarted(
+      this.db,
+      claimAuthority,
+    );
+    if (!crossedExecutionBoundary) return;
+    try {
+      const result = await preparedCall.execute();
+      await this.settleWithOutput(operation, claimId, {
+        state: "completed",
+        result,
+      });
     } catch (error) {
       const knownPreExecution =
         error instanceof AttemptToolApprovalRequiredError ||
@@ -255,13 +314,90 @@ export class CodemodeAttemptDispatcher {
         connectorActionWasNotExecuted(error);
       await this.settleWithOutput(operation, claimId, {
         state: knownPreExecution ? "failed" : "outcome_unknown",
-        errorCode: errorCode(error, signal),
+        errorCode: errorCode(error, signal, true),
         errorMessage: !knownPreExecution
           ? "Tool execution ended without a durable result. Its side-effect outcome is unknown; inspect actual state before retrying."
           : safeErrorMessage(error),
       });
-    } finally {
-      clearInterval(heartbeat);
+    }
+  }
+
+  private async ensureToolCallCreated(
+    operation: CodemodeOperation,
+    entry: AttemptToolCatalogEntry,
+    reclaimed: boolean,
+  ): Promise<boolean> {
+    const clientEventId = codemodeToolCallCreatedClientEventId(operation.operationId);
+    if (reclaimed) {
+      const existing = await getSessionEventByClientEventId(
+        this.db,
+        this.scope.workspaceId,
+        this.scope.sessionId,
+        clientEventId,
+      ).catch(() => null);
+      if (existing) {
+        assertMatchingCodemodeToolCallCreated(existing, operation, entry, this.scope);
+        return true;
+      }
+      const legacyCreated = await getSessionToolCallCreatedEventByOperationId(this.db, {
+        workspaceId: this.scope.workspaceId,
+        sessionId: this.scope.sessionId,
+        turnId: this.scope.turnId,
+        attemptId: this.scope.attemptId,
+        operationId: operation.operationId,
+      }).catch(() => null);
+      if (legacyCreated) {
+        assertMatchingCodemodeToolCallCreated(legacyCreated, operation, entry, this.scope);
+        return true;
+      }
+    }
+    try {
+      const created = await appendAndPublishTurnEventsFenced(
+        this.db,
+        this.bus,
+        this.scope.workspaceId,
+        this.scope.sessionId,
+        this.scope.turnId,
+        this.scope.executionGeneration,
+        this.scope.attemptId,
+        [
+          {
+            type: "agent.toolCall.created",
+            clientEventId,
+            turnId: this.scope.turnId,
+            turnGeneration: this.scope.executionGeneration,
+            turnAttemptId: this.scope.attemptId,
+            producerId: operation.caller.subjectId,
+            payload: {
+              id: operation.operationId,
+              name: entry.modelName,
+              arguments: operation.arguments,
+              origin: "codemode",
+              subjectId: operation.caller.subjectId,
+              raw: {
+                type: "codemode_call",
+                serverId: operation.identity.serverId,
+                toolName: operation.identity.toolName,
+                catalogDigest: operation.catalogDigest,
+              },
+            },
+          },
+        ],
+      );
+      return created.accepted;
+    } catch {
+      // A concurrent reclaimed claimant can win the unique client-event insert,
+      // or a committed append can lose its response. Reconcile durable truth
+      // before treating the attempt fence as closed.
+      const raced = await getSessionEventByClientEventId(
+        this.db,
+        this.scope.workspaceId,
+        this.scope.sessionId,
+        clientEventId,
+      ).catch(() => null);
+      if (!raced) return false;
+      assertMatchingCodemodeToolCallCreated(raced, operation, entry, this.scope);
+      return true;
     }
   }
 
@@ -311,6 +447,43 @@ export class CodemodeAttemptDispatcher {
   }
 }
 
+export function codemodeToolCallCreatedClientEventId(operationId: string): string {
+  return `opengeni:codemode-tool-call-created:${operationId}`;
+}
+
+function assertMatchingCodemodeToolCallCreated(
+  event: SessionEvent,
+  operation: CodemodeOperation,
+  entry: AttemptToolCatalogEntry,
+  scope: CodemodeDispatcherScope,
+): void {
+  const payload = recordValue(event.payload);
+  const raw = recordValue(payload?.raw);
+  if (
+    event.type !== "agent.toolCall.created" ||
+    event.turnId !== scope.turnId ||
+    event.turnGeneration !== scope.executionGeneration ||
+    event.turnAttemptId !== scope.attemptId ||
+    event.turnAssociation !== "current" ||
+    payload?.id !== operation.operationId ||
+    payload?.name !== entry.modelName ||
+    payload?.origin !== "codemode" ||
+    payload?.subjectId !== operation.caller.subjectId ||
+    raw?.type !== "codemode_call" ||
+    raw?.serverId !== operation.identity.serverId ||
+    raw?.toolName !== operation.identity.toolName ||
+    raw?.catalogDigest !== operation.catalogDigest
+  ) {
+    throw new Error("Codemode tool-call creation id is bound to incompatible durable evidence");
+  }
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function connectorActionWasNotExecuted(error: unknown): boolean {
   return Boolean(
     error &&
@@ -324,8 +497,10 @@ function combinedSignal(primary: AbortSignal, secondary?: AbortSignal): AbortSig
   return secondary ? AbortSignal.any([primary, secondary]) : primary;
 }
 
-function errorCode(error: unknown, signal: AbortSignal): string {
-  if (signal.aborted) return "attempt_cancelled_during_execution";
+function errorCode(error: unknown, signal: AbortSignal, executionStarted: boolean): string {
+  if (signal.aborted) {
+    return executionStarted ? "attempt_cancelled_during_execution" : "attempt_cancelled";
+  }
   if (connectorActionWasNotExecuted(error)) return "connector_action_not_executed";
   if (typeof error === "object" && error !== null && "code" in error) {
     const code = (error as { code?: unknown }).code;
@@ -338,6 +513,7 @@ function safeErrorMessage(error: unknown): string {
   if (
     error instanceof AttemptToolApprovalRequiredError ||
     error instanceof AttemptToolCatalogStaleError ||
+    error instanceof AttemptToolInputValidationError ||
     error instanceof AttemptToolNotFoundError
   ) {
     return error.message;

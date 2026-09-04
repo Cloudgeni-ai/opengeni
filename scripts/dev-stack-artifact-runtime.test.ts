@@ -81,6 +81,8 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("export OPENGENI_MODAL_TOKEN_ID OPENGENI_MODAL_TOKEN_SECRET");
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_ID=%s");
     expect(source).not.toContain("printf 'OPENGENI_MODAL_TOKEN_SECRET=%s");
+    expect(source).toContain('register_process "$!" "Modal sandbox edge"');
+    expect(source).toContain('register_process "$!" "Modal sandbox tunnel"');
   });
 
   test("isolates Modal sandbox ownership between local worktrees", async () => {
@@ -113,6 +115,24 @@ describe("local artifact runtime stack contract", () => {
     expect(source).toContain("bun scripts/prepare-development-nats-config.ts");
     expect(source).toContain("OPENGENI_NATS_CONFIG_FILE");
     expect(source).toContain("bash scripts/run-development-relay.sh");
+  });
+
+  test("makes local integrations self-initializing with stable OAuth state", async () => {
+    const [source, envExample] = await Promise.all([
+      Bun.file(scriptPath).text(),
+      Bun.file(envExamplePath).text(),
+    ]);
+
+    expect(envExample).toContain("OPENGENI_INTEGRATIONS_ENABLED=true");
+    expect(envExample).toContain("# OPENGENI_INTEGRATIONS_STATE_SECRET=");
+    expect(source).toContain('if [ -z "${OPENGENI_INTEGRATIONS_ENABLED:-}" ]; then');
+    expect(source).toContain("OPENGENI_INTEGRATIONS_ENABLED=true");
+    expect(source).toContain('[ "$OPENGENI_INTEGRATIONS_ENABLED" = "true" ]');
+    expect(source).toContain('if [ "$OPENGENI_INTEGRATIONS_ENABLED" = "true" ] &&');
+    expect(source).toContain('[ -z "${OPENGENI_INTEGRATIONS_STATE_SECRET:-}" ]');
+    expect(source).toContain("OPENGENI_INTEGRATIONS_STATE_SECRET=");
+    expect(source).toContain('randomBytes(32).toString("base64url")');
+    expect(source).toContain("Generated and persisted a local integration state secret in .env.");
   });
 
   test("persists NATS auth-callout defaults for independently restarted components", async () => {
@@ -258,6 +278,10 @@ describe("local artifact runtime stack contract", () => {
   test("keeps the browser API hostname aligned with the local web hostname", async () => {
     const source = await Bun.file(scriptPath).text();
 
+    expect(source).toContain(
+      'export OPENGENI_WEB_BASE_URL="http://127.0.0.1:${OPENGENI_WEB_PORT}"',
+    );
+    expect(source).toContain("printf 'OPENGENI_WEB_BASE_URL=%s\\n' \"${OPENGENI_WEB_BASE_URL}\"");
     expect(source).toContain(
       'browser_base_url="${OPENGENI_WEB_BASE_URL:-${OPENGENI_PUBLIC_BASE_URL:-}}"',
     );

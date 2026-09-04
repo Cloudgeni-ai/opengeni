@@ -54,6 +54,7 @@ import {
 } from "./editable-artifact-websocket";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import {
   createStandaloneEditableArtifactApplication,
   type StandaloneEditableArtifactApplication,
@@ -455,7 +456,10 @@ export async function startApi(
       if (artifactWebSockets.handles(request)) {
         return artifactWebSockets.upgrade(request, bunServer);
       }
-      return app.fetch(request);
+      return app.fetch(
+        request,
+        apiRequestBindingsForTransportPeer(bunServer.requestIP(request)?.address),
+      );
     },
     websocket: {
       maxPayloadLength: EDITABLE_ARTIFACT_LIVE_WEBSOCKET_MAX_MESSAGE_BYTES,

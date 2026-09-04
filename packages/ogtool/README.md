@@ -32,4 +32,6 @@ Commands:
 The HTTP client submits a caller-chosen operation id and polls the durable result. A lost response
 therefore cannot silently replay a side effect. `@opengeni/ogtool` also re-exports the typed
 `@opengeni/codemode` client for application code. Codemode is a projection of the attempt's one
-tool authority, not a second tool or credential surface.
+tool authority, not a second tool or credential surface. Aborting the CLI/client wait stops only
+local observation; it does not cancel a journaled server operation, which must be reconciled by the
+same operation id or settled by the owning attempt lifecycle.

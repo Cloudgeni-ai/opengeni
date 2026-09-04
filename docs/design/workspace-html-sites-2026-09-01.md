@@ -1,7 +1,8 @@
 <!-- docs-refs: record -->
 
 > **Point-in-time design record.** Written against `main` at `9e21a09c` on
-> September 1, 2026. Code wins where the implementation later differs.
+> September 1, 2026 and resolved on September 3, 2026. Code wins where the
+> implementation later differs.
 
 # Workspace HTML Sites
 
@@ -46,13 +47,16 @@ model.
 Artifact HTML is publisher-controlled active content. The opaque origin blocks
 parent DOM, cookie, and storage access, but the current renderer deliberately
 allows scripts, external resources, forms, popups, and outbound network
-requests. Opening an artifact therefore must not disclose an OpenGeni credential
-or silently grant API or tool authority. Authenticated Site capabilities require
-an additional explicit trust and capability boundary described below.
+requests. Opening an artifact therefore must not disclose an OpenGeni
+credential or grant broader API authority. Publishing an immutable Site version
+with requested tool identities explicitly authorizes that active version to
+invoke those identities without per-call prompts, subject to the current
+viewer still having live workspace and connection authority.
 
-The finished artifact is one self-contained HTML document. Source retention for
-future agent editing is useful, but is a separate authoring concern from the
-runtime format.
+The finished runtime is one self-contained HTML document. Each immutable
+version retains its complete traversal-free source bundle and exact requested
+tool identities beside that HTML, so `Edit with Geni` can restore the ordinary
+Bun project without changing the runtime format.
 
 ### The agent should use the typed OpenGeni SDK
 
@@ -67,24 +71,23 @@ imply that the Site is controlling a browser. Its purpose is to keep Node-only,
 operator-only, or otherwise inappropriate package surfaces out of the browser
 bundle.
 
-The desired Site authoring experience is one typed client with the runtime's
-OpenGeni API, workspace context, and tools:
+The Site runtime exposes one workspace-bound typed tool client without giving
+publisher-controlled code an API URL, workspace id, cookie, or bearer:
 
 ```ts
-import { OpenGeniClient } from "@opengeni/sdk/browser";
+import { createOpenGeniSiteClient } from "@opengeni/sdk/site";
 
-const client = new OpenGeniClient({
-  baseUrl: runtime.apiBaseUrl,
-  // Available only after the viewer enables this exact version's capabilities.
-  accessToken: () => runtime.accessToken,
-});
+const client = createOpenGeniSiteClient();
 
-const session = await client.createSession(runtime.workspaceId, request);
 const issues = await client.tools.linear.issues_list({ state: "Todo" });
 ```
 
-This example records the desired API shape, not a claim that current `main`
-already exports these exact constructor names or `client.tools`.
+The host injects a minimal receiver before Site application code and transfers
+exactly one bootstrap `MessagePort` to that document. The receiver retains the
+port so a client constructed after the iframe's `load` event can still connect;
+navigation creates a new document and revokes the old bootstrap plus every
+derived tool-call port. The same lazy `client.tools` proxy is available to
+ordinary SDK/browser consumers through a workspace-bound HTTP adapter.
 
 ### The agent should use OpenGeni's styled React UI by default
 
@@ -191,49 +194,34 @@ The detailed package boundary is intentionally not settled in this record. It
 must be derived from the current runtime and contracts rather than created by
 renaming files prematurely.
 
-### Authenticated runtime communication requires explicit trust and confinement
+### Authenticated runtime communication stays in the parent
 
-Opening a Site should provide only non-secret runtime context such as the API
-base URL and workspace id. It must not place a general viewer credential in the
-iframe. Publisher-controlled code can send any readable bearer to an external
-endpoint, and an opaque origin does not prevent that exfiltration.
+The final design uses the parent-mediated boundary. Opening a Site transfers no
+credential and no non-secret routing context into the iframe. The parent owns
+the authenticated SDK client, projects only the exact tool identities retained
+by the immutable current Site version, and rejects every call outside that set.
 
-Ordinary HTTP/SSE remains the preferred transport only after the viewer
-explicitly enables authenticated capabilities for one exact immutable artifact
-version and the server can mint a sufficiently confined browser credential. If
-the required authority cannot be represented safely in an artifact-readable
-bearer, the privileged call must instead cross a parent-mediated,
-capability-checked boundary that keeps the credential outside the iframe. A
-parent-page `fetch` RPC bridge is therefore a containment fallback, not a
-forbidden architecture or the default for every request.
+The iframe creates one `MessageChannel`, sends the transfer request to its
+parent, and then communicates only over the transferred port. The host accepts
+the channel only when `event.source` is the exact iframe window and exactly one
+port is present. Reload, stop, navigation, cancellation, and unmount close the
+port and abort outstanding requests.
 
-The exact token/session mechanism remains open pending a full authority review.
-Whatever is selected must:
+The parent resolves every call through the current human's live workspace tool
+gateway. That gateway rebuilds the enabled first-party and integration catalog,
+resolves personal/workspace connection authority through the existing broker,
+validates the catalog digest and input, and invokes the same executor as model
+and Codemode calls. The active immutable version's retained tool identities are
+the Site's direct-call allowlist. Calls within that live intersection execute
+without a confirmation dialog or approval capability, including tools whose
+ordinary current-human catalog policy is `human`.
 
-- require explicit viewer trust/consent for the exact artifact version and
-  disclosed API/tool capabilities before granting them;
-- bind authority to the exact viewer, workspace, artifact, version, and approved
-  API/tool allowlist rather than representing unrestricted viewer authority;
-- work with the existing typed SDK;
-- renew only while the exact consented capability grant remains live, without
-  interrupting a long-open Site;
-- observe logout, membership, permission, and connection changes;
-- preserve personal as well as workspace-owned connection behavior;
-- authorize every API and tool call on the server against both current viewer
-  authority and the narrower artifact capability grant;
-- require fresh consent when published code changes to another immutable
-  version;
-- avoid shipping a standing shared API key; and
-- produce clear reauthentication or access-loss behavior instead of scattered
-  tool failures.
-
-The implementation should prefer existing access-grant and browser-auth
-machinery to authorize creation and refresh of the narrower artifact grant, but
-must never copy a managed browser session credential into the iframe. A new
-server-backed runtime-session model, an artifact/version-bound delegated token,
-or a parent-mediated request path are candidate mechanisms, not settled product
-decisions. A general bearer that lets artifact code act as the current human is
-not a candidate.
+This avoids version-scoped bearer issuance entirely. Membership, permission,
+connection, logout, and catalog changes are observed by the parent's ordinary
+live authority path, while the immutable version's requested-tool set remains a
+second, narrower allowlist. A newly published version may change that retained
+allowlist, but never inherits a credential because no artifact-readable
+credential exists.
 
 ## Things not to build
 
@@ -244,8 +232,8 @@ not a candidate.
 - A bespoke Site build service or required OpenGeni build command.
 - A user-facing Site deployment CLI.
 - A second React component system for agent sessions.
-- A custom `fetch` transport except where the final authentication design needs
-  parent mediation to keep credentials outside untrusted artifact code.
+- A general-purpose authenticated `fetch` bridge. The parent exposes only the
+  bounded typed tool catalog/call protocol required by `@opengeni/sdk/site`.
 
 ## Existing surfaces to reuse
 
@@ -272,7 +260,7 @@ The current architecture investigation should begin with these shipped seams:
 - Access-grant and delegated-token resolution:
   `packages/core/src/access/` and the managed browser-auth seam.
 
-## Current implementation assessment
+## Implementation assessment at design time
 
 Most of the required product already exists on `main`. This should be an
 extraction and an additional public adapter, not a replacement tool platform.
@@ -312,7 +300,7 @@ extraction and an additional public adapter, not a replacement tool platform.
   but that route currently registers OpenGeni's first-party tools rather than
   the complete set of configured external integrations.
 
-### Actual additions required
+### Implemented additions
 
 1. Extract or introduce generic tool definition, catalog, namespace, type
    generation, validation, and execution contracts below the current
@@ -326,40 +314,49 @@ extraction and an additional public adapter, not a replacement tool platform.
    tools OpenGeni already gives an agent. It must assemble configured external
    integrations as well as first-party tools and call the existing executor,
    not duplicate provider implementations.
-4. Add an explicit artifact trust and capability grant plus browser-usable
-   runtime authentication or parent mediation. The server must positively link
-   grant creation and refresh to the live managed-human login, bind the grant to
-   the exact artifact version and approved API/tool allowlist, and revoke it on
-   trust, login, membership, permission, or connection changes. A plain
-   delegated bearer that merely claims the human's subject id is insufficient:
-   current access code deliberately refuses delegated bearers the canonical
-   managed-human stamp and personal-connection authority. The host-owned MCP
-   authority path is also a different concern: it lets an embedding host supply
-   connector authority; it does not establish viewer consent for publisher-
-   controlled code or safely expose the human's authority inside the iframe.
-5. Define direct-human approval and durable operation semantics for UI tool
-   calls. Retries of mutating calls need the same no-duplicate and
-   outcome-unknown guarantees as Codemode without pretending that the call
-   belongs to an agent attempt.
+4. Add an explicit immutable requested-tool allowlist plus parent mediation.
+   The server must positively link every Site call to the exact active artifact
+   version, intersect it with the live managed-human gateway, and revoke access
+   immediately on archive, version replacement, logout, membership, permission,
+   connection, or catalog changes. A plain delegated bearer that merely claims
+   the human's subject id is insufficient: current access code deliberately
+   refuses delegated bearers the canonical managed-human stamp and personal-
+   connection authority. No artifact-readable credential or Site-specific
+   bearer is issued.
+   Publication that activates requested tools requires the provenance-stamped
+   canonical managed-cookie or local human authorization. A delegated bearer
+   cannot obtain it by choosing `principalKind: human_session` in its token.
+5. Keep generic direct-human approval and durable operation semantics for
+   ordinary non-Site UI tool calls. Sites use their immutable requested-tool
+   allowlist directly and do not enter that per-call approval flow.
 
 No new Linear, Slack, GitHub, provider credential, MCP transport, artifact host,
 or React session implementation is required.
 
-## Likely SDK and request flow
-
-The exact package names are open, but the behavioral flow should remain simple.
+## Final SDK and request flow
 
 ### During Site authoring
 
-1. The authoring environment obtains the tool catalog selected for the Site.
-2. The generic declaration generator writes a project-local declaration that
-   augments an SDK interface such as `OpenGeniGeneratedTools`.
+1. The normal Site-authoring session inherits the workspace's enabled tools and
+   obtains its exact attempt catalog through Codemode.
+2. `ogtool declarations` writes a project-local declaration that augments
+   `OpenGeniGeneratedTools`.
 3. TypeScript then understands exact calls such as
    `client.tools.linear.issues_list(...)`; the runtime namespace remains a lazy
    proxy so the published SDK does not need to statically know every installed
    integration.
-4. The agent uses normal Bun development and build commands and publishes the
-   resulting self-contained HTML.
+4. The agent uses normal Bun development and browser validation, then publishes
+   the resulting self-contained HTML, retained source bundle, and exact
+   requested canonical identities together.
+
+The product runtime packages this guidance as the native tool-bound
+`opengeni-sites` Skill. A create-only Site session admits it when
+`artifacts_create` is present; an edit session admits it only when both
+`artifacts_get_source` and `artifacts_publish` are present. Repository-local
+`.agents/skills` is only the reviewed source copy, not the product activation
+mechanism. Connected Machine attempts keep the same frozen Site tool surface,
+but do not advertise this worker-bundled filesystem Skill until its files have
+an explicit machine-delivery path.
 
 Generated types improve authoring but do not grant access. The server remains
 authoritative if a viewer lacks a required permission or connection, or if the
@@ -367,67 +364,63 @@ catalog changed after the Site was built.
 
 ### When the Site opens
 
-1. The OpenGeni host gives the iframe non-secret context such as its API base
-   URL, workspace id, artifact id, and immutable version id. No credential or
-   privileged capability is present merely because the artifact was opened.
-2. The host shows the exact artifact version and requested API/tool capabilities
-   before the viewer explicitly enables them. A new published version requires
-   a new decision.
-3. The host either gives the iframe a short-lived, revocable, artifact/version-
-   bound bearer limited to the consented capabilities, or keeps the credential
-   outside the iframe and exposes a parent-mediated capability-checked call
-   boundary.
-4. In bearer mode, `OpenGeniClient` reads the current narrow token through a
-   callback so renewal does not require rebuilding the client. In parent-
-   mediated mode, an SDK transport adapter presents the same typed call shape
-   without exposing credential bytes.
-5. A call through `client.tools` sends an operation id, canonical tool identity,
-   arguments, and any catalog version needed to detect stale code.
-6. The API or parent boundary resolves server-owned current-human evidence,
-   checks the exact live workspace authority, revalidates the exact artifact
-   version and consented capability grant, and resolves the viewer's current
-   connection authority. It must not trust a client-supplied subject or grant
-   claim.
-7. The generic tool host obtains the allowed descriptor from the same runtime
-   preparation path used for agents, validates the input, applies approval and
-   operation policy, and invokes the existing `PrefixedMcpServer` executor.
-8. The executor performs the provider call and returns the existing structured
-   result, attachment, auth-needed, or outcome-unknown projection. The generic
-   host validates the successful structured output and the SDK returns the
-   typed value.
+1. The host transfers one bootstrap `MessagePort` to a receiver installed before
+   Site application code. The receiver retains it for late SDK construction;
+   the iframe receives no token, API URL, workspace id, cookie, or DOM authority.
+2. The parent loads the live workspace catalog and projects only identities
+   retained by the current immutable Site version. Requested but disabled tools
+   remain unavailable.
+3. A call through `client.tools` sends an operation id, the projected catalog
+   digest, canonical identity, and arguments over the transferred port.
+4. The parent rejects identities outside the immutable requested set and sends
+   the call through the authenticated workspace HTTP adapter.
+5. The parent dispatches an allowed call directly without a confirmation dialog
+   or approval capability. The API verifies that the artifact is active, the
+   version is still current, and the exact identity remains in that version's
+   retained requested-tool set.
+6. The API rebuilds the current-human gateway from live enabled first-party and
+   integration servers, validates digest/input/authorization, resolves current
+   connections, and calls the same executor closures as model and Codemode.
+7. Reload, stop, navigation, cancellation, logout, or unmount closes the port
+   and aborts pending work. Catalog or authority drift fails closed and is
+   surfaced to the Site as a typed bridge/tool error.
 
-The managed session-set implementation already contains useful live actor,
-refresh, epoch, and revocation machinery. It may be the right authority behind
-creating and refreshing an artifact capability grant, but its credential must
-never enter the iframe. The consented exact-version grant, safe iframe-facing
-bearer or parent-mediated boundary, and positive server-owned provenance are not
-present today. That is the main security design task; transport convenience
-must not hide or replace it.
+## Resolved technical decisions
 
-## Open technical questions
-
-1. Which exact generic tool types and functions should move below Codemode, and
-   which should remain attempt-specific?
-2. Can the existing SDK client gain `client.tools` without introducing a second
-   client, transport, or package-level authority model?
-3. Should browser tool invocation use an existing MCP HTTP route, a generic
-   typed call route, or an SDK adapter over one of those protocols or a parent-
-   mediated capability boundary?
-4. How is the runtime tool catalog selected and typed when different viewers
-   have different connections, grants, and exact-version consented allowlists?
-5. What trust UI and durable grant model binds viewer consent to one immutable
-   artifact version and makes newly published code require a new decision?
-6. Which current connection-authority paths can authorize creation of a narrow
-   artifact capability without treating iframe code as the current human or
-   exposing the managed browser credential?
-7. What token renewal and revocation behavior already exists and can be reused,
-   and when is parent mediation required instead?
-8. How should approval-required direct UI tool calls enter the existing human
-   approval lifecycle?
-9. Which operation-id and outcome-unknown contracts should be shared with
-   Codemode so browser-side retries cannot duplicate side effects?
-10. How should the source project be retained for future `Edit with Geni`
-   iterations without changing the single-HTML runtime contract?
-
-These questions should be answered from current code before an implementation
-plan or package split is finalized.
+- Generic catalog, digest, schema validation, declarations, canonical identity,
+  and execution live in `@opengeni/tool-gateway`.
+- Runtime preparation is the shared provider assembly seam. Model tools,
+  Codemode, current-human MCP, and HTTP/SDK adapters do not rediscover provider
+  implementations independently.
+- `@opengeni/sdk` owns the augmentable lazy `client.tools` namespace;
+  `@opengeni/sdk/site` supplies the iframe transport over one document-retained
+  bootstrap `MessagePort` and derived call ports that close on navigation.
+- Browser hosts use `/v1/workspaces/:id/tools/catalog`, `/calls`, and
+  `/declarations`. External MCP clients use the aggregate
+  `/v1/workspaces/:id/mcp` route and standard MCP OAuth.
+- Site authority is parent-mediated and limited twice: the immutable version's
+  retained requested identities and the viewer's live workspace gateway.
+- Generated Site tool paths are stable from each identity's own normalization;
+  adding, removing, or hiding a colliding catalog neighbor cannot rename an
+  already-requested tool.
+- Existing `requireApproval` metadata remains the ordinary model/MCP/HTTP
+  approval policy. A Site version's requested identities are only a maximum
+  allowlist; publishing grants no authority, and execution uses the viewer's
+  ordinary live gateway policy.
+- Codemode keeps its exact-attempt durable operation journal and recovery
+  semantics. An expired post-execution claim reaches `outcome_unknown` only in
+  the same transaction that appends its terminal tool-call output. Direct
+  current-human calls carry caller-generated operation ids;
+  provider-specific idempotency/outcome handling remains in the canonical
+  executor rather than a second Site journal.
+- Attempt-frozen connector Allow/Ask/Block policy and its durable request ledger
+  remain model/Codemode authority. Direct current-human HTTP/SDK/MCP calls use
+  the existing `requireApproval` classification, and Sites use the verified
+  active-version bypass; neither direct path invents an attempt-owned connector
+  request or generalized exactly-once semantics.
+- Each immutable version retains the complete bounded source bundle beside its
+  single-HTML runtime. Archive/restore changes publication status without
+  deleting versions or source.
+- Version provenance retains the exact source session/turn/attempt, but list
+  responses redact it and detail links are projected only when the viewer can
+  read the source session.

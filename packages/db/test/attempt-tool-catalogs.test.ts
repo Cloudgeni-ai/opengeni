@@ -217,6 +217,22 @@ describe("durable attempt tool catalogs", () => {
     ).rejects.toBeInstanceOf(CodemodeOperationConflictError);
   });
 
+  test("serializes concurrent first submissions into one creation and one replay", async () => {
+    if (!available) return;
+    const scope = await fixture();
+    const exactCatalog = catalog(scope);
+    await persistAttemptToolCatalog(client.db, exactCatalog);
+    const call = codemodeCall(exactCatalog.digest, crypto.randomUUID());
+
+    const submissions = await Promise.all([
+      submitCodemodeOperation(client.db, { ...scope, call }),
+      submitCodemodeOperation(client.db, { ...scope, call }),
+    ]);
+
+    expect(submissions.map(({ created }) => created).sort()).toEqual([false, true]);
+    expect(submissions[0]!.operation).toEqual(submissions[1]!.operation);
+  });
+
   test("claims once and records one durable result under the owning claim fence", async () => {
     if (!available) return;
     const scope = await fixture();
@@ -327,17 +343,15 @@ describe("durable attempt tool catalogs", () => {
     ).toBe("claimed");
     const recoveredClaimId = crypto.randomUUID();
     expect(
-      (
-        await claimCodemodeOperation(client.db, {
-          ...scope,
-          catalogDigest: exactCatalog.digest,
-          operationId: beforeBoundary.operationId,
-          claimId: recoveredClaimId,
-          now: new Date(startedAt.getTime() + 1_001),
-          claimLeaseMs: 1_000,
-        })
-      ).status,
-    ).toBe("claimed");
+      await claimCodemodeOperation(client.db, {
+        ...scope,
+        catalogDigest: exactCatalog.digest,
+        operationId: beforeBoundary.operationId,
+        claimId: recoveredClaimId,
+        now: new Date(startedAt.getTime() + 1_001),
+        claimLeaseMs: 1_000,
+      }),
+    ).toMatchObject({ status: "claimed", reclaimed: true });
     expect(
       await markCodemodeOperationExecutionStarted(client.db, {
         accountId: scope.accountId,
@@ -382,12 +396,20 @@ describe("durable attempt tool catalogs", () => {
       claimLeaseMs: 1_000,
     });
     expect(lostExecution).toMatchObject({
-      status: "terminal",
+      status: "execution_owner_lost",
+      claimId: executingClaimId,
       operation: {
-        state: "outcome_unknown",
-        errorCode: "worker_lost_during_execution",
+        state: "running",
       },
     });
+    expect(
+      await getCodemodeOperation(client.db, {
+        accountId: scope.accountId,
+        workspaceId: scope.workspaceId,
+        attemptId: scope.attemptId,
+        operationId: afterBoundary.operationId,
+      }),
+    ).toMatchObject({ state: "running", completedAt: null });
   });
 
   test("rejects human-approval tools before reserving execution", async () => {

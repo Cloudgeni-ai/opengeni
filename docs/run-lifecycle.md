@@ -521,13 +521,38 @@ terminal model response does not join that background work. Every actual local
 function call does join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and
 `load_skill`; their stable first-request schemas remain eager, but their
-execution does not bypass catalog persistence. Search disclosure, deferred
+execution does not bypass catalog persistence. An in-process model-tool server
+is never bound to a provisional local-only catalog: its first invocation waits
+for and uses the final environment containing every admitted local and MCP
+definition, which is the same environment exposed to Codemode. Search
+disclosure, deferred
 invocation, Codemode activation, catalog persistence, and cleanup join that same
 promise, so no partial catalog grants authority. An exact preparation failure is
 therefore observed at the first tool-call boundary and the tool body never runs.
 Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
+
+Codemode submission compares the caller's catalog digest with the exact active
+catalog before creating its durable operation. A mismatch returns the stable
+`codemode_catalog_stale` code; the client may then refresh once, re-resolve the
+identity/path, and retry with the same operation id. It never performs that
+recovery after an operation exists or after an ambiguous transport failure.
+Worker dispatch performs catalog, identity, approval, input-schema,
+authorization, and argument-sensitive connector-policy prepare before writing
+the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
+connector authority therefore settle before the provider executor can run.
+After the marker, the prepared gateway call performs durable connector begin at
+the executor boundary and completes the same request as `completed`,
+`not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
+gateway lifecycle; the model SDK wrapper only projects Ask into the ordinary
+human-approval interruption and carries the exact approved call id into a
+host-only invocation context on resume. The gateway rejects a direct model call
+to an `approval: human` entry when that context is absent or belongs to another
+tool/subject. A client
+`AbortSignal` is observer-only: it stops HTTP/polling waits but creates no server
+cancellation authority. Attempt/turn interruption remains the sole cancellation
+boundary and still drains or closes journaled work under the existing lifecycle.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
@@ -1304,23 +1329,32 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
-A yielded managed process promotes its parent admission to retained state and
-creates the non-TTL process holder in the same transaction before any caller
-receives a live locator. The holder keeps the exact temporary sandbox alive after
-the turn ends. A yielded Connected Machine exec instead creates a session-owned
-background-command row before returning; that row freezes the physical control
-workspace, enrollment, connection instance, and op ID. The exact parent
-admission/process UUID/provider locator or Connected Machine locator remains
-pinned across active-pointer movement.
-Both provider paths serialize adoption with Steer, Pause, terminal Cancel, and
-session-tree deletion through the canonical workspace-control, workspace,
-session, turn, and exact-attempt fence. Managed promotion and command insertion
-are one transaction. For Connected Machines, the op-stream yield path takes
-exact failure-cancellation authority before the adoption transaction begins;
-if the fence rejects, that path exact-cancels the frozen op, while a committed
-row transfers cancellation to session control and reconciliation. This closes
-the post-commit/pre-unwind window in which attempt cancellation could otherwise
-send `OpCancel` after durable adoption.
+A yielded managed process first promotes its parent admission to retained state
+and creates the non-TTL process holder before the internal provider locator can
+leave the routing layer. The holder preserves exact cleanup authority while the
+same shell tool continues its foreground wait. A command that proves terminal
+during that wait returns inline and never becomes session background state.
+Only providers whose process locator is controllable from another worker may
+end that wait with a second, exact-attempt-fenced adoption transaction that
+inserts its session-owned command row immediately before the model receives the
+live locator. The SDK Local and Docker locators index an in-memory table on one
+worker session object, so those providers remain turn-owned until terminal or
+turn cancellation instead of publishing a false background locator. A yielded
+Connected Machine exec likewise creates its session-owned background-command
+row before returning; that row freezes the physical control workspace,
+enrollment, connection instance, and op ID. The exact parent admission,
+process UUID, and provider locator or Connected Machine locator remain pinned
+across active-pointer movement.
+Both provider paths serialize session adoption with Steer, Pause, terminal
+Cancel, and session-tree deletion through the canonical workspace-control,
+workspace, session, turn, and exact-attempt fence. Managed retention and session
+adoption are deliberately separate so a provider's short yield is not mistaken
+for a model-visible background command. For Connected Machines, the op-stream
+yield path takes exact failure-cancellation authority before the adoption
+transaction begins; if the fence rejects, that path exact-cancels the frozen op,
+while a committed row transfers cancellation to session control and
+reconciliation. This closes the post-commit/pre-unwind window in which attempt
+cancellation could otherwise send `OpCancel` after durable adoption.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
@@ -1462,10 +1496,22 @@ reinterpretation, or blind replay of an ambiguous operation.
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn
-and approval id before invocation. The approved transition admits the provider
-once; a replay after execution started is recorded as outcome-unknown, and a
-replay after completion is rejected as already executed. Recovery may therefore
-re-enter the SDK approval step without issuing the MCP request again.
+and approval id before invocation. Argument-sensitive prepare, begin, and
+completion for both classes are owned by the canonical attempt gateway used by
+model MCP and Codemode; an approval-wrapped MCP adapter without that exact
+attempt gateway fails before provider execution. Dedicated GitHub and Google Drive adapters classify
+provider outcomes but do not register a second policy lifecycle. The approved
+transition admits the provider once; a replay after execution started is recorded
+as outcome-unknown, and a replay after completion is rejected as already executed.
+Recovery may therefore re-enter the SDK approval step without issuing the MCP
+request again.
+
+The Codemode dispatcher renews its operation claim during gateway preparation,
+not only after the execution marker. Its visible `agent.toolCall.created` event
+uses a deterministic per-operation client event id, so reclaiming an expired
+pre-execution claim reuses one durable timeline entry before the replacement
+claimant crosses the execution boundary. During a rolling upgrade it also
+recognizes the exact unkeyed event written by a predecessor worker.
 
 Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
 operation receipts bind the exact accepted turn, attempt, execution generation,

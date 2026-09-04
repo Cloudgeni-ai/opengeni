@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   PRIMARY_WORKSPACE_ITEMS,
   WORKSPACE_CONFIG_GROUPS,
+  isConfigItemActive,
   isWorkspaceConfigPath,
 } from "./workspace-nav-data";
 
@@ -36,5 +37,12 @@ describe("workspace rail destinations", () => {
     expect(isWorkspaceConfigPath("/workspaces/ws-1/documents", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/state", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/settings", "ws-1")).toBe(true);
+    expect(
+      isConfigItemActive(
+        "/workspaces/ws-1/artifacts/site-1",
+        "ws-1",
+        "/workspaces/$workspaceId/artifacts",
+      ),
+    ).toBe(true);
   });
 });

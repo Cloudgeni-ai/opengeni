@@ -53,7 +53,7 @@ export function WorkspaceConfigLink(props: {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
 
   if (variant === "rail") {
-    return (
+    const link = (
       <Link
         to={item.to}
         params={{ workspaceId }}
@@ -77,6 +77,7 @@ export function WorkspaceConfigLink(props: {
         {!collapsed ? <span className="min-w-0 truncate">{item.label}</span> : null}
       </Link>
     );
+    return link;
   }
 
   if (variant === "menu") {

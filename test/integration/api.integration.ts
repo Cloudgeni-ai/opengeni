@@ -9605,6 +9605,33 @@ describe("API component integration", () => {
     expect(catalogResponse.status).toBe(200);
     expect(await catalogResponse.json()).toEqual(environment.catalog);
 
+    const staleOperationId = crypto.randomUUID();
+    const stale = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: staleOperationId,
+        catalogDigest: "f".repeat(64),
+        identity: { serverId: "crm", toolName: "search_documents" },
+        arguments: { query: "stale catalog" },
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: true,
+        details: { code: "codemode_catalog_stale" },
+      },
+    });
+    expect(
+      (
+        await app.request(`${base}/calls/${staleOperationId}`, {
+          headers: { authorization },
+        })
+      ).status,
+    ).toBe(404);
+
     const operationId = crypto.randomUUID();
     const request = {
       operationId,

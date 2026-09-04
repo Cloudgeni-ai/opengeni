@@ -17,6 +17,7 @@
 import { sandboxLifecycleTransitionWaitMs, type Settings } from "@opengeni/config";
 import {
   adoptConnectedMachineSessionBackgroundCommand,
+  adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
   getRetainedProcess,
@@ -512,10 +513,6 @@ function afterPersistableHomeMutation(
           admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
           operation: op,
           providerBinding: boundAdmission.providerBinding ?? null,
-          backgroundCommand: {
-            commandId: retainedProcess.id,
-            command: op,
-          },
           owner: {
             kind: "turn",
             turnId: fence.turnId,
@@ -691,6 +688,46 @@ function settleRetainedProcessForTurn(
   };
 }
 
+function adoptRetainedProcessAsBackgroundCommandForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: { backend: ResolvedActiveBackend; process: RoutingRetainedProcess }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ backend, process }) => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== backend.kind ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    ) {
+      throw new Error("Background command adoption lost its exact retained-process identity");
+    }
+    await adoptManagedSessionBackgroundCommand(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: fence.turnId,
+      executionGeneration: fence.executionGeneration,
+      attemptId: fence.attemptId,
+      processId: process.id,
+      expected: retainedProcessSettlementIdentity(durable),
+      command: "execCommand",
+    });
+  };
+}
+
 /** Build the selfhosted `ControlRpc` over the events bus's request/reply
  *  connection. A null bus / unconfigured NATS yields a NatsControlRpc whose
  *  connection factory returns null → agent_offline on every op (never a throw). */
@@ -729,6 +766,10 @@ export function wrapTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
+    services,
+    ids,
+  );
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -890,6 +931,7 @@ export function wrapTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -968,6 +1010,10 @@ export function wrapLazyTurnBoxWithRouting(
   const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
   const afterProcessMutation = afterRetainedProcessMutation(services, ids);
   const settleProcess = settleRetainedProcessForTurn(services, ids);
+  const adoptProcessAsBackgroundCommand = adoptRetainedProcessAsBackgroundCommandForTurn(
+    services,
+    ids,
+  );
   const defaultBackend = sandboxBackendForSdkBackendId(args.backendId);
   const defaultSupportsPty = defaultBackend
     ? selectBackend(defaultBackend).capabilities.Terminal.pty
@@ -1108,6 +1154,7 @@ export function wrapLazyTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({

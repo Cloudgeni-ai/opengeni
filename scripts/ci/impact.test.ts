@@ -208,6 +208,11 @@ describe("fail-closed change impact", () => {
       path: ".agents/skills/opengeni-documents/SKILL.md",
       reason: "bundled artifact skill source boundary",
     });
+
+    const siteSkill = createImpactPlan([".agents/skills/opengeni-sites/SKILL.md"]);
+    expect(siteSkill.mode).toBe("focused");
+    expect(siteSkill.affectedPackages).toContain("@opengeni/runtime");
+    expect(siteSkill.unitTests).toContain("scripts/sync-artifact-skills.test.ts");
   });
 
   test("React artifact UI selects its browser and full-stack acceptance coverage", () => {

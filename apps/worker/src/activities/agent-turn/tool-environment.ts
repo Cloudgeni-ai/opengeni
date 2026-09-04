@@ -1,4 +1,6 @@
 import {
+  beginConnectorActionExecution,
+  completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
   getWorkspaceModelPolicy,
   listWorkspaceGatewayCustomModels,
@@ -6,6 +8,8 @@ import {
   listOrganizationModelProviderCustomModelsForWorkspace,
   organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
+  prepareConnectorActionApproval,
+  previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
   withCodexAppsRequestAuthorization,
@@ -19,16 +23,15 @@ import {
   type OpenGeniRuntime,
   type AttemptConnectorActionBinding,
   type ConnectorAttachmentMaterializationRequest,
+  type ConnectorActionPolicyHooks,
   createFirstPartyInteractionAttemptToolDefinitions,
 } from "@opengeni/runtime";
 import {
-  authorizeGoogleDrivePublicationAttempt,
   createGoogleDrivePublicationAttemptTool,
   googleDrivePublicationConnectorCall,
   resolveGoogleDrivePublicationTarget,
 } from "../google-drive-publication";
 import { connectionTokenResolverForTurn } from "../mcp-credentials";
-import { buildApiIntegrationServersForTurn } from "../api-integrations";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
@@ -40,6 +43,7 @@ import {
   defaultSessionMcpServerIds,
   loadRigDefaultVariableSetEnvironment,
   mergeRigDefaultVariableSetEnvironment,
+  buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
   withFrozenPersonalConnectionDelegations,
@@ -439,7 +443,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     );
   };
   const selectedApiIntegrationServerIds = new Set(turnTools.map((tool) => tool.id));
-  const apiIntegrationMcpServers = buildApiIntegrationServersForTurn({
+  const apiIntegrationMcpServers = buildApiIntegrationMcpServers({
     settings: runSettings,
     integrations: installedApiIntegrations.filter((integration) =>
       selectedApiIntegrationServerIds.has(integration.serverId),
@@ -531,6 +535,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           },
         ]
       : [];
+  const attemptConnectorActionBindings = [
+    ...googleDriveConnectorBindings,
+    ...githubRestMcp.connectorBindings,
+  ];
+  const connectorActionPolicy: ConnectorActionPolicyHooks = {
+    preview: async (call) =>
+      await previewConnectorActionApproval(db, connectorActionIdentity, call),
+    prepare: async (call) =>
+      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
+    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
+    complete: async ({ requestId, outcome }) =>
+      await completeConnectorActionExecution(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        requestId,
+        attemptId: input.attemptId,
+        outcome,
+      }),
+  };
   const attemptToolDefinitions = [
     createListModelsAttemptToolDefinition({
       currentModelId: turnExecutionPolicy.productModelId,
@@ -760,30 +783,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         nestedAgentDepth: session.nestedAgentDepth,
         effectiveMaxNestedAgentDepth: session.effectiveMaxNestedAgentDepth,
         attemptToolDefinitions,
-        ...((googleDrivePublicationTarget && googleDrivePublicationAllowed) ||
-        githubRestMcp.authorizeCodemodeCall
-          ? {
-              attemptToolAuthorize: async (authorization) => {
-                const { call } = authorization;
-                if (
-                  googleDrivePublicationTarget &&
-                  googleDrivePublicationAllowed &&
-                  call.caller.kind === "codemode" &&
-                  call.identity.serverId === "google-drive-publishing" &&
-                  call.identity.toolName === "google_drive_publish_file"
-                ) {
-                  await authorizeGoogleDrivePublicationAttempt({
-                    db,
-                    identity: connectorActionIdentity,
-                    target: googleDrivePublicationTarget,
-                    approvalId: call.operationId,
-                    arguments: call.arguments,
-                  });
-                }
-                await githubRestMcp.authorizeCodemodeCall?.(authorization);
-              },
-            }
-          : {}),
+        connectorActionPolicy,
+        attemptConnectorActionBindings,
       }),
       cancellationSignal,
       async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
@@ -855,11 +856,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     activatePreparedToolEnvironment(eventing.preparedTools);
   }
   return {
-    attemptConnectorActionBindings: [
-      ...googleDriveConnectorBindings,
-      ...githubRestMcp.connectorBindings,
-    ],
-    connectorActionIdentity,
+    attemptConnectorActionBindings,
+    connectorActionPolicy,
     generateSessionTitleInParallel: titleToolPlan.generateTitleInParallel,
     postToolPreparationStartedAt,
     preparationIndependentToolNames: titleToolPlan.preparationIndependentToolNames,

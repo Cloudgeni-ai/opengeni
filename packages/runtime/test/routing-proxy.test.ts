@@ -1118,6 +1118,63 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ]);
   });
 
+  test("retained process promotion and session background adoption are separate and idempotent", async () => {
+    let parentPromotions = 0;
+    let backgroundAdoptions = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 175\n\nOutput:\nstarted";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => {
+        parentPromotions += 1;
+      },
+      adoptProcessAsBackgroundCommand: async ({ process }) => {
+        expect(process.providerSessionId).toBe(175);
+        backgroundAdoptions += 1;
+      },
+    });
+
+    await proxy.execCommand({ cmd: "long" });
+    expect(parentPromotions).toBe(1);
+    expect(backgroundAdoptions).toBe(0);
+
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    expect(backgroundAdoptions).toBe(1);
+  });
+
+  test("process-local provider locators cannot become session background commands", async () => {
+    for (const kind of ["local", "docker"] as const) {
+      let backgroundAdoptions = 0;
+      const backend: RoutableBackendSession = {
+        async execCommand() {
+          return "Process running with session ID 176\n\nOutput:\nstarted";
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        adoptProcessAsBackgroundCommand: async () => {
+          backgroundAdoptions += 1;
+        },
+      });
+
+      await proxy.execCommand({ cmd: "long" });
+      expect(proxy.canAdoptRetainedProcessAsBackgroundCommand(176)).toBe(false);
+      await expect(proxy.adoptRetainedProcessAsBackgroundCommand(176)).rejects.toThrow(
+        "backgroundCommandAdoption",
+      );
+      expect(backgroundAdoptions).toBe(0);
+    }
+  });
+
   test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {
     let writes = 0;
     let settlementAttempts = 0;

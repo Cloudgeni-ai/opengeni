@@ -1360,6 +1360,7 @@ export type TurnStartupPhase =
   | "tool_optional_connect"
   | "tool_attempt_catalog_build"
   | "tool_attempt_catalog_persist"
+  | "tool_workspace_gateway_catalog_build"
   | "post_tool_preparation"
   | "agent_construction"
   | "post_agent_preparation"

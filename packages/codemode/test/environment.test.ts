@@ -6,6 +6,7 @@ import {
   AttemptToolCatalogStaleError,
   AttemptToolInputValidationError,
   AttemptToolOutputValidationError,
+  AttemptToolPathCollisionError,
   createAttemptToolEnvironment,
   parseVerifiedAttemptToolCatalog,
 } from "../src";
@@ -94,7 +95,31 @@ describe("AttemptToolEnvironment", () => {
     expect(paths[0]![1]).toMatch(/^_1_search_[0-9a-f]{10}$/u);
     expect(paths[1]![1]).toMatch(/^_1_search_[0-9a-f]{10}$/u);
     expect(paths[0]).not.toEqual(paths[1]);
-    expect(paths[2]).toEqual(["_constructor", "___proto__"]);
+    expect(paths[2]![0]).toBe("_constructor");
+    expect(paths[2]![1]).toMatch(/^___proto___[0-9a-f]{10}$/u);
+
+    const isolated = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [definition("foo-bar", "1-search")],
+    });
+    expect(isolated.catalog.entries[0]?.codemodePath).toEqual(paths[0]);
+  });
+
+  test("rejects path-prefix collisions while allocating the canonical catalog", () => {
+    expect(() =>
+      createAttemptToolEnvironment({
+        scope,
+        generation: 1,
+        definitions: [
+          { ...definition("docs", "search"), codemodePath: ["docs", "search"] },
+          {
+            ...definition("docs", "search_advanced"),
+            codemodePath: ["docs", "search", "advanced"],
+          },
+        ],
+      }),
+    ).toThrow(AttemptToolPathCollisionError);
   });
 
   test("routes model and Codemode calls through one opaque executor", async () => {
@@ -216,11 +241,14 @@ describe("AttemptToolEnvironment", () => {
     expect(executed).toBe(false);
   });
 
-  test("keeps approval-required tools model-visible but blocks Codemode bypass", async () => {
+  test("requires exact host confirmation before a model can execute a human-approved tool", async () => {
     let executions = 0;
+    let approvalConfirmed = false;
     const environment = createAttemptToolEnvironment({
       scope,
       generation: 1,
+      confirmModelApproval: ({ modelName, subjectId }) =>
+        approvalConfirmed && modelName === "github__delete" && subjectId === "agent:test",
       definitions: [
         {
           ...definition("github", "delete", async () => {
@@ -238,6 +266,23 @@ describe("AttemptToolEnvironment", () => {
         identity: { serverId: "github", toolName: "delete" },
         arguments: {},
         caller: { kind: "codemode", subjectId: "agent:test" },
+      }),
+    ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
+    expect(executions).toBe(0);
+    await expect(
+      environment.callModel({
+        modelName: "github__delete",
+        arguments: {},
+        subjectId: "agent:test",
+      }),
+    ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
+    expect(executions).toBe(0);
+    approvalConfirmed = true;
+    await expect(
+      environment.callModel({
+        modelName: "github__delete",
+        arguments: {},
+        subjectId: "wrong-agent",
       }),
     ).rejects.toBeInstanceOf(AttemptToolApprovalRequiredError);
     expect(executions).toBe(0);

@@ -1184,7 +1184,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
       const {
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
         generateSessionTitleInParallel,
         postToolPreparationStartedAt,
         preparationIndependentToolNames,
@@ -1239,7 +1239,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         sandboxCodemodeToken,
         fileResourceDownloads,
         attemptConnectorActionBindings,
-        connectorActionIdentity,
+        connectorActionPolicy,
+        trigger,
         preparationIndependentToolNames,
         videoGenerationAcceptancesByCallId,
         activeSandboxBackend,
