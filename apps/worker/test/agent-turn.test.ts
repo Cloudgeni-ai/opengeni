@@ -5142,7 +5142,20 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "permanent", code: "db_failure" }],
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const authorizationGuard = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "42501",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-authorization-guard",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
     });
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",

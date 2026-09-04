@@ -297,6 +297,8 @@ describe("failSessionAttempt child-terminal identity", () => {
       attemptId: "attempt-never-created",
       workflowId: "session-child-1",
       retryDelayMs: 4_000,
+      preClaimFailureDisposition: "retryable",
+      preClaimFailure: { disposition: "retryable", code: "db_failure" },
       error: "Database deadlock while persisting session.turn.attempt_claimed",
     });
 

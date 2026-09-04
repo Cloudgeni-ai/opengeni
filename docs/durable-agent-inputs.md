@@ -161,9 +161,9 @@ orchestrator-, goal-, or depth-specific rule, and every level of a nested chain
 behaves identically. It applies to all six child lifecycle kinds, which share
 the `childSessionId` field; several notices for one child in a single batch
 produce one acknowledgment. A turn whose frozen principal is purely a service
-(an ordinary machine-input turn with no goal continuation, schedule, xAI-user,
-or private-owner authority behind it) has no human to acknowledge for and
-writes nothing.
+(an ordinary machine-input turn with no causal child parent-turn, goal
+continuation, schedule, xAI-user, or private-owner authority behind it) has no
+human to acknowledge for and writes nothing.
 
 Read state is per viewer, so this only ever changes the rail for that one
 human; another member still sees the child unread. It only ever removes noise:

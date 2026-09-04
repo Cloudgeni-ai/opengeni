@@ -876,10 +876,13 @@ ID, an equally sanitized typed cause, and allowlisted catalog identifiers—neve
 raw SQL text, a raw driver cause, or bound parameters.
 
 An activity failure can occur before that transaction creates its attempt row.
-The turn worker exports a stable typed Temporal disposition: exhausted
-contention and operational database unavailability are retryable, while
-constraints, permissions, malformed state, and claim invariants are permanent.
-The failure activity distinguishes this from a
+The turn worker exports a stable typed Temporal disposition. Every typed
+persistence failure from the atomic claim transaction is retryable, including
+constraints and authorization guards: no provider or tool effect can have
+occurred, and a deployment or authority repair may make the exact accepted work
+admissible. Operational database unavailability and rolling-legacy unknowns use
+the same delayed recovery path. Only malformed non-database state and permanent
+claim invariants are terminal. The failure activity distinguishes this from a
 stale or settled attempt. Retryable and rolling-legacy unknown failures record a
 delayed `session_workflow_wake_outbox` revision and return an explicit
 `unclaimed` result; new workflow histories retain the logical turn, back off
@@ -891,6 +894,18 @@ in flight. A permanent failure atomically fails the exact still-runnable turn
 compaction/internal-update obligation), session, events, maintenance, and child
 terminal outbox without fabricating an attempt row or looping. Raw SQL and
 invariant messages never enter workflow history.
+
+Older workers could misclassify an application SQLSTATE from a session-level
+internal-update claim as permanent and mark its undelivered child inputs plus
+the session failed. `recoverSessionWorkFailedBeforeAttemptClaim` is the bounded
+operator repair for that historical shape. It requires exact account,
+workspace, workflow, operation, failure-sequence, current-sequence, and complete
+failed-update-set fences; active control; no live turn or attempt; and only
+undelivered child updates whose exact parent turns are completed and retain an
+initiating human. It restores those named updates, appends the audited queued
+status transition, and registers a signal-with-start wake in one transaction.
+It is not a generic Resume or a way to reopen an arbitrary terminal session.
+
 Older histories retain their recorded activity arguments for deterministic
 replay. A still-open legacy history records a tail patch after its historical
 failure activity and follows the bounded re-peek path even when a rolling legacy

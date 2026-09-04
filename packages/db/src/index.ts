@@ -61067,6 +61067,49 @@ function systemUpdateExecutionAuthorityKey(update: BoundedSystemUpdate): string 
   });
 }
 
+function systemUpdateCausalHumanTurnId(
+  update: Pick<BoundedSystemUpdate, "kind" | "lineage">,
+): string | null {
+  const lineage =
+    update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
+      ? (update.lineage as Record<string, unknown>)
+      : null;
+  const value = isChildLifecycleSystemUpdateKind(update.kind)
+    ? lineage?.parentTurnId
+    : update.kind === "goal_continuation"
+      ? lineage?.causalTurnId
+      : null;
+  if (typeof value !== "string" || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(value)) {
+    return null;
+  }
+  return value;
+}
+
+function systemUpdatesCanCoalesceForExecution<T extends BoundedSystemUpdate>(
+  selected: readonly T[],
+  candidate: T,
+): boolean {
+  const first = selected[0];
+  if (
+    !first ||
+    systemUpdateExecutionAuthorityKey(first) !== systemUpdateExecutionAuthorityKey(candidate)
+  ) {
+    return false;
+  }
+  // Null is compatible context (for example an ordinary notice riding with a
+  // goal continuation). Once a batch contains frozen causal-human lineage,
+  // every further lineage-bearing member must name that same exact turn.
+  const selectedCausalTurnId = selected
+    .map((update) => systemUpdateCausalHumanTurnId(update))
+    .find((turnId): turnId is string => turnId !== null);
+  const candidateCausalTurnId = systemUpdateCausalHumanTurnId(candidate);
+  return (
+    selectedCausalTurnId === undefined ||
+    candidateCausalTurnId === null ||
+    selectedCausalTurnId === candidateCausalTurnId
+  );
+}
+
 function personalConnectionDelegationsForSameSessionSuccessor(
   delegations: McpPersonalConnectionDelegation[],
   targetSessionId: string,
@@ -61126,12 +61169,12 @@ function internalUpdateEventMember(update: BoundedSystemUpdate) {
 
 function selectBoundedSystemUpdateBatch<T extends BoundedSystemUpdate>(
   updates: readonly T[],
-  canCoalesce: (first: T, candidate: T) => boolean = () => true,
+  canCoalesce: (selected: readonly T[], candidate: T) => boolean = () => true,
 ): T[] {
   const selected: T[] = [];
   let selectedBytes = 0;
   for (const update of updates) {
-    if (selected[0] && !canCoalesce(selected[0], update)) break;
+    if (selected[0] && !canCoalesce(selected, update)) break;
     const updateBytes = Buffer.byteLength(
       JSON.stringify({
         id: update.id,
@@ -61810,9 +61853,7 @@ export async function claimSessionWorkForAttempt(
           }
           const deliverable = selectBoundedSystemUpdateBatch(
             validUpdates,
-            (first, candidate) =>
-              systemUpdateExecutionAuthorityKey(first) ===
-              systemUpdateExecutionAuthorityKey(candidate),
+            systemUpdatesCanCoalesceForExecution,
           );
           if (deliverable.length === 0) {
             let sequence = nextSequence - 1;
@@ -63375,33 +63416,37 @@ export async function claimSessionWorkForAttempt(
             }
             initiatingHumanSubjectId = connectionAuthoritySubjectId;
           }
-          if (!initiatingHumanSubjectId && routingGoalUpdate) {
-            const causalTurnIdValue =
-              routingGoalUpdate.lineage &&
-              typeof routingGoalUpdate.lineage === "object" &&
-              !Array.isArray(routingGoalUpdate.lineage)
-                ? (routingGoalUpdate.lineage as Record<string, unknown>).causalTurnId
-                : null;
-            const causalTurnId = typeof causalTurnIdValue === "string" ? causalTurnIdValue : null;
-            if (causalTurnId) {
-              const [causalTurn] = await tx
-                .select({
-                  initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-                  initiatorKind: schema.sessionTurns.initiatorKind,
-                  initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                })
-                .from(schema.sessionTurns)
-                .where(
-                  and(
-                    eq(schema.sessionTurns.workspaceId, workspaceId),
-                    eq(schema.sessionTurns.sessionId, sessionId),
-                    eq(schema.sessionTurns.id, causalTurnId),
-                  ),
-                )
-                .limit(1);
-              initiatingHumanSubjectId =
-                causalTurn?.initiatingHumanSubjectId ??
-                (causalTurn?.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null);
+          const causalHumanTurnId = delivered.updates
+            .map((update) => systemUpdateCausalHumanTurnId(update))
+            .find((causalTurnId): causalTurnId is string => causalTurnId !== null);
+          if (causalHumanTurnId) {
+            // Child lifecycle notices freeze the parent turn that spawned the
+            // child. Resolve that exact row on the receiving parent session;
+            // never substitute the latest human turn, whose authority may be
+            // unrelated by the time the child finishes.
+            const [causalTurn] = await tx
+              .select({
+                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+                initiatorKind: schema.sessionTurns.initiatorKind,
+                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+              })
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, workspaceId),
+                  eq(schema.sessionTurns.sessionId, sessionId),
+                  eq(schema.sessionTurns.id, causalHumanTurnId),
+                ),
+              )
+              .limit(1);
+            const causalHumanSubjectId =
+              causalTurn?.initiatingHumanSubjectId ??
+              (causalTurn?.initiatorKind === "subject" ? causalTurn.initiatorSubjectId : null);
+            if (causalHumanSubjectId) {
+              if (initiatingHumanSubjectId && initiatingHumanSubjectId !== causalHumanSubjectId) {
+                throw new Error("system-update causal human does not match turn provenance");
+              }
+              initiatingHumanSubjectId = causalHumanSubjectId;
             }
           }
           if (internalXaiAuthority.subjectId) {
@@ -65733,6 +65778,26 @@ export type FailSessionWorkBeforeAttemptClaimResult =
   | { action: "terminal"; turnId: null; events: [] }
   | { action: "stale"; turnId: null; events: [] };
 
+export type RecoverSessionWorkFailedBeforeAttemptClaimInput = {
+  accountId: string;
+  sessionId: string;
+  workflowId: string;
+  operationId: string;
+  expectedFailureEventSequence: number;
+  expectedLastSequence: number;
+  failedUpdateIds: string[];
+};
+
+export type RecoverSessionWorkFailedBeforeAttemptClaimResult =
+  | {
+      action: "recovered";
+      event: SessionEvent;
+      workflowWakeRevision: number;
+      restoredUpdateIds: string[];
+    }
+  | { action: "already_recovered"; event: SessionEvent }
+  | { action: "stale"; event: null };
+
 /**
  * Terminally settle a permanent admission failure that happened before an
  * attempt row existed. The workflow supplies the exact trigger recorded in
@@ -66195,6 +66260,353 @@ export async function failSessionWorkBeforeAttemptClaim(
           action: "failed",
           turnId: turn?.id ?? null,
           events: [...closedToolEvents, ...inserted.map(mapEvent)],
+        } as const;
+      }),
+  );
+}
+
+/**
+ * Repair the exact terminal shape written by an older worker after a
+ * session-level pre-claim database failure. This is deliberately narrower than
+ * Resume: it accepts only a failed session with no live turn/attempt, an exact
+ * `pre_claim_failure` status event, and the caller-named complete set of
+ * undelivered failed child updates whose frozen parent turns still carry human
+ * authority. The restored updates, audit event, runnable session state, and
+ * signal-with-start wake commit atomically.
+ */
+export async function recoverSessionWorkFailedBeforeAttemptClaim(
+  db: Database,
+  workspaceId: string,
+  input: RecoverSessionWorkFailedBeforeAttemptClaimInput,
+): Promise<RecoverSessionWorkFailedBeforeAttemptClaimResult> {
+  const operationId = input.operationId.trim();
+  if (!operationId || operationId.length > 200) {
+    throw new Error("A bounded recovery operation id is required");
+  }
+  if (
+    !Number.isSafeInteger(input.expectedFailureEventSequence) ||
+    input.expectedFailureEventSequence <= 0 ||
+    !Number.isSafeInteger(input.expectedLastSequence) ||
+    input.expectedLastSequence < input.expectedFailureEventSequence
+  ) {
+    throw new Error("Recovery event sequence fences are invalid");
+  }
+  const expectedUpdateIds = [...input.failedUpdateIds].sort();
+  if (
+    expectedUpdateIds.length === 0 ||
+    new Set(expectedUpdateIds).size !== expectedUpdateIds.length
+  ) {
+    throw new Error("Recovery requires a non-empty unique failed-update set");
+  }
+
+  return await retrySessionActivityRls(
+    db,
+    workspaceId,
+    {
+      stage: "session_lifecycle_outbox.recover_failed_before_attempt_claim",
+      eventTypes: ["session.status.changed", "system.update.pending"],
+      maxAttempts: 3,
+    },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockChildLifecycleOutboxWriteRowsTx(
+          tx as unknown as Database,
+          workspaceId,
+          { sessionId: input.sessionId },
+        );
+        const session = locks.session;
+        if (session.accountId !== input.accountId) {
+          throw new SessionControlInvariantError(
+            `Session ${input.sessionId} does not belong to account ${input.accountId}`,
+          );
+        }
+        if (
+          session.temporalWorkflowId !== null &&
+          session.temporalWorkflowId !== input.workflowId
+        ) {
+          return { action: "stale", event: null } as const;
+        }
+
+        const [priorRecovery] = await rawRows<{
+          id: string;
+          sequence: number;
+          payload: unknown;
+          payload_codec_version: number | null;
+          occurred_at: Date | string;
+        }>(
+          tx as unknown as Database,
+          sql`select id, sequence, payload, payload_codec_version, occurred_at
+              from session_events
+              where workspace_id = ${workspaceId}
+                and session_id = ${input.sessionId}
+                and type = 'session.status.changed'
+                and payload->>'code' = 'pre_claim_failure_recovered'
+                and payload->>'recoveryOperationId' = ${operationId}
+              order by sequence desc
+              limit 1`,
+        );
+        if (priorRecovery) {
+          return {
+            action: "already_recovered",
+            event: {
+              id: priorRecovery.id,
+              workspaceId,
+              sessionId: input.sessionId,
+              sequence: priorRecovery.sequence,
+              type: "session.status.changed",
+              payload: fromPostgresLosslessJson(
+                priorRecovery.payload,
+                priorRecovery.payload_codec_version,
+              ),
+              occurredAt:
+                priorRecovery.occurred_at instanceof Date
+                  ? priorRecovery.occurred_at.toISOString()
+                  : new Date(priorRecovery.occurred_at).toISOString(),
+              clientEventId: null,
+              turnId: null,
+              turnGeneration: null,
+              turnAttemptId: null,
+              turnAssociation: null,
+              duplicateOfEventId: null,
+              duplicateReason: null,
+            },
+          } as const;
+        }
+        if (
+          session.status !== "failed" ||
+          session.activeTurnId !== null ||
+          session.lastSequence !== input.expectedLastSequence ||
+          !session.temporalWorkflowId
+        ) {
+          return { action: "stale", event: null } as const;
+        }
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          workspaceId,
+          input.sessionId,
+          { workspaceControl: locks.control ?? undefined },
+        );
+        if (!locks.workspace || effectiveControl.state !== "active") {
+          return { action: "stale", event: null } as const;
+        }
+
+        const [failureEvent] = await tx
+          .select({
+            sequence: schema.sessionEvents.sequence,
+            payload: schema.sessionEvents.payload,
+            payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+          })
+          .from(schema.sessionEvents)
+          .where(
+            and(
+              eq(schema.sessionEvents.workspaceId, workspaceId),
+              eq(schema.sessionEvents.sessionId, input.sessionId),
+              eq(schema.sessionEvents.type, "session.status.changed"),
+            ),
+          )
+          .orderBy(desc(schema.sessionEvents.sequence))
+          .limit(1);
+        const failurePayload = failureEvent
+          ? sessionEventPayloadRecord(failureEvent.payload, failureEvent.payloadCodecVersion)
+          : null;
+        if (
+          failureEvent?.sequence !== input.expectedFailureEventSequence ||
+          failurePayload?.status !== "failed" ||
+          failurePayload.code !== "pre_claim_failure"
+        ) {
+          return { action: "stale", event: null } as const;
+        }
+
+        const [liveAttempt] = await tx
+          .select({ id: schema.sessionTurnAttempts.id })
+          .from(schema.sessionTurnAttempts)
+          .where(
+            and(
+              eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+              inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+            ),
+          )
+          .limit(1);
+        const [liveTurn] = await tx
+          .select({ id: schema.sessionTurns.id })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.status, [
+                "queued",
+                "running",
+                "recovering",
+                "requires_action",
+                "waiting_capacity",
+              ]),
+            ),
+          )
+          .limit(1);
+        if (liveAttempt || liveTurn) {
+          return { action: "stale", event: null } as const;
+        }
+
+        const failedUpdates = await tx
+          .select({
+            id: schema.sessionSystemUpdates.id,
+            kind: schema.sessionSystemUpdates.kind,
+            lineage: schema.sessionSystemUpdates.lineage,
+            deliveredTurnId: schema.sessionSystemUpdates.deliveredTurnId,
+            deliveredHistoryItemId: schema.sessionSystemUpdates.deliveredHistoryItemId,
+            deliveredAt: schema.sessionSystemUpdates.deliveredAt,
+          })
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.state, "failed"),
+            ),
+          )
+          .orderBy(schema.sessionSystemUpdates.id)
+          .for("update");
+        const actualFailedUpdateIds = failedUpdates.map((update) => update.id).sort();
+        if (
+          actualFailedUpdateIds.length !== expectedUpdateIds.length ||
+          actualFailedUpdateIds.some((updateId, index) => updateId !== expectedUpdateIds[index])
+        ) {
+          return { action: "stale", event: null } as const;
+        }
+
+        const causalTurnIds = new Set<string>();
+        for (const update of failedUpdates) {
+          const causalTurnId = systemUpdateCausalHumanTurnId(update);
+          const lineage =
+            update.lineage && typeof update.lineage === "object" && !Array.isArray(update.lineage)
+              ? (update.lineage as Record<string, unknown>)
+              : null;
+          if (
+            !isChildLifecycleSystemUpdateKind(update.kind) ||
+            !causalTurnId ||
+            lineage?.parentSessionId !== input.sessionId ||
+            update.deliveredTurnId !== null ||
+            update.deliveredHistoryItemId !== null ||
+            update.deliveredAt !== null
+          ) {
+            return { action: "stale", event: null } as const;
+          }
+          causalTurnIds.add(causalTurnId);
+        }
+        const causalTurns = await tx
+          .select({
+            id: schema.sessionTurns.id,
+            status: schema.sessionTurns.status,
+            initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
+          })
+          .from(schema.sessionTurns)
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              inArray(schema.sessionTurns.id, [...causalTurnIds]),
+            ),
+          );
+        if (
+          causalTurns.length !== causalTurnIds.size ||
+          causalTurns.some(
+            (turn) =>
+              turn.status !== "completed" ||
+              !turn.initiatingHumanSubjectId ||
+              !causalTurnIds.has(turn.id),
+          )
+        ) {
+          return { action: "stale", event: null } as const;
+        }
+
+        const restored = await tx
+          .update(schema.sessionSystemUpdates)
+          .set({ state: "pending" })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.state, "failed"),
+              inArray(schema.sessionSystemUpdates.id, expectedUpdateIds),
+            ),
+          )
+          .returning({ id: schema.sessionSystemUpdates.id });
+        if (restored.length !== expectedUpdateIds.length) {
+          throw new SessionControlInvariantError(
+            `Failed to restore the exact pre-claim update set for session ${input.sessionId}`,
+          );
+        }
+
+        const now = new Date();
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                sequence: session.lastSequence + 1,
+                type: "session.status.changed" as const,
+                payload: {
+                  status: "queued",
+                  code: "pre_claim_failure_recovered",
+                  recoveryOperationId: operationId,
+                  restoredUpdateCount: restored.length,
+                },
+                occurredAt: now,
+              },
+              "payload",
+              "payloadCodecVersion",
+            ),
+          )
+          .returning();
+        if (!event) {
+          throw new SessionControlInvariantError(
+            `Failed to append pre-claim recovery event for session ${input.sessionId}`,
+          );
+        }
+        const [updatedSession] = await tx
+          .update(schema.sessions)
+          .set({
+            status: "queued",
+            lastSequence: session.lastSequence + 1,
+            queueVersion: session.queueVersion + 1,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, input.sessionId),
+              eq(schema.sessions.status, "failed"),
+              // The semantic event trigger has already advanced this wide
+              // compatibility projection in the same transaction.
+              eq(schema.sessions.lastSequence, input.expectedLastSequence + 1),
+            ),
+          )
+          .returning({ id: schema.sessions.id });
+        if (!updatedSession) {
+          throw new SessionControlInvariantError(
+            `Pre-claim recovery lost the session fence for ${input.sessionId}`,
+          );
+        }
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId,
+            sessionId: input.sessionId,
+            temporalWorkflowId: session.temporalWorkflowId,
+            reason: "pre_claim_failure_recovered",
+          },
+        );
+        return {
+          action: "recovered",
+          event: mapEvent(event),
+          workflowWakeRevision,
+          restoredUpdateIds: restored.map((update) => update.id).sort(),
         } as const;
       }),
   );

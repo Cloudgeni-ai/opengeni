@@ -10,7 +10,10 @@ import {
   configureChildLifecycleNotices,
   createDb,
   createSession,
+  createVariableSet,
   enqueueSessionTurn,
+  ensureManagedAccessForUserWithOrganizationMemberships,
+  failSessionWorkBeforeAttemptClaim,
   getSessionForSubject,
   grantWorkspaceAccess,
   initializeSessionStartAtomically,
@@ -19,6 +22,7 @@ import {
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
   recordSessionGoalProgressWithEvent,
+  recoverSessionWorkFailedBeforeAttemptClaim,
   sessionSystemUpdateOutboxKindPayload,
   setSessionAttention,
   settleSessionIdleWithParentOutbox,
@@ -46,6 +50,54 @@ afterAll(async () => {
 
 type Grant = { accountId: string; workspaceId: string; subjectId: string };
 
+async function managedWorkspaceWithPersonalVariableSet(): Promise<{
+  grant: Grant;
+  variableSetId: string;
+}> {
+  const userId = `child-read-personal-${crypto.randomUUID()}`;
+  const subjectId = `user:${userId}`;
+  const provisioned = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId,
+    email: `${userId}@example.test`,
+    name: "Child read personal-resource owner",
+  });
+  const membership = provisioned.organizationMemberships[0];
+  if (!membership?.personalWorkspaceId) {
+    throw new Error("managed human provisioned without a personal workspace");
+  }
+  const sharedGrant = provisioned.accessContext.workspaceGrants.find(
+    (candidate) =>
+      candidate.accountId === membership.organizationId &&
+      candidate.workspaceId !== membership.personalWorkspaceId,
+  );
+  if (!sharedGrant?.workspaceId) {
+    throw new Error("managed human provisioned without a shared workspace");
+  }
+  await shared.admin`
+    insert into session_tenancy_activations (
+      account_id, activation_version, inventory_digest, parity_digest, activated_by
+    ) values (
+      ${membership.organizationId}, 1, ${"e".repeat(64)}, ${"f".repeat(64)},
+      'child-read-acknowledgment'
+    ) on conflict (account_id) do nothing`;
+  const variableSet = await createVariableSet(client.db, {
+    accountId: membership.organizationId,
+    workspaceId: membership.personalWorkspaceId,
+    scope: "user",
+    subjectId,
+    name: `child-read-personal-${crypto.randomUUID()}`,
+    variables: [{ name: "PERSONAL_TOKEN", valueEncrypted: "ciphertext:test" }],
+  });
+  return {
+    grant: {
+      accountId: membership.organizationId,
+      workspaceId: sharedGrant.workspaceId,
+      subjectId,
+    },
+    variableSetId: variableSet.id,
+  };
+}
+
 async function workspace(): Promise<Grant> {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
@@ -66,20 +118,20 @@ async function workspace(): Promise<Grant> {
 }
 
 /** A second member of the same workspace, so per-viewer isolation is testable. */
-async function member(grant: Grant): Promise<string> {
+async function member(grant: Grant, control = false): Promise<string> {
   const subjectId = `user:other-${crypto.randomUUID()}`;
   await grantWorkspaceAccess(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId,
-    permissions: ["sessions:read"],
+    permissions: control ? ["sessions:read", "sessions:control"] : ["sessions:read"],
   });
   return subjectId;
 }
 
 async function startSession(
   grant: Grant,
-  input: { parent?: Started; goal?: boolean; message: string },
+  input: { parent?: Started; goal?: boolean; message: string; personalVariableSetId?: string },
 ) {
   const session = await createSession(client.db, {
     accountId: grant.accountId,
@@ -105,6 +157,18 @@ async function startSession(
     reasoningEffort: "medium" as const,
     latencyMode: "standard" as const,
     sandboxBackend: "none",
+    ...(input.personalVariableSetId
+      ? {
+          subjectId: grant.subjectId,
+          variableSetIds: [input.personalVariableSetId],
+          variableSetId: input.personalVariableSetId,
+          initialPersonalResourceAttachmentIntent: {
+            mode: "session" as const,
+            workspaceSharedAcknowledged: true,
+            sharedOutputWarningVersion: 1 as const,
+          },
+        }
+      : {}),
   });
   await initializeSessionStartAtomically(client.db, {
     accountId: grant.accountId,
@@ -374,24 +438,143 @@ describe("child read acknowledgment on parent consumption", () => {
     });
   });
 
-  test("a pure service turn with no initiating human writes no acknowledgment", async () => {
-    const grant = await workspace();
-    const parent = await startSession(grant, { message: "orchestrate" });
+  test("a child result inherits its exact parent-turn human and admits session personal resources", async () => {
+    const { grant, variableSetId } = await managedWorkspaceWithPersonalVariableSet();
+    const parent = await startSession(grant, {
+      message: "orchestrate",
+      personalVariableSetId: variableSetId,
+    });
     const child = await startSession(grant, { parent, message: "work" });
     await settleIdle(grant, child);
     expect(await deliverOutboxTo(parent.session.id)).toBe(1);
     await settleIdle(grant, parent);
 
+    const [pendingUpdate] = await shared.admin<Array<{ id: string }>>`
+      select id from session_system_updates
+      where session_id = ${parent.session.id} and state = 'pending'`;
+    if (!pendingUpdate) throw new Error("child result update was not pending");
+    const failed = await failSessionWorkBeforeAttemptClaim(client.db, grant.workspaceId, {
+      accountId: grant.accountId,
+      sessionId: parent.session.id,
+      workflowId: `session-${parent.session.id}`,
+      trigger: { kind: "next" },
+      error: "Agent turn admission failed before attempt claim.",
+    });
+    expect(failed.action).toBe("failed");
+    const failedSequence = await lastSequence(parent.session.id);
+    const recoveryOperationId = `child-read-recovery-${crypto.randomUUID()}`;
+    expect(
+      await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        operationId: `${recoveryOperationId}-wrong-set`,
+        expectedFailureEventSequence: failedSequence,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [crypto.randomUUID()],
+      }),
+    ).toEqual({ action: "stale", event: null });
+    const recovered = await recoverSessionWorkFailedBeforeAttemptClaim(
+      client.db,
+      grant.workspaceId,
+      {
+        accountId: grant.accountId,
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        operationId: recoveryOperationId,
+        expectedFailureEventSequence: failedSequence,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [pendingUpdate.id],
+      },
+    );
+    expect(recovered).toMatchObject({
+      action: "recovered",
+      restoredUpdateIds: [pendingUpdate.id],
+    });
+    expect(
+      await recoverSessionWorkFailedBeforeAttemptClaim(client.db, grant.workspaceId, {
+        accountId: grant.accountId,
+        sessionId: parent.session.id,
+        workflowId: `session-${parent.session.id}`,
+        operationId: recoveryOperationId,
+        expectedFailureEventSequence: failedSequence,
+        expectedLastSequence: failedSequence,
+        failedUpdateIds: [pendingUpdate.id],
+      }),
+    ).toMatchObject({ action: "already_recovered" });
+
     const claimed = await claim(grant, parent.session.id);
     expect(claimed.action).toBe("claimed");
-    // The delivered batch created a `system`-sourced turn with a service
-    // initiator, so there is no frozen human whose fence could advance.
-    const [turn] = await shared.admin<Array<{ initiating_human_subject_id: string | null }>>`
-      select initiating_human_subject_id from session_turns
-      where session_id = ${parent.session.id} and source = 'system'`;
-    expect(turn?.initiating_human_subject_id).toBeNull();
-    expect(await pinRowCount(child.session.id)).toBe(0);
-  });
+    if (claimed.action !== "claimed") throw new Error("child result was not claimed");
+    expect(claimed.turn.initiatingHumanSubjectId).toBe(grant.subjectId);
+    const [admission] = await shared.admin<Array<{ subjectId: string; resourceCount: number }>>`
+        select
+          initiating_human_subject_id as "subjectId",
+          resource_count::int as "resourceCount"
+        from session_attempt_personal_resource_admissions
+        where attempt_id = ${claimed.attemptId}`;
+    expect(admission).toEqual({ subjectId: grant.subjectId, resourceCount: 1 });
+    expect(await pinRow(grant.subjectId, child.session.id)).toMatchObject({
+      acknowledged_sequence: await lastSequence(child.session.id),
+    });
+  }, 240_000);
+
+  test("child results from different causal humans are claimed in separate turns", async () => {
+    const ownerGrant = await workspace();
+    const otherGrant = {
+      ...ownerGrant,
+      subjectId: await member(ownerGrant, true),
+    };
+    const parent = await startSession(ownerGrant, { message: "orchestrate first" });
+    const ownerChild = await startSession(ownerGrant, { parent, message: "owner work" });
+    await settleIdle(ownerGrant, ownerChild);
+    await settleIdle(ownerGrant, parent);
+
+    await enqueueHumanTurn(otherGrant, parent.session.id);
+    const otherParentClaim = await claim(otherGrant, parent.session.id);
+    if (otherParentClaim.action !== "claimed") {
+      throw new Error("second parent turn was not claimed");
+    }
+    const otherParent = {
+      session: parent.session,
+      turn: otherParentClaim.turn,
+      attemptId: otherParentClaim.attemptId,
+    };
+    const otherChild = await startSession(otherGrant, {
+      parent: otherParent,
+      message: "other member work",
+    });
+    await settleIdle(otherGrant, otherChild);
+    await settleIdle(otherGrant, otherParent);
+
+    expect(await deliverOutboxTo(parent.session.id)).toBe(2);
+
+    const ownerResultClaim = await claim(ownerGrant, parent.session.id);
+    expect(ownerResultClaim.action).toBe("claimed");
+    if (ownerResultClaim.action !== "claimed") {
+      throw new Error("owner child result was not claimed");
+    }
+    expect(ownerResultClaim.turn.initiatingHumanSubjectId).toBe(ownerGrant.subjectId);
+    expect(await pinRow(ownerGrant.subjectId, ownerChild.session.id)).toMatchObject({
+      acknowledged_sequence: await lastSequence(ownerChild.session.id),
+    });
+    expect(await pinRow(otherGrant.subjectId, otherChild.session.id)).toBeNull();
+
+    await settleIdle(ownerGrant, {
+      session: parent.session,
+      turn: ownerResultClaim.turn,
+      attemptId: ownerResultClaim.attemptId,
+    });
+    const otherResultClaim = await claim(otherGrant, parent.session.id);
+    expect(otherResultClaim.action).toBe("claimed");
+    if (otherResultClaim.action !== "claimed") {
+      throw new Error("other member child result was not claimed");
+    }
+    expect(otherResultClaim.turn.initiatingHumanSubjectId).toBe(otherGrant.subjectId);
+    expect(await pinRow(otherGrant.subjectId, otherChild.session.id)).toMatchObject({
+      acknowledged_sequence: await lastSequence(otherChild.session.id),
+    });
+  }, 240_000);
 
   test("a parent-consumed failure keeps lifecycle truth but clears failure attention", async () => {
     const grant = await workspace();
