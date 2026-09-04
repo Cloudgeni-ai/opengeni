@@ -583,6 +583,42 @@ function sessionListQuery(options: {
   };
 }
 
+export type SessionListPageOptions = {
+  limit?: number;
+  parentSessionId?: string | null;
+  cursor?: string;
+  search?: string;
+  /** Restrict rows to one workspace project; null selects unfiled rows. */
+  channelId?: string | null;
+  /** Restrict rows to the exact frozen session creator identity. */
+  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /** Inclusive ISO-8601 activity lower bound. */
+  updatedFrom?: string;
+  /** Exclusive ISO-8601 activity upper bound. */
+  updatedBefore?: string;
+  /** Inclusive ISO-8601 creation lower bound. */
+  createdFrom?: string;
+  /** Exclusive ISO-8601 creation upper bound. */
+  createdBefore?: string;
+  /** Return only the complete personal pinned projection. */
+  pinsOnly?: boolean;
+  /** Return archived root chats instead of the active session list. */
+  archivedOnly?: boolean;
+  /** Stop this caller's finite page read when its owning route is abandoned. */
+  signal?: AbortSignal | undefined;
+};
+
+function hasSessionPageFilters(options: SessionListPageOptions): boolean {
+  return (
+    options.channelId !== undefined ||
+    options.createdBy !== undefined ||
+    options.updatedFrom !== undefined ||
+    options.updatedBefore !== undefined ||
+    options.createdFrom !== undefined ||
+    options.createdBefore !== undefined
+  );
+}
+
 /**
  * Web-standard fetch response accepted by the SDK.
  *
@@ -1218,18 +1254,7 @@ export class OpenGeniClient {
   /** Pin-aware ordinary-session page with a stable keyset cursor. */
   async listSessionPage(
     workspaceId: string,
-    options: {
-      limit?: number;
-      parentSessionId?: string | null;
-      cursor?: string;
-      search?: string;
-      /** Return only the complete personal pinned projection. */
-      pinsOnly?: boolean;
-      /** Return archived root chats instead of the active session list. */
-      archivedOnly?: boolean;
-      /** Stop this caller's finite page read when its owning route is abandoned. */
-      signal?: AbortSignal | undefined;
-    } = {},
+    options: SessionListPageOptions = {},
   ): Promise<SessionListResponse> {
     const search = options.search?.trim();
     let response: SessionListResponse | Session[];
@@ -1243,6 +1268,17 @@ export class OpenGeniClient {
           ...sessionListQuery(options),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(search ? { search } : {}),
+          ...(options.channelId !== undefined ? { channelId: options.channelId ?? "null" } : {}),
+          ...(options.createdBy
+            ? {
+                createdByKind: options.createdBy.kind,
+                createdBySubjectId: options.createdBy.subjectId,
+              }
+            : {}),
+          ...(options.updatedFrom ? { updatedFrom: options.updatedFrom } : {}),
+          ...(options.updatedBefore ? { updatedBefore: options.updatedBefore } : {}),
+          ...(options.createdFrom ? { createdFrom: options.createdFrom } : {}),
+          ...(options.createdBefore ? { createdBefore: options.createdBefore } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
           ...(options.archivedOnly ? { archivedOnly: "true" } : {}),
         },
@@ -1279,6 +1315,9 @@ export class OpenGeniClient {
       }
       if (options.archivedOnly) {
         throw new Error("The connected OpenGeni API does not support archived session lists");
+      }
+      if (hasSessionPageFilters(options)) {
+        throw new Error("The connected OpenGeni API does not support filtered session lists");
       }
       return { pinned: [], sessions: response, nextCursor: null };
     }

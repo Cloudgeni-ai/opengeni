@@ -15,7 +15,7 @@ export type SessionContinuationState = {
   /** Shared causal generation captured when that snapshot's page-one read started. */
   snapshotGeneration: number;
   /** Root-hook snapshots and direct cursor-rebase snapshots have independent identities. */
-  source: "root" | "rebase";
+  source: "root" | "rebase" | "group";
   /** Rows fetched from that snapshot, excluding display-only rows retained from older snapshots. */
   authoritativeIds: ReadonlySet<string>;
   /** Actual request-start generation for each accepted continuation row's live channel fields. */
@@ -72,7 +72,7 @@ export function mergeSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
   pageReadGeneration = snapshotGeneration,
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) {
@@ -211,7 +211,7 @@ export function rebaseSessionContinuation(
   page: { sessions: Session[]; nextCursor: string | null },
   snapshotRevision: number,
   snapshotGeneration = 0,
-  source: "root" | "rebase" = "root",
+  source: "root" | "rebase" | "group" = "root",
 ): SessionContinuationState {
   if (requestGeneration !== activeGeneration) return state;
   const active = activeSessionContinuation(state, activeGeneration);

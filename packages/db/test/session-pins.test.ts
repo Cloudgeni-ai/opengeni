@@ -3,6 +3,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   appendSessionEvents,
+  createChannel,
   createDb,
   createSession,
   decodeSessionListCursor,
@@ -57,6 +58,8 @@ async function session(input: {
   workspaceId: string;
   message: string;
   parentSessionId?: string;
+  channelId?: string | null;
+  createdBy?: { kind: "subject" | "service"; subjectId: string; label?: string };
 }) {
   return await createSession(db, {
     accountId: input.accountId,
@@ -69,6 +72,8 @@ async function session(input: {
     latencyMode: "standard" as const,
     sandboxBackend: "none",
     ...(input.parentSessionId ? { parentSessionId: input.parentSessionId } : {}),
+    ...(input.channelId !== undefined ? { channelId: input.channelId } : {}),
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
   });
 }
 
@@ -969,6 +974,113 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       where workspace_id = ${workspace.workspaceId}
         and subject_id = ${subjectId}`;
     expect(count?.count).toBe(0);
+  }, 60_000);
+
+  test("keeps project, creator, and date filters bound to their continuation cursor", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:filtered-pages";
+    await grantMember(workspace, subjectId);
+    const projectA = await createChannel(db, { ...workspace, name: "Filtered project A" });
+    const projectB = await createChannel(db, { ...workspace, name: "Filtered project B" });
+    const ada = { kind: "subject" as const, subjectId: "user:ada" };
+    const newerA = await session({
+      ...workspace,
+      message: "filtered newer A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const olderA = await session({
+      ...workspace,
+      message: "filtered older A",
+      channelId: projectA.id,
+      createdBy: ada,
+    });
+    const projectBRow = await session({
+      ...workspace,
+      message: "filtered project B",
+      channelId: projectB.id,
+      createdBy: { kind: "service", subjectId: "service:scheduler" },
+    });
+    const unfiled = await session({
+      ...workspace,
+      message: "filtered unfiled",
+      channelId: null,
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
+        update sessions
+        set created_at = case id
+              when ${newerA.id} then '2026-09-04T08:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T08:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T07:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T08:00:00.000Z'::timestamptz
+              else created_at
+            end,
+            updated_at = case id
+              when ${newerA.id} then '2026-09-04T10:00:00.000Z'::timestamptz
+              when ${olderA.id} then '2026-09-03T10:00:00.000Z'::timestamptz
+              when ${projectBRow.id} then '2026-09-04T11:00:00.000Z'::timestamptz
+              when ${unfiled.id} then '2026-09-02T10:00:00.000Z'::timestamptz
+              else updated_at
+            end
+        where id in (${newerA.id}, ${olderA.id}, ${projectBRow.id}, ${unfiled.id})
+      `,
+    );
+
+    const firstProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      limit: 1,
+    });
+    expect(firstProjectPage.sessions.map((row) => row.id)).toEqual([newerA.id]);
+    const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
+    expect(projectCursor).toMatchObject({ kind: "keyset" });
+    const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: projectA.id,
+      cursor: projectCursor!,
+      limit: 1,
+    });
+    expect(secondProjectPage.sessions.map((row) => row.id)).toEqual([olderA.id]);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        channelId: projectB.id,
+        cursor: projectCursor!,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    const creatorPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdBy: ada,
+    });
+    expect(creatorPage.sessions.map((row) => row.id)).toEqual([newerA.id, olderA.id]);
+
+    const currentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      updatedFrom: new Date("2026-09-04T00:00:00.000Z"),
+      updatedBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(currentDatePage.sessions.map((row) => row.id)).toEqual([projectBRow.id, newerA.id]);
+
+    const createdCurrentDatePage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      createdFrom: new Date("2026-09-04T00:00:00.000Z"),
+      createdBefore: new Date("2026-09-05T00:00:00.000Z"),
+    });
+    expect(createdCurrentDatePage.sessions.map((row) => row.id)).toEqual([
+      projectBRow.id,
+      newerA.id,
+    ]);
+
+    const unfiledPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: null,
+    });
+    expect(unfiledPage.sessions.map((row) => row.id)).toEqual([unfiled.id]);
   }, 60_000);
 
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {

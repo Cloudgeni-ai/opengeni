@@ -363,6 +363,27 @@ describe("API component integration", () => {
       pinned: [{ id: pinnedTarget.id }],
       sessions: [],
     });
+    const currentDateFiltered = await app.request(
+      workspacePath(
+        workspaceId,
+        "/sessions?view=page&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z",
+      ),
+    );
+    expect(currentDateFiltered.status).toBe(200);
+    expect(
+      (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            "/sessions?view=page&updatedFrom=2026-09-05T00%3A00%3A00.000Z&updatedBefore=2026-09-04T00%3A00%3A00.000Z",
+          ),
+        )
+      ).status,
+    ).toBe(400);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
@@ -412,6 +433,16 @@ describe("API component integration", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&channelId=null&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
