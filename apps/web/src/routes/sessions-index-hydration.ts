@@ -9,14 +9,17 @@ type PersistedProjectProvenance = {
 
 /**
  * Resolve the route's ambient project-selection effect. Undefined means the
- * effect must not mutate an authority already installed by remote hydration.
+ * effect must not mutate an authority already installed by remote hydration;
+ * an explicit-to-omitted route transition is a new ordinary launch intent.
  */
 export function resolveAmbientNewSessionProjectChannelId(input: {
   launchChannelId: string | null | undefined;
+  previousLaunchChannelId: string | null | undefined;
   recentChannelId: string | null;
   remoteDraftHydrated: boolean;
 }): string | null | undefined {
   if (input.launchChannelId !== undefined) return input.launchChannelId;
+  if (input.previousLaunchChannelId !== undefined) return input.recentChannelId;
   return input.remoteDraftHydrated ? undefined : input.recentChannelId;
 }
 

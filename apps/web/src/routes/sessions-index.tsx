@@ -227,6 +227,7 @@ function SessionsIndexRouteContent({
     launchChannelId !== undefined,
   );
   const remoteDraftHydratedRef = useRef(false);
+  const previousLaunchChannelIdRef = useRef<string | null | undefined>(undefined);
   const recentChannelId = selectionHistory.projects[0]?.channelId ?? null;
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [projectNameDraft, setProjectNameDraft] = useState("");
@@ -593,12 +594,19 @@ function SessionsIndexRouteContent({
   // local so choosing a folder does not turn the composer URL into application
   // state.
   useEffect(() => {
+    const previousLaunchChannelId = previousLaunchChannelIdRef.current;
+    previousLaunchChannelIdRef.current = launchChannelId;
     const channelId = resolveAmbientNewSessionProjectChannelId({
       launchChannelId,
+      previousLaunchChannelId,
       recentChannelId,
       remoteDraftHydrated: remoteDraftHydratedRef.current,
     });
-    if (channelId !== undefined) selectProject(channelId, launchChannelId !== undefined);
+    if (channelId === undefined) return;
+    if (launchChannelId === undefined && previousLaunchChannelId !== undefined) {
+      setProjectProvenancePresent(false);
+    }
+    selectProject(channelId, launchChannelId !== undefined);
   }, [launchChannelId, recentChannelId, selectProject]);
 
   useEffect(() => {

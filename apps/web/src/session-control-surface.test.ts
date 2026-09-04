@@ -144,6 +144,11 @@ describe("session control surface architecture", () => {
     expect(selection).toContain("setSelectedProjectChannelId(channelId);");
     expect(selection).not.toContain("const selectProject = useCallback(");
     expect(selection).not.toContain("[defaultSandboxBackend, selectedChannelId, selectionHistory]");
+    expect(route).toContain(
+      "const previousLaunchChannelIdRef = useRef<string | null | undefined>(undefined);",
+    );
+    expect(route).toContain("previousLaunchChannelIdRef.current = launchChannelId;");
+    expect(route).toContain("setProjectProvenancePresent(false);");
     expect(route).toContain("}, [launchChannelId, recentChannelId, selectProject]);");
   });
 

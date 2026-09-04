@@ -152,6 +152,19 @@ export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessio
   return options;
 }
 
+function projectComputeMatches(
+  current: NewSessionDraftOptionsValue,
+  incoming: NewSessionDraftOptionsValue,
+): boolean {
+  // An old client cannot name project provenance. Preserve a newer client's
+  // marker only while the compute placement that marker described is exact.
+  return (
+    current.sandboxBackend === incoming.sandboxBackend &&
+    current.targetSandboxId === incoming.targetSandboxId &&
+    current.workingDir === incoming.workingDir
+  );
+}
+
 export async function getNewSessionDraftInTransaction(
   db: Database,
   input: { workspaceId: string; subjectId: string; lock?: boolean },
@@ -250,7 +263,7 @@ export async function saveNewSessionDraftInTransaction(
   const revision = currentRevision + 1;
   const selectedProjectChannelId = Object.hasOwn(input, "selectedProjectChannelId")
     ? input.selectedProjectChannelId
-    : current
+    : current && projectComputeMatches(publicNewSessionDraftOptions(current), input.options)
       ? newSessionDraftSelectedProjectChannelId(current)
       : undefined;
   const values = {

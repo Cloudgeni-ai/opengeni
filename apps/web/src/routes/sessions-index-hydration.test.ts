@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  newSessionProjectSelection,
   resolveAmbientNewSessionProjectChannelId,
   resolveHydratedNewSessionProjectSelection,
 } from "./sessions-index-hydration";
+import {
+  buildCreateSessionRequest,
+  emptySessionDraft,
+  submissionFromSessionDraft,
+} from "../lib/session-create";
 
 const PROJECT_A = "00000000-0000-4000-8000-000000000011";
 const PROJECT_B = "00000000-0000-4000-8000-000000000012";
@@ -40,6 +46,7 @@ describe("sessions-index project hydration", () => {
     expect(
       resolveAmbientNewSessionProjectChannelId({
         launchChannelId: undefined,
+        previousLaunchChannelId: undefined,
         recentChannelId: PROJECT_A,
         remoteDraftHydrated: true,
       }),
@@ -90,10 +97,11 @@ describe("sessions-index project hydration", () => {
     });
   });
 
-  test("ambient Recents applies before hydration but never reapplies afterward", () => {
+  test("ambient Recents applies before hydration without overwriting hydrated selection history", () => {
     expect(
       resolveAmbientNewSessionProjectChannelId({
         launchChannelId: undefined,
+        previousLaunchChannelId: undefined,
         recentChannelId: PROJECT_A,
         remoteDraftHydrated: false,
       }),
@@ -101,6 +109,7 @@ describe("sessions-index project hydration", () => {
     expect(
       resolveAmbientNewSessionProjectChannelId({
         launchChannelId: undefined,
+        previousLaunchChannelId: undefined,
         recentChannelId: PROJECT_A,
         remoteDraftHydrated: true,
       }),
@@ -108,9 +117,72 @@ describe("sessions-index project hydration", () => {
     expect(
       resolveAmbientNewSessionProjectChannelId({
         launchChannelId: null,
+        previousLaunchChannelId: undefined,
         recentChannelId: PROJECT_A,
         remoteDraftHydrated: true,
       }),
     ).toBeNull();
+  });
+
+  test("post-hydration explicit Default to omitted intent selects Recents for every create mode", () => {
+    const channelId = resolveAmbientNewSessionProjectChannelId({
+      launchChannelId: undefined,
+      previousLaunchChannelId: null,
+      recentChannelId: PROJECT_A,
+      remoteDraftHydrated: true,
+    });
+    expect(channelId).toBe(PROJECT_A);
+
+    const selection = newSessionProjectSelection(staleProjectAHistory, channelId!, {
+      channelId: null,
+      compute: restoredProjectBCompute,
+    });
+    expect(selection).toEqual({
+      channelId: PROJECT_A,
+      compute: {
+        kind: "machine",
+        sandboxId: MACHINE_A,
+        folder: { kind: "path", path: "/workspace/project-a" },
+      },
+    });
+
+    const submission = submissionFromSessionDraft({
+      ...emptySessionDraft(),
+      compute: selection.compute,
+    });
+    const requests = [undefined, "realtime" as const].map((startMode) =>
+      buildCreateSessionRequest({
+        currentResources: [],
+        submission: { text: startMode ? "" : "start", resources: [], ...submission.extras },
+        startMode,
+        selectedTools: [],
+        defaultModel: "gpt-5.4",
+        defaultReasoningEffort: "medium",
+        defaultLatencyMode: "standard",
+        clientEventId: `event-${startMode ?? "normal"}`,
+        idempotencyKey: `create-${startMode ?? "normal"}`,
+        channelId: selection.channelId,
+        targetSandboxId: submission.options.targetSandboxId,
+        workingDir: submission.options.workingDir,
+      }),
+    );
+    for (const request of requests) {
+      expect(request).toMatchObject({
+        channelId: PROJECT_A,
+        targetSandboxId: MACHINE_A,
+        workingDir: "/workspace/project-a",
+      });
+    }
+    expect(requests[0]?.initialMessage).toBe("start");
+    expect(requests[1]).not.toHaveProperty("initialMessage");
+
+    expect(
+      resolveAmbientNewSessionProjectChannelId({
+        launchChannelId: undefined,
+        previousLaunchChannelId: undefined,
+        recentChannelId: PROJECT_B,
+        remoteDraftHydrated: true,
+      }),
+    ).toBeUndefined();
   });
 });

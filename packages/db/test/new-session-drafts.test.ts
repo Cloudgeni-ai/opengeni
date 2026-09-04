@@ -166,16 +166,23 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(namedProject.sessionOptions).toMatchObject({ selectedProjectChannelId: projectId });
   });
 
-  test("legacy omission preserves stored provenance while explicit null selects Default", async () => {
+  test("legacy text-only omission preserves compatible provenance and explicit values remain exact", async () => {
     const context = await fixture();
     const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-a",
+    };
     const namedProject = await saveDraft(context, 0, {
       text: "named-project draft",
       selectedProjectChannelId: projectId,
+      options: compute,
     });
 
     const legacySave = await saveDraft(context, namedProject.revision, {
       text: "older client edit without provenance",
+      options: compute,
     });
     expect(legacySave.revision).toBe(namedProject.revision + 1);
     expect(newSessionDraftSelectedProjectChannelId(legacySave)).toBe(projectId);
@@ -184,10 +191,82 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     const explicitDefault = await saveDraft(context, legacySave.revision, {
       text: "new client explicitly selected Default",
       selectedProjectChannelId: null,
+      options: compute,
     });
     expect(explicitDefault.revision).toBe(legacySave.revision + 1);
     expect(newSessionDraftSelectedProjectChannelId(explicitDefault)).toBeNull();
     expect(explicitDefault.sessionOptions).toMatchObject({ selectedProjectChannelId: null });
+
+    const explicitNamed = await saveDraft(context, explicitDefault.revision, {
+      text: "new client explicitly restored the named project",
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+    expect(newSessionDraftSelectedProjectChannelId(explicitNamed)).toBe(projectId);
+    expect(explicitNamed.sessionOptions).toMatchObject({ selectedProjectChannelId: projectId });
+  });
+
+  test("legacy omission clears named-project provenance when machine placement changes", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const firstMachine = crypto.randomUUID();
+    const namedProject = await saveDraft(context, 0, {
+      selectedProjectChannelId: projectId,
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: firstMachine,
+        workingDir: "/workspace/project-a",
+      },
+    });
+
+    const changedMachine = await saveDraft(context, namedProject.revision, {
+      text: "older client changed the project-dependent compute",
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-b",
+      },
+    });
+
+    expect(newSessionDraftSelectedProjectChannelId(changedMachine)).toBeUndefined();
+    expect(Object.hasOwn(changedMachine.sessionOptions, "selectedProjectChannelId")).toBe(false);
+  });
+
+  test("stale provenance-omitting compute edits still fail OCC without changing the row", async () => {
+    const context = await fixture();
+    const projectId = crypto.randomUUID();
+    const compute = {
+      sandboxBackend: "selfhosted" as const,
+      targetSandboxId: crypto.randomUUID(),
+      workingDir: "/workspace/project-a",
+    };
+    const first = await saveDraft(context, 0, {
+      selectedProjectChannelId: projectId,
+      options: compute,
+    });
+    const current = await saveDraft(context, first.revision, {
+      text: "current text-only edit",
+      options: compute,
+    });
+
+    await expect(
+      saveDraft(context, first.revision, {
+        text: "stale compute edit",
+        options: {
+          sandboxBackend: "selfhosted",
+          targetSandboxId: crypto.randomUUID(),
+          workingDir: "/workspace/other",
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "NewSessionDraftConflictError",
+      currentRevision: current.revision,
+    });
+    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+      revision: current.revision,
+      text: "current text-only edit",
+      sessionOptions: { ...compute, selectedProjectChannelId: projectId },
+    });
   });
 
   test("markerless legacy rows preserve narrowed and empty tool intent through seeding", async () => {
@@ -776,7 +855,14 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
 
   test("a member removal that wins the lock rejects a stale authorized draft write", async () => {
     const context = await fixture();
-    await saveDraft(context, 0);
+    await saveDraft(context, 0, {
+      selectedProjectChannelId: crypto.randomUUID(),
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-a",
+      },
+    });
     let removalLocked!: () => void;
     let finishRemoval!: () => void;
     const locked = new Promise<void>((resolve) => {
@@ -820,7 +906,14 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     );
     await locked;
 
-    const staleSave = saveDraft(context, 1, { text: "must not survive removal" });
+    const staleSave = saveDraft(context, 1, {
+      text: "must not survive removal",
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "/workspace/project-b",
+      },
+    });
     let stateBeforeRelease: "blocked" | "settled";
     try {
       stateBeforeRelease = await Promise.race([
