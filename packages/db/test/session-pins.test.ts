@@ -24,6 +24,7 @@ import {
   SessionArchiveVersionConflictError,
   setSessionArchive,
   setSessionAttention,
+  setSessionChannel,
   setSessionPin,
   withWorkspaceSessionActivityRls,
   withWorkspaceSubjectSessionActivityRls,
@@ -1037,6 +1038,23 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(firstProjectPage.sessions.map((row) => row.id)).toEqual([newerA.id]);
     const projectCursor = decodeSessionListCursor(firstProjectPage.nextCursor!);
     expect(projectCursor).toMatchObject({ kind: "keyset" });
+    const [beforeMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(
+      await setSessionChannel(db, {
+        workspaceId: workspace.workspaceId,
+        sessionId: projectBRow.id,
+        channelId: projectA.id,
+      }),
+    ).toBe(true);
+    const [afterMove] = await admin<
+      { updated_at: Date; activity_revision: string }[]
+    >`select updated_at, activity_revision::text from sessions where id = ${projectBRow.id}`;
+    expect(afterMove!.updated_at.getTime()).toBe(beforeMove!.updated_at.getTime());
+    expect(BigInt(afterMove!.activity_revision)).toBeGreaterThan(
+      BigInt(projectCursor!.kind === "keyset" ? projectCursor!.snapshotRevision : "0"),
+    );
     const secondProjectPage = await listSessionsForSubject(db, workspace.workspaceId, {
       subjectId,
       channelId: projectA.id,

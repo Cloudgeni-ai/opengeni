@@ -282,12 +282,12 @@ describe("web bundle budget policy", () => {
   });
 
   test("retains the exact grouped-session pagination configured-browser envelope", () => {
-    expect(GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT).toBe(2_285_208);
+    expect(GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT).toBe(2_285_322);
     expect(GROUPED_SESSION_PAGINATION_BROWSER_RAW_BUDGET).toBe(2233 * KIB);
     expect(
       GROUPED_SESSION_PAGINATION_BROWSER_RAW_BUDGET -
         GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT,
-    ).toBe(1_384);
+    ).toBe(1_270);
     expect(
       GROUPED_SESSION_PAGINATION_BROWSER_RAW_BUDGET -
         GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT,

@@ -144,7 +144,7 @@ export const SESSION_WAIT_COMMAND_WAKE_RAW_BUDGET = wholeKibEnvelope(
 );
 
 /** Exact grouped-session pagination configured-browser Linux/x64 Bun 1.4 measurement. */
-export const GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT = 2_285_208;
+export const GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT = 2_285_322;
 export const GROUPED_SESSION_PAGINATION_BROWSER_RAW_BUDGET = wholeKibEnvelope(
   GROUPED_SESSION_PAGINATION_BROWSER_RAW_MEASUREMENT,
 );

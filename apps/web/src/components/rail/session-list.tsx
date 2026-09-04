@@ -82,6 +82,7 @@ import {
   authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
+  projectSessionArchiveMembership,
   rebaseSessionContinuation,
   reconcileRetainedSessionContinuationChannel,
   sessionPageKey,
@@ -470,6 +471,12 @@ export function SessionList() {
       ),
     [groupContinuations, pageGeneration],
   );
+  const [archiveOverrides, setArchiveOverrides] = useState<ReadonlyMap<string, Session>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    setArchiveOverrides(new Map());
+  }, [rail.workspaceId]);
   const extraSessions = useMemo(() => {
     const rows = new Map<string, Session>();
     for (const [key, continuation] of activeGroupContinuations) {
@@ -826,8 +833,16 @@ export function SessionList() {
       const current = source.get(id);
       if (current) source.set(id, applySessionChannelMove(current, override));
     }
+    const archiveProjected = projectSessionArchiveMembership(
+      [...source.values()],
+      archiveOverrides,
+      false,
+      rail.workspaceId,
+    );
     const projectedAttention = new Map(attentionOverrides);
-    const active = activeSessionId ? source.get(activeSessionId) : null;
+    const active = activeSessionId
+      ? archiveProjected.find((session) => session.id === activeSessionId)
+      : null;
     if (documentForeground && active?.unread && active.workspaceId === rail.workspaceId) {
       const foregroundProjection: SessionAttentionProjection = {
         id: active.id,
@@ -841,9 +856,10 @@ export function SessionList() {
         latestSessionAttentionProjection(projectedAttention.get(active.id), foregroundProjection),
       );
     }
-    return applySessionAttentionProjections([...source.values()], projectedAttention);
+    return applySessionAttentionProjections(archiveProjected, projectedAttention);
   }, [
     activeSessionId,
+    archiveOverrides,
     attentionOverrides,
     channelMoveOverrides,
     documentForeground,
@@ -1236,10 +1252,21 @@ export function SessionList() {
     const rows = new Map(archivedSessions.map((session) => [session.id, session]));
     for (const session of archivedExtraSessions) rows.set(session.id, session);
     const archiveForest = buildPinnedRailSections(
-      [...rows.values()].filter((session) => !archiveTransitions.has(session.rootSessionId)),
+      projectSessionArchiveMembership(
+        [...rows.values()],
+        archiveOverrides,
+        true,
+        rail.workspaceId,
+      ).filter((session) => !archiveTransitions.has(session.rootSessionId)),
     ).complete;
     return [...archiveForest.running, ...archiveForest.grouped.flatMap((group) => group.sessions)];
-  }, [archiveTransitions, archivedExtraSessions, archivedSessions]);
+  }, [
+    archiveOverrides,
+    archiveTransitions,
+    archivedExtraSessions,
+    archivedSessions,
+    rail.workspaceId,
+  ]);
   // Workstreams open on first paint. A user collapse is local interaction
   // state; new or newly loaded sections therefore remain open by default.
   const [collapsedChannelSections, setCollapsedChannelSections] = useState<ReadonlySet<string>>(
@@ -1447,6 +1474,11 @@ export function SessionList() {
           archived,
           expectedVersion: session.archiveVersion ?? 0,
         });
+        setArchiveOverrides((current) => {
+          const next = new Map(current).set(updated.id, updated);
+          if (next.size > 64) next.delete(next.keys().next().value!);
+          return next;
+        });
         context.setSession((current) =>
           current?.id === updated.id
             ? {
@@ -1489,6 +1521,40 @@ export function SessionList() {
     if (!sessionPendingDelete) return false;
     try {
       const result = await context.client.deleteSession(rail.workspaceId, sessionPendingDelete.id);
+      setArchiveOverrides((current) => {
+        if (!current.has(sessionPendingDelete.id)) return current;
+        const next = new Map(current);
+        next.delete(sessionPendingDelete.id);
+        return next;
+      });
+      setGroupContinuations((current) => {
+        let changed = false;
+        const next = new Map(current);
+        for (const [key, continuation] of current) {
+          const removedIds = new Set(
+            continuation.sessions
+              .filter((session) => session.rootSessionId === sessionPendingDelete.id)
+              .map((session) => session.id),
+          );
+          const retainedSessions = continuation.sessions.filter(
+            (session) => !removedIds.has(session.id),
+          );
+          if (retainedSessions.length !== continuation.sessions.length) {
+            next.set(key, {
+              ...continuation,
+              sessions: retainedSessions,
+              authoritativeIds: new Set(
+                [...continuation.authoritativeIds].filter((id) => !removedIds.has(id)),
+              ),
+              channelGenerations: new Map(
+                [...continuation.channelGenerations].filter(([id]) => !removedIds.has(id)),
+              ),
+            });
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
       const viewingDeletedTree = context.session?.rootSessionId === sessionPendingDelete.id;
       if (viewingDeletedTree) {
         context.resetSessionView();
@@ -1947,9 +2013,13 @@ export function SessionList() {
           sessionMatchesPaginationGroup(session, group, requestedAt),
         ),
       });
-      setGroupContinuations((states) =>
-        new Map(states).set(group.key, { ...current, failed: false }),
-      );
+      setGroupContinuations((states) => {
+        const latest = activeSessionContinuation(
+          states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+          requestGeneration,
+        );
+        return new Map(states).set(group.key, { ...latest, failed: false });
+      });
 
       try {
         let pageRead;
@@ -1965,48 +2035,59 @@ export function SessionList() {
         }
         if (!requestIsCurrent()) return;
         const page = filterPage(pageRead.page);
+        const pageReadGeneration = pageRead.readGeneration;
         const snapshotRevision =
           current.nextCursor === undefined || rebased ? attempt : current.snapshotRevision;
         const snapshotGeneration =
           current.nextCursor === undefined || rebased
-            ? pageRead.readGeneration
+            ? pageReadGeneration
             : current.snapshotGeneration;
-        const next = rebased
-          ? rebaseSessionContinuation(
-              current,
-              requestGeneration,
-              requestGeneration,
-              page,
-              snapshotRevision,
-              snapshotGeneration,
-              "group",
-            )
-          : mergeSessionContinuation(
-              current,
-              requestGeneration,
-              requestGeneration,
-              page,
-              snapshotRevision,
-              snapshotGeneration,
-              "group",
-              pageRead.readGeneration,
-            );
         const newlyLoaded = page.sessions.filter(
           (session) => !loadedSessionIdsRef.current.has(session.id),
         ).length;
-        setGroupContinuations((states) => new Map(states).set(group.key, next));
+        setGroupContinuations((states) => {
+          const latest = activeSessionContinuation(
+            states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+            requestGeneration,
+          );
+          const next = rebased
+            ? rebaseSessionContinuation(
+                latest,
+                requestGeneration,
+                requestGeneration,
+                page,
+                snapshotRevision,
+                snapshotGeneration,
+                "group",
+              )
+            : mergeSessionContinuation(
+                latest,
+                requestGeneration,
+                requestGeneration,
+                page,
+                snapshotRevision,
+                snapshotGeneration,
+                "group",
+                pageReadGeneration,
+              );
+          return new Map(states).set(group.key, next);
+        });
         setAnnouncement(
           newlyLoaded > 0
             ? `Loaded ${newlyLoaded} older session${newlyLoaded === 1 ? "" : "s"} in ${group.label}.`
-            : next.nextCursor
+            : page.nextCursor
               ? `No additional older sessions in ${group.label} yet.`
               : `No more older sessions in ${group.label}.`,
         );
       } catch {
         if (!requestIsCurrent()) return;
-        setGroupContinuations((states) =>
-          new Map(states).set(group.key, { ...current, failed: true }),
-        );
+        setGroupContinuations((states) => {
+          const latest = activeSessionContinuation(
+            states.get(group.key) ?? emptySessionContinuation(requestGeneration),
+            requestGeneration,
+          );
+          return new Map(states).set(group.key, { ...latest, failed: true });
+        });
         setAnnouncement(`Older sessions in ${group.label} did not load. Retry is available.`);
       } finally {
         if (requestIsCurrent()) {
@@ -2120,6 +2201,21 @@ export function SessionList() {
             ? [bucket]
             : [];
         });
+  const creatorDiscoveryPagination =
+    browseGroupBy === "creator" && !paginationBrowseFilter.creator
+      ? paginationForGroup(
+          {
+            key: "creator-discovery",
+            label: "More creators",
+            kind: "creatorDiscovery",
+            knownCreators: forest.grouped.flatMap((bucket) => {
+              const creator = bucket.sessions[0]?.session.createdBy;
+              return creator ? [{ kind: creator.kind, subjectId: creator.subjectId }] : [];
+            }),
+          },
+          nextCursor,
+        )
+      : undefined;
 
   // Cross-tab invalidation and lifecycle reconciliation. Cross-device changes
   // arrive on the 15s poll; returning to a tab or reconnecting refreshes now.
@@ -2416,6 +2512,7 @@ export function SessionList() {
       <div
         ref={listRef}
         role="region"
+        tabIndex={-1}
         aria-label={search ? "Session search results" : "Sessions"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
@@ -2625,6 +2722,29 @@ export function SessionList() {
                     />
                   );
                 })}
+                {creatorDiscoveryPagination ? (
+                  <SessionGroup
+                    label="More creators"
+                    nodes={[]}
+                    pagination={creatorDiscoveryPagination}
+                    localDeliveryAttention={localDeliveryAttention}
+                    flat={flat}
+                    activeSessionId={activeSessionId}
+                    focusIndex={focusIndex}
+                    onFocusSession={setFocusedSessionId}
+                    expanded={expanded}
+                    onToggleExpand={toggleExpand}
+                    childPages={childPages}
+                    onLoadMoreChildren={loadChildPage}
+                    onRename={context.updateSessionTitle}
+                    onPin={onPin}
+                    channels={channels}
+                    onMoveToChannel={onMoveToChannel}
+                    onUpdateAttention={onUpdateAttention}
+                    onArchive={onArchive}
+                    onRequestDelete={setSessionPendingDelete}
+                  />
+                ) : null}
               </>
             )}
             {channelMode ? (
@@ -2714,10 +2834,11 @@ type SessionGroupPaginationProps = {
 };
 
 function SessionGroupPaginationControl(
-  props: SessionGroupPaginationProps & { className?: string },
+  props: SessionGroupPaginationProps & { className?: string; fallbackFocusId?: string },
 ) {
   const { failed, group, hasMore, loading, onLoadMore } = props;
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const groupRef = useRef(group);
   groupRef.current = group;
   useEffect(() => {
@@ -2739,14 +2860,34 @@ function SessionGroupPaginationControl(
     return () => observer.disconnect();
   }, [failed, group.key, hasMore, loading, onLoadMore]);
 
+  const loadFromButton = async () => {
+    const button = buttonRef.current;
+    const root = button?.closest<HTMLElement>("[data-sessionpin-session-list]") ?? null;
+    const shouldRestoreFocus = document.activeElement === button;
+    await onLoadMore(groupRef.current);
+    if (!shouldRestoreFocus || !root) return;
+    requestAnimationFrame(() => {
+      if (button?.isConnected || !root.isConnected) return;
+      const labelledFallback = props.fallbackFocusId
+        ? document.getElementById(props.fallbackFocusId)
+        : null;
+      const fallback =
+        labelledFallback && root.contains(labelledFallback)
+          ? labelledFallback
+          : (root.querySelector<HTMLElement>("a[data-session-row]") ?? root);
+      fallback.focus();
+    });
+  };
+
   const action = loading ? "Loading" : failed ? "Retry" : "Load";
   return (
     <div ref={sentinelRef} className={cn("px-2 py-1 text-center", props.className)}>
       <button
+        ref={buttonRef}
         type="button"
         disabled={loading || !hasMore}
         aria-label={`${action} older sessions in ${group.label}`}
-        onClick={() => void onLoadMore(group)}
+        onClick={() => void loadFromButton()}
         className="min-h-8 rounded-md px-2 text-xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg disabled:opacity-60 pointer-coarse:min-h-11"
       >
         {loading ? "Loading older…" : failed ? "Retry older" : "Load older"}
@@ -2924,6 +3065,7 @@ function SessionGroup(props: {
       ) : (
         <p
           id={sectionId}
+          tabIndex={-1}
           className="px-1.5 pb-0.5 pt-2 text-2xs font-medium uppercase tracking-wider text-fg-muted"
         >
           {props.label}
@@ -2962,7 +3104,7 @@ function SessionGroup(props: {
         </div>
       ) : null}
       {sectionExpanded && props.pagination ? (
-        <SessionGroupPaginationControl {...props.pagination} />
+        <SessionGroupPaginationControl {...props.pagination} fallbackFocusId={sectionId} />
       ) : null}
     </div>
   );

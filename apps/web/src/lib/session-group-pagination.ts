@@ -40,6 +40,12 @@ export type SessionPaginationGroup =
   | {
       key: string;
       label: string;
+      kind: "creatorDiscovery";
+      knownCreators: readonly CreatorIdentity[];
+    }
+  | {
+      key: string;
+      label: string;
       kind: "results";
     }
   | {
@@ -208,6 +214,15 @@ export function sessionMatchesPaginationGroup(
         !active &&
         session.createdBy.kind === group.creator.kind &&
         session.createdBy.subjectId === group.creator.subjectId
+      );
+    case "creatorDiscovery":
+      return (
+        !active &&
+        !group.knownCreators.some(
+          (creator) =>
+            creator.kind === session.createdBy.kind &&
+            creator.subjectId === session.createdBy.subjectId,
+        )
       );
     case "results":
     case "archived":

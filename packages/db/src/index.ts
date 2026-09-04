@@ -19141,7 +19141,16 @@ export async function deleteChannel(
   workspaceId: string,
   channelId: string,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    // Detaching sessions changes project-filter membership. Enroll matching
+    // rows in the activity commit gate while preserving their recency sort so
+    // an already-open filtered cursor remains a frozen membership snapshot.
+    await scopedDb
+      .update(schema.sessions)
+      .set({ channelId: null, updatedAt: sql`${schema.sessions.updatedAt}` })
+      .where(
+        and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.channelId, channelId)),
+      );
     const rows = await scopedDb
       .delete(schema.channels)
       .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -19204,9 +19213,9 @@ export async function reorderChannels(
 
 // Re-files one session (rail organization only). Resolves the target channel
 // workspace-scoped so a foreign channel id can never be attached; null moves
-// the session back to the unfiled inbox. Deliberately does not bump
-// updatedAt: filing is organization, not activity, and must not reorder the
-// rail's recency buckets.
+// the session back to the unfiled inbox. Filing advances the activity revision
+// used to freeze filtered cursor membership, while preserving updatedAt so it
+// never reorders the rail's recency buckets.
 export async function setSessionChannel(
   db: Database,
   input: { workspaceId: string; sessionId: string; channelId: string | null },
@@ -19232,7 +19241,9 @@ export async function setSessionChannel(
     try {
       const rows = await scopedDb
         .update(schema.sessions)
-        .set({ channelId: input.channelId })
+        // Naming updatedAt in the SET list enrolls this row in the commit gate;
+        // the self-assignment deliberately preserves the activity sort time.
+        .set({ channelId: input.channelId, updatedAt: sql`${schema.sessions.updatedAt}` })
         .where(
           and(
             eq(schema.sessions.workspaceId, input.workspaceId),

@@ -715,6 +715,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (pageView) {
       return c.json({
         ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         pinned: page.pinned.map(decorate),
         sessions: page.sessions.map(decorate),
       });
@@ -4629,6 +4630,7 @@ function sessionListQuery(
   updatedBefore: Date | undefined;
   createdFrom: Date | undefined;
   createdBefore: Date | undefined;
+  hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -4752,6 +4754,7 @@ function sessionListQuery(
     updatedBefore,
     createdFrom,
     createdBefore,
+    hasPageFilters,
   };
 }
 

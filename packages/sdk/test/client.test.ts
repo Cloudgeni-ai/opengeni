@@ -1950,7 +1950,12 @@ describe("OpenGeniClient", () => {
   test("listSessions stays array-shaped while listSessionPage adds pin cursors", async () => {
     const { client, requests } = makeClient((request) =>
       request.url.includes("view=page")
-        ? jsonResponse({ pinned: [], sessions: [], nextCursor: null })
+        ? jsonResponse({
+            pinned: [],
+            sessions: [],
+            nextCursor: null,
+            ...(request.url.includes("channelId=") ? { filtersApplied: true } : {}),
+          })
         : jsonResponse([]),
     );
     await client.listSessions(WORKSPACE_ID, { limit: 5, parentSessionId: null });
@@ -2061,6 +2066,17 @@ describe("OpenGeniClient", () => {
     await expect(client.listSessionPage(WORKSPACE_ID, { channelId: null })).rejects.toThrow(
       "does not support filtered session lists",
     );
+  });
+
+  test("filtered session pages fail closed when an older page response lacks filter support", async () => {
+    const { client } = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null }),
+    );
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, {
+        createdBy: { kind: "subject", subjectId: "user:ada" },
+      }),
+    ).rejects.toThrow("does not support filtered session lists");
   });
 
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {

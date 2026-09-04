@@ -5,10 +5,12 @@ import { SessionChannelProjectionAuthority } from "./session-pins";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
+  applySessionArchiveProjection,
   authoritativeSessionContinuation,
   authoritativeSessionContinuationChannels,
   emptySessionContinuation,
   mergeSessionContinuation,
+  projectSessionArchiveMembership,
   rebaseSessionContinuation,
   reconcileRetainedSessionContinuationChannel,
   sessionPageKey,
@@ -17,6 +19,72 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("projects successful archive moves across stale active and archived pages", () => {
+    const active = {
+      ...row("active"),
+      archived: false,
+      archiveVersion: 2,
+      pinned: true,
+      pinVersion: 3,
+    } as Session;
+    const archived = {
+      ...row("archived"),
+      archived: true,
+      archiveVersion: 5,
+    } as Session;
+    const archivedWrite = {
+      ...active,
+      archived: true,
+      archivedAt: "2026-09-04T12:00:00.000Z",
+      archiveVersion: 3,
+      pinned: false,
+      pinVersion: 4,
+    } as Session;
+    const restoredWrite = {
+      ...archived,
+      archived: false,
+      archivedAt: null,
+      archiveVersion: 6,
+    } as Session;
+    const overrides = new Map([
+      [active.id, archivedWrite],
+      [archived.id, restoredWrite],
+    ]);
+
+    expect(
+      projectSessionArchiveMembership([active], overrides, false, "workspace-a").map(
+        (session) => session.id,
+      ),
+    ).toEqual(["archived"]);
+    expect(
+      projectSessionArchiveMembership([archived], overrides, true, "workspace-a").map(
+        (session) => session.id,
+      ),
+    ).toEqual(["active"]);
+    expect(
+      projectSessionArchiveMembership([archived], overrides, false, "workspace-b").map(
+        (session) => session.id,
+      ),
+    ).toEqual([]);
+  });
+
+  test("keeps a newer archive revision over an older retained override", () => {
+    const current = {
+      ...row("current"),
+      archived: false,
+      archiveVersion: 8,
+      channelId: "channel-new",
+    } as Session;
+    const staleOverride = {
+      ...current,
+      archived: true,
+      archiveVersion: 7,
+      channelId: "channel-old",
+    } as Session;
+
+    expect(applySessionArchiveProjection(current, staleOverride)).toBe(current);
+  });
+
   test("rejects a delayed page after the workspace or search changes", () => {
     const first = { key: sessionPageKey("workspace-a", ""), generation: 0 };
     const second = advanceSessionPageIdentity(first, sessionPageKey("workspace-a", "needle"));

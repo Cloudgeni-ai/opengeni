@@ -1023,11 +1023,17 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           }),
         { timeout: 10_000 },
       );
-      await retryOlder.click();
+      await retryOlder.focus();
+      await retryOlder.press("Enter");
       const finalPage = (await (await finalPageResponse).json()) as BrowserSessionPage;
       expect(finalPage.sessions).toHaveLength(6);
       expect(finalPage.nextCursor).toBeNull();
       await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor();
+      await page.waitForFunction(
+        () => document.activeElement?.id === "session-group-today",
+        undefined,
+        { timeout: 10_000 },
+      );
       const visibleIds = await visibleRows.evaluateAll((rows) =>
         rows.map((row) => row.getAttribute("data-session-row")),
       );

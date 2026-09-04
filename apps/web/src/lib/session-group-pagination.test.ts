@@ -139,6 +139,18 @@ describe("session group pagination", () => {
         NOW,
       ),
     ).toBe(true);
+    expect(
+      sessionMatchesPaginationGroup(
+        row({ createdBy: { kind: "subject", subjectId: "user:grace" } }),
+        {
+          key: "creator-discovery",
+          label: "More creators",
+          kind: "creatorDiscovery",
+          knownCreators: [{ kind: "subject", subjectId: "user:ada" }],
+        },
+        NOW,
+      ),
+    ).toBe(true);
   });
 
   test("uses the browser-local calendar date in the continuation identity", () => {

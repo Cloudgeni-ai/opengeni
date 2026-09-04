@@ -1321,6 +1321,9 @@ export class OpenGeniClient {
       }
       return { pinned: [], sessions: response, nextCursor: null };
     }
+    if (hasSessionPageFilters(options) && response.filtersApplied !== true) {
+      throw new Error("The connected OpenGeni API does not support filtered session lists");
+    }
     return response;
   }
 

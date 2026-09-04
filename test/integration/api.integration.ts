@@ -370,6 +370,7 @@ describe("API component integration", () => {
       ),
     );
     expect(currentDateFiltered.status).toBe(200);
+    expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
         .status,
