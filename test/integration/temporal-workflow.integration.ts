@@ -521,6 +521,70 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "parks a rotation recovery until the exact sandbox lifecycle wake arrives",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const turn = queuedTurn("event-rotation-wait");
+      const runs: string[] = [];
+      let lifecyclePending = true;
+      let lifecycleWaitPeeks = 0;
+      const lifecycleRef = {
+        version: 1 as const,
+        sandboxGroupId: crypto.randomUUID(),
+        leaseEpoch: 7,
+        reason: "rotation_in_progress" as const,
+      };
+      const admission = createTurnAdmission([turn], async () => {
+        runs.push(crypto.randomUUID());
+        return { status: runs.length === 1 ? "recovering" : "idle" };
+      });
+      const basePeek = admission.activities.peekSessionWork;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        peekSessionWork: async () => {
+          if (runs.length === 1 && lifecyclePending) {
+            lifecycleWaitPeeks += 1;
+            return { kind: "sandbox-lifecycle-wait", ref: lifecycleRef } as const;
+          }
+          return await basePeek();
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => {
+          throw new Error("rotation lifecycle wait failed the session");
+        },
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId: `wf-${crypto.randomUUID()}`,
+          args: [{ ...scope, sessionId, initialEventId: turn.triggerEventId }],
+        });
+        await waitFor(() => runs.length === 1);
+        await waitFor(() => lifecycleWaitPeeks > 0);
+        expect(runs).toHaveLength(1);
+
+        lifecyclePending = false;
+        await handle.signal("queueChanged");
+        await handle.result();
+
+        expect(runs).toHaveLength(2);
+        expect(lifecycleWaitPeeks).toBeGreaterThan(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "re-dispatches the same recovering inference instead of failing the session",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;

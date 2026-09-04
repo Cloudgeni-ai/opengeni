@@ -263,9 +263,10 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // finished yet.
   const recoveryTurnId = attempt.turnId;
   // A true epoch supersession and a provider lifecycle transition are both
-  // recoverable control-plane states, never session failures. The latter is
-  // paced briefly; the next acquire waits on the durable claim and resumes
-  // immediately when it clears.
+  // recoverable control-plane states, never session failures. A rotation
+  // persists an exact group/epoch wait marker so the workflow parks before
+  // another turn-worker dispatch; shorter non-rotation transitions retain
+  // their existing paced retry.
   const lifecycleTransition = sandboxLifecycleTransitionDiagnostic(error);
   const leaseControlError =
     error instanceof SandboxLeaseSupersededError ? error : lifecycleTransition;
@@ -282,6 +283,14 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       const transitionPending = lifecycleTransition !== null || rotationPending;
       const deadlineRotationPending =
         rotationPending && fencedLease?.rotationReason === "provider_deadline";
+      const sandboxLifecycleWait = rotationPending
+        ? {
+            version: 1 as const,
+            sandboxGroupId: leaseControlError.sandboxGroupId,
+            leaseEpoch: fencedLease?.leaseEpoch ?? leaseControlError.leaseEpoch,
+            reason: "rotation_in_progress" as const,
+          }
+        : undefined;
       const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
         sessionId: input.sessionId,
         turnId: recoveryTurnId,
@@ -306,6 +315,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
               },
             }
           : {}),
+        ...(sandboxLifecycleWait ? { sandboxLifecycleWait } : {}),
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -319,7 +329,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       control.turnMetricOutcome = "recovering";
       return claimedResult({
         status: "recovering",
-        ...(transitionPending
+        ...(transitionPending && !sandboxLifecycleWait
           ? {
               continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
             }
@@ -393,6 +403,12 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
           sandboxGroupId: rotation.sandboxGroupId,
           leaseEpoch: rotation.leaseEpoch,
         },
+        sandboxLifecycleWait: {
+          version: 1,
+          sandboxGroupId: rotation.sandboxGroupId,
+          leaseEpoch: rotation.leaseEpoch,
+          reason: "rotation_in_progress",
+        },
       });
       if (recovery.action === "stale") {
         acknowledgeLostAttemptOwnership();
@@ -404,10 +420,7 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
       control.activityStatus = "recovering";
       control.turnMetricOutcome = "recovering";
-      return claimedResult({
-        status: "recovering",
-        continueDelayMs: sandboxDeadlineRotationRecoveryDelayMs(settings),
-      });
+      return claimedResult({ status: "recovering" });
     } catch (recoveryError) {
       console.error(
         "sandbox deadline rotation recovery failed",
