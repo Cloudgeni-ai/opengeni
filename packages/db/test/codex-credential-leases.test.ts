@@ -150,7 +150,7 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
           verified_control_revision, mcp_approval_policies
         ) values (
           ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 1,
-          'running', 'wf', ${`run:${attemptId}`}, ${dispatchId}, 0,
+          'claimed', 'wf', ${`run:${attemptId}`}, ${dispatchId}, 0,
           '{}'::jsonb
         )
       `);
@@ -224,7 +224,7 @@ async function startRecoveryAttempt(ws: Workspace, turnId: string): Promise<stri
           verified_control_revision, mcp_approval_policies
         ) values (
           ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${turn.session_id}, ${turnId},
-          ${executionGeneration}, 'running', 'wf', ${`run:${attemptId}`},
+          ${executionGeneration}, 'claimed', 'wf', ${`run:${attemptId}`},
           ${`activity:${attemptId}`}, 0, '{}'::jsonb
         )
       `);

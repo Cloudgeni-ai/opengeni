@@ -2160,13 +2160,12 @@ async function registerContinuableWakes(
       )
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
+        session_id, account_id, workspace_id, temporal_workflow_id, reason
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}, 1
+      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
-        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,

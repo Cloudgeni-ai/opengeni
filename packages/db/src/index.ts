@@ -24049,7 +24049,7 @@ export async function acquireCodexCredentialLease<
         turn.status !== "running" ||
         turn.active_attempt_id !== input.attemptId ||
         Number(turn.execution_generation) !== input.executionGeneration ||
-        attempt.state !== "running" ||
+        (attempt.state !== "claimed" && attempt.state !== "running") ||
         Number(attempt.execution_generation) !== input.executionGeneration ||
         attempt.temporal_workflow_id !== input.workflowId ||
         attempt.temporal_workflow_run_id !== input.workflowRunId ||
@@ -26986,7 +26986,7 @@ export async function quarantineCodexCredentialForLease(
           attempt.accountId !== input.accountId ||
           attempt.sessionId !== input.sessionId ||
           attempt.turnId !== input.turnId ||
-          attempt.state !== "running" ||
+          (attempt.state !== "claimed" && attempt.state !== "running") ||
           attempt.executionGeneration !== input.executionGeneration ||
           attempt.temporalWorkflowId !== input.workflowId ||
           attempt.temporalWorkflowRunId !== input.workflowRunId ||
