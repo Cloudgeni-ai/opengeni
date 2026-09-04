@@ -2967,6 +2967,49 @@ describe("groupTimeline", () => {
     });
   });
 
+  test.each([
+    ["an explicit final answer", "final_answer"],
+    ["a phase-less legacy final answer", undefined],
+  ] as const)("does not append a wait outcome after %s", (_label, phase) => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          reason: "Waiting on stale work.",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason: "Waiting on stale work.", timeoutSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("agent.message.completed", {
+          text: "The work is complete.",
+          ...(phase ? { phase } : {}),
+        }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "The work is complete.",
+      streaming: false,
+    });
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
   test("recovers a retained terminal output when its message event is absent", () => {
     reset();
     const groups = groupTimeline(

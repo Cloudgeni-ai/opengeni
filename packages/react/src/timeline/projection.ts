@@ -1031,7 +1031,11 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         }
         finalizeOpen(turnId, "complete", event.occurredAt);
         items.push(turnEndItem(event, "complete", null));
-        if (!finalOutput.trim() && pendingWaitOutcome) {
+        const hasCompletedFinalResponse =
+          latestAgentResponse?.completed === true &&
+          latestAgentResponse.item.phase !== "commentary" &&
+          Boolean(latestAgentResponse.item.text.trim());
+        if (!finalOutput.trim() && !hasCompletedFinalResponse && pendingWaitOutcome) {
           items.push({
             kind: "notice",
             id: `${pendingWaitOutcome.id}-visible-outcome`,
