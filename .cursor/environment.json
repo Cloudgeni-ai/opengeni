@@ -1,0 +1,15 @@
+{
+  "name": "OpenGeni",
+  "install": "bun install --frozen-lockfile",
+  "terminals": [
+    {
+      "name": "dev-stack",
+      "command": "bun run dev",
+      "description": "Full OpenGeni local stack: native PostgreSQL/NATS/Temporal/MinIO infra, DB migrations + role provisioning, the Hono API (http://127.0.0.1:8000), control + turn Temporal workers, artifact materializer/outbox, and the React web console (http://127.0.0.1:3000). Uses the native infra backend and the in-process 'local' sandbox (no Docker). Set the OPENGENI_OPENAI_API_KEY secret to run live agent turns."
+    }
+  ],
+  "ports": [
+    { "name": "web", "port": 3000 },
+    { "name": "api", "port": 8000 }
+  ]
+}
