@@ -1115,6 +1115,53 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
+  test("empty wait turns keep their durable reason outside the collapsed steps", async () => {
+    resetTimelineEvents();
+    const reason = "Two delegated reviews are still running.";
+    const events = [
+      timelineEvent("user.message", { text: "Wait for the reviews" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason, timeoutSeconds: 3600 },
+      }),
+      timelineEvent("session.wait.started", {
+        actor: "agent",
+        waitTurnId: "turn-1",
+        deadlineAt: "2026-06-10T13:00:00.000Z",
+        reason,
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: "" }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent).toContain(`Waiting: ${reason}`);
+    expect(r.container.textContent?.split(reason)).toHaveLength(2);
+    const visibleOutcome = Array.from(r.container.querySelectorAll('[role="status"]')).find(
+      (element) => element.textContent?.includes(`Waiting: ${reason}`),
+    );
+    expect(visibleOutcome).not.toBeUndefined();
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(visibleOutcome?.isConnected).toBe(true);
+    expect(r.container.textContent).toContain("Wait for input");
+
+    await r.unmount();
+  });
+
   test("live turn activity keeps an open TurnSummary shell (no remount on settle)", async () => {
     resetTimelineEvents();
     const events = [

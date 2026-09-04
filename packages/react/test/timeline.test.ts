@@ -2849,6 +2849,173 @@ describe("groupTimeline", () => {
     });
   });
 
+  test("surfaces a session wait reason when an empty turn has no assistant response", () => {
+    reset();
+    const reason = "Two delegated reviews are still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("agent.message.completed", { text: "" }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
+  });
+
+  test("repairs legacy agent goal holds without duplicating the hidden tool row", () => {
+    reset();
+    const reason = "PR review and CI are still in flight.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("goal.held", {
+          actor: "agent",
+          goalId: "goal-1",
+          reason,
+          turnId: "turn-1",
+          untilAt: "2026-06-10T13:00:00.000Z",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-legacy",
+          name: "goal_wait",
+          arguments: { reason, untilSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-legacy",
+          output: { status: "held" },
+        }),
+        event("agent.message.completed", { text: "" }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
+    const [turn] = turnGroups(groups);
+    expect(turn?.groups.some((group) => group.kind === "item" && group.item.kind === "goal")).toBe(
+      false,
+    );
+  });
+
+  test("does not add a wait notice when completed assistant prose is already visible", () => {
+    reset();
+    const reason = "The child is still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: reason,
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("agent.message.completed", { text: "" }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: reason,
+      phase: "commentary",
+    });
+    expect(groups.some((group) => group.kind === "item" && group.item.kind === "notice")).toBe(
+      false,
+    );
+  });
+
+  test("recovers a retained terminal output when its message event is absent", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("does not leak a discarded wait reason into a later turn", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event(
+          "session.wait.started",
+          { actor: "agent", reason: "Waiting on an obsolete worker." },
+          { turnId: "turn-failed" },
+        ),
+        event("turn.failed", { error: "worker failed" }, { turnId: "turn-failed" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
+          { turnId: "turn-retry" },
+        ),
+        event(
+          "agent.toolCall.output",
+          { id: "call-1", output: "ok" },
+          { turnId: "turn-retry" },
+        ),
+        event("turn.completed", { output: "" }, { turnId: "turn-retry" }),
+      ]),
+    );
+
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "notice" &&
+          group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
   test("keeps a resumed continuation separate from the prior held-turn fallback", () => {
     reset();
     const groups = groupTimeline(

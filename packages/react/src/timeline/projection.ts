@@ -58,6 +58,7 @@ const WORKER_SPAWN_TOOL = "session_create";
 const WORKER_MESSAGE_TOOL = "session_send_message";
 const WORKER_FAILURE_CODE_MAX_LENGTH = 128;
 const WORKER_FAILURE_MESSAGE_MAX_UTF8_BYTES = 1_024;
+type PendingWaitOutcome = { id: string; reason: string; occurredAt: string };
 
 /**
  * Tools whose durable side-effect events already own the timeline (MemoryRow).
@@ -131,6 +132,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   const items: TimelineItem[] = [];
   const prescan = prescanTurnAnchors(events);
   const ordered = orderTimelineEvents(events, prescan);
+  const pendingWaitOutcomeByTurn = new Map<string | null, PendingWaitOutcome>();
+  const turnsWithAgentResponse = new Set<string>();
+  let hasUnscopedAgentResponse = false;
   const humanInputRequests = humanInputRequestsById(events);
   const humanInputToolCallIds = new Set(
     [...humanInputRequests.values()]
@@ -219,6 +223,32 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
   };
 
   const last = (): TimelineItem | undefined => items[items.length - 1];
+
+  const rememberAgentResponse = (turnId: string | null): void => {
+    if (turnId) {
+      turnsWithAgentResponse.add(turnId);
+    } else {
+      hasUnscopedAgentResponse = true;
+    }
+  };
+
+  const takePendingWaitOutcome = (
+    turnId: string | null,
+  ): PendingWaitOutcome | undefined => {
+    const exact = pendingWaitOutcomeByTurn.get(turnId);
+    const fallback = turnId ? pendingWaitOutcomeByTurn.get(null) : undefined;
+    pendingWaitOutcomeByTurn.delete(turnId);
+    if (turnId) pendingWaitOutcomeByTurn.delete(null);
+    return exact ?? fallback;
+  };
+
+  const settleAgentResponseTracking = (turnId: string | null): boolean => {
+    const hadResponse =
+      (turnId ? turnsWithAgentResponse.has(turnId) : false) || hasUnscopedAgentResponse;
+    if (turnId) turnsWithAgentResponse.delete(turnId);
+    hasUnscopedAgentResponse = false;
+    return hadResponse;
+  };
 
   /** A new item of a different kind ends whatever was streaming at the tail. */
   const closeStreamingTail = (): void => {
@@ -378,6 +408,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (!text) {
           break;
         }
+        if (text.trim()) {
+          rememberAgentResponse(turnId);
+        }
         const open = last();
         if (open?.kind === "agent-message" && open.streaming && open.turnId === turnId) {
           open.text += text;
@@ -398,6 +431,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "agent.message.completed": {
         const text = stringValue(payload.text);
         const phase = assistantMessagePhase(payload.phase);
+        if (text.trim()) {
+          rememberAgentResponse(turnId);
+        }
         // Reconcile the most recent same-turn agent message — even when
         // activity (tool calls, reasoning) landed after its deltas — so the
         // completed text never duplicates the streamed one.
@@ -936,6 +972,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // extra agent response.
         if (payload.maintenance === "context_compaction") {
           finalizeOpen(turnId, "complete", event.occurredAt);
+          settleAgentResponseTracking(turnId);
+          takePendingWaitOutcome(turnId);
           break;
         }
         // Credit exhaustion arrives as a NOMINALLY completed turn (`detail:
@@ -946,6 +984,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         // projects exactly like a failed turn plus an explicit notice.
         if (isCreditExhaustionPayload(payload)) {
           finalizeOpen(turnId, "complete", event.occurredAt);
+          settleAgentResponseTracking(turnId);
+          takePendingWaitOutcome(turnId);
           items.push(turnEndItem(event, "failed", CREDIT_EXHAUSTION_MESSAGE));
           items.push({
             kind: "notice",
@@ -956,12 +996,40 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           });
           break;
         }
+        const hadAgentResponse = settleAgentResponseTracking(turnId);
+        const finalOutput = stringValue(payload.output);
+        const pendingWaitOutcome = takePendingWaitOutcome(turnId);
+        if (!hadAgentResponse && finalOutput.trim()) {
+          // `agent.message.completed` and `turn.completed` normally commit
+          // together, but legacy or partially compacted ledgers may retain only
+          // the terminal output receipt. Keep that authoritative response
+          // visible instead of leaving it trapped in raw audit data.
+          items.push({
+            kind: "agent-message",
+            id: `${event.id}-output-message`,
+            turnId,
+            text: finalOutput,
+            streaming: false,
+            occurredAt: event.occurredAt,
+          });
+        }
         finalizeOpen(turnId, "complete", event.occurredAt);
         items.push(turnEndItem(event, "complete", null));
+        if (!hadAgentResponse && !finalOutput.trim() && pendingWaitOutcome) {
+          items.push({
+            kind: "notice",
+            id: `${pendingWaitOutcome.id}-visible-outcome`,
+            tone: "waiting",
+            text: waitingOutcomeText(pendingWaitOutcome.reason),
+            occurredAt: pendingWaitOutcome.occurredAt,
+          });
+        }
         break;
       }
 
       case "turn.failed": {
+        settleAgentResponseTracking(turnId);
+        takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
         // Credit death can hide behind fields `failureMessage` doesn't read
         // (detail/segmentLimit), so classify the whole payload before falling
@@ -994,6 +1062,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         if (turnId && !prescan.startedTurnIds.has(turnId)) {
           break;
         }
+        settleAgentResponseTracking(turnId);
+        takePendingWaitOutcome(turnId);
         const hadActivity = hasTurnActivity(items, turnId);
         finalizeOpen(turnId, "cancelled", event.occurredAt);
         items.push(turnEndItem(event, "cancelled", null));
@@ -1039,6 +1109,9 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
       case "goal.cleared":
       case "goal.held":
       case "goal.continuation": {
+        if (event.type === "goal.held" && payload.actor === "agent") {
+          rememberPendingWaitOutcome(pendingWaitOutcomeByTurn, event, payload, turnId);
+        }
         // Agent tool mutations already appear as tool-call rows in the activity
         // cluster. Re-emitting them as GoalRow landmarks splits "N steps" mid-turn.
         if (shouldSuppressAgentGoalLandmark(event.type, payload)) {
@@ -1054,6 +1127,13 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
               : goalText(payload),
           occurredAt: event.occurredAt,
         });
+        break;
+      }
+
+      case "session.wait.started": {
+        if (payload.actor === "agent") {
+          rememberPendingWaitOutcome(pendingWaitOutcomeByTurn, event, payload, turnId);
+        }
         break;
       }
 
@@ -2189,11 +2269,30 @@ function goalText(payload: Record<string, unknown>): string | null {
   return null;
 }
 
+function rememberPendingWaitOutcome(
+  pending: Map<string | null, PendingWaitOutcome>,
+  event: SessionEvent,
+  payload: Record<string, unknown>,
+  eventTurnId: string | null,
+): void {
+  const reason = stringValue(payload.reason).trim();
+  if (!reason) return;
+  const turnId =
+    eventTurnId || stringValue(payload.waitTurnId) || stringValue(payload.turnId) || null;
+  pending.set(turnId, { id: event.id, reason, occurredAt: event.occurredAt });
+}
+
+function waitingOutcomeText(reason: string): string {
+  return /^waiting\b/i.test(reason) ? reason : `Waiting: ${reason}`;
+}
+
 /**
  * Agent-owned goal mutations already have an in-cluster tool row. Suppress the
- * breakaway landmark for those only. `goal.completed` has no actor field today
- * and is only emitted by the agent tool, so it is always suppressed. API /
- * system / create-session / continuation landmarks stay visible.
+ * breakaway landmark for those only. Empty wait turns retain the durable hold
+ * reason and surface it after the folded steps. `goal.completed` has no actor
+ * field today and is only emitted by the agent tool, so it is always
+ * suppressed. API / system / create-session / continuation landmarks stay
+ * visible.
  */
 function shouldSuppressAgentGoalLandmark(type: string, payload: Record<string, unknown>): boolean {
   if (type === "goal.completed") {
