@@ -1603,7 +1603,7 @@ describe("embedding host session authorization routes", () => {
       } as unknown as ApiRouteDeps,
       value.grant,
     );
-    const detail = await callMcpTool<{ id: string; parentSessionId: string | null }>(
+    const detail = await callMcpTool<{ id: string; parentSessionId?: string }>(
       server,
       "session_get",
       { sessionId: value.child.id },
@@ -1620,7 +1620,7 @@ describe("embedding host session authorization routes", () => {
     ).rejects.toThrow("Session not found or access denied");
 
     const listed = await callMcpTool<{
-      sessions: Array<{ id: string; parentSessionId: string | null }>;
+      sessions: Array<{ id: string; parentSessionId?: string }>;
       total: number;
     }>(server, "sessions_list", { query: "Shared host search target" });
     expect(listed.total).toBe(1);
