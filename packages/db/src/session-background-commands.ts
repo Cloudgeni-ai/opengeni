@@ -284,7 +284,7 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
  * claim expiry is coordination recovery only and never implies command loss. */
 export async function claimConnectedMachineSessionBackgroundCommands(
   db: Database,
-  input: { claimId: string; limit: number; claimTtlMs: number },
+  input: { claimId: string; limit: number; claimTtlMs: number; dueBefore?: Date },
 ): Promise<ConnectedMachineBackgroundCommandClaim[]> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
     throw new Error("Connected command reconciliation limit must be between 1 and 100");
@@ -313,7 +313,8 @@ export async function claimConnectedMachineSessionBackgroundCommands(
       reconcile_proof_reason as "reconcileProofReason",
       reconcile_proof_observed_at as "reconcileProofObservedAt"
     from opengeni_private.claim_connected_machine_background_commands(
-      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+      ${(input.dueBefore ?? new Date()).toISOString()}::timestamptz
     )
   `);
   return rows.map((row: ConnectedMachineBackgroundCommandClaimRow) => {

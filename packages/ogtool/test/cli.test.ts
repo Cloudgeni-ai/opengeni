@@ -190,6 +190,7 @@ describe("ogtool CLI", () => {
           ["list", "--full"],
           ["show", "docs.tool0"],
           ["list", "--json", "--limit=100", "--offset=7"],
+          ["list", "--json", "--query=docs", "--offset=7"],
           ["list", "--query=Needle 界", "--limit=2", "--offset=1"],
           ["list", "--json", "--query=needle"],
           ["list", "--json", "--offset=999"],
@@ -203,9 +204,11 @@ describe("ogtool CLI", () => {
           if (args.includes("--json") || args.includes("--full") || args[0] === "show") {
             expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
           } else expect(rust.stdout).toBe(js.stdout);
-          if (args[0] === "list" && !args.includes("--full")) {
-            expect(Buffer.byteLength(rust.stdout, "utf8")).toBeLessThanOrEqual(16_384);
-            expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+          if (args.join(" ") === "list" || args.join(" ") === "list --json") {
+            expect(Buffer.byteLength(js.stdout, "utf8")).toBeGreaterThan(16_384);
+            for (const entry of mock.catalog.entries) {
+              expect(js.stdout).toContain(entry.codemodePath.join("."));
+            }
           }
         }
         const controls = String.fromCharCode(
@@ -238,7 +241,7 @@ describe("ogtool CLI", () => {
               expect(rust.stdout).toBe(js.stdout);
               expect(js.stdout).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
               expect(js.stdout).toContain("Search\\u001b]52;c;VEVTVA==\\u0007");
-              expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+              expect(Buffer.byteLength(js.stdout, "utf8")).toBeGreaterThan(16_384);
             }
           }
         }
@@ -432,7 +435,7 @@ describe("ogtool CLI", () => {
     }
   }, 30_000);
 
-  test("actual compact stdout stays within 16 KiB for 4096 tools with maximum paths", async () => {
+  test("actual compact stdout retains all 4096 maximum paths beyond 16 KiB", async () => {
     const mock = codemodeServer();
     const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
     try {
@@ -445,24 +448,35 @@ describe("ogtool CLI", () => {
         description: "😀".repeat(160),
       }));
       for (const flags of [[], ["--json"]]) {
-        const first = await run(["list", ...flags, "--limit", "100"], environment);
+        const first = await run(["list", ...flags], environment);
         expect(first.exitCode).toBe(0);
-        expect(Buffer.byteLength(first.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+        expect(Buffer.byteLength(first.stdout, "utf8")).toBeGreaterThan(16_384);
         expect(first.stdout).toContain(mock.catalog.entries[0]!.codemodePath.join("."));
         if (flags.length) {
           const page = JSON.parse(first.stdout);
           expect(page.total).toBe(4096);
           expect(page.catalogDigest).toBe(mock.catalog.digest);
-          expect(page.nextOffset).toBe(page.tools.length);
-          expect(page.tools.length).toBeLessThan(100);
-          const next = JSON.parse(
-            (await run(["list", "--json", "--offset", String(page.nextOffset)], environment))
-              .stdout,
+          expect(page.nextOffset).toBeNull();
+          expect(page.tools.map((tool: { path: string }) => tool.path)).toEqual(
+            mock.catalog.entries.map((entry) => entry.codemodePath.join(".")),
           );
-          expect(next.tools[0].path).toBe(
-            mock.catalog.entries[page.nextOffset]!.codemodePath.join("."),
-          );
-        } else expect(first.stdout).toContain("# Continue with --offset");
+        } else {
+          expect(
+            first.stdout
+              .split("\n")
+              .filter((line) => line && !line.startsWith("#"))
+              .map((line) => line.split(" — ")[0]),
+          ).toEqual(mock.catalog.entries.map((entry) => entry.codemodePath.join(".")));
+        }
+        if (process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT) {
+          const native = await run(["list", ...flags], environment, [
+            process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT,
+            "codemode",
+          ]);
+          expect(native.exitCode).toBe(0);
+          if (flags.length) expect(JSON.parse(native.stdout)).toEqual(JSON.parse(first.stdout));
+          else expect(native.stdout).toBe(first.stdout);
+        }
       }
       const query = await run(
         ["list", "--json", "--query=t42", "--limit=1", "--offset=1"],

@@ -65,6 +65,7 @@ import {
   credentialSubjectIdForTurnInitiator,
   xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
+  classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
@@ -5276,6 +5277,42 @@ describe("transient provider error classifier", () => {
     expect(JSON.stringify(payload)).not.toContain(syntheticValue);
     expect(JSON.stringify(payload)).not.toContain(source.query);
     expect((error as SessionEventPersistenceError).cause).toBe(source);
+  });
+
+  test("safety refusals outrank transient status and do not rotate credentials", () => {
+    const message =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    for (const status of [403, 429, 500, 502, 503]) {
+      const error = Object.assign(new Error(message), {
+        status,
+        headers: new Headers({ "x-opengeni-codex-transport-error": "1" }),
+      });
+      expect(isTransientProviderError(error)).toBe(false);
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(
+        classifyXaiCredentialFailure(
+          Object.assign(new Error(message), {
+            status,
+            headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
+          }),
+        ),
+      ).toBeNull();
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_safety_refusal",
+        retryable: false,
+        detail: message,
+      });
+    }
+    const wrapped = Object.assign(new Error("Service unavailable"), {
+      status: 503,
+      cause: { error: { code: "content_policy_violation" } },
+    });
+    expect(isTransientProviderError(wrapped)).toBe(false);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: "content_policy_violation",
+    });
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {

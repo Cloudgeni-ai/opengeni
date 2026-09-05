@@ -37,6 +37,11 @@ span multiple batches. Model input reads those batches from canonical history
 in position order, never reconstructs them from update rows, and never requires
 one shared history-item id across the whole turn.
 
+Provider safety refusals terminate the turn with `provider_safety_refusal` and
+the original diagnostic. They are neither temporary provider unavailability
+nor credential failures, even when carried by a 5xx response. Same-turn recovery
+and account rotation must not replay them.
+
 Session display titles are durable session metadata, not a truncation of model
 history. Creation and migration use `New conversation` only as the durable
 marker that semantic naming is still pending. Human-facing clients render a

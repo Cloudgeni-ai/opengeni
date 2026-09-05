@@ -35,8 +35,9 @@ function catalog(count: number, extreme = false) {
   return parseVerifiedAttemptToolCatalog(base);
 }
 
-describe("compact catalog pages", () => {
-  test("default50/max100 and full4096 page walks preserve every complete path", () => {
+describe("compact catalogs", () => {
+  test("default output preserves all 4096 complete paths without a byte cap", () => {
+    expect(parseListOptions([]).limit).toBeUndefined();
     for (const extreme of [false, true]) {
       const frozen = catalog(4096, extreme);
       for (const json of [false, true]) {
@@ -45,7 +46,7 @@ describe("compact catalog pages", () => {
         for (;;) {
           const options = { ...parseListOptions([]), json, offset };
           const output = compactOutput(frozen, options);
-          expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(16_384);
+          expect(Buffer.byteLength(output, "utf8")).toBeGreaterThan(16_384);
           let paths: string[];
           let nextOffset: number | null;
           if (json) {
@@ -74,8 +75,7 @@ describe("compact catalog pages", () => {
               expect(output).toContain(`# Continue with --offset ${nextOffset}`);
           }
           expect(paths.length).toBeGreaterThan(0);
-          expect(paths.length).toBeLessThanOrEqual(50);
-          if (!extreme && offset === 0) expect(paths).toHaveLength(50);
+          expect(paths).toHaveLength(4096);
           seen.push(...paths);
           if (nextOffset === null) break;
           expect(nextOffset).toBe(offset + paths.length);
@@ -89,6 +89,13 @@ describe("compact catalog pages", () => {
     );
     expect(maximum.tools).toHaveLength(100);
     expect(maximum.nextOffset).toBe(100);
+    const remaining = JSON.parse(
+      compactOutput(catalog(200), parseListOptions(["--json", "--query=docs", "--offset=7"])),
+    );
+    expect(remaining.tools).toHaveLength(193);
+    expect(remaining.tools[0].path).toBe("docs.tool7");
+    expect(remaining.tools[192].path).toBe("docs.tool199");
+    expect(remaining.nextOffset).toBeNull();
   }, 60_000);
 
   test("text escapes terminal controls without altering JSON, filtering, or catalog content", () => {
@@ -127,18 +134,18 @@ describe("compact catalog pages", () => {
     }
   });
 
-  test("text page byte budget includes terminal escape expansion and continuation", () => {
+  test("terminal escape expansion does not drop tools", () => {
     const frozen = catalog(100);
     for (const entry of frozen.entries) entry.description = "\u001b".repeat(160);
     const output = compactOutput(frozen, parseListOptions(["--limit=100"]));
-    expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(16_384);
+    expect(Buffer.byteLength(output, "utf8")).toBeGreaterThan(16_384);
     expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
     const count = output.split("\n").filter((line) => line.startsWith("docs.")).length;
     expect(count).toBeGreaterThan(0);
-    expect(count).toBeLessThan(100);
-    expect(output).toContain(`nextOffset: ${count}\n`);
+    expect(count).toBe(100);
+    expect(output).toContain("nextOffset: none\n");
     const next = compactOutput(frozen, parseListOptions([`--offset=${count}`]));
-    expect(next.startsWith(`docs.tool${count} — `)).toBe(true);
+    expect(next).not.toContain("docs.tool");
     expect(output).toContain("\\u001b".repeat(160));
   });
 
@@ -216,12 +223,12 @@ describe("compact catalog pages", () => {
     expect(parseListOptions(["--full"]).full).toBe(true);
   });
 
-  test("an impossible oversized callable path fails rather than truncating or looping", () => {
+  test("the renderer never truncates a path to an aggregate output budget", () => {
     const frozen = catalog(1);
     frozen.entries[0]!.codemodePath = ["x".repeat(20_000), "tool"];
     for (const flags of [[], ["--json"]]) {
-      expect(() => compactOutput(frozen, parseListOptions(flags))).toThrow(
-        "16384-byte compact page limit",
+      expect(compactOutput(frozen, parseListOptions(flags))).toContain(
+        "x".repeat(20_000) + ".tool",
       );
     }
   });

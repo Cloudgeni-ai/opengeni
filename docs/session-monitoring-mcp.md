@@ -83,8 +83,11 @@ optional fields are:
   proved quiescence. Counts are visible queued human/API turns and pending
   machine inputs, never their prompts or payloads.
 
-The goal/progress database read selects bounded text prefixes and original
-Unicode character counts, not whole goal metadata or event payloads. Compact
+The goal/progress database read selects bounded text prefixes, not whole goal
+metadata or event payloads. Progress scalars are decoded with their stored codec
+version before presentation. Original Unicode character counts are exact when
+known; a cut encoded scalar retains a canonical prefix and an explicit
+`textTruncated` flag without inventing an omitted-character count. Compact
 mode does not assemble `effectiveToolPolicy`. Title, goal, evidence, progress,
 pause, and wait text are independently bounded with explicit loss flags; the
 final result is capped at 64 KiB. It fails rather than silently dropping a goal
@@ -96,9 +99,16 @@ tools, `effectiveToolPolicy`, Variable Set ids, and projection byte/loss facts.
 It is configuration inspection, not the compact goal/progress response with
 extra fields. Variable values are never returned.
 
-A goal's `completed` status is not a terminal child result. Use `lastSequence`
-with `session_wait` and `waitFor: "completion"` to join a child's completed
-result. Use `session_events` for more progress or exact retained evidence.
+A goal's `completed` status is not a terminal child result. Join with
+`session_wait` and `waitFor: "completion"` using the last **consumed event cursor**
+(0 when none has been consumed). Do not advance that cursor to a fresh
+`session_get.lastSequence`: this snapshot watermark can already include an
+unread completion, and the wait reads strictly after its cursor. For an
+already-settled child, retrieve its result-bearing completion with
+`session_events` (filter `includeTypes: ["turn.completed"]` and inspect the
+result-bearing output, not maintenance/segment settlements) or join from the
+last consumed cursor. Use `session_events` for more progress or
+exact retained evidence.
 Do not use `session_get` on your own current session to reconstruct conversation
 context.
 

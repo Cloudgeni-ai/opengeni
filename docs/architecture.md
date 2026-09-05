@@ -179,7 +179,13 @@ A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
 adoption, ordinary turn completion and Steer detach from it, while explicit
 command cancellation, Pause, or terminal Cancel control its lifetime.
-Exact terminal proof settles the command row and appends its terminal session
+An explicitly stopped, revoked, or replaced Connected Machine instance ends
+command tracking as `lost`; this never asserts operating-system process death.
+A temporary transport outage alone preserves tracking. Reconciliation drains
+a fixed due-time frontier in batches, sharing offline observations per instance.
+The historical retirement migration preserves command records without creating
+model input or waking old sessions.
+Exact terminal proof (including confirmed tracking retirement) settles the command row and appends its terminal session
 event in one PostgreSQL transaction. A nonterminal session also receives one
 typed model input and any idle workflow wake in that commit; a failed or
 cancelled session remains terminal and keeps event-only audit rather than
@@ -379,8 +385,10 @@ snapshot it, or provider-terminate the user's computer.
 
 The structured Files boundary advertises the selected machine's effective
 host-native working directory as `FileSystem.root`. Canonical file links and
-tree nodes stay in that namespace, while provider commands use contained paths
-relative to the same root. Files requests carry the capability epoch plus root;
+tree nodes stay in that namespace. Connected Machine file reads also accept
+absolute paths outside the working directory, subject to the machine account’s
+OS permissions; the working directory is a browsing default, not a read boundary.
+Managed provider reads and structured mutations retain workspace confinement. Files requests carry the capability epoch plus root;
 the API binds one active route for the request and returns a retryable conflict
 if the selected target or root changes instead of reinterpreting the path on a
 different filesystem.

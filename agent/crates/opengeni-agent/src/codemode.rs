@@ -423,10 +423,10 @@ impl Catalog {
             })
             .collect();
         let offset = args.offset.unwrap_or(0);
-        let mut tools: Vec<_> = matches
+        let tools: Vec<_> = matches
             .iter()
             .skip(offset)
-            .take(args.limit.unwrap_or(50))
+            .take(args.limit.unwrap_or(usize::MAX))
             .map(|entry| {
                 json!({
                     "path": entry.codemode_path.join("."),
@@ -451,46 +451,35 @@ impl Catalog {
                 })
                 .collect()
         };
-        loop {
-            let next_offset =
-                (offset + tools.len() < matches.len()).then_some(offset + tools.len());
-            let output = if args.json {
-                format!(
-                    "{}\n",
-                    serde_json::to_string(&json!({
-                        "catalogDigest": self.digest,
-                        "total": matches.len(),
-                        "offset": offset,
-                        "nextOffset": next_offset,
-                        "tools": tools,
-                    }))?
-                )
-            } else {
-                let mut output = text_lines[..tools.len()].concat();
+        let next_offset = (offset + tools.len() < matches.len()).then_some(offset + tools.len());
+        let output = if args.json {
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "catalogDigest": self.digest,
+                    "total": matches.len(),
+                    "offset": offset,
+                    "nextOffset": next_offset,
+                    "tools": tools,
+                }))?
+            )
+        } else {
+            let mut output = text_lines.concat();
+            let _ = writeln!(
+                output,
+                "# total: {}; offset: {offset}; nextOffset: {}",
+                matches.len(),
+                next_offset.map_or_else(|| "none".to_string(), |value| value.to_string())
+            );
+            if let Some(next) = next_offset {
                 let _ = writeln!(
                     output,
-                    "# total: {}; offset: {offset}; nextOffset: {}",
-                    matches.len(),
-                    next_offset.map_or_else(|| "none".to_string(), |value| value.to_string())
+                    "# Continue with --offset {next} (keep the same --query and --limit)."
                 );
-                if let Some(next) = next_offset {
-                    let _ = writeln!(
-                        output,
-                        "# Continue with --offset {next} (keep the same --query and --limit)."
-                    );
-                }
-                output
-            };
-            if output.len() <= 16 * 1024 {
-                return Ok(output);
             }
-            if tools.len() <= 1 {
-                return Err(CodemodeError::InvalidArguments(
-                    "One tool exceeds the 16384-byte compact page limit; use list --full redirected to a file".to_string(),
-                ));
-            }
-            tools.pop();
-        }
+            output
+        };
+        Ok(output)
     }
 
     fn show_output(&self, name: &str) -> Result<String, CodemodeError> {
@@ -852,7 +841,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_escape_expansion_is_included_in_page_byte_budget() {
+    fn terminal_escape_expansion_does_not_drop_tools() {
         let frozen = catalog(
             (0..100)
                 .map(|index| {
@@ -869,14 +858,14 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(output.len() <= 16_384);
+        assert!(output.len() > 16_384);
         assert!(!output.contains('\u{1b}'));
         let count = output
             .lines()
             .filter(|line| line.starts_with("docs."))
             .count();
-        assert!(count > 0 && count < 100);
-        assert!(output.contains(&format!("nextOffset: {count}\n")));
+        assert_eq!(count, 100);
+        assert!(output.contains("nextOffset: none\n"));
         assert!(output.contains(&"\\u001b".repeat(160)));
         let next = frozen
             .compact_output(&CodemodeListArgs {
@@ -884,11 +873,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(next.starts_with(&format!("docs.tool{count} — ")));
+        assert!(!next.contains("docs.tool"));
     }
 
     #[test]
-    fn compact_pages_walk_all_4096_tools_with_maximum_paths_without_skips() {
+    fn compact_output_lists_all_4096_tools_with_maximum_paths_without_skips() {
         for extreme in [false, true] {
             let tools = (0..4096)
                 .map(|index| {
@@ -920,7 +909,7 @@ mod tests {
                             ..Default::default()
                         })
                         .unwrap();
-                    assert!(output.len() <= 16_384);
+                    assert!(output.len() > 16_384);
                     let (paths, next): (Vec<String>, Option<usize>) = if json {
                         let page: Value = serde_json::from_str(&output).unwrap();
                         assert_eq!(page["total"], 4096);
@@ -959,10 +948,7 @@ mod tests {
                         }
                         (paths, next)
                     };
-                    assert!(!paths.is_empty() && paths.len() <= 50);
-                    if !extreme && offset == 0 {
-                        assert_eq!(paths.len(), 50);
-                    }
+                    assert_eq!(paths.len(), 4096);
                     let count = paths.len();
                     seen.extend(paths);
                     match next {
@@ -1061,9 +1047,8 @@ mod tests {
                     json,
                     ..Default::default()
                 })
-                .unwrap_err()
-                .to_string()
-                .contains("16384-byte compact page limit"));
+                .unwrap()
+                .contains(&format!("{}.tool", "x".repeat(20_000))));
         }
     }
 

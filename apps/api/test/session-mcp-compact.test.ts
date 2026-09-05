@@ -314,6 +314,30 @@ describe("compact-by-default MCP allowlists and byte regressions", () => {
     expect(result).not.toHaveProperty("projection");
   });
 
+  test("detail preserves encoded-prefix loss without inventing an original character count", () => {
+    const session = { ...page().sessions[0]!, lastSequence: 7 } as unknown as Session;
+    const result = boundSessionCompactDetailMcp(
+      session,
+      {
+        ...noFacts,
+        progress: {
+          sequence: 7,
+          text: "🙂".repeat(600),
+          originalChars: null,
+          textTruncated: true,
+          occurredAt: at,
+        },
+      },
+      null,
+    );
+    expect(result.progress).toEqual({
+      sequence: 7,
+      text: "🙂".repeat(600),
+      textTruncated: true,
+      occurredAt: at,
+    });
+  });
+
   test("detail preserves completion evidence, pause rationale, stopping, wait and progress; never silently drops them", () => {
     const session = {
       ...page().sessions[0]!,

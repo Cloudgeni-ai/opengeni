@@ -4200,6 +4200,8 @@ describe("runtime event normalization", () => {
   } as const;
 
   test("codemode guidance separates compact discovery from explicit schema inspection", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("enumerates every authorized tool");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("without schemas or an output-size cutoff");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool list");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
     expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
