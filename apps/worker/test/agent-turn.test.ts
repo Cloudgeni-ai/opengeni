@@ -5311,6 +5311,7 @@ describe("transient provider error classifier", () => {
     expect(agentRunFailurePayload(wrapped)).toMatchObject({
       code: "provider_safety_refusal",
       retryable: false,
+      detail: "content_policy_violation",
     });
   });
 

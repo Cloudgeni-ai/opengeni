@@ -725,13 +725,17 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
   return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
 }
 
-function isProviderSafetyRefusal(error: unknown): boolean {
-  return collectErrorStrings(error).some(
+function providerSafetyRefusalDiagnostic(error: unknown): string | undefined {
+  return collectErrorStrings(error).find(
     (value) =>
       /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
         value,
       ) || /\bthis request was blocked by our safety systems\b/i.test(value),
   );
+}
+
+function isProviderSafetyRefusal(error: unknown): boolean {
+  return providerSafetyRefusalDiagnostic(error) !== undefined;
 }
 
 export function isTransientProviderError(error: unknown): boolean {
@@ -862,7 +866,7 @@ export function agentRunFailurePayload(
         "The model provider blocked this request through its safety systems. Automatic retries stopped.",
       code: "provider_safety_refusal",
       retryable: false,
-      detail: error instanceof Error ? error.message : collectErrorStrings(error).join(": "),
+      detail: providerSafetyRefusalDiagnostic(error),
     };
   }
   const message = error instanceof Error ? error.message : String(error);
