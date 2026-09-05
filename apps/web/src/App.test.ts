@@ -1588,6 +1588,7 @@ describe("summarizeSessionFailure", () => {
       failedAt: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+      safetyRefusal: false,
     });
   });
 });
