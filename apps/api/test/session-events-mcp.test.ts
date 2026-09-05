@@ -359,17 +359,35 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
       ]),
     );
 
-    const listed = await callMcpTool<{
+    type DiscoveryPage = {
       sessions: Array<{
         id: string;
         queuedPromptCount: number;
-        latestMessage: { type: string; preview: string | null } | null;
+        latestMessage?: { type: string; preview: string | null } | null;
       }>;
-    }>("sessions_list", { includeLastMessage: true, limit: 100 });
-    expect(listed.sessions.find((session) => session.id === queued.id)).toMatchObject({
+    };
+    const listed = await callMcpTool<DiscoveryPage>("sessions_list", {
+      includeLastMessage: true,
+      limit: 100,
+    });
+    const compactQueued = listed.sessions.find((session) => session.id === queued.id);
+    expect(compactQueued).toMatchObject({ id: queued.id, queuedPromptCount: 1 });
+    expect(compactQueued).not.toHaveProperty("latestMessage");
+    expect(JSON.stringify(listed)).not.toContain(queuedText);
+
+    // Full is the legacy bounded projection, not permission to preview an
+    // unclaimed prompt. Only the absent-versus-null presentation differs.
+    const full = await callMcpTool<DiscoveryPage>("sessions_list", {
+      detail: "full",
+      includeLastMessage: true,
+      limit: 100,
+    });
+    expect(full.sessions.find((session) => session.id === queued.id)).toMatchObject({
+      id: queued.id,
       queuedPromptCount: 1,
       latestMessage: null,
     });
+    expect(JSON.stringify(full)).not.toContain(queuedText);
   });
 
   test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {

@@ -78,6 +78,37 @@ const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 
 const keys = (value: object) => Object.keys(value).sort();
 
 describe("compact-by-default MCP allowlists and byte regressions", () => {
+  test("a queued prompt without a claimable preview stays absent in compact and null in full", () => {
+    const source = page();
+    const queued = source.sessions[0]!;
+    queued.queuedPromptCount = 1;
+    queued.latestMessage = null;
+    const compact = capSessionDiscoveryCompactPage(source, { includeLastMessage: true });
+    expect(compact.sessions[0]).toMatchObject({ id: queued.id, queuedPromptCount: 1 });
+    expect(compact.sessions[0]).not.toHaveProperty("latestMessage");
+    const full = capSessionDiscoveryPage(source, true);
+    expect(full.sessions[0]).toMatchObject({
+      id: queued.id,
+      queuedPromptCount: 1,
+      latestMessage: null,
+    });
+
+    // Once the DB supplies an eligible preview, neither presentation drops it.
+    queued.latestMessage = {
+      type: "user.message",
+      preview: "claimed prompt",
+      previewOriginalChars: 14,
+    };
+    expect(
+      capSessionDiscoveryCompactPage(source, { includeLastMessage: true }).sessions[0],
+    ).toHaveProperty("latestMessage", { type: "user.message", preview: "claimed prompt" });
+    expect(capSessionDiscoveryPage(source, true).sessions[0]!.latestMessage).toEqual({
+      type: "user.message",
+      preview: "claimed prompt",
+      previewTruncated: false,
+    });
+  });
+
   test("ordinary list pages contain only actionable fields, at 1/20/100 rows", () => {
     const expectedBytes = new Map([
       [1, 221],
