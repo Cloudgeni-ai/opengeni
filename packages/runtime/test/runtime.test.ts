@@ -4199,6 +4199,15 @@ describe("runtime event normalization", () => {
     sandboxBackend: "none",
   } as const;
 
+  test("codemode guidance separates compact discovery from explicit schema inspection", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool list");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("ogtool show <tool-path>");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --json");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("list --full");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same list, show, and call commands");
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("same public Codemode operation journal");
+  });
+
   test("the codemode directive is present exactly when an attempt token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(codemodeOn), [], {
       codemodeTokenSeed: "ogd_seed",
@@ -5513,7 +5522,12 @@ describe("runtime event normalization", () => {
         exec: async (args: { cmd: string }) => {
           const proc = Bun.spawn(["sh", "-lc", args.cmd], {
             cwd: home,
-            env: { ...process.env, HOME: home },
+            env: {
+              ...process.env,
+              HOME: home,
+              // Never let the fixture refresh the invoking agent's credential.
+              OPENGENI_CODEMODE_TOKEN_FILE: undefined,
+            },
             stdout: "pipe",
             stderr: "pipe",
           });

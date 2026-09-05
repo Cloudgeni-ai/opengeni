@@ -245,13 +245,63 @@ pub struct CodemodeArgs {
 /// Native Codemode client operations.
 #[derive(Debug, Subcommand)]
 pub enum CodemodeAction {
-    /// List the exact frozen tool catalog for this execution attempt.
-    List,
+    /// List callable paths and short descriptions from the frozen catalog.
+    List(CodemodeListArgs),
+    /// Show one tool's details and schemas (at most 64 KiB).
+    Show(CodemodeShowArgs),
     /// Call one tool by generated path, model name, or `server.tool` identity.
     Call(CodemodeCallArgs),
     /// Report whether the attempt-scoped client environment is usable. Secret
     /// values are never printed.
     Doctor,
+}
+
+/// Output selection for `codemode list`.
+#[derive(Debug, Default, clap::Args)]
+pub struct CodemodeListArgs {
+    /// Retain the complete legacy catalog JSON output.
+    #[arg(long, conflicts_with_all = ["json", "query", "limit", "offset"])]
+    pub full: bool,
+    /// Emit compact machine-readable paths and descriptions.
+    #[arg(long)]
+    pub json: bool,
+    /// Literal case-sensitive substring in the path or full normalized description.
+    #[arg(long)]
+    pub query: Option<String>,
+    /// Maximum tools per compact page (default 50; range 1..100).
+    #[arg(long, value_parser = parse_list_limit)]
+    pub limit: Option<usize>,
+    /// Nonnegative offset in the filtered frozen catalog (default 0).
+    #[arg(long, value_parser = parse_list_offset)]
+    pub offset: Option<usize>,
+}
+
+fn parse_list_offset(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected a nonnegative safe integer".to_string());
+    }
+    let number: u64 = value
+        .parse()
+        .map_err(|_| "expected a nonnegative safe integer")?;
+    if number > 9_007_199_254_740_991 {
+        return Err("expected a nonnegative safe integer".to_string());
+    }
+    usize::try_from(number).map_err(|_| "offset is too large for this platform".to_string())
+}
+
+fn parse_list_limit(value: &str) -> Result<usize, String> {
+    let number = parse_list_offset(value)?;
+    if !(1..=100).contains(&number) {
+        return Err("limit must be between 1 and 100".to_string());
+    }
+    Ok(number)
+}
+
+/// Arguments for `codemode show`.
+#[derive(Debug, clap::Args)]
+pub struct CodemodeShowArgs {
+    /// Generated path, model name, or `server.tool` identity.
+    pub tool: String,
 }
 
 /// Arguments for `codemode call`.
@@ -460,12 +510,102 @@ mod tests {
     }
 
     #[test]
+    fn codemode_discovery_flags_and_errors() {
+        for flag in ["--full", "--json"] {
+            let cli = Cli::try_parse_from(["opengeni-agent", "codemode", "list", flag]).unwrap();
+            match cli.command {
+                Some(Command::Codemode(CodemodeArgs {
+                    action: CodemodeAction::List(args),
+                })) => {
+                    assert_eq!(args.full, flag == "--full");
+                    assert_eq!(args.json, flag == "--json");
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        }
+        let cli =
+            Cli::try_parse_from(["opengeni-agent", "codemode", "show", "docs.search"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Codemode(CodemodeArgs {
+            action: CodemodeAction::Show(CodemodeShowArgs { tool })
+        })) if tool == "docs.search"));
+        for args in [
+            vec!["list", "--full", "--json"],
+            vec!["list", "--json", "--full"],
+            vec!["list", "--full", "--full"],
+            vec!["list", "--json", "--json"],
+            vec!["list", "--unknown"],
+            vec!["list", "extra"],
+            vec!["show"],
+            vec!["show", "docs.search", "extra"],
+            vec!["show", "--full"],
+            vec!["show", "docs.search", "--json"],
+            vec!["list", "--limit", "0"],
+            vec!["list", "--limit", "101"],
+            vec!["list", "--limit", "1.5"],
+            vec!["list", "--limit", ""],
+            vec!["list", "--offset", "-1"],
+            vec!["list", "--offset", "1e2"],
+            vec!["list", "--offset", "0x10"],
+            vec!["list", "--offset", "+1"],
+            vec!["list", "--offset", "9007199254740992"],
+            vec!["list", "--offset", " 1"],
+            vec!["list", "--limit", "９"],
+            vec!["list", "--query"],
+            vec!["list", "--offset"],
+            vec!["list", "--limit"],
+            vec!["list", "--query", "--json"],
+            vec!["list", "--full", "--limit", "50"],
+            vec!["list", "--full", "--offset=0"],
+            vec!["list", "--full", "--query="],
+            vec!["list", "--json=true"],
+            vec!["list", "--limit=2", "--limit", "3"],
+            vec!["list", "--offset=0", "--offset=1"],
+            vec!["list", "--query=a", "--query=b"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["opengeni-agent", "codemode"].into_iter().chain(args))
+                    .is_err()
+            );
+        }
+        for command in ["list", "show"] {
+            let error =
+                Cli::try_parse_from(["opengeni-agent", "codemode", command, "--help"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+        let cli = Cli::try_parse_from([
+            "opengeni-agent",
+            "codemode",
+            "list",
+            "--query=--flag",
+            "--limit=01",
+            "--offset=0",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::List(args),
+            })) => {
+                assert_eq!(args.query.as_deref(), Some("--flag"));
+                assert_eq!(args.limit, Some(1));
+                assert_eq!(args.offset, Some(0));
+            }
+            other => panic!("expected list, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn codemode_commands_parse() {
         let list = Cli::parse_from(["opengeni-agent", "codemode", "list"]);
         assert!(matches!(
             list.command,
             Some(Command::Codemode(CodemodeArgs {
-                action: CodemodeAction::List
+                action: CodemodeAction::List(CodemodeListArgs {
+                    full: false,
+                    json: false,
+                    query: None,
+                    limit: None,
+                    offset: None
+                })
             }))
         ));
 

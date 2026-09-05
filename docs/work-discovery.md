@@ -138,6 +138,12 @@ trigram similarity, semantic embeddings, or provider-specific alias expansion.
 
 ## Discovery filters and cursors
 
+MCP and agent-topology default **projections** differ: MCP now defaults to compact actionable
+rows without claim reads on plain browse. `includeRelatedWork: true` opts into
+evidence; query/subject automatically includes it, and `detail: "full"` restores
+the legacy bounded MCP projection. Agent-topology REST/SDK/UI shapes and defaults
+are unchanged. See [compact session monitoring](session-monitoring-mcp.md).
+
 The first-party `sessions_list` tool and the agent-topology HTTP/SDK surface
 support the same core filters:
 

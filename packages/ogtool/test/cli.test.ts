@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAttemptToolEnvironment } from "@opengeni/codemode";
+import { createAttemptToolEnvironment, digestAttemptToolCatalog } from "@opengeni/codemode";
 
 const cliSource = join(import.meta.dir, "..", "src", "cli.ts");
 const packageVersion = (
@@ -17,8 +17,9 @@ afterEach(async () => {
 async function run(
   args: string[],
   environment: Record<string, string | undefined> = {},
+  command: string[] = [process.execPath, cliSource],
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-  const child = Bun.spawn([process.execPath, cliSource, ...args], {
+  const child = Bun.spawn([...command, ...args], {
     env: {
       ...process.env,
       OPENGENI_CODEMODE_URL: undefined,
@@ -124,7 +125,11 @@ function codemodeServer(
           { status: options.failStatus },
         );
       }
-      if (url.pathname.endsWith("/catalog")) return Response.json(catalog);
+      if (url.pathname.endsWith("/catalog")) {
+        const { digest: _digest, ...unsigned } = catalog;
+        catalog.digest = digestAttemptToolCatalog(unsigned);
+        return Response.json(catalog);
+      }
       if (request.method === "POST" && url.pathname.endsWith("/calls")) {
         const payload = (await request.json()) as {
           operationId: string;
@@ -164,6 +169,86 @@ function codemodeServer(
 }
 
 describe("ogtool CLI", () => {
+  test.skipIf(!process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT)(
+    "built native discovery matches actual ogtool stdout and JSON",
+    async () => {
+      const mock = codemodeServer();
+      const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+      const native = [process.env.OPENGENI_OGTOOL_TEST_NATIVE_CLIENT!, "codemode"];
+      try {
+        const template = mock.catalog.entries[0]!;
+        mock.catalog.entries = Array.from({ length: 101 }, (_, index) => ({
+          ...template,
+          identity: { serverId: "docs", toolName: `tool${index}` },
+          modelName: `tool${index}`,
+          codemodePath: ["docs", `tool${index}`],
+          description: `${"😀".repeat(160)} Needle 界`,
+        }));
+        for (const args of [
+          ["list"],
+          ["list", "--json"],
+          ["list", "--full"],
+          ["show", "docs.tool0"],
+          ["list", "--json", "--limit=100", "--offset=7"],
+          ["list", "--query=Needle 界", "--limit=2", "--offset=1"],
+          ["list", "--json", "--query=needle"],
+          ["list", "--json", "--offset=999"],
+        ]) {
+          const [js, rust] = await Promise.all([
+            run(args, environment),
+            run(args, environment, native),
+          ]);
+          expect(js.exitCode).toBe(0);
+          expect(rust.exitCode).toBe(0);
+          if (args.includes("--json") || args.includes("--full") || args[0] === "show") {
+            expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
+          } else expect(rust.stdout).toBe(js.stdout);
+          if (args[0] === "list" && !args.includes("--full")) {
+            expect(Buffer.byteLength(rust.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+            expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+          }
+        }
+        const controls = String.fromCharCode(
+          ...Array.from({ length: 32 }, (_, index) => index),
+          ...Array.from({ length: 33 }, (_, index) => 127 + index),
+        );
+        const payload = `Search\u001b]52;c;VEVTVA==\u0007 CSI\u001b[2J Back\u0008${controls}`;
+        for (const field of ["description", "title"] as const) {
+          for (const entry of mock.catalog.entries) {
+            delete entry.description;
+            delete entry.title;
+            entry[field] = payload;
+          }
+          for (const args of [
+            ["list"],
+            ["list", "--json"],
+            ["list", "--full"],
+            ["show", "docs.tool0"],
+            ["list", "--query", "\u001b]52"],
+          ]) {
+            const [js, rust] = await Promise.all([
+              run(args, environment),
+              run(args, environment, native),
+            ]);
+            expect(js.exitCode).toBe(0);
+            expect(rust.exitCode).toBe(0);
+            if (args.includes("--json") || args.includes("--full") || args[0] === "show") {
+              expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
+            } else {
+              expect(rust.stdout).toBe(js.stdout);
+              expect(js.stdout).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
+              expect(js.stdout).toContain("Search\\u001b]52;c;VEVTVA==\\u0007");
+              expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+            }
+          }
+        }
+      } finally {
+        mock.server.stop(true);
+      }
+    },
+    30_000,
+  );
+
   test("reports its package version without requiring Codemode", async () => {
     const result = await run(["--version"]);
     expect(result.exitCode).toBe(0);
@@ -220,7 +305,7 @@ describe("ogtool CLI", () => {
     const token = await tokenFile();
     const mock = codemodeServer();
     try {
-      const result = await run(["list"], {
+      const result = await run(["list", "--full"], {
         OPENGENI_CODEMODE_URL: mock.url,
         OPENGENI_CODEMODE_TOKEN_FILE: token.path,
       });
@@ -235,6 +320,206 @@ describe("ogtool CLI", () => {
       expect(mock.requests.every((request) => request.authorization === "Bearer test-bearer")).toBe(
         true,
       );
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test("compact discovery and show disclose only the requested detail", async () => {
+    const mock = codemodeServer();
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const text = await run(["list"], environment);
+      expect(text).toEqual({
+        exitCode: 0,
+        stdout: "docs.search — Search docs\n# total: 1; offset: 0; nextOffset: none\n",
+        stderr: "",
+      });
+      const compact = await run(["list", "--json"], environment);
+      expect(compact.exitCode).toBe(0);
+      expect(JSON.parse(compact.stdout)).toEqual({
+        catalogDigest: mock.catalog.digest,
+        total: 1,
+        offset: 0,
+        nextOffset: null,
+        tools: [{ path: "docs.search", description: "Search docs" }],
+      });
+      for (const name of ["docs.search", "docs__search"]) {
+        const shown = await run(["show", name], environment);
+        expect(shown.exitCode).toBe(0);
+        expect(JSON.parse(shown.stdout)).toEqual(
+          JSON.parse((await run(["list", "--full"], environment)).stdout).tools[0],
+        );
+      }
+      expect(mock.requests.every(({ method }) => method === "GET")).toBe(true);
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test("description bounds preserve multibyte code points and normalize whitespace", async () => {
+    const mock = codemodeServer();
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    const entry = mock.catalog.entries[0]!;
+    try {
+      for (const [description, expected] of [
+        ["  Search\n\t docs\u2003now  ", "Search docs now"],
+        ["😀".repeat(160), "😀".repeat(160)],
+        ["界😀".repeat(81), "界😀".repeat(79) + "界…"],
+        ["", "Fallback title"],
+      ]) {
+        entry.description = description;
+        entry.title = "Fallback title";
+        const result = await run(["list", "--json"], environment);
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout)).toEqual({
+          catalogDigest: mock.catalog.digest,
+          total: 1,
+          offset: 0,
+          nextOffset: null,
+          tools: [{ path: "docs.search", description: expected }],
+        });
+      }
+      delete entry.description;
+      delete entry.title;
+      expect((await run(["list"], environment)).stdout).toBe(
+        "docs.search\n# total: 1; offset: 0; nextOffset: none\n",
+      );
+      mock.catalog.entries = [];
+      expect((await run(["list"], environment)).stdout).toBe(
+        "# total: 0; offset: 0; nextOffset: none\n",
+      );
+      expect(JSON.parse((await run(["list", "--json"], environment)).stdout)).toEqual({
+        catalogDigest: mock.catalog.digest,
+        total: 0,
+        offset: 0,
+        nextOffset: null,
+        tools: [],
+      });
+    } finally {
+      mock.server.stop(true);
+    }
+  });
+
+  test("discovery rejects invalid flags and arity before configuration or HTTP", async () => {
+    for (const args of [
+      ["list", "--full", "--json"],
+      ["list", "--json", "--full"],
+      ["list", "--full", "--full"],
+      ["list", "--json", "--json"],
+      ["list", "--unknown"],
+      ["list", "extra"],
+      ["show"],
+      ["show", "docs.search", "extra"],
+      ["show", "--full"],
+      ["show", "docs.search", "--json"],
+      ["list", "--full", "--offset", "0"],
+      ["list", "--limit", "101"],
+      ["list", "--query"],
+      ["list", "--offset", "-1"],
+    ]) {
+      const result = await run(args);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("usage:");
+      expect(result.stderr).not.toContain("is required");
+    }
+    for (const args of [["--help"], ["list", "--help"], ["show", "--help"]]) {
+      const result = await run(args);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("ogtool list [--full | --json]");
+      expect(result.stdout).toContain("ogtool show");
+    }
+  }, 30_000);
+
+  test("actual compact stdout stays within 16 KiB for 4096 tools with maximum paths", async () => {
+    const mock = codemodeServer();
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const template = mock.catalog.entries[0]!;
+      mock.catalog.entries = Array.from({ length: 4096 }, (_, index) => ({
+        ...template,
+        identity: { serverId: "docs", toolName: `tool${index}` },
+        modelName: `tool${index}`,
+        codemodePath: [...Array<string>(7).fill("x".repeat(128)), `t${index}`.padEnd(128, "x")],
+        description: "😀".repeat(160),
+      }));
+      for (const flags of [[], ["--json"]]) {
+        const first = await run(["list", ...flags, "--limit", "100"], environment);
+        expect(first.exitCode).toBe(0);
+        expect(Buffer.byteLength(first.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+        expect(first.stdout).toContain(mock.catalog.entries[0]!.codemodePath.join("."));
+        if (flags.length) {
+          const page = JSON.parse(first.stdout);
+          expect(page.total).toBe(4096);
+          expect(page.catalogDigest).toBe(mock.catalog.digest);
+          expect(page.nextOffset).toBe(page.tools.length);
+          expect(page.tools.length).toBeLessThan(100);
+          const next = JSON.parse(
+            (await run(["list", "--json", "--offset", String(page.nextOffset)], environment))
+              .stdout,
+          );
+          expect(next.tools[0].path).toBe(
+            mock.catalog.entries[page.nextOffset]!.codemodePath.join("."),
+          );
+        } else expect(first.stdout).toContain("# Continue with --offset");
+      }
+      const query = await run(
+        ["list", "--json", "--query=t42", "--limit=1", "--offset=1"],
+        environment,
+      );
+      expect(query.exitCode).toBe(0);
+      const result = JSON.parse(query.stdout);
+      expect(result.tools).toHaveLength(1);
+      expect(result.offset).toBe(1);
+      const noMatch = JSON.parse(
+        (await run(["list", "--json", "--query", "absent"], environment)).stdout,
+      );
+      expect(noMatch.total).toBe(0);
+      expect(noMatch.nextOffset).toBeNull();
+      expect(noMatch.tools).toEqual([]);
+    } finally {
+      mock.server.stop(true);
+    }
+  }, 30_000);
+
+  test("show fails closed for unknown, ambiguous, or oversized details", async () => {
+    const mock = codemodeServer();
+    const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
+    try {
+      const unknown = await run(["show", "missing"], environment);
+      expect(unknown.exitCode).toBe(1);
+      expect(unknown.stderr).toContain("Unknown Codemode tool");
+      expect(unknown.stdout).toBe("");
+      const entry = mock.catalog.entries[0]!;
+      mock.catalog.entries.push({
+        ...entry,
+        identity: { serverId: "other", toolName: "tool" },
+        modelName: "docs.search",
+        codemodePath: ["other", "tool"],
+      });
+      const ambiguous = await run(["show", "docs.search"], environment);
+      expect(ambiguous.exitCode).toBe(1);
+      expect(ambiguous.stderr).toContain("Ambiguous");
+      mock.catalog.entries.pop();
+      entry.inputSchema = { type: "object", description: "" };
+      const baseline = await run(["show", "docs.search"], environment);
+      expect(baseline.exitCode).toBe(0);
+      const remaining = 65_536 - Buffer.byteLength(baseline.stdout, "utf8");
+      entry.inputSchema.description = "x".repeat(remaining);
+      const exact = await run(["show", "docs.search"], environment);
+      expect(exact.exitCode).toBe(0);
+      expect(Buffer.byteLength(exact.stdout, "utf8")).toBe(65_536);
+      entry.inputSchema.description += "x";
+      const over = await run(["show", "docs.search"], environment);
+      expect(over.exitCode).toBe(1);
+      expect(over.stdout).toBe("");
+      entry.inputSchema = { type: "object", description: "😀".repeat(17_000) };
+      const oversized = await run(["show", "docs.search"], environment);
+      expect(oversized.exitCode).toBe(1);
+      expect(oversized.stdout).toBe("");
+      expect(oversized.stderr).toContain("exceed 65536 bytes");
+      expect((await run(["list", "--full"], environment)).exitCode).toBe(0);
     } finally {
       mock.server.stop(true);
     }
