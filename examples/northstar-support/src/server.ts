@@ -1,7 +1,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { OpenGeniClient, type CreateSessionRequest } from "@opengeni/sdk";
-import { join, normalize } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { extname, join, resolve, sep } from "node:path";
 import * as z from "zod/v4";
 import type {
   SupportCase,
@@ -21,6 +22,9 @@ const PRODUCT_APP_ORIGIN = (
 ).replace(/\/+$/, "");
 const STATIC_ROOT = join(import.meta.dir, "../dist");
 const MCP_SERVER_ID = "northstar_support";
+const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
+const REVALIDATE_CACHE_CONTROL = "no-cache";
+const NOT_FOUND_CACHE_CONTROL = "no-store";
 const MCP_TOOLS = ["get_ticket", "get_customer", "update_ticket", "add_internal_note"];
 const encoder = new TextEncoder();
 
@@ -274,25 +278,107 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
-function staticResponse(pathname: string): Response {
-  const requested = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const safePath = normalize(requested);
-  if (safePath.startsWith("..") || safePath.includes("/../")) {
-    return new Response("Not found", { status: 404 });
+function safeStaticPath(root: string, pathname: string): string | null {
+  const candidate = resolve(root, `.${pathname}`);
+  return candidate === root || candidate.startsWith(`${root}${sep}`) ? candidate : null;
+}
+
+function cacheControlFor(pathname: string): string {
+  if (pathname.startsWith("/assets/")) return IMMUTABLE_CACHE_CONTROL;
+  if (pathname === "/" || extname(pathname) === ".html") return REVALIDATE_CACHE_CONTROL;
+  return IMMUTABLE_CACHE_CONTROL;
+}
+
+function notFound(): Response {
+  return new Response("Not found", {
+    status: 404,
+    headers: { "cache-control": NOT_FOUND_CACHE_CONTROL },
+  });
+}
+
+function acceptsEncoding(header: string | null, encoding: string): boolean {
+  if (!header) return false;
+  let wildcardAccepted = false;
+  for (const entry of header.split(",")) {
+    const segments = entry.trim().split(";");
+    const name = segments[0]?.toLowerCase();
+    const quality = segments
+      .slice(1)
+      .map((parameter) => parameter.trim().toLowerCase())
+      .find((parameter) => parameter.startsWith("q="));
+    const accepted = quality ? Number(quality.slice(2)) > 0 : true;
+    if (name === encoding.toLowerCase()) return accepted;
+    if (name === "*") wildcardAccepted = accepted;
   }
-  const asset = Bun.file(join(STATIC_ROOT, safePath));
-  if (asset.size > 0) {
-    return new Response(asset, {
-      headers: {
-        "cache-control":
-          safePath === "index.html" ? "no-cache" : "public, max-age=31536000, immutable",
-      },
-    });
+  return wildcardAccepted;
+}
+
+async function resolvedRegularFile(root: string, path: string): Promise<string | null> {
+  try {
+    const [realRoot, realPath] = await Promise.all([realpath(root), realpath(path)]);
+    if (realPath !== realRoot && !realPath.startsWith(`${realRoot}${sep}`)) return null;
+    return (await stat(realPath)).isFile() ? realPath : null;
+  } catch {
+    return null;
   }
-  const index = Bun.file(join(STATIC_ROOT, "index.html"));
-  return index.size > 0
-    ? new Response(index, { headers: { "cache-control": "no-cache" } })
-    : new Response("Not found", { status: 404 });
+}
+
+async function serveStaticFile(
+  request: Request,
+  root: string,
+  path: string,
+  cacheControl: string,
+): Promise<Response | null> {
+  const sourcePath = await resolvedRegularFile(root, path);
+  if (!sourcePath) return null;
+  const source = Bun.file(sourcePath);
+  const gzipPath = `${path}.gz`;
+  const acceptsGzip =
+    !request.headers.has("range") &&
+    acceptsEncoding(request.headers.get("accept-encoding"), "gzip");
+  const encodedPath = acceptsGzip ? await resolvedRegularFile(root, gzipPath) : null;
+  const encoded = encodedPath ? Bun.file(encodedPath) : null;
+  const body = encoded ?? source;
+  const headers = new Headers({
+    "cache-control": cacheControl,
+    "content-type": source.type || "application/octet-stream",
+    vary: "Accept-Encoding",
+  });
+  if (encoded) headers.set("content-encoding", "gzip");
+  if (request.method === "HEAD") {
+    headers.set("content-length", String(body.size));
+    return new Response(null, { headers });
+  }
+  return new Response(body, { headers });
+}
+
+export async function staticResponse(
+  request: Request,
+  pathname: string,
+  root = STATIC_ROOT,
+): Promise<Response> {
+  let requested = pathname;
+  try {
+    requested = decodeURIComponent(pathname);
+  } catch {
+    return notFound();
+  }
+  if (requested.split("/").includes("..")) {
+    return notFound();
+  }
+  requested = requested === "/" ? "/index.html" : requested;
+  const filePath = safeStaticPath(root, requested);
+  if (!filePath) {
+    return notFound();
+  }
+  const exact = await serveStaticFile(request, root, filePath, cacheControlFor(requested));
+  if (exact) return exact;
+  if (requested.startsWith("/assets/")) {
+    return notFound();
+  }
+  const indexPath = safeStaticPath(root, "/index.html");
+  if (!indexPath) return notFound();
+  return (await serveStaticFile(request, root, indexPath, REVALIDATE_CACHE_CONTROL)) ?? notFound();
 }
 
 function emit(
@@ -524,7 +610,7 @@ async function productRequest(request: Request): Promise<Response> {
       status: 204,
       headers: {
         "access-control-allow-origin": PRODUCT_APP_ORIGIN,
-        "access-control-allow-methods": "GET, POST, PATCH, OPTIONS",
+        "access-control-allow-methods": "GET, HEAD, POST, PATCH, OPTIONS",
         "access-control-allow-headers": "content-type",
         "access-control-max-age": "86400",
       },
@@ -642,7 +728,9 @@ async function productRequest(request: Request): Promise<Response> {
     emit("demo.reset", "Demo data reset", "all");
     return json(state);
   }
-  if (UNIFIED_SERVER && request.method === "GET") return staticResponse(url.pathname);
+  if (UNIFIED_SERVER && (request.method === "GET" || request.method === "HEAD")) {
+    return await staticResponse(request, url.pathname);
+  }
   return new Response("Not found", { status: 404 });
 }
 
@@ -791,28 +879,30 @@ async function mcpRequest(request: Request): Promise<Response> {
   return await transport.handleRequest(request);
 }
 
-const productServer = Bun.serve({
-  hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
-  port: PRODUCT_PORT,
-  idleTimeout: 255,
-  fetch: async (request) => {
-    if (UNIFIED_SERVER && new URL(request.url).pathname === "/mcp") {
-      return await mcpRequest(request);
-    }
-    return await productRequest(request);
-  },
-});
-const mcpServer = UNIFIED_SERVER
-  ? productServer
-  : Bun.serve({
-      hostname: "127.0.0.1",
-      port: MCP_PORT,
-      idleTimeout: 255,
-      fetch: mcpRequest,
-    });
+if (import.meta.main) {
+  const productServer = Bun.serve({
+    hostname: UNIFIED_SERVER ? "0.0.0.0" : "127.0.0.1",
+    port: PRODUCT_PORT,
+    idleTimeout: 255,
+    fetch: async (request) => {
+      if (UNIFIED_SERVER && new URL(request.url).pathname === "/mcp") {
+        return await mcpRequest(request);
+      }
+      return await productRequest(request);
+    },
+  });
+  const mcpServer = UNIFIED_SERVER
+    ? productServer
+    : Bun.serve({
+        hostname: "127.0.0.1",
+        port: MCP_PORT,
+        idleTimeout: 255,
+        fetch: mcpRequest,
+      });
 
-console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);
-console.log(`Northstar MCP server   http://127.0.0.1:${mcpServer.port}/mcp`);
-console.log("MCP auth               ", mcpToken ? "configured" : "MISSING");
-console.log("OpenGeni auth          ", apiKey ? "configured" : "MISSING");
-console.log("OpenGeni workspace     ", workspaceId || "MISSING");
+  console.log(`Northstar product API  http://127.0.0.1:${productServer.port}/api/demo/health`);
+  console.log(`Northstar MCP server   http://127.0.0.1:${mcpServer.port}/mcp`);
+  console.log("MCP auth               ", mcpToken ? "configured" : "MISSING");
+  console.log("OpenGeni auth          ", apiKey ? "configured" : "MISSING");
+  console.log("OpenGeni workspace     ", workspaceId || "MISSING");
+}
