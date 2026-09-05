@@ -860,13 +860,14 @@ export function agentRunFailurePayload(
       historyPersistenceStage: error.stage,
     };
   }
-  if (isProviderSafetyRefusal(error)) {
+  const safetyRefusalDiagnostic = providerSafetyRefusalDiagnostic(error);
+  if (safetyRefusalDiagnostic !== undefined) {
     return {
       error:
         "The model provider blocked this request through its safety systems. Automatic retries stopped.",
       code: "provider_safety_refusal",
       retryable: false,
-      detail: providerSafetyRefusalDiagnostic(error),
+      detail: safetyRefusalDiagnostic,
     };
   }
   const message = error instanceof Error ? error.message : String(error);
