@@ -1,4 +1,4 @@
-import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon } from "lucide-react";
+import { FileCode2Icon, FileWarningIcon, LoaderCircleIcon, TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { cn } from "../lib/cn";
@@ -55,6 +55,9 @@ export type SandboxFilesProps = {
   workspaceResting?: boolean | undefined;
   /** A deliberate wake has started but the live file surface is not ready yet. */
   workspaceWaking?: boolean | undefined;
+  /** Capability handshake failure. Takes precedence over a retained wake spinner. */
+  capabilitiesError?: Error | null | undefined;
+  onRetryCapabilities?: (() => void) | undefined;
   /** Whether live reads are currently authoritative. */
   liveWorkspaceReady?: boolean | undefined;
   /** Deliberately wake the machine to read content absent from the capture. */
@@ -86,6 +89,8 @@ export function SandboxFiles({
   requestedPathReady = true,
   workspaceResting = false,
   workspaceWaking = false,
+  capabilitiesError = null,
+  onRetryCapabilities,
   liveWorkspaceReady = true,
   onWakeWorkspace,
   themeType,
@@ -257,6 +262,23 @@ export function SandboxFiles({
     liveRequestedPath === viewPath &&
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
+
+  if (capabilitiesError) {
+    return (
+      <div className={cn("h-full", className)} data-opengeni-workspace-error>
+        <Notice
+          icon={<TriangleAlertIcon className="size-5" aria-hidden />}
+          title="Sandbox unavailable"
+          announce="alert"
+        >
+          <p>{capabilitiesError.message || "Couldn't reach the sandbox for this session."}</p>
+          {onRetryCapabilities ? (
+            <WakeButton onClick={onRetryCapabilities}>Retry</WakeButton>
+          ) : null}
+        </Notice>
+      </div>
+    );
+  }
 
   if (workspaceResting || workspaceWaking) {
     return (

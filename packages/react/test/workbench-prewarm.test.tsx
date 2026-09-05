@@ -13,7 +13,11 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import { act, type ReactElement, type ReactNode, useMemo } from "react";
-import type { GetWorkspaceCaptureResponse, WorkspaceCaptureManifest } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  type GetWorkspaceCaptureResponse,
+  type WorkspaceCaptureManifest,
+} from "@opengeni/sdk";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import type { SessionClientLike } from "../src/client";
@@ -45,6 +49,7 @@ registerDom();
 
 const EMPTY_MACHINES = { activeSandboxId: null, activeEpoch: 0, machines: [] };
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const WARM_CAP_MESSAGE = "workspace sandbox warm allowance exhausted";
 
 /** The composite dock hook's sub-hooks resolve the client from context, so it
  *  must run under a provider (unlike the leaf hooks). This renders it there and
@@ -809,6 +814,55 @@ describe("workbench prewarm gating (Refinement 1)", () => {
     // The intent flipped attachFiles → the box warmed via a viewer attach.
     expect(spy.attachCalls).toBe(1);
     await hook.unmount();
+  });
+
+  test("a Files warm-cap denial replaces Waking workspace immediately and Retry re-attempts", async () => {
+    let attachCalls = 0;
+    const { client } = coldClient({
+      getWorkspaceCapture: async () => ({ available: false }),
+      attachViewer: async () => {
+        attachCalls += 1;
+        throw new OpenGeniApiError(429, JSON.stringify({ message: WARM_CAP_MESSAGE }));
+      },
+    });
+    const rendered = await renderComponent(
+      withProvider(
+        client,
+        <SandboxWorkspace
+          sessionId={SESSION_ID}
+          events={[]}
+          primary={<div>chat</div>}
+          autoSaveId="og.test.prewarm.warm-cap"
+        />,
+      ),
+    );
+    await flush(60);
+
+    const wake = Array.from(rendered.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Open live workspace"),
+    );
+    expect(wake).toBeDefined();
+    await act(async () => {
+      wake!.click();
+    });
+    await flush(60);
+
+    expect(attachCalls).toBe(1);
+    const alert = rendered.container.querySelector('[role="alert"]');
+    expect(alert?.textContent).toContain("Sandbox unavailable");
+    expect(alert?.textContent).toContain(WARM_CAP_MESSAGE);
+    expect(rendered.container.textContent).not.toContain("Waking workspace");
+
+    const retry = Array.from(rendered.container.querySelectorAll("button")).find(
+      (button) => button.textContent === "Retry",
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry!.click();
+    });
+    await flush(60);
+    expect(attachCalls).toBe(2);
+    await rendered.unmount();
   });
 
   test("activating the terminal warms the box (interactive PTY intent)", async () => {

@@ -123,6 +123,34 @@ describe("BrowserSession route discipline", () => {
     expect(create).toContain('identity.status !== "active"');
   });
 
+  test("settles prepared admission failures before returning the shared HTTP error", async () => {
+    const source = await readFile(routeUrl, "utf8");
+    const createStart = source.indexOf('app.post("/v1/workspaces/:workspaceId/browser-sessions"');
+    const createEnd = source.indexOf("app.get(", createStart);
+    const create = source.slice(createStart, createEnd);
+    expect(create).toContain("error instanceof SandboxViewerAdmissionBlockedError");
+    expect(create.indexOf("ensureInteractionHolder")).toBeLessThan(
+      create.indexOf("failBrowserSessionOperation"),
+    );
+
+    const resumeStart = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/resume"',
+    );
+    const resumeEnd = source.indexOf(
+      '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
+      resumeStart,
+    );
+    const resume = source.slice(resumeStart, resumeEnd);
+    const admissionCatch = resume.indexOf("error instanceof SandboxViewerAdmissionBlockedError");
+    expect(admissionCatch).toBeGreaterThan(resume.indexOf("ensureInteractionHolder"));
+    expect(resume.indexOf("failBrowserSessionResumePreparation", admissionCatch)).toBeGreaterThan(
+      admissionCatch,
+    );
+
+    const routeError = source.slice(source.indexOf("function browserRouteError"));
+    expect(routeError).toContain("httpExceptionForSandboxViewerAdmission(error)");
+  });
+
   test("routes attached-device BrowserSession end through the original placement fence", async () => {
     const source = await readFile(routeUrl, "utf8");
     const placement = source.slice(
