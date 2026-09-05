@@ -28,6 +28,7 @@ import {
   commitSessionAttemptQuiescence,
   clearDurablePendingSessionToolCalls,
   completeConnectorActionExecution,
+  confirmDrainCold,
   createDb,
   createSession,
   createSessionGoal,
@@ -564,6 +565,125 @@ describe("clean session control plane", () => {
       (await getLatestRunState(client.db, grant.workspaceId!, session.id))
         ?.providerArtifactInvalidatedAt,
     ).toBeInstanceOf(Date);
+  });
+
+  test("rotation recovery parks the exact lease epoch until the cold transition wakes it", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "wait for the rotating sandbox");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const turn = await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId, {
+      attemptId,
+      workflowRunId,
+      dispatchId,
+    });
+    expect(turn).not.toBeNull();
+
+    const leaseEpoch = 7;
+    await shared.admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        instance_id, backend, lease_epoch, resume_backend_id, resume_state,
+        rotation_requested_at, rotation_reason, expires_at
+      ) values (
+        ${grant.accountId}, ${grant.workspaceId!}, ${session.sandboxGroupId},
+        'draining', 0, 'sb-rotation-wait', 'modal', ${leaseEpoch}, 'modal',
+        jsonb_build_object(
+          'backendId', 'modal',
+          'sessionState', jsonb_build_object(
+            'providerState', jsonb_build_object('sandboxId', 'sb-rotation-wait')
+          )
+        ),
+        now(), 'provider_deadline', now() - interval '1 second'
+      )`;
+
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: turn!.triggerEventId,
+        attemptId,
+        reason: "sandbox_deadline_rotation",
+        detail: {
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+        },
+        sandboxLifecycleWait: {
+          version: 1,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch,
+          reason: "rotation_in_progress",
+        },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "sandbox-lifecycle-wait",
+      ref: {
+        version: 1,
+        sandboxGroupId: session.sandboxGroupId,
+        leaseEpoch,
+        reason: "rotation_in_progress",
+      },
+    });
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
+
+    const wakeBeforeCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [row] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+        .limit(1);
+      return row!;
+    });
+    expect(
+      await confirmDrainCold(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sandboxGroupId: session.sandboxGroupId,
+        expectedEpoch: leaseEpoch,
+      }),
+    ).toEqual({ wentCold: true });
+
+    const wakeAfterCold = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [row] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id))
+        .limit(1);
+      return row!;
+    });
+    expect(wakeAfterCold.reason).toBe("sandbox_lifecycle_advanced");
+    expect(wakeAfterCold.wakeRevision).toBeGreaterThan(wakeBeforeCold.wakeRevision);
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "runnable",
+    });
+
+    const resumed = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      workflowId,
+    );
+    expect(resumed).toMatchObject({
+      id: turn!.id,
+      status: "running",
+      executionGeneration: turn!.executionGeneration + 1,
+    });
+    expect(resumed?.metadata).not.toHaveProperty("sandboxLifecycleWait");
   });
 
   test("an accepted Steer outranks retryable recovery for the exact live attempt", async () => {

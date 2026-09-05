@@ -613,6 +613,29 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       await waitForProviderCapacity(peek.ref);
       continue;
     }
+    if (peek.kind === "sandbox-lifecycle-wait") {
+      // The recovering turn carries an exact group/epoch marker. Do not reserve
+      // another turn-worker slot while the same draining lease still owns that
+      // transition. The draining->cold commit enqueues a durable workflow wake
+      // for this exact marker; keep only the standard five-second close-race
+      // window so a signal or an already-completed transition is not lost.
+      const seenSignalVersion = signalVersion;
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (
+        finalPeek.kind !== "sandbox-lifecycle-wait" ||
+        finalPeek.ref.sandboxGroupId !== peek.ref.sandboxGroupId ||
+        finalPeek.ref.leaseEpoch !== peek.ref.leaseEpoch
+      ) {
+        continue;
+      }
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
+    }
     if (peek.kind === "approval-wait") {
       const seenApprovalWakeups = approvalWakeups;
       const seenWakeups = wakeups;
