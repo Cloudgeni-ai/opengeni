@@ -122,15 +122,23 @@ the equivalent no-runtime list/show/call client:
 ```bash
 ogtool list
 ogtool list --json
+ogtool list --query search --limit 25 --offset 0
 ogtool show docs.search
 ogtool call docs.search '{"query":"durable catalogs"}'
 "$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
 
 Discovery is compact by default: `list` prints callable paths plus descriptions
-bounded to 160 Unicode code points; `list --json` returns only `{tools:
-[{path, description}]}`. `list --full` preserves the previous full catalog JSON
-for explicit inspection and existing scripts. The two flags are mutually exclusive.
+bounded to 160 Unicode code points. `--query` matches literal case-sensitive substrings
+in paths or full whitespace-normalized descriptions; `--limit` defaults to 50 and is
+bounded to 1..100; `--offset` is a nonnegative safe integer in the filtered catalog.
+The complete text/JSON page is capped at 16 KiB, including escaping, metadata, newline,
+and text continuation hints. Trailing entries are dropped to fit, never partial paths.
+`list --json` returns `{catalogDigest, total, offset, nextOffset, tools:
+[{path, description}]}`. `total` is the filtered count; follow `nextOffset` until null,
+keeping the query and frozen digest unchanged. Empty and past-end pages have no tools
+and a null next offset. `list --full` preserves the previous full catalog JSON for
+explicit inspection and existing scripts and rejects every compact option.
 `show <path>` resolves exactly one tool using the same aliases as `call` and emits
 its details and schemas as JSON, capped at 64 KiB including the final newline.
 Unknown/ambiguous tools and oversized details fail without partial schema output;

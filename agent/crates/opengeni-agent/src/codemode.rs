@@ -6,7 +6,7 @@
 //! the only execution path. The worker injects a short-lived bearer into each
 //! child process; this module never persists or logs it.
 
-use std::{path::PathBuf, time::Duration};
+use std::{fmt::Write as _, path::PathBuf, time::Duration};
 
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ use thiserror::Error;
 use tokio::time::{sleep, Instant};
 use uuid::Uuid;
 
-use crate::cli::{CodemodeAction, CodemodeArgs, CodemodeCallArgs};
+use crate::cli::{CodemodeAction, CodemodeArgs, CodemodeCallArgs, CodemodeListArgs};
 use opengeni_agent_proto::v1::{self, ControlRequest, ExecRequest};
 
 const URL_ENV: &str = "OPENGENI_CODEMODE_URL";
@@ -130,10 +130,8 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
                     "{}",
                     serde_json::to_string_pretty(&catalog.list_projection())?
                 );
-            } else if args.json {
-                println!("{}", serde_json::to_string(&catalog.compact_projection())?);
             } else {
-                print!("{}", catalog.compact_text());
+                print!("{}", catalog.compact_output(&args)?);
             }
         }
         CodemodeAction::Show(args) => {
@@ -414,26 +412,79 @@ struct Catalog {
 }
 
 impl Catalog {
-    fn compact_projection(&self) -> Value {
-        json!({ "tools": self.entries.iter().map(|entry| json!({
-            "path": entry.codemode_path.join("."),
-            "description": short_description(entry),
-        })).collect::<Vec<_>>() })
-    }
-
-    fn compact_text(&self) -> String {
-        self.entries
+    fn compact_output(&self, args: &CodemodeListArgs) -> Result<String, CodemodeError> {
+        let query = args.query.as_deref().unwrap_or("");
+        let matches: Vec<_> = self
+            .entries
             .iter()
-            .map(|entry| {
-                let path = entry.codemode_path.join(".");
-                let description = short_description(entry);
-                if description.is_empty() {
-                    format!("{path}\n")
-                } else {
-                    format!("{path} — {description}\n")
-                }
+            .filter(|entry| {
+                entry.codemode_path.join(".").contains(query)
+                    || normalized_description(entry).contains(query)
             })
-            .collect()
+            .collect();
+        let offset = args.offset.unwrap_or(0);
+        let mut tools: Vec<_> = matches
+            .iter()
+            .skip(offset)
+            .take(args.limit.unwrap_or(50))
+            .map(|entry| {
+                json!({
+                    "path": entry.codemode_path.join("."),
+                    "description": short_description(entry),
+                })
+            })
+            .collect();
+        loop {
+            let next_offset =
+                (offset + tools.len() < matches.len()).then_some(offset + tools.len());
+            let output = if args.json {
+                format!(
+                    "{}\n",
+                    serde_json::to_string(&json!({
+                        "catalogDigest": self.digest,
+                        "total": matches.len(),
+                        "offset": offset,
+                        "nextOffset": next_offset,
+                        "tools": tools,
+                    }))?
+                )
+            } else {
+                let mut output: String = tools
+                    .iter()
+                    .map(|tool| {
+                        let path = tool["path"].as_str().unwrap_or_default();
+                        let description = tool["description"].as_str().unwrap_or_default();
+                        if description.is_empty() {
+                            format!("{path}\n")
+                        } else {
+                            format!("{path} — {description}\n")
+                        }
+                    })
+                    .collect();
+                let _ = writeln!(
+                    output,
+                    "# total: {}; offset: {offset}; nextOffset: {}",
+                    matches.len(),
+                    next_offset.map_or_else(|| "none".to_string(), |value| value.to_string())
+                );
+                if let Some(next) = next_offset {
+                    let _ = writeln!(
+                        output,
+                        "# Continue with --offset {next} (keep the same --query and --limit)."
+                    );
+                }
+                output
+            };
+            if output.len() <= 16 * 1024 {
+                return Ok(output);
+            }
+            if tools.len() <= 1 {
+                return Err(CodemodeError::InvalidArguments(
+                    "One tool exceeds the 16384-byte compact page limit; use list --full redirected to a file".to_string(),
+                ));
+            }
+            tools.pop();
+        }
     }
 
     fn show_output(&self, name: &str) -> Result<String, CodemodeError> {
@@ -510,8 +561,8 @@ impl Catalog {
     }
 }
 
-fn short_description(entry: &CatalogEntry) -> String {
-    let text = entry
+fn normalized_description(entry: &CatalogEntry) -> String {
+    entry
         .description
         .as_deref()
         .filter(|value| !value.is_empty())
@@ -519,7 +570,11 @@ fn short_description(entry: &CatalogEntry) -> String {
         .unwrap_or("")
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+fn short_description(entry: &CatalogEntry) -> String {
+    let text = normalized_description(entry);
     if text.chars().count() <= 160 {
         text
     } else {
@@ -690,17 +745,217 @@ mod tests {
             tool.description = Some(description);
             assert_eq!(short_description(&tool), expected);
             let catalog = catalog(vec![tool.clone()]);
+            let output = catalog
+                .compact_output(&CodemodeListArgs {
+                    json: true,
+                    ..Default::default()
+                })
+                .unwrap();
             assert_eq!(
-                catalog.compact_projection(),
-                json!({"tools": [{"path": "server.tool", "description": expected}]})
+                serde_json::from_str::<Value>(&output).unwrap(),
+                json!({"catalogDigest": catalog.digest, "total": 1, "offset": 0, "nextOffset": null,
+                    "tools": [{"path": "server.tool", "description": expected}]})
             );
-            assert_eq!(catalog.compact_text(), format!("server.tool — {expected}\n"));
+            assert_eq!(
+                catalog
+                    .compact_output(&CodemodeListArgs::default())
+                    .unwrap(),
+                format!("server.tool — {expected}\n# total: 1; offset: 0; nextOffset: none\n")
+            );
         }
         tool.description = None;
         tool.title = None;
-        assert_eq!(catalog(vec![tool]).compact_text(), "server.tool\n");
-        assert_eq!(catalog(vec![]).compact_text(), "");
-        assert_eq!(catalog(vec![]).compact_projection(), json!({"tools": []}));
+        assert_eq!(
+            catalog(vec![tool])
+                .compact_output(&CodemodeListArgs::default())
+                .unwrap(),
+            "server.tool\n# total: 1; offset: 0; nextOffset: none\n"
+        );
+        assert_eq!(
+            catalog(vec![])
+                .compact_output(&CodemodeListArgs::default())
+                .unwrap(),
+            "# total: 0; offset: 0; nextOffset: none\n"
+        );
+    }
+
+    #[test]
+    fn compact_pages_walk_all_4096_tools_with_maximum_paths_without_skips() {
+        for extreme in [false, true] {
+            let tools = (0..4096)
+                .map(|index| {
+                    let name = format!("tool{index}");
+                    let mut tool = entry("docs", &name, &name, &["docs", &name]);
+                    if extreme {
+                        tool.codemode_path = vec!["x".repeat(128); 8];
+                        tool.codemode_path[7] = format!("{name:x<128}");
+                        tool.description =
+                            Some(if index % 2 == 0 { "\0" } else { "😀" }.repeat(160));
+                    }
+                    tool
+                })
+                .collect();
+            let frozen = catalog(tools);
+            let expected: Vec<_> = frozen
+                .entries
+                .iter()
+                .map(|tool| tool.codemode_path.join("."))
+                .collect();
+            for json in [false, true] {
+                let mut seen = Vec::new();
+                let mut offset = 0;
+                loop {
+                    let output = frozen
+                        .compact_output(&CodemodeListArgs {
+                            json,
+                            offset: Some(offset),
+                            ..Default::default()
+                        })
+                        .unwrap();
+                    assert!(output.len() <= 16_384);
+                    let (paths, next): (Vec<String>, Option<usize>) = if json {
+                        let page: Value = serde_json::from_str(&output).unwrap();
+                        assert_eq!(page["total"], 4096);
+                        assert_eq!(page["offset"], offset);
+                        assert_eq!(page["catalogDigest"], frozen.digest);
+                        (
+                            page["tools"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|tool| tool["path"].as_str().unwrap().to_string())
+                                .collect(),
+                            page["nextOffset"]
+                                .as_u64()
+                                .map(|value| usize::try_from(value).unwrap()),
+                        )
+                    } else {
+                        let paths = output
+                            .lines()
+                            .filter(|line| !line.starts_with('#'))
+                            .map(|line| line.split(" — ").next().unwrap().to_string())
+                            .collect();
+                        let footer = output
+                            .lines()
+                            .find(|line| line.starts_with("# total:"))
+                            .unwrap();
+                        let next = footer.rsplit(": ").next().unwrap();
+                        let next = if next == "none" {
+                            None
+                        } else {
+                            Some(next.parse().unwrap())
+                        };
+                        if let Some(next) = next {
+                            assert!(output.contains(&format!("# Continue with --offset {next}")));
+                        }
+                        (paths, next)
+                    };
+                    assert!(!paths.is_empty() && paths.len() <= 50);
+                    if !extreme && offset == 0 {
+                        assert_eq!(paths.len(), 50);
+                    }
+                    let count = paths.len();
+                    seen.extend(paths);
+                    match next {
+                        Some(next) => {
+                            assert_eq!(next, offset + count);
+                            offset = next;
+                        }
+                        None => break,
+                    }
+                }
+                assert_eq!(seen, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_queries_and_offsets_are_literal_filtered_and_bounded() {
+        let mut frozen = catalog(
+            (0..101)
+                .map(|index| {
+                    let name = format!("tool{index}");
+                    entry("docs", &name, &name, &["docs", &name])
+                })
+                .collect(),
+        );
+        frozen.entries[0].description = Some(format!("{} Needle\n\t界", "x".repeat(200)));
+        frozen.entries[1].description = Some("Needle 界 and more".to_string());
+        frozen.entries[2].title = Some("Fallback".to_string());
+        for (query, expected) in [
+            ("Needle 界", vec!["docs.tool0", "docs.tool1"]),
+            ("docs.tool99", vec!["docs.tool99"]),
+            ("Fallback", vec!["docs.tool2"]),
+            ("needle", vec![]),
+            (".*", vec![]),
+        ] {
+            let output = frozen
+                .compact_output(&CodemodeListArgs {
+                    json: true,
+                    query: Some(query.to_string()),
+                    ..Default::default()
+                })
+                .unwrap();
+            let page: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(page["total"], expected.len());
+            assert_eq!(page["nextOffset"], Value::Null);
+            assert_eq!(
+                page["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|tool| tool["path"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+        let output = frozen
+            .compact_output(&CodemodeListArgs {
+                json: true,
+                query: Some("Needle 界".to_string()),
+                limit: Some(1),
+                offset: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        let page: Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(page["total"], 2);
+        assert_eq!(page["tools"][0]["path"], "docs.tool1");
+        assert_eq!(page["nextOffset"], Value::Null);
+        let maximum = frozen
+            .compact_output(&CodemodeListArgs {
+                json: true,
+                limit: Some(100),
+                ..Default::default()
+            })
+            .unwrap();
+        let maximum: Value = serde_json::from_str(&maximum).unwrap();
+        assert_eq!(maximum["tools"].as_array().unwrap().len(), 100);
+        assert_eq!(maximum["nextOffset"], 100);
+        for offset in [101, 102, 9_007_199_254_740_991] {
+            let output = frozen
+                .compact_output(&CodemodeListArgs {
+                    json: true,
+                    offset: Some(offset),
+                    ..Default::default()
+                })
+                .unwrap();
+            let page: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(page["offset"], offset);
+            assert_eq!(page["tools"], json!([]));
+            assert_eq!(page["nextOffset"], Value::Null);
+        }
+        frozen.entries[0].codemode_path = vec!["x".repeat(20_000), "tool".to_string()];
+        for json in [false, true] {
+            assert!(frozen
+                .compact_output(&CodemodeListArgs {
+                    json,
+                    ..Default::default()
+                })
+                .unwrap_err()
+                .to_string()
+                .contains("16384-byte compact page limit"));
+        }
     }
 
     #[test]
@@ -715,7 +970,9 @@ mod tests {
             assert_eq!(shown, catalog.list_projection()["tools"][0]);
         }
         assert!(catalog.show_output("missing").is_err());
-        catalog.entries.push(entry("alias", "tool", "server.tool", &["alias", "tool"]));
+        catalog
+            .entries
+            .push(entry("alias", "tool", "server.tool", &["alias", "tool"]));
         assert!(catalog
             .show_output("server.tool")
             .unwrap_err()
@@ -728,7 +985,8 @@ mod tests {
         assert_eq!(catalog.show_output("server.tool").unwrap().len(), 65_536);
         catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining + 1));
         assert!(catalog.show_output("server.tool").is_err());
-        catalog.entries[0].input_schema = json!({"type": "object", "description": "😀".repeat(17_000)});
+        catalog.entries[0].input_schema =
+            json!({"type": "object", "description": "😀".repeat(17_000)});
         assert!(catalog
             .show_output("server.tool")
             .unwrap_err()

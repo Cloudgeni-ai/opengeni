@@ -257,14 +257,44 @@ pub enum CodemodeAction {
 }
 
 /// Output selection for `codemode list`.
-#[derive(Debug, clap::Args)]
+#[derive(Debug, Default, clap::Args)]
 pub struct CodemodeListArgs {
     /// Retain the complete legacy catalog JSON output.
-    #[arg(long, conflicts_with = "json")]
+    #[arg(long, conflicts_with_all = ["json", "query", "limit", "offset"])]
     pub full: bool,
     /// Emit compact machine-readable paths and descriptions.
     #[arg(long)]
     pub json: bool,
+    /// Literal case-sensitive substring in the path or full normalized description.
+    #[arg(long)]
+    pub query: Option<String>,
+    /// Maximum tools per compact page (default 50; range 1..100).
+    #[arg(long, value_parser = parse_list_limit)]
+    pub limit: Option<usize>,
+    /// Nonnegative offset in the filtered frozen catalog (default 0).
+    #[arg(long, value_parser = parse_list_offset)]
+    pub offset: Option<usize>,
+}
+
+fn parse_list_offset(value: &str) -> Result<usize, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("expected a nonnegative safe integer".to_string());
+    }
+    let number: u64 = value
+        .parse()
+        .map_err(|_| "expected a nonnegative safe integer")?;
+    if number > 9_007_199_254_740_991 {
+        return Err("expected a nonnegative safe integer".to_string());
+    }
+    usize::try_from(number).map_err(|_| "offset is too large for this platform".to_string())
+}
+
+fn parse_list_limit(value: &str) -> Result<usize, String> {
+    let number = parse_list_offset(value)?;
+    if !(1..=100).contains(&number) {
+        return Err("limit must be between 1 and 100".to_string());
+    }
+    Ok(number)
 }
 
 /// Arguments for `codemode show`.
@@ -493,7 +523,8 @@ mod tests {
                 other => panic!("expected list, got {other:?}"),
             }
         }
-        let cli = Cli::try_parse_from(["opengeni-agent", "codemode", "show", "docs.search"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["opengeni-agent", "codemode", "show", "docs.search"]).unwrap();
         assert!(matches!(cli.command, Some(Command::Codemode(CodemodeArgs {
             action: CodemodeAction::Show(CodemodeShowArgs { tool })
         })) if tool == "docs.search"));
@@ -508,15 +539,57 @@ mod tests {
             vec!["show", "docs.search", "extra"],
             vec!["show", "--full"],
             vec!["show", "docs.search", "--json"],
+            vec!["list", "--limit", "0"],
+            vec!["list", "--limit", "101"],
+            vec!["list", "--limit", "1.5"],
+            vec!["list", "--limit", ""],
+            vec!["list", "--offset", "-1"],
+            vec!["list", "--offset", "1e2"],
+            vec!["list", "--offset", "0x10"],
+            vec!["list", "--offset", "+1"],
+            vec!["list", "--offset", "9007199254740992"],
+            vec!["list", "--offset", " 1"],
+            vec!["list", "--limit", "９"],
+            vec!["list", "--query"],
+            vec!["list", "--offset"],
+            vec!["list", "--limit"],
+            vec!["list", "--query", "--json"],
+            vec!["list", "--full", "--limit", "50"],
+            vec!["list", "--full", "--offset=0"],
+            vec!["list", "--full", "--query="],
+            vec!["list", "--json=true"],
+            vec!["list", "--limit=2", "--limit", "3"],
+            vec!["list", "--offset=0", "--offset=1"],
+            vec!["list", "--query=a", "--query=b"],
         ] {
             assert!(
-                Cli::try_parse_from(["opengeni-agent", "codemode"].into_iter().chain(args)).is_err()
+                Cli::try_parse_from(["opengeni-agent", "codemode"].into_iter().chain(args))
+                    .is_err()
             );
         }
         for command in ["list", "show"] {
             let error =
                 Cli::try_parse_from(["opengeni-agent", "codemode", command, "--help"]).unwrap_err();
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+        let cli = Cli::try_parse_from([
+            "opengeni-agent",
+            "codemode",
+            "list",
+            "--query=--flag",
+            "--limit=01",
+            "--offset=0",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Codemode(CodemodeArgs {
+                action: CodemodeAction::List(args),
+            })) => {
+                assert_eq!(args.query.as_deref(), Some("--flag"));
+                assert_eq!(args.limit, Some(1));
+                assert_eq!(args.offset, Some(0));
+            }
+            other => panic!("expected list, got {other:?}"),
         }
     }
 
@@ -528,7 +601,10 @@ mod tests {
             Some(Command::Codemode(CodemodeArgs {
                 action: CodemodeAction::List(CodemodeListArgs {
                     full: false,
-                    json: false
+                    json: false,
+                    query: None,
+                    limit: None,
+                    offset: None
                 })
             }))
         ));
