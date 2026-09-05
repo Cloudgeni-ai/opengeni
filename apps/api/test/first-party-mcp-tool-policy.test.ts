@@ -147,6 +147,35 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("session monitoring offers explicit full mode without changing permission gates", () => {
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      grant(["sessions:read"], ["sessions_list", "session_get"]),
+    );
+    for (const detail of [undefined, "compact", "full"]) {
+      expect(
+        registeredToolInputSchema(server, "sessions_list").safeParse({
+          detail,
+          includeRelatedWork: false,
+        }).success,
+      ).toBeTrue();
+      expect(
+        registeredToolInputSchema(server, "session_get").safeParse({ sessionId, detail }).success,
+      ).toBeTrue();
+    }
+    expect(
+      registeredToolInputSchema(server, "sessions_list").safeParse({ detail: "unbounded" }).success,
+    ).toBeFalse();
+    expect(
+      registeredToolInputSchema(server, "session_get").safeParse({ sessionId, detail: "unbounded" })
+        .success,
+    ).toBeFalse();
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), grant([], ["sessions_list", "session_get"])),
+      ),
+    ).toEqual([]);
+  });
   test("omission splits the complete safe default catalog across broad and local adapters", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
       workspaceMemoryEnabled: true,

@@ -8466,7 +8466,7 @@ describe("API component integration", () => {
       model: string;
       temporalWorkflowId: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id });
+    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
     expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
@@ -8483,9 +8483,17 @@ describe("API component integration", () => {
     const fetched = await callMcpTool<{
       id: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id });
+    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
     expect(fetched.id).toBe(created.id);
     expect(fetched.environmentId).toBeNull();
+    const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
+      mcp,
+      "session_get",
+      { sessionId: created.id },
+    );
+    expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
+    expect(compact).not.toHaveProperty("effectiveToolPolicy");
+    expect(compact).not.toHaveProperty("initialMessage");
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
     ).rejects.toThrow("session not found");

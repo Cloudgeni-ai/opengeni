@@ -9,7 +9,7 @@ function uuid(index: number): string {
   return `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
 }
 
-describe("sessions_list compact discovery projection", () => {
+describe("sessions_list legacy bounded detail=full discovery projection", () => {
   test("stays deterministic and within the exact envelope at 1, 20, and 100 rows", () => {
     let previousBytes = 0;
     for (const count of [1, 20, 100]) {
