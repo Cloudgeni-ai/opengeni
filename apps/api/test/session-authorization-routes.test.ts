@@ -1608,7 +1608,8 @@ describe("embedding host session authorization routes", () => {
       "session_get",
       { sessionId: value.child.id },
     );
-    expect(detail).toMatchObject({ id: value.child.id, parentSessionId: null });
+    expect(detail).toMatchObject({ id: value.child.id });
+    expect(detail).not.toHaveProperty("parentSessionId");
     expect(calls).toContainEqual({
       sessionId: value.child.id,
       operation: "session.read",
@@ -1623,9 +1624,39 @@ describe("embedding host session authorization routes", () => {
       total: number;
     }>(server, "sessions_list", { query: "Shared host search target" });
     expect(listed.total).toBe(1);
-    expect(listed.sessions).toEqual([
-      expect.objectContaining({ id: value.child.id, parentSessionId: null }),
-    ]);
+    expect(listed.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+    expect(listed.sessions[0]).not.toHaveProperty("parentSessionId");
+    await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
+      mutateSessionControlInTransaction(scoped, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.root.id,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "private parent reason",
+      }),
+    );
+    for (const mode of ["compact", "full"] as const) {
+      const paused = await callMcpTool<Record<string, unknown>>(server, "session_get", {
+        sessionId: value.child.id,
+        detail: mode,
+      });
+      expect(JSON.stringify(paused)).toContain("An ancestor session");
+      expect(JSON.stringify(paused)).not.toContain("private parent reason");
+      expect(JSON.stringify(paused)).not.toContain(value.root.id);
+      await expect(
+        callMcpTool(server, "session_get", { sessionId: value.hidden.id, detail: mode }),
+      ).rejects.toThrow("Session not found or access denied");
+      const rows = await callMcpTool<{ total: number; sessions: unknown[] }>(
+        server,
+        "sessions_list",
+        { detail: mode },
+      );
+      expect(rows.total).toBe(1);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.root.id);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.hidden.id);
+    }
   });
 
   test("authorizes first-party MCP parent-to-child Pause, Resume, and Agent Steer exactly once", async () => {

@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
+  boundSessionMcpText as capSessionDiscoveryText,
+  compactSessionMcpListRow,
+  sessionMcpIncludesRelatedWork,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -70,6 +73,7 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
   getSessionTurn,
   getOrCreatePreferenceRegistrySnapshot,
@@ -246,6 +250,7 @@ import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
+  boundSessionCompactDetailMcp,
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
@@ -4575,10 +4580,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status and advisory related-work evidence in this workspace. query searches semantic titles, active goals, and typed work claims; subject performs one exact provider-neutral claim lookup and ranks it ahead of text. Neither path searches initialMessage or grants access to a result. Claims are nonexclusive evidence, never locks or instructions. Relevance cursors are bound to normalized filters and a workspace activity-revision snapshot. Without search, the tool defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get only when ordinary target authorization allows it. The list never returns full session objects, instructions, resources, tools, files, or history.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
+          detail: z4
+            .enum(["compact", "full"])
+            .optional()
+            .describe(
+              "compact (default) omits empty diagnostics but retains positive descendant attention counts and incomplete-tree loss facts; full restores the legacy bounded rows and pagination diagnostics.",
+            ),
+          includeRelatedWork: z4.boolean().optional(),
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
@@ -4616,6 +4628,8 @@ function registerWorkspaceOrchestrationTools(
       async ({
         limit,
         cursor,
+        detail,
+        includeRelatedWork,
         includeLastMessage,
         orderBy: requestedOrderBy,
         updatedAfter,
@@ -4639,6 +4653,12 @@ function registerWorkspaceOrchestrationTools(
           authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const relevanceRequested = Boolean(query?.trim() || subject);
+        const relatedWorkRequested = sessionMcpIncludesRelatedWork({
+          detail,
+          includeRelatedWork,
+          query,
+          subject,
+        });
         if (relevanceRequested && !deps.settings.workDiscoveryEnabled) {
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
@@ -4685,18 +4705,24 @@ function registerWorkspaceOrchestrationTools(
             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
             ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
             ...(claimLimit !== undefined ? { claimLimit } : {}),
-            includeWorkDiscovery: deps.settings.workDiscoveryEnabled,
+            includeWorkDiscovery: deps.settings.workDiscoveryEnabled && relatedWorkRequested,
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
           });
-          const result = capSessionDiscoveryPage(page, includeLastMessage === true);
+          const result =
+            detail === "full"
+              ? capSessionDiscoveryPage(page, includeLastMessage === true)
+              : capSessionDiscoveryCompactPage(page, {
+                  includeLastMessage: includeLastMessage === true,
+                  includeRelatedWork: relatedWorkRequested,
+                });
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
             mode,
             outcome: result.sessions.length === 0 ? "empty" : "ok",
             authorizationScope: metricAuthorizationScope,
             durationMs: performance.now() - startedAtMs,
-            responseBytes: result.bytes,
+            responseBytes: Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
             ...summarizeWorkDiscoveryRows(result.sessions),
           });
           return json(result);
@@ -4721,10 +4747,13 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing: status, goal-bearing metadata, resources, persisted tool refs, exact bounded effectiveToolPolicy, and variableSet attachment (names/ids only, never variable values). effectiveToolPolicy distinguishes selected refs from workspace defaults, mandatory carriers, configured/deferred refs, and dropped refs. Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
-        inputSchema: { sessionId: z4.string().uuid() },
+          "Get another session you are managing. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and lastSequence for session_wait. Goal completion is not a terminal child result: join with session_wait waitFor=completion. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Do not use your own session id to reconstruct context; conversation history and persistent settings are supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+        inputSchema: {
+          sessionId: z4.string().uuid(),
+          detail: z4.enum(["compact", "full"]).optional(),
+        },
       },
-      async ({ sessionId }) => {
+      async ({ sessionId, detail }) => {
         const authorization = await authorizeFirstPartySession(
           deps,
           grant,
@@ -4743,12 +4772,18 @@ function registerWorkspaceOrchestrationTools(
           },
           authorization?.relatedSessionAccess ?? "root",
         );
+        if (detail !== "full") {
+          return json(
+            boundSessionCompactDetailMcp(
+              projected,
+              await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
+              queue,
+            ),
+          );
+        }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
-              ...projected,
-              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
-            }),
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
           ),
         );
       },
@@ -6459,36 +6494,90 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
   }
 }
 
-function capSessionDiscoveryText(
-  value: string | null,
-  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
-  originalChars?: number | null,
+export function capSessionDiscoveryCompactPage(
+  page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
+  options: { includeLastMessage?: boolean; includeRelatedWork?: boolean } = {},
+  maxBytes = SESSION_DISCOVERY_PAGE_MAX_BYTES,
 ) {
-  if (value === null) {
-    return { text: value, truncated: false };
-  }
-  const projectedChars = Array.from(value);
-  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
-  if (sourceChars <= maxChars) {
-    return { text: value, truncated: false };
-  }
-
-  // The database supplies only a bounded prefix plus the original character
-  // count. Iterate to a stable marker width so the reported omission includes
-  // the characters replaced by the marker itself.
-  let bodyChars = maxChars;
-  let marker = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const omittedChars = Math.max(0, sourceChars - bodyChars);
-    marker = `…[${omittedChars} chars truncated]…`;
-    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
-    if (nextBodyChars === bodyChars) break;
-    bodyChars = nextBodyChars;
-  }
-  return {
-    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
-    truncated: true,
+  let previewBytes = 0;
+  const projected = page.sessions.map((session) => {
+    const row = {
+      ...compactSessionMcpListRow(session, options.includeRelatedWork),
+      ...(options.includeLastMessage && session.queuedPromptCount > 0
+        ? { queuedPromptCount: session.queuedPromptCount }
+        : {}),
+    };
+    if (!options.includeLastMessage) return row;
+    const preview = capSessionDiscoveryText(
+      session.latestMessage?.preview ?? null,
+      600,
+      session.latestMessage?.previewOriginalChars,
+    );
+    if (!session.latestMessage) return row;
+    const bytes = Buffer.byteLength(preview.text ?? "", "utf8");
+    const omitted = previewBytes + bytes > SESSION_DISCOVERY_PREVIEW_MAX_BYTES;
+    if (!omitted) previewBytes += bytes;
+    return {
+      ...row,
+      latestMessage: {
+        type: session.latestMessage.type,
+        ...(omitted
+          ? {
+              previewOmitted: true,
+              previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+              previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+                session.id,
+                session.latestMessage.type,
+              ),
+            }
+          : {
+              preview: preview.text,
+              ...(preview.truncated ? { previewTruncated: true } : {}),
+            }),
+      },
+    };
+  });
+  let kept = projected;
+  const build = () => {
+    const dropped = kept.length < projected.length;
+    const last = page.sessions[kept.length - 1];
+    const cursor =
+      dropped && last
+        ? {
+            orderBy: page.orderBy,
+            sortRank: last.sortRank,
+            sortRevision: last.sortRevision,
+            sortAt: last.sortAt,
+            id: last.id,
+            snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
+            updatedAfter: page.updatedAfter,
+            filterHash: page.filterHash,
+          }
+        : page.nextCursor;
+    return {
+      sessions: kept,
+      total: page.total,
+      nextCursor: cursor ? encodeSessionDiscoveryCursor(cursor) : null,
+      ...(page.orderBy === "updatedAt" ? { updatedThrough: page.updatedThrough } : {}),
+      ...(dropped
+        ? {
+            responseTruncated: true,
+            truncationReason: `response exceeded ${maxBytes} bytes; continue with nextCursor`,
+          }
+        : {}),
+    };
   };
+  let result = build();
+  while (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes) {
+    throw new RangeError(`sessions_list compact metadata exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
 }
 
 export function capSessionDiscoveryPage(

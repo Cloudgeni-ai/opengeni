@@ -35135,7 +35135,8 @@ export async function listSessionDiscoverySummaries(
     recentHours?: number;
     subject?: WorkClaimSubjectFilter;
     claimLimit?: number;
-    /** Skip advisory claim reads for an operator-disabled discovery rollout. */
+    /** Skip advisory claim reads on plain MCP browse or an operator-disabled rollout.
+     * Omitted retains the REST/UI legacy evidence default. */
     includeWorkDiscovery?: boolean;
     subjectId?: string;
     authorizationScope?: SessionAuthorizationListScope;
@@ -56892,6 +56893,78 @@ export async function getSessionGoal(
       )
       .limit(1);
     return row ? mapSessionGoal(row) : null;
+  });
+}
+
+/** Bounded MCP management facts. No config, goal metadata, or event payload is materialized.
+ * The caller must authorize session.read first, just as for getSession/queue reads. */
+export async function getSessionMcpMonitoringSummary(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<import("@opengeni/contracts").SessionMcpMonitoringSource> {
+  return await withWorkspaceRls(db, workspaceId, async (tx) => {
+    const [goal] = await tx
+      .select({
+        status: schema.sessionGoals.status,
+        text: sql<string>`left(${schema.sessionGoals.text}, 600)`,
+        textOriginalChars: sql<number>`char_length(${schema.sessionGoals.text})::integer`,
+        evidence: sql<string | null>`left(${schema.sessionGoals.evidence}, 2000)`,
+        evidenceOriginalChars: sql<
+          number | null
+        >`char_length(${schema.sessionGoals.evidence})::integer`,
+        rationale: sql<string | null>`left(${schema.sessionGoals.rationale}, 600)`,
+        rationaleOriginalChars: sql<
+          number | null
+        >`char_length(${schema.sessionGoals.rationale})::integer`,
+        pausedReason: sql<string | null>`left(${schema.sessionGoals.pausedReason}, 600)`,
+        pausedReasonOriginalChars: sql<
+          number | null
+        >`char_length(${schema.sessionGoals.pausedReason})::integer`,
+      })
+      .from(schema.sessionGoals)
+      .where(
+        and(
+          eq(schema.sessionGoals.workspaceId, workspaceId),
+          eq(schema.sessionGoals.sessionId, sessionId),
+        ),
+      )
+      .limit(1);
+    const [progress] = await tx
+      .select({
+        sequence: schema.sessionEvents.sequence,
+        text: sql<string | null>`left(${schema.sessionEvents.payload}->>'progressNote', 600)`,
+        originalChars: sql<
+          number | null
+        >`char_length(${schema.sessionEvents.payload}->>'progressNote')::integer`,
+        occurredAt: schema.sessionEvents.occurredAt,
+      })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, workspaceId),
+          eq(schema.sessionEvents.sessionId, sessionId),
+          eq(schema.sessionEvents.type, "goal.progress"),
+        ),
+      )
+      .orderBy(desc(schema.sessionEvents.sequence))
+      .limit(1);
+    const [wait] = await tx
+      .select({
+        reason: schema.sessions.inputWaitReason,
+        until: schema.sessions.inputWaitUntil,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return {
+      goal: goal ? { ...goal, status: goal.status as SessionGoalStatus } : null,
+      progress: progress ? { ...progress, occurredAt: progress.occurredAt.toISOString() } : null,
+      wait:
+        wait?.reason && wait.until
+          ? { reason: wait.reason, until: wait.until.toISOString() }
+          : null,
+    };
   });
 }
 
