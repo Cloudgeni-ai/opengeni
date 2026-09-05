@@ -36,6 +36,10 @@ Commands:
 Start with `list`, then use `show docs.search` before constructing a call. Compact
 descriptions collapse whitespace and use at most 160 Unicode code points, including
 an ellipsis when shortened; a missing/empty description falls back to the title.
+Text mode displays C0, C1, and DEL control characters as literal `\uNNNN` escapes
+so descriptions and title fallbacks cannot execute terminal control sequences.
+The byte budget includes this escape expansion. This is text-only presentation:
+catalog content, query matching, and explicit JSON/full/schema output remain unchanged.
 Catalog order and callable paths are preserved. Compact output contains no identities,
 schemas, approval annotations, or attempt IDs. JSON includes the frozen catalog digest
 so a machine caller can detect a changed catalog between pages.

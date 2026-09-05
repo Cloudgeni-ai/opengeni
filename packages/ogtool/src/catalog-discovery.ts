@@ -18,6 +18,14 @@ export function shortDescription(entry: AttemptToolCatalogEntry): string {
     : `${characters.slice(0, DESCRIPTION_MAX_CHARS - 1).join("")}…`;
 }
 
+/** Terminal-only presentation: never mutate catalog, query, or JSON content. */
+function terminalDescription(text: string): string {
+  return text.replace(
+    /[\u0000-\u001f\u007f-\u009f]/gu,
+    (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
 export type ListOptions = {
   full: boolean;
   json: boolean;
@@ -69,6 +77,12 @@ export function compactOutput(catalog: AttemptToolCatalog, options: ListOptions)
     path: entry.codemodePath.join("."),
     description: shortDescription(entry),
   }));
+  const textLines = options.json
+    ? []
+    : tools.map(
+        (tool) =>
+          `${tool.path}${tool.description ? ` — ${terminalDescription(tool.description)}` : ""}\n`,
+      );
   for (;;) {
     const nextOffset =
       options.offset + tools.length < matches.length ? options.offset + tools.length : null;
@@ -81,9 +95,7 @@ export function compactOutput(catalog: AttemptToolCatalog, options: ListOptions)
     };
     const output = options.json
       ? `${JSON.stringify(page)}\n`
-      : tools
-          .map((tool) => `${tool.path}${tool.description ? ` — ${tool.description}` : ""}\n`)
-          .join("") +
+      : textLines.slice(0, tools.length).join("") +
         `# total: ${page.total}; offset: ${page.offset}; nextOffset: ${nextOffset ?? "none"}\n` +
         (nextOffset === null
           ? ""

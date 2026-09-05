@@ -4,7 +4,7 @@ import {
   digestAttemptToolCatalog,
   parseVerifiedAttemptToolCatalog,
 } from "@opengeni/codemode";
-import { compactOutput, parseListOptions } from "../src/catalog-discovery";
+import { compactOutput, parseListOptions, shortDescription } from "../src/catalog-discovery";
 
 function catalog(count: number, extreme = false) {
   const base = createAttemptToolEnvironment({
@@ -63,6 +63,7 @@ describe("compact catalog pages", () => {
             paths = page.tools.map((tool: { path: string }) => tool.path);
             nextOffset = page.nextOffset;
           } else {
+            expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
             paths = output
               .split("\n")
               .filter((line) => line && !line.startsWith("#"))
@@ -89,6 +90,57 @@ describe("compact catalog pages", () => {
     expect(maximum.tools).toHaveLength(100);
     expect(maximum.nextOffset).toBe(100);
   }, 60_000);
+
+  test("text escapes terminal controls without altering JSON, filtering, or catalog content", () => {
+    const frozen = catalog(1);
+    const controls = String.fromCharCode(
+      ...Array.from({ length: 32 }, (_, index) => index),
+      ...Array.from({ length: 33 }, (_, index) => 127 + index),
+    );
+    const payload = `Search\u001b]52;c;VEVTVA==\u0007 CSI\u001b[2J Back\u0008 DEL\u007f C1\u009b${controls}`;
+    for (const field of ["description", "title"] as const) {
+      delete frozen.entries[0]!.description;
+      delete frozen.entries[0]!.title;
+      frozen.entries[0]![field] = payload;
+      const before = JSON.stringify(frozen);
+      const jsonBefore = compactOutput(frozen, parseListOptions(["--json"]));
+      const text = compactOutput(frozen, parseListOptions([]));
+      expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
+      expect(text).toContain("Search\\u001b]52;c;VEVTVA==\\u0007");
+      expect(text).toContain("CSI\\u001b[2J Back\\u0008 DEL\\u007f C1\\u009b");
+      for (const character of controls) {
+        if (!/\p{White_Space}/u.test(character)) {
+          expect(text).toContain(`\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
+        }
+      }
+      expect(compactOutput(frozen, parseListOptions(["--json"]))).toBe(jsonBefore);
+      expect(JSON.stringify(frozen)).toBe(before);
+      const rawQuery = JSON.parse(
+        compactOutput(frozen, parseListOptions(["--json", "--query", "\u001b]52"])),
+      );
+      expect(rawQuery.total).toBe(1);
+      expect(rawQuery.tools[0].description).toBe(shortDescription(frozen.entries[0]!));
+      const escapedQuery = JSON.parse(
+        compactOutput(frozen, parseListOptions(["--json", "--query", "\\u001b]52"])),
+      );
+      expect(escapedQuery.total).toBe(0);
+    }
+  });
+
+  test("text page byte budget includes terminal escape expansion and continuation", () => {
+    const frozen = catalog(100);
+    for (const entry of frozen.entries) entry.description = "\u001b".repeat(160);
+    const output = compactOutput(frozen, parseListOptions(["--limit=100"]));
+    expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(16_384);
+    expect(output).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
+    const count = output.split("\n").filter((line) => line.startsWith("docs.")).length;
+    expect(count).toBeGreaterThan(0);
+    expect(count).toBeLessThan(100);
+    expect(output).toContain(`nextOffset: ${count}\n`);
+    const next = compactOutput(frozen, parseListOptions([`--offset=${count}`]));
+    expect(next.startsWith(`docs.tool${count} — `)).toBe(true);
+    expect(output).toContain("\\u001b".repeat(160));
+  });
 
   test("query is literal, case-sensitive, normalized, and searches beyond displayed summaries", () => {
     const frozen = catalog(4);
