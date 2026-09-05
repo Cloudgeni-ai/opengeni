@@ -9,7 +9,6 @@ export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/machines"
   | "/workspaces/$workspaceId/plugins"
   | "/workspaces/$workspaceId/schedules"
-  | "/workspaces/$workspaceId/documents"
   | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/state"
   | "/workspaces/$workspaceId/artifacts"
@@ -20,7 +19,6 @@ export type WorkspaceConfigIcon =
   | "box"
   | "server-cog"
   | "laptop"
-  | "file-search"
   | "brain-circuit"
   | "map"
   | "plug"
@@ -50,12 +48,6 @@ export const PRIMARY_WORKSPACE_ITEMS: WorkspaceConfigItem[] = [
     icon: "plug",
     label: "Plugins",
     description: "Integrations, MCP servers, skills, and packs",
-  },
-  {
-    to: "/workspaces/$workspaceId/documents",
-    icon: "file-search",
-    label: "Documents",
-    description: "Indexed knowledge for agents",
   },
   {
     to: "/workspaces/$workspaceId/state",
