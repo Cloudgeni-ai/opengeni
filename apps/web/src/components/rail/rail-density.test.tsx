@@ -91,6 +91,11 @@ describe("session-first rail density", () => {
     const first = await render(<PrimaryNav />);
     try {
       expect(first.container.textContent).not.toContain("Explore");
+      expect(first.container.textContent).toContain("Plugins");
+      expect(first.container.textContent).toContain("Agent Knowledge");
+      expect(first.container.textContent).toContain("Schedules");
+      expect(first.container.textContent).toContain("Sites");
+      expect(first.container.textContent).not.toContain("Documents");
       expect(first.container.querySelectorAll('[data-workspace-shortcut="true"]')).toHaveLength(4);
 
       await act(async () => showLessButton(first.container).click());
