@@ -6,6 +6,7 @@ import {
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   normalizeWorkspaceInstructionPolicyRoleKey,
   type WorkspaceInstructionPolicyKind,
+  type WorkspaceInstructionPolicyHead,
   type WorkspaceInstructionPolicyOnboardingProposal,
   type WorkspaceInstructionPolicyScope,
   type WorkspaceStateGovernanceDriftStatus,
@@ -1051,10 +1052,12 @@ export function FocusedInstructions({
   state,
   workspaceId,
   personalWorkspace,
+  onInstructionSaved,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   personalWorkspace: boolean;
+  onInstructionSaved?: (head: WorkspaceInstructionPolicyHead) => void;
 }) {
   const context = useAppContext();
   const { client } = context;
@@ -1133,7 +1136,9 @@ export function FocusedInstructions({
           activeHead,
         );
       }
-      setConfirmedSave(await pendingSave.current.run());
+      const saved = await pendingSave.current.run();
+      setConfirmedSave(saved);
+      onInstructionSaved?.(saved.head);
       pendingSave.current = null;
       setMessage("Saved. New agent turns will use these workspace instructions.");
     } catch (error) {
@@ -1270,7 +1275,10 @@ export function WorkspaceStateRoute({
   const { client } = context;
   const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
-  const { state, error, loading, reload } = useWorkspaceStateInventory(client, workspaceId);
+  const { state, error, loading, reload, acceptInstructionHead } = useWorkspaceStateInventory(
+    client,
+    workspaceId,
+  );
 
   return (
     <ContentPage width="standard">
@@ -1338,6 +1346,7 @@ export function WorkspaceStateRoute({
                 state={state}
                 workspaceId={workspaceId}
                 personalWorkspace={personalWorkspace}
+                onInstructionSaved={acceptInstructionHead}
               />
             ) : null}
             {view === "skills" ? (
