@@ -23,6 +23,11 @@ import {
 } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import {
+  LOSSLESS_JSON_STRING_PREFIX,
+  toPostgresLosslessJson,
+} from "../../../packages/db/src/lossless-json";
+import { SESSION_MCP_PROGRESS_STORAGE_CHARS } from "../../../packages/db/src/session-mcp-progress";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -189,6 +194,92 @@ describe("compact session MCP database boundary", () => {
     expect(full).toHaveProperty("effectiveToolPolicy");
     expect(full.initialMessage).toBe("NEVER SHOW THIS PROMPT");
     expect(full).toHaveProperty("projection");
+  });
+
+  test("progress reads decode only a bounded scalar and retain canonical truncation facts", async () => {
+    if (!shared || !client) return;
+    for (const note of [
+      "tests\u0000green",
+      "before\ud800after\udc00",
+      `${LOSSLESS_JSON_STRING_PREFIX}literal`,
+      "a".repeat(900) + "🙂\u0000",
+      "🙂".repeat(5000) + "\u0000",
+      "a".repeat(599) + "🙂" + "b".repeat(5000) + "\u0000",
+    ]) {
+      await appendSessionEvents(client.db, grant.workspaceId, sessionId, [
+        {
+          type: "goal.progress",
+          payload: { progressNote: note, privateExtra: "NO".repeat(50_000) },
+        },
+      ]);
+      const summary = await getSessionMcpMonitoringSummary(client.db, grant.workspaceId, sessionId);
+      const chars = Array.from(note);
+      expect(summary.progress!.text).toBe(chars.slice(0, 600).join(""));
+      const cutEncodedScalar =
+        (toPostgresLosslessJson(note) as string).length > SESSION_MCP_PROGRESS_STORAGE_CHARS;
+      expect(summary.progress!.originalChars).toBe(cutEncodedScalar ? null : chars.length);
+      expect(summary.progress!.textTruncated === true).toBe(cutEncodedScalar);
+
+      const compact = await call("session_get", { sessionId });
+      expect(compact.progress.textTruncated === true).toBe(chars.length > 600);
+      if (chars.length <= 600) expect(compact.progress.text).toBe(note);
+      else expect(compact.progress.text).toStartWith(chars.slice(0, 100).join(""));
+      expect(JSON.stringify(compact)).not.toContain("privateExtra");
+      const progressRead = queries.find((query) => query.includes("progressNote"))!;
+      expect(progressRead).toContain("left(");
+      expect(progressRead).toContain("char_length(");
+      expect(progressRead).toContain('"payload_codec_version"');
+      expect(progressRead).not.toMatch(/"session_events"\."payload"\s*,/);
+    }
+  });
+
+  test("marker-shaped legacy progress remains literal without a codec version", async () => {
+    if (!shared || !client) return;
+    const marker = toPostgresLosslessJson("literal legacy\u0000note") as string;
+    const [event] = await appendSessionEvents(client.db, grant.workspaceId, sessionId, [
+      { type: "goal.progress", payload: { progressNote: "legacy fixture" } },
+    ]);
+    // Simulate retained old-writer data in this isolated fixture, without
+    // passing the marker through the new writer's escaping codec.
+    await shared.admin`
+      update session_events
+      set payload = ${shared.admin.json({ progressNote: marker })}, payload_codec_version = null
+      where id = ${event!.id}
+    `;
+    const compact = await call("session_get", { sessionId });
+    expect(compact.progress.text).toBe(marker);
+    expect(compact.progress).not.toHaveProperty("textTruncated");
+  });
+
+  test("a completion committed before session_get remains joinable from the consumed cursor", async () => {
+    if (!shared || !client) return;
+    const consumedCursor = (await call("session_get", { sessionId })).lastSequence;
+    const [completed] = await appendSessionEvents(client.db, grant.workspaceId, sessionId, [
+      { type: "turn.completed", payload: { output: "Retained child result" } },
+    ]);
+    const snapshot = await call("session_get", { sessionId });
+    expect(snapshot.lastSequence).toBe(completed!.sequence);
+    const joined = await call("session_wait", {
+      targets: [{ sessionId, afterSequence: consumedCursor }],
+      waitFor: "completion",
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: 1,
+    });
+    expect(joined.timedOut).toBeFalse();
+    expect(joined.changed[0].events).toContainEqual(
+      expect.objectContaining({
+        sequence: completed!.sequence,
+        text: "Retained child result",
+      }),
+    );
+    const skipped = await call("session_wait", {
+      targets: [{ sessionId, afterSequence: snapshot.lastSequence }],
+      waitFor: "completion",
+      includeOwnPendingUpdates: false,
+      maxWaitSeconds: 1,
+    });
+    expect(skipped.timedOut).toBeTrue();
+    expect(skipped.changed).toEqual([]);
   });
 
   test("monitoring lookup never crosses a workspace or target id", async () => {

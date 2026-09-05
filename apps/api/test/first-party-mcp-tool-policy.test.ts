@@ -152,6 +152,13 @@ describe("first-party MCP tool visibility policy", () => {
       deps(),
       grant(["sessions:read"], ["sessions_list", "session_get"]),
     );
+    const getDescription = (
+      server as unknown as {
+        _registeredTools: Record<string, { description: string }>;
+      }
+    )._registeredTools["session_get"]!.description;
+    expect(getDescription).toContain("last consumed event cursor");
+    expect(getDescription).toContain("not this snapshot lastSequence");
     for (const detail of [undefined, "compact", "full"]) {
       expect(
         registeredToolInputSchema(server, "sessions_list").safeParse({

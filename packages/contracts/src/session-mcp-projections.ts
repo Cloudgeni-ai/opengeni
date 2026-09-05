@@ -161,7 +161,9 @@ export type SessionMcpMonitoringSource = {
   progress: {
     sequence: number;
     text: string | null;
+    /** Null when a bounded encoded prefix cannot establish the original code-point count. */
     originalChars: number | null;
+    textTruncated?: true;
     occurredAt: string;
   } | null;
   wait: { reason: string; until: string } | null;
@@ -222,7 +224,7 @@ export function compactSessionMcpDetail(
             sequence: progress.sequence,
             text: progressText!.text,
             occurredAt: progress.occurredAt,
-            ...(progressText!.truncated ? { textTruncated: true } : {}),
+            ...(progressText!.truncated || progress.textTruncated ? { textTruncated: true } : {}),
           },
         }
       : {}),
