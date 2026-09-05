@@ -1,4 +1,5 @@
 import type { Settings } from "@opengeni/config";
+import { CODEMODE_ARGUMENTS_MAX_BYTES } from "@opengeni/contracts";
 import {
   isNonPublicAddress,
   pinnedFetch,
@@ -10,7 +11,11 @@ import {
 export { undiciFetch } from "@opengeni/network";
 
 export const MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
-export const MCP_MAX_INBOUND_REQUEST_BYTES = 1024 * 1024;
+// Codemode sends its admitted call through the same first-party MCP endpoint.
+// Keep enough JSON-RPC envelope headroom above the exact 4 MiB argument bound;
+// a lower HTTP limit rejects valid calls before the tool can execute and turns
+// a deterministic transport refusal into apparent outcome uncertainty.
+export const MCP_MAX_INBOUND_REQUEST_BYTES = CODEMODE_ARGUMENTS_MAX_BYTES + 64 * 1024;
 export const MCP_MAX_TOOL_DEFINITION_BYTES = 128 * 1024;
 export const MCP_MAX_TOOL_LIST_BYTES = 4 * 1024 * 1024;
 export const MCP_MAX_TOOL_LIST_ENTRIES = 1_000;

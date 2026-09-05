@@ -5,7 +5,9 @@ import {
   assertManagedEmailTransportMetadata,
   organizationUserSetupPayloadDigest,
   renderOrganizationUserSetupEmail,
+  resolveOrganizationUserSetupDeliveryEmail,
 } from "../src/auth/organization-user-setup";
+import { testSettings } from "@opengeni/testing";
 
 const message = {
   kind: "organization_user_setup" as const,
@@ -73,7 +75,7 @@ describe("managed email transport", () => {
           role: "viewer",
         },
       ],
-      setupUrl: "https://opengeni.test/setup-account#token=secret-bearer",
+      setupUrl: "https://opengeni.test/setup-account?token=secret-bearer",
     });
     expect(rendered.subject).toBe("You're invited to join R&D <Labs> on OpenGeni");
     expect(rendered.text).toContain("Ada <Admin>");
@@ -114,5 +116,58 @@ describe("managed email transport", () => {
         providerIdempotencyScope: "test-provider-v1:account-b",
       }),
     ).not.toBe(first);
+  });
+
+  test("freezes transport across cutover and recovers legacy rows from the payload digest", async () => {
+    const identity = {
+      invitationId: "00000000-0000-4000-8000-000000000001",
+      deliveryId: "00000000-0000-4000-8000-000000000002",
+      senderEmail: "OpenGeni <invites@example.test>",
+      recipientEmail: "invited@example.test",
+      recipientName: "Invited User",
+      organizationName: "Frozen Organization",
+      organizationRole: "member" as const,
+      sharedWorkspaceAccess: [],
+      providerIdempotencyScope: "test-provider-v1:frozen-account",
+    };
+    const fragmentSettings = testSettings({
+      publicBaseUrl: "https://opengeni.test",
+      betterAuthSecret: "managed-email-transport-freeze-secret-at-least-32-bytes",
+      organizationUserSetupEmailTokenTransport: "fragment",
+    });
+    const querySettings = testSettings({
+      publicBaseUrl: "https://opengeni.test",
+      betterAuthSecret: "managed-email-transport-freeze-secret-at-least-32-bytes",
+      organizationUserSetupEmailTokenTransport: "query",
+      organizationUserSetupQueryEdgeSanitizationConfirmed: true,
+    });
+    const first = await resolveOrganizationUserSetupDeliveryEmail(fragmentSettings, {
+      ...identity,
+      frozenTransport: null,
+      frozenPayloadDigest: null,
+    });
+    expect(first.transport).toBe("fragment");
+    expect(first.message.text).toContain("/setup-account#token=");
+
+    const frozenRetry = await resolveOrganizationUserSetupDeliveryEmail(querySettings, {
+      ...identity,
+      frozenTransport: "fragment",
+      frozenPayloadDigest: first.payloadDigest,
+    });
+    expect(frozenRetry).toEqual(first);
+
+    const legacyRetry = await resolveOrganizationUserSetupDeliveryEmail(querySettings, {
+      ...identity,
+      frozenTransport: null,
+      frozenPayloadDigest: first.payloadDigest,
+    });
+    expect(legacyRetry).toEqual(first);
+    await expect(
+      resolveOrganizationUserSetupDeliveryEmail(querySettings, {
+        ...identity,
+        frozenTransport: null,
+        frozenPayloadDigest: "f".repeat(64),
+      }),
+    ).rejects.toThrow("does not match its frozen payload");
   });
 });

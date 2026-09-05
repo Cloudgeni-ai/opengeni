@@ -229,6 +229,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/restored-attachment-preview.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
   "test/e2e/session-pins.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -288,6 +294,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/workspace-switcher-trigger.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/setup-account-token.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/personal-resource-attachments.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
@@ -355,7 +362,7 @@ const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
 const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|spreadsheets|video-generation)\//;
+  /^\.agents\/skills\/opengeni-(?:documents|presentations|sites|spreadsheets|video-generation)\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];

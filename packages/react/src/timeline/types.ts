@@ -279,7 +279,14 @@ export type FleetDecisionItem = {
   policyVersion: "adaptive-shadow-v1";
   actualOutcome: "selected" | "waiting" | "none";
   actualCandidateKey: string | null;
-  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  actualReason:
+    | "lease_reused"
+    | "pin"
+    | "rotation"
+    | "active"
+    | "all_capped"
+    | "allocator_disabled"
+    | "none";
   shadowOutcome: "selected" | "paced" | "none";
   shadowCandidateKey: string | null;
   shadowReason:

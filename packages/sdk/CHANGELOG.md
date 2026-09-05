@@ -1,5 +1,30 @@
 # @opengeni/sdk
 
+## 3.7.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+- Updated dependencies [6b65383]
+  - @opengeni/contracts@2.13.0
+
+## 3.6.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- d63ee0f: Keep Connected Machine file links in the target's canonical filesystem namespace, including Windows drive and UNC roots, and reject stale file requests with a retryable route conflict.
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+
 ## 3.5.1
 
 ### Patch Changes

@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import {
+  CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
+  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
+  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
+  SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
   preflightChecksFor,
@@ -16,6 +20,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV,
+  MCP_OAUTH_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -297,6 +302,51 @@ describe("deployment contract", () => {
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
   });
 
+  test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
+    const enabledEnv = {
+      OPENGENI_MCP_OAUTH_ENABLED: "true",
+      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
+    };
+    const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
+    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+      expect(enabledVars).toContain(key);
+    }
+    expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const enabled = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      enabledEnv,
+    );
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const missingOrigin = generateRuntimeArtifacts(
+      deploymentProfiles["local-compose"],
+      {},
+      {
+        OPENGENI_MCP_OAUTH_ENABLED: "true",
+      },
+    );
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
+    expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("rejects MCP OAuth artifacts for configured product-access deployments", () => {
+    const env = { OPENGENI_MCP_OAUTH_ENABLED: "true" };
+    expect(() => requiredRuntimeEnvVars(deploymentProfiles["azure-managed"], env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
+    expect(() => generateRuntimeArtifacts(deploymentProfiles["azure-managed"], {}, env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
+  });
+
   test("lists native cloud storage environment variables without static key assumptions", () => {
     const awsVars = requiredRuntimeEnvVars(deploymentProfiles["aws-existing-services"]);
     const gcpVars = requiredRuntimeEnvVars(deploymentProfiles["gcp-existing-services"]);
@@ -449,24 +499,53 @@ describe("deployment contract", () => {
     expect(commands).not.toContain("opengeni-postgres-ca");
   });
 
-  test("drains applications only for the exact model-catalog maintenance cutover", () => {
-    const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-      OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
-      OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
-    });
-    const commands = plan.deployCommands.join("\n");
+  test("drains applications for every documented maintenance cutover", () => {
+    for (const cutover of [
+      MODEL_CATALOG_MAINTENANCE_CUTOVER,
+      SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
+      SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
+      CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
+      MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
+    ]) {
+      const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED: "true",
+      });
+      const commands = plan.deployCommands.join("\n");
 
-    expect(
-      plan.deployCommands.filter(
+      expect(
+        plan.deployCommands.filter(
+          (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
+        ),
+      ).toHaveLength(2);
+      const helmCommands = plan.deployCommands.filter(
         (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
-      ),
-    ).toHaveLength(2);
-    expect(commands).toContain("--set migrations.enabled=false");
-    expect(commands).toContain("wait --for=delete pod");
-    expect(plan.notes.join("\n")).toContain(MODEL_CATALOG_MAINTENANCE_CUTOVER);
+      );
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
+      expect(commands).toContain("--set migrations.enabled=false");
+      expect(commands).toContain("wait --for=delete pod");
+      expect(plan.notes.join("\n")).toContain(cutover);
+      expect(plan.notes.join("\n")).toContain("applications-disabled revision");
+      if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
+        expect(plan.notes.join("\n")).toContain("migration 0403");
+      }
+      if (cutover === MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER) {
+        expect(plan.notes.join("\n")).toContain("migrations 0404 and 0405");
+      }
+      expect(() =>
+        stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
+        }),
+      ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
+    }
+
+    const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);
+    expect(rollingPlan.deployCommands.join("\n")).not.toContain("--atomic");
+
     expect(() =>
       stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
-        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: MODEL_CATALOG_MAINTENANCE_CUTOVER,
+        OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
       }),
     ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
     expect(() =>
@@ -494,6 +573,8 @@ describe("deployment contract", () => {
         (command) => command.includes("helm upgrade") && command.includes("deploy/helm/opengeni"),
       );
       expect(helmCommands).toHaveLength(2);
+      expect(helmCommands[0]).not.toContain("--atomic");
+      expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
       for (const command of helmCommands) {
         expect(command).toContain(
           `--set-string api.image.digest=${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}`,
@@ -546,6 +627,8 @@ describe("deployment contract", () => {
       }
     }
     expect(helmCommands[0]).not.toContain("if ! helm status");
+    expect(helmCommands[0]).not.toContain("--atomic");
+    expect(helmCommands[1]).toContain("--atomic --cleanup-on-fail");
     expect(commands.indexOf("kind load docker-image")).toBeLessThan(
       commands.indexOf("--set api.enabled=false"),
     );

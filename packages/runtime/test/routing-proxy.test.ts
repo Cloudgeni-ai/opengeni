@@ -22,6 +22,7 @@ import {
   ChannelANotFoundError,
   SandboxChannelAService,
   RoutingBackendRecoveryRequiredError,
+  RoutingActiveRouteChangedError,
   RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
@@ -977,7 +978,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
 
     expect(await proxy.fileSystemRoot()).toBe("/workspace");
     kind = "selfhosted";
-    expect(await proxy.fileSystemRoot()).toBe(".");
+    expect(await proxy.fileSystemRoot()).toBe("/workspace");
     expect(operations).toBe(0);
   });
 
@@ -1115,6 +1116,63 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       "stdin-resolved",
       "parent-settled",
     ]);
+  });
+
+  test("retained process promotion and session background adoption are separate and idempotent", async () => {
+    let parentPromotions = 0;
+    let backgroundAdoptions = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 175\n\nOutput:\nstarted";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => {
+        parentPromotions += 1;
+      },
+      adoptProcessAsBackgroundCommand: async ({ process }) => {
+        expect(process.providerSessionId).toBe(175);
+        backgroundAdoptions += 1;
+      },
+    });
+
+    await proxy.execCommand({ cmd: "long" });
+    expect(parentPromotions).toBe(1);
+    expect(backgroundAdoptions).toBe(0);
+
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(175);
+    expect(backgroundAdoptions).toBe(1);
+  });
+
+  test("process-local provider locators cannot become session background commands", async () => {
+    for (const kind of ["local", "docker"] as const) {
+      let backgroundAdoptions = 0;
+      const backend: RoutableBackendSession = {
+        async execCommand() {
+          return "Process running with session ID 176\n\nOutput:\nstarted";
+        },
+      };
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind }),
+        beforeMutation: async () => "parent",
+        afterMutation: async () => undefined,
+        adoptProcessAsBackgroundCommand: async () => {
+          backgroundAdoptions += 1;
+        },
+      });
+
+      await proxy.execCommand({ cmd: "long" });
+      expect(proxy.canAdoptRetainedProcessAsBackgroundCommand(176)).toBe(false);
+      await expect(proxy.adoptRetainedProcessAsBackgroundCommand(176)).rejects.toThrow(
+        "backgroundCommandAdoption",
+      );
+      expect(backgroundAdoptions).toBe(0);
+    }
   });
 
   test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {
@@ -1678,6 +1736,49 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     );
     expect(oldCalls).toEqual(["exec"]);
     expect(newCalls).toEqual([]);
+  });
+
+  test("an API-bound route adopts the active root once and rejects a later swap", async () => {
+    const ptr = mutablePointer({ activeSandboxId: "machine", activeEpoch: 4 });
+    const homeCalls: string[] = [];
+    const machineCalls: string[] = [];
+    const home: RoutableBackendSession = {
+      state: { manifest: { root: "/workspace" } },
+      async readFile() {
+        homeCalls.push("read");
+        return new TextEncoder().encode("home");
+      },
+    };
+    const machine: RoutableBackendSession = {
+      state: { manifest: { root: "C:/work/repo" } },
+      async readFile() {
+        machineCalls.push("read");
+        return new TextEncoder().encode("machine");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      bindActiveRouteOnFirstResolve: true,
+      defaultResolved: { session: home, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: home, sandboxId: null, kind: "modal" }
+          : { session: machine, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
+    });
+
+    await expect(proxy.fileSystemAuthority()).resolves.toEqual({
+      root: "C:/work/repo",
+      activeEpoch: 4,
+      backendKind: "selfhosted",
+    });
+    await expect(proxy.readFile({ path: "src/app.ts" })).resolves.toBeInstanceOf(Uint8Array);
+    expect(machineCalls).toEqual(["read"]);
+
+    ptr.swap(null);
+    await expect(proxy.readFile({ path: "README.md" })).rejects.toBeInstanceOf(
+      RoutingActiveRouteChangedError,
+    );
+    expect(homeCalls).toEqual([]);
   });
 
   test("(2) stale-epoch in-flight read: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {

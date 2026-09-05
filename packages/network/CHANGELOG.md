@@ -1,5 +1,11 @@
 # @opengeni/network
 
+## 0.3.0
+
+### Minor Changes
+
+- 876396d: Support safe same-origin legacy MCP OAuth discovery when RFC 9728 Protected Resource Metadata is absent, and expose shared runtime/catalog discovery classifications.
+
 ## 0.2.3
 
 ### Patch Changes

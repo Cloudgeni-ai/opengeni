@@ -29,7 +29,9 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/home/u/proj/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link directly to `/tmp`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "In managed sandboxes, never link directly to `/tmp`",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "or any file outside the current workspace",
     );
@@ -37,6 +39,9 @@ describe("provider-neutral operational instructions", () => {
       "copy it into the current workspace before responding",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "absolute file links may point outside the working directory",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");
@@ -80,19 +85,19 @@ describe("provider-neutral operational instructions", () => {
 
   test("holds an unchanged external wait during the status turn without stalling useful work", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "do not end with only a status reply and leave an immediate continuation",
+      "Do not end with only a status reply and leave an immediate continuation",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "only when further progress genuinely depends on an unchanged child or external event",
+      "only when further progress genuinely depends on unchanged work already in flight",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "Do not use `goal_wait` for work you can still advance or for a blocker that requires a human decision.",
+      "Do not use `wait_for_input` for work you can still advance or for a blocker that requires a human decision.",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "after calling `goal_wait`, end without another final or status restatement unless you found material new information",
+      "after calling `wait_for_input`, end without another final or status restatement unless you found material new information",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
-      "except for the unchanged-wait `goal_wait` continuation described above",
+      "except for the unchanged-wait `wait_for_input` continuation described above",
     );
   });
 });

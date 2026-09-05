@@ -2,8 +2,11 @@ import {
   createGraphqlMcpServer,
   createOpenApiMcpServer,
   createPinnedIntegrationTransport,
+  directIntegrationTransport,
+  IntegrationInvocationError,
   type IntegrationCredentialResolver,
   type IntegrationInvocationAuthority,
+  type IntegrationTransport,
 } from "@opengeni/capabilities";
 import type { Settings } from "@opengeni/config";
 import type { ToolAuthNeededPayload } from "@opengeni/contracts";
@@ -12,8 +15,8 @@ import type {
   ResolveConnectionCredentialInput,
   ResolveConnectionCredentialResult,
 } from "@opengeni/db";
-import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { FetchLike } from "@opengeni/network";
+import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 
 export type BuildApiIntegrationServersInput = {
   settings: Settings;
@@ -27,12 +30,11 @@ export type BuildApiIntegrationServersInput = {
 };
 
 /**
- * Compile active persisted API facets into ordinary in-process MCP servers for
- * one exact attempt. Connection resolution remains request-time, destination-
- * bound, personal-delegation-fenced, and refreshable through the same worker
- * resolver used by remote MCP servers.
+ * Compile active persisted API facets into ordinary in-process MCP providers.
+ * The caller supplies its authority resolver, so agent attempts and current
+ * humans use the same provider assembly without sharing credentials or policy.
  */
-export function buildApiIntegrationServersForTurn(
+export function buildApiIntegrationMcpServers(
   input: BuildApiIntegrationServersInput,
 ): LocalMcpServerRegistration[] {
   const transport = createPinnedIntegrationTransport({
@@ -47,39 +49,99 @@ export function buildApiIntegrationServersForTurn(
         : {}),
     };
     const credentialResolver = integration.connectionRef
-      ? integrationCredentialResolver(input, integration)
+      ? integrationCredentialResolver(input, integration, "execution")
       : undefined;
-    const server =
+    const buildServer = (
+      serverTransport: IntegrationTransport,
+      serverCredentialResolver = credentialResolver,
+    ) =>
       integration.revision.protocol === "openapi"
         ? createOpenApiMcpServer({
             revision: integration.revision,
-            transport,
+            transport: serverTransport,
             authority,
-            ...(credentialResolver ? { credentialResolver } : {}),
+            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
           })
         : createGraphqlMcpServer({
             revision: integration.revision,
             endpoint: integration.baseUrl,
-            transport,
+            transport: serverTransport,
             authority,
-            ...(credentialResolver ? { credentialResolver } : {}),
+            ...(serverCredentialResolver ? { credentialResolver: serverCredentialResolver } : {}),
           });
+    const server = buildServer(transport);
+    const preflightCredentialResolver = integration.connectionRef
+      ? integrationCredentialResolver(input, integration, "preflight")
+      : undefined;
+    const preflightServer = preflightCredentialResolver
+      ? buildServer(providerBlockingPreflightTransport, preflightCredentialResolver)
+      : null;
     return {
       id: integration.serverId,
       server,
+      approvalAuthority: {
+        kind: "api_integration",
+        capabilityId: integration.capabilityId,
+        pluginKey: integration.pluginKey,
+        pluginInstallationId: integration.pluginInstallationId,
+        installationVersion: integration.installationVersion,
+        instanceId: integration.instanceId,
+        instanceKey: integration.instanceKey,
+        instanceVersion: integration.instanceVersion,
+        definitionId: integration.definitionId,
+        definitionProvenance: integration.definitionProvenance,
+        revisionId: integration.revision.id,
+        baseUrl: integration.baseUrl,
+        providerDomain: integration.providerDomain,
+        connectionRef: integration.connectionRef,
+        connectionAuthorityGeneration: integration.connectionAuthorityGeneration,
+      },
       ...(integration.connectionRef?.connectionId
         ? { resolvedConnectionId: integration.connectionRef.connectionId }
+        : {}),
+      ...(credentialResolver
+        ? {
+            preflightCall: async (
+              toolName: string,
+              args: Record<string, unknown>,
+              options?: { signal?: AbortSignal },
+            ) => await preflightApiIntegrationCall(preflightServer!, toolName, args, options),
+          }
         : {}),
     };
   });
 }
 
+const providerBlockingPreflightTransport = directIntegrationTransport(async () => {
+  throw new Error("integration provider request blocked by preflight");
+});
+
+async function preflightApiIntegrationCall(
+  server: LocalMcpServerRegistration["server"],
+  toolName: string,
+  args: Record<string, unknown>,
+  options?: { signal?: AbortSignal },
+): Promise<void> {
+  try {
+    await server.callTool(toolName, args, null, options);
+  } catch (error) {
+    if (error instanceof IntegrationInvocationError && error.code === "request_failed") return;
+    throw error;
+  }
+  throw new Error("integration preflight unexpectedly crossed the provider request boundary");
+}
+
 function integrationCredentialResolver(
   input: BuildApiIntegrationServersInput,
   integration: ApiIntegrationRuntime,
+  credentialResolutionMode: "execution" | "preflight",
 ): IntegrationCredentialResolver {
   const connectionRef = integration.connectionRef;
   if (!connectionRef) throw new Error("Integration credential resolver requires a connection");
+  const expectedAuthorityGeneration = integration.connectionAuthorityGeneration;
+  if (expectedAuthorityGeneration === null) {
+    throw new Error("Integration credential resolver requires a connection authority generation");
+  }
   return {
     resolve: async (request) => {
       const result = await input.resolveCredential({
@@ -90,6 +152,8 @@ function integrationCredentialResolver(
         destinationUrl: request.destinationUrl,
         credentialTarget: "http_api",
         forceRefresh: request.forceRefresh === true,
+        credentialResolutionMode,
+        expectedAuthorityGeneration,
       });
       if (result.status === "auth_needed") {
         await publishAuthNeeded(

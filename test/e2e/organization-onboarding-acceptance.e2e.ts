@@ -300,8 +300,9 @@ function firstUrl(message: CapturedManagedEmail): string {
 
 function setupToken(message: CapturedManagedEmail): string {
   const url = new URL(firstUrl(message));
-  const token = new URLSearchParams(url.hash.slice(1)).get("token");
-  if (!token) throw new Error("organization setup URL did not contain a fragment token");
+  const token =
+    url.searchParams.get("token") ?? new URLSearchParams(url.hash.slice(1)).get("token");
+  if (!token) throw new Error("organization setup URL did not contain a token");
   return token;
 }
 
@@ -385,6 +386,8 @@ beforeAll(async () => {
     runtimeDatabaseRole: "opengeni_app",
     publicBaseUrl: publicOrigin,
     betterAuthSecret: "onboarding-browser-better-auth-secret-at-least-32-bytes",
+    organizationUserSetupEmailTokenTransport: "query",
+    organizationUserSetupQueryEdgeSanitizationConfirmed: true,
     sandboxBackend: "none",
   });
   const api = createApp({
@@ -1144,6 +1147,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const resetEmail = await takeEmail("password_reset", registeredEmail);
     const resetUrl = new URL(firstUrl(resetEmail));
     expect(resetUrl.pathname.startsWith("/v1/auth/reset-password/")).toBe(true);
+    // Stop authenticated background reads before removing their credentials.
+    await registeredPage.goto("about:blank");
     await registeredContext.clearCookies();
     await registeredPage.goto(resetUrl.toString(), {
       waitUntil: "domcontentloaded",

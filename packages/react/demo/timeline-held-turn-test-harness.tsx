@@ -26,12 +26,15 @@ const events = [
   event("user.message", { text: "Wait for the child and keep me posted." }),
   event("agent.message.completed", { text: fallback, phase: "commentary" }),
   event("agent.toolCall.created", {
-    id: "goal-wait-call",
-    name: "goal_wait",
-    arguments: { reason: "child still running", untilSeconds: 900 },
+    id: "input-wait-call",
+    name: "wait_for_input",
+    arguments: { reason: "child still running", timeoutSeconds: 900 },
   }),
-  event("goal.held", { actor: "agent", reason: "child still running" }),
-  event("agent.toolCall.output", { id: "goal-wait-call", output: { status: "held" } }),
+  event("session.wait.started", { actor: "agent", reason: "child still running" }),
+  event("agent.toolCall.output", {
+    id: "input-wait-call",
+    output: { status: "waiting_for_input" },
+  }),
   event("turn.completed", {}),
 ];
 

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "2.1.2",
+  "version": "2.3.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -40,6 +40,10 @@
     "./github-rest-mcp": {
       "types": "./src/github-rest-mcp.ts",
       "default": "./src/github-rest-mcp.ts"
+    },
+    "./workspace-tool-gateway": {
+      "types": "./src/workspace-tool-gateway.ts",
+      "default": "./src/workspace-tool-gateway.ts"
     }
   },
   "publishConfig": {
@@ -66,6 +70,7 @@
     "@opengeni/contracts": "workspace:*",
     "@opengeni/network": "workspace:*",
     "@opengeni/sdk": "workspace:*",
+    "@opengeni/tool-gateway": "workspace:*",
     "@opengeni/xai-subscription": "workspace:*",
     "debug": "4.4.3",
     "modal": "0.9.0",

@@ -1603,12 +1603,13 @@ describe("embedding host session authorization routes", () => {
       } as unknown as ApiRouteDeps,
       value.grant,
     );
-    const detail = await callMcpTool<{ id: string; parentSessionId: string | null }>(
+    const detail = await callMcpTool<{ id: string; parentSessionId?: string }>(
       server,
       "session_get",
       { sessionId: value.child.id },
     );
-    expect(detail).toMatchObject({ id: value.child.id, parentSessionId: null });
+    expect(detail).toMatchObject({ id: value.child.id });
+    expect(detail).not.toHaveProperty("parentSessionId");
     expect(calls).toContainEqual({
       sessionId: value.child.id,
       operation: "session.read",
@@ -1619,13 +1620,46 @@ describe("embedding host session authorization routes", () => {
     ).rejects.toThrow("Session not found or access denied");
 
     const listed = await callMcpTool<{
-      sessions: Array<{ id: string; parentSessionId: string | null }>;
+      sessions: Array<{ id: string; parentSessionId?: string }>;
       total: number;
     }>(server, "sessions_list", { query: "Shared host search target" });
     expect(listed.total).toBe(1);
-    expect(listed.sessions).toEqual([
-      expect.objectContaining({ id: value.child.id, parentSessionId: null }),
-    ]);
+    expect(listed.sessions).toEqual([expect.objectContaining({ id: value.child.id })]);
+    expect(listed.sessions[0]).not.toHaveProperty("parentSessionId");
+    await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
+      mutateSessionControlInTransaction(scoped, {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId,
+        sessionId: value.root.id,
+        actor: { type: "human", subjectId: value.grant.subjectId },
+        operationKey: crypto.randomUUID(),
+        action: "pause",
+        reason: "private parent reason",
+      }),
+    );
+    for (const mode of ["compact", "full"] as const) {
+      const paused = await callMcpTool<Record<string, unknown>>(server, "session_get", {
+        sessionId: value.child.id,
+        detail: mode,
+      });
+      expect(JSON.stringify(paused)).toContain("An ancestor session");
+      expect(JSON.stringify(paused)).not.toContain("private parent reason");
+      expect(JSON.stringify(paused)).not.toContain(value.root.id);
+      if (mode === "full") {
+        expect(paused.effectiveToolPolicy).toMatchObject({ inheritedFromSessionId: null });
+      }
+      await expect(
+        callMcpTool(server, "session_get", { sessionId: value.hidden.id, detail: mode }),
+      ).rejects.toThrow("Session not found or access denied");
+      const rows = await callMcpTool<{ total: number; sessions: unknown[] }>(
+        server,
+        "sessions_list",
+        { detail: mode },
+      );
+      expect(rows.total).toBe(1);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.root.id);
+      expect(JSON.stringify(rows.sessions)).not.toContain(value.hidden.id);
+    }
   });
 
   test("authorizes first-party MCP parent-to-child Pause, Resume, and Agent Steer exactly once", async () => {
@@ -2179,6 +2213,54 @@ describe("embedding host session authorization routes", () => {
       exp: Math.floor(Date.now() / 1000) + 3_600,
     });
     const headers = { authorization: `Bearer ${token}` };
+    const mcpDeps = {
+      settings: testSettings(),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {},
+      objectStorage: null,
+      githubStateSecret: "test",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => ({}) as never,
+      sessionAuthorization: {
+        authorizeSession: async ({ target }: { target: { sessionId: string } }) =>
+          target.sessionId === value.hidden.id
+            ? { allowed: false as const, reason: "not_found" }
+            : { allowed: true as const },
+      },
+    } as unknown as ApiRouteDeps;
+    const agentGrant = {
+      ...value.grant,
+      principalKind: "agent_attempt" as const,
+      metadata: {
+        sessionId: value.child.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
+    };
+    const mcp = buildOpenGeniMcpServer(mcpDeps, agentGrant);
+    for (const detail of ["compact", "full"] as const) {
+      const own = await callMcpTool<{ id: string }>(mcp, "session_get", { detail });
+      expect(own.id).toBe(value.child.id);
+      expect(own.id).not.toBe(value.root.id);
+      expect(await callMcpTool(mcp, "session_get", { sessionId: value.child.id, detail })).toEqual(
+        own,
+      );
+      expect(
+        await callMcpTool(mcp, "session_get", { sessionId: value.root.id, detail }),
+      ).toMatchObject({ id: value.root.id });
+      await expect(
+        callMcpTool(mcp, "session_get", { sessionId: value.hidden.id, detail }),
+      ).rejects.toThrow("Session not found or access denied");
+      const operator = buildOpenGeniMcpServer(mcpDeps, { ...agentGrant, principalKind: "service" });
+      await expect(callMcpTool(operator, "session_get", { detail })).rejects.toThrow(
+        "requires an explicit sessionId",
+      );
+      expect(
+        await callMcpTool(operator, "session_get", { sessionId: value.child.id, detail }),
+      ).toMatchObject({ id: value.child.id });
+    }
     const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`;
     expect((await app.request(path, { headers })).status).toBe(200);
     expect(actors).toContainEqual({
@@ -2211,6 +2293,11 @@ describe("embedding host session authorization routes", () => {
     const callCount = actors.length;
     expect((await app.request(path, { headers })).status).toBe(404);
     expect(actors).toHaveLength(callCount);
+    for (const args of [{}, { sessionId: value.child.id }, { sessionId: value.root.id }]) {
+      await expect(callMcpTool(mcp, "session_get", args)).rejects.toMatchObject({
+        reason: "caller_stale",
+      });
+    }
     await expect(
       requireSessionAuthorizationListScope(
         { db: client.db },

@@ -633,7 +633,9 @@ function CapabilitiesLegacyRedirect() {
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return (
+    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+  );
 }
 
 function Schedules() {

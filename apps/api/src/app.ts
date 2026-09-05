@@ -18,6 +18,8 @@ import {
   resolveWorkspaceMemoryPromptMode,
   VOICE_INPUT_ACCEPTED_MIME_TYPES,
   TRANSCRIPTION_RECORDING_PROVIDER_SEGMENT_SECONDS,
+  ToolGatewayApprovalRequest,
+  ToolGatewayCallRequest,
   type AccessGrant,
   type ErrorCode,
 } from "@opengeni/contracts";
@@ -41,7 +43,6 @@ import {
   reapManagedAuthIsolatedSessions,
   reapExpiredManagedAuthSessionSets,
   rlsContextForWorkspace,
-  withSessionRlsActorContext,
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
@@ -63,7 +64,7 @@ import {
   ManagedAuthActorLeaseOutcomeUnknownError,
   hasPermission,
   requireAccessGrant,
-  requireLiveAgentAttemptAuthorization,
+  requireAccessGrantAuthorization,
   requirePermission,
   releaseManagedAuthRequestActorLease,
   resolveCatalogSettings,
@@ -96,13 +97,33 @@ import {
   runManagedAuthProvider,
 } from "./auth/managed-auth-attempt-context";
 import { createManagedEmailTransport } from "./auth/managed-email";
-import { assertManagedEmailTransportMetadata } from "./auth/organization-user-setup";
+import {
+  assertManagedEmailTransportMetadata,
+  assertOrganizationUserSetupQueryTransportConfigured,
+} from "./auth/organization-user-setup";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import {
+  buildWorkspaceToolGatewayMcpServer,
+  approveWorkspaceToolGatewayCall,
+  callWorkspaceToolGateway,
+  grantUsesAttemptScopedMcp,
+  prepareMcpOAuthWorkspaceToolGateway,
+  prepareWorkspaceToolGateway,
+  workspaceToolGatewayDeclarations,
+} from "./workspace-tool-gateway";
+import {
+  isMcpOAuthResourcePath,
+  mcpOAuthAuthenticateHeader,
+  mcpOAuthBearerToken,
+  registerMcpOAuthRoutes,
+  resolveMcpOAuthRouteAccess,
+} from "./mcp-oauth";
+import {
   CodemodeAuthorityError,
   CodemodeCatalogNotReadyError,
+  CodemodeCatalogStaleError,
   isCodemodeGrant,
   readCodemodeOperation,
   requireActiveCodemodeCatalog,
@@ -115,6 +136,7 @@ import {
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
 import { allowedCorsOrigin } from "./http/cors";
+import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
 import { registerCodexRoutes } from "./routes/codex";
@@ -245,6 +267,7 @@ export function createAppComposition(deps: AppDependencies): {
   app: Hono;
   routeDeps: ApiRouteDeps;
 } {
+  assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
   // The request-scoped workspace control-prefix budget is validated once by
   // @opengeni/config at boot; install it for every request-scoped db command
   // (Send/Steer/control/queue/settings/delete) built by this app.
@@ -400,6 +423,18 @@ export function createAppComposition(deps: AppDependencies): {
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
     correlationIds.set(c.req.raw, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
+
+  app.use("*", async (c, next) => {
+    const oauthToken = mcpOAuthBearerToken(c.req.raw);
+    if (
+      oauthToken &&
+      (!deps.settings.mcpOauthEnabled || !isMcpOAuthResourcePath(new URL(c.req.url).pathname))
+    ) {
+      c.header("www-authenticate", 'Bearer error="invalid_token"');
+      return c.json({ error: "invalid_token" }, 401);
+    }
     await next();
   });
 
@@ -799,6 +834,8 @@ export function createAppComposition(deps: AppDependencies): {
     }),
   );
 
+  registerMcpOAuthRoutes(app, routeDeps);
+
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
@@ -898,7 +935,54 @@ export function createAppComposition(deps: AppDependencies): {
       }
       throw error;
     }
-    const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
+    let oauthAccess: Awaited<ReturnType<typeof resolveMcpOAuthRouteAccess>>;
+    try {
+      oauthAccess = await resolveMcpOAuthRouteAccess(routeDeps, c.req.raw, workspaceId);
+    } catch (error) {
+      if (error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
+    if (oauthAccess) {
+      return await withAccessGrantSessionRlsContext(routeDeps, oauthAccess.grant, async () => {
+        const prepared = await prepareMcpOAuthWorkspaceToolGateway(
+          routeDeps,
+          oauthAccess.grant,
+          oauthAccess.allowedToolIdentities,
+        );
+        const transport = new WebStandardStreamableHTTPServerTransport({
+          enableJsonResponse: true,
+        });
+        const mcp = buildWorkspaceToolGatewayMcpServer(
+          prepared,
+          oauthAccess.grant,
+          routeDeps.observability,
+        );
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      });
+    }
+    let authorization: Awaited<ReturnType<typeof requireMcpAccessGrantAuthorization>>;
+    try {
+      authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
+    } catch (error) {
+      if (deps.settings.mcpOauthEnabled && error instanceof HTTPException && error.status === 401) {
+        c.header(
+          "www-authenticate",
+          mcpOAuthAuthenticateHeader(routeDeps, new URL(c.req.url).pathname),
+        );
+      }
+      throw error;
+    }
+    const grant = authorization.grant;
     return await withAccessGrantSessionRlsContext(routeDeps, grant, async () => {
       const boundSessionId = grant.metadata?.sessionId;
       if (typeof boundSessionId === "string") {
@@ -926,6 +1010,16 @@ export function createAppComposition(deps: AppDependencies): {
       const transport = new WebStandardStreamableHTTPServerTransport({
         enableJsonResponse: true,
       });
+      if (!grantUsesAttemptScopedMcp(grant)) {
+        const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+        const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
+        try {
+          await mcp.connect(transport);
+          return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
+        } finally {
+          await Promise.allSettled([mcp.close(), prepared.close()]);
+        }
+      }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
       const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
         requestOrigin: new URL(c.req.url).origin,
@@ -937,6 +1031,100 @@ export function createAppComposition(deps: AppDependencies): {
       // worker that drops the call (Steer/Pause) aborts a blocking tool here.
       return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
     });
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(prepared.toolGatewayCatalog);
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/calls", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const grant = authorization.grant;
+    const parsed = ToolGatewayCallRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway call" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(
+        await callWorkspaceToolGateway(
+          prepared,
+          grant,
+          parsed.data,
+          routeDeps.db,
+          undefined,
+          routeDeps.observability,
+        ),
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/tools/approvals", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const parsed = ToolGatewayApprovalRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "Invalid tool gateway approval" });
+    }
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      return c.json(
+        await approveWorkspaceToolGatewayCall(
+          prepared,
+          authorization.grant,
+          routeDeps.db,
+          parsed.data,
+          undefined,
+          routeDeps.observability,
+        ),
+        201,
+      );
+    } finally {
+      await prepared.close();
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/tools/declarations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      routeDeps,
+      workspaceId,
+      "workspace:read",
+    );
+    const prepared = await prepareWorkspaceToolGateway(routeDeps, authorization);
+    try {
+      c.header("cache-control", "no-store");
+      return c.json(workspaceToolGatewayDeclarations(prepared));
+    } finally {
+      await prepared.close();
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1136,7 +1324,7 @@ export function workspaceActorContextExempt(method: string, pathname: string): b
   // Hono's trailing wildcard also matches it, but "external" is not a workspace UUID;
   // the route performs its own organization API-key authorization.
   if (method === "PUT" && pathname === "/v1/workspaces/external") return true;
-  if (/^\/v1\/workspaces\/[^/]+\/mcp$/.test(pathname)) return true;
+  if (/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(pathname)) return true;
   if (
     method === "GET" &&
     publicWorkspaceBrowserRoutePatterns.some((route) => route.test(pathname))
@@ -1165,46 +1353,15 @@ async function validateCodexAccountTarget(request: Request): Promise<void> {
   }
 }
 
-async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (grant.principalKind !== "agent_attempt") {
-    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
-  }
-  const callerSessionId = grant.metadata?.sessionId;
-  if (typeof callerSessionId !== "string") {
-    throw new HTTPException(403, { message: "agent attempt authority is invalid" });
-  }
-  try {
-    const actor = await requireLiveAgentAttemptAuthorization(deps.db, grant, callerSessionId);
-    return await withSessionRlsActorContext(
-      {
-        subjectId: actor.subjectId,
-        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-      },
-      fn,
-    );
-  } catch (error) {
-    if (error instanceof SessionAuthorizationDeniedError) {
-      throw new HTTPException(403, {
-        message: "agent attempt authority is invalid",
-        cause: error,
-      });
-    }
-    throw error;
-  }
-}
-
-async function requireMcpAccessGrant(
+async function requireMcpAccessGrantAuthorization(
   c: Parameters<typeof requireAccessGrant>[0],
   deps: ApiRouteDeps,
   workspaceId: string,
-): Promise<AccessGrant> {
-  const grant = await requireAccessGrant(c, deps, workspaceId);
+): Promise<Awaited<ReturnType<typeof requireAccessGrantAuthorization>>> {
+  const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId);
+  const grant = authorization.grant;
   if (hasPermission(grant.permissions, "workspace:read")) {
-    return grant;
+    return authorization;
   }
   if (isCodemodeGrant(grant)) {
     requirePermission(grant, "workspace:read");
@@ -1214,10 +1371,10 @@ async function requireMcpAccessGrant(
   // authorization seam runs immediately after this gate, and tool registration
   // still exposes only capabilities permitted by the delegated grant.
   if (grant.metadata?.delegated === true && typeof grant.metadata.sessionId === "string") {
-    return grant;
+    return authorization;
   }
   requirePermission(grant, "workspace:read");
-  return grant;
+  return authorization;
 }
 
 function clientAuthConfig(settings: AppDependencies["settings"]) {
@@ -1266,6 +1423,15 @@ function codemodeHttpError(error: unknown): HTTPException {
     });
   }
   if (error instanceof CodemodeCatalogNotReadyError) {
+    return new ApiHttpError(409, {
+      code: "conflict",
+      message: error.message,
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: error.code },
+    });
+  }
+  if (error instanceof CodemodeCatalogStaleError) {
     return new ApiHttpError(409, {
       code: "conflict",
       message: error.message,
@@ -1504,6 +1670,20 @@ const routeLabelPatterns: Array<{
   pattern: RegExp;
   label: string | ((match: RegExpMatchArray) => string);
 }> = [
+  {
+    pattern: /^\/\.well-known\/oauth-authorization-server$/,
+    label: "/.well-known/oauth-authorization-server",
+  },
+  {
+    pattern:
+      /^\/\.well-known\/oauth-protected-resource\/v1\/workspaces\/[^/]+\/mcp(?:\/(docs|files))?$/,
+    label: (match) =>
+      `/.well-known/oauth-protected-resource/v1/workspaces/:workspaceId/mcp${match[1] ? `/${match[1]}` : ""}`,
+  },
+  {
+    pattern: /^\/oauth\/(register|authorize|token)$/,
+    label: (match) => `/oauth/${match[1]}`,
+  },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
@@ -1588,6 +1768,22 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/mcp\/files$/,
     label: "/v1/workspaces/:workspaceId/mcp/files",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/catalog$/,
+    label: "/v1/workspaces/:workspaceId/tools/catalog",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/calls$/,
+    label: "/v1/workspaces/:workspaceId/tools/calls",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/approvals$/,
+    label: "/v1/workspaces/:workspaceId/tools/approvals",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/tools\/declarations$/,
+    label: "/v1/workspaces/:workspaceId/tools/declarations",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/default-rig$/,
@@ -2353,5 +2549,6 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
   ) {
     return false;
   }
-  return !pathname.split("/").includes("mcp");
+  const segments = pathname.split("/");
+  return !segments.includes("mcp") && !segments.includes("codemode");
 }

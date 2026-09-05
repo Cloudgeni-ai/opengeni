@@ -6,6 +6,7 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import {
+  adoptManagedSessionBackgroundCommand,
   advanceWorkspaceGeneration,
   advanceWorkspaceGenerationForDirectRequest,
   claimSessionWorkForAttempt,
@@ -25,6 +26,7 @@ import {
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
   SandboxRetainedProcessTerminalError,
+  SessionBackgroundCommandAdoptionFencedError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
   type Database,
@@ -492,6 +494,111 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("managed process retention does not background until exact-attempt adoption", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess();
+
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([]);
+
+    const adopt = () =>
+      adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt.turnId,
+        executionGeneration: fixture.attempt.executionGeneration,
+        attemptId: fixture.attempt.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "sleep 60",
+      });
+    await adopt();
+    await adopt();
+
+    const commands = await listSessionBackgroundCommands(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+    });
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      id: fixture.process.id,
+      provider: "managed",
+      state: "running",
+    });
+  });
+
+  test("a retained command that finishes during foreground waiting creates no background input", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess();
+
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+
+    expect(settled.backgroundCommandEvents).toEqual([]);
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([]);
+  });
+
+  test("Pause between retention and receipt adoption fences session ownership", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess();
+    await withWorkspaceSessionActivityRls(
+      db,
+      fixture.workspaceId,
+      async (scopedDb) =>
+        await mutateSessionControlInTransaction(scopedDb, {
+          accountId: fixture.accountId,
+          workspaceId: fixture.workspaceId,
+          sessionId: fixture.sessionId,
+          actor: { type: "human", subjectId: "user:test-owner" },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+    );
+
+    await expect(
+      adoptManagedSessionBackgroundCommand(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        turnId: fixture.attempt.turnId,
+        executionGeneration: fixture.attempt.executionGeneration,
+        attemptId: fixture.attempt.attemptId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        command: "sleep 60",
+      }),
+    ).rejects.toBeInstanceOf(SessionBackgroundCommandAdoptionFencedError);
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([]);
+  });
+
   test("Pause before managed adoption fences session ownership but preserves exact cleanup authority", async () => {
     if (!available) return;
     const ids = await freshWorkspace();
@@ -613,6 +720,107 @@ describe("retained-process terminal-owner reconciliation", () => {
     });
   });
 
+  test("command-result failure rolls back retained-process settlement and retries proof without replay", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({
+      outcome: "completed",
+      backgroundCommand: "bun test --watch",
+    });
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const functionName = `fail_command_settlement_${suffix}`;
+    const triggerName = `fail_command_settlement_${suffix}`;
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([expect.objectContaining({ id: fixture.process.id, state: "running" })]);
+    await admin.unsafe(`
+      create function ${functionName}() returns trigger language plpgsql as $$
+      begin
+        raise exception 'forced command settlement failure';
+      end
+      $$;
+      create trigger ${triggerName}
+      before update on session_background_commands
+      for each row execute function ${functionName}();
+    `);
+
+    let settlementFailure: unknown;
+    try {
+      await settleRetainedProcess(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+        processId: fixture.process.id,
+        expected: retainedProcessSettlementIdentity(fixture.process),
+        outcome: "exited",
+        exitCode: 0,
+        reason: "provider_exit_banner",
+        idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+      });
+    } catch (error) {
+      settlementFailure = error;
+    } finally {
+      await admin.unsafe(`
+        drop trigger if exists ${triggerName} on session_background_commands;
+        drop function if exists ${functionName}();
+      `);
+    }
+    expect(settlementFailure).toBeInstanceOf(Error);
+    const failureMessages: string[] = [];
+    let currentFailure: unknown = settlementFailure;
+    while (currentFailure instanceof Error) {
+      failureMessages.push(currentFailure.message);
+      currentFailure = currentFailure.cause;
+    }
+    expect(failureMessages.join("\n")).toContain("forced command settlement failure");
+
+    expect(await settlementProjection(fixture)).toMatchObject({
+      processState: "active",
+      admissionOutcome: "retained",
+      admissionSettled: false,
+      processHolders: 1,
+    });
+    expect(
+      await listSessionBackgroundCommands(db, {
+        accountId: fixture.accountId,
+        workspaceId: fixture.workspaceId,
+        sessionId: fixture.sessionId,
+      }),
+    ).toEqual([expect.objectContaining({ id: fixture.process.id, state: "running" })]);
+
+    const settled = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(fixture.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(settled.settled).toBe(true);
+    expect(settled.backgroundCommandEvents.map((event) => event.type)).toEqual([
+      "session.command.finished",
+      "system.update.pending",
+    ]);
+    const replay = await settleRetainedProcess(db, {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      processId: fixture.process.id,
+      expected: retainedProcessSettlementIdentity(settled.process),
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider_exit_banner",
+      idleGraceMs: SETTINGS.sandboxIdleGraceMs,
+    });
+    expect(replay).toMatchObject({ settled: false, backgroundCommandEvents: [] });
+  });
+
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
     expect(
       classifyRetainedProcessPollResult(
@@ -628,6 +836,19 @@ describe("retained-process terminal-owner reconciliation", () => {
       },
     });
     expect(classifyRetainedProcessPollResult("session not found: 9", 9)).toEqual({
+      status: "proved",
+      proof: {
+        outcome: "lost",
+        exitCode: null,
+        reason: "provider_session_lost_banner",
+      },
+    });
+    expect(
+      classifyRetainedProcessPollResult(
+        "Wall time: 0.001 seconds\nProcess exited with code 1\nOutput:\nwrite_stdin failed: session not found: 9",
+        9,
+      ),
+    ).toEqual({
       status: "proved",
       proof: {
         outcome: "lost",

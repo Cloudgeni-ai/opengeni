@@ -26,6 +26,8 @@ const sandboxProviderDeadlineInteractionFollowupMigrationName =
   "0391_sandbox_provider_deadline_interaction_followup.sql";
 const sandboxDeadlineRotationPreemptionMigrationName =
   "0397_sandbox_deadline_rotation_preemption.sql";
+const sessionInputWaitMigrationName = "0402_session_input_wait_and_background_command_results.sql";
+const commandTrackingRetirementMigrationName = "0407_connected_command_tracking_retirement.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -189,9 +191,21 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${sessionEventRawLaneActivationMigrationName}),
           (${sandboxProviderDeadlineInteractionMigrationName}),
           (${sandboxProviderDeadlineInteractionFollowupMigrationName}),
-          (${sandboxDeadlineRotationPreemptionMigrationName})
+          (${sandboxDeadlineRotationPreemptionMigrationName}),
+          (${sessionInputWaitMigrationName}),
+          (${commandTrackingRetirementMigrationName})
       `;
       await migrate(databaseUrl);
+      // Current session adapters select the complete sessions row while this
+      // fixture intentionally withholds 0402. Supply only its later columns
+      // during fixture setup, then remove them before the ordered replay.
+      await sql`
+        alter table sessions
+        add column input_wait_turn_id uuid,
+        add column input_wait_until timestamptz,
+        add column input_wait_reason text,
+        add column input_wait_set_at timestamptz
+      `;
       await sql`
         delete from schema_migrations
         where name in (
@@ -208,7 +222,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sessionEventRawLaneActivationMigrationName},
           ${sandboxProviderDeadlineInteractionMigrationName},
           ${sandboxProviderDeadlineInteractionFollowupMigrationName},
-          ${sandboxDeadlineRotationPreemptionMigrationName}
+          ${sandboxDeadlineRotationPreemptionMigrationName},
+          ${sessionInputWaitMigrationName},
+          ${commandTrackingRetirementMigrationName}
         )
       `;
 
@@ -236,6 +252,13 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         "initiating human lacks target-workspace membership",
       );
 
+      await sql`
+        alter table sessions
+        drop column input_wait_turn_id,
+        drop column input_wait_until,
+        drop column input_wait_reason,
+        drop column input_wait_set_at
+      `;
       await migrate(databaseUrl);
       const receipts = await sql<Array<{ name: string }>>`
         select name
@@ -254,7 +277,9 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sessionEventRawLaneActivationMigrationName},
           ${sandboxProviderDeadlineInteractionMigrationName},
           ${sandboxProviderDeadlineInteractionFollowupMigrationName},
-          ${sandboxDeadlineRotationPreemptionMigrationName}
+          ${sandboxDeadlineRotationPreemptionMigrationName},
+          ${sessionInputWaitMigrationName},
+          ${commandTrackingRetirementMigrationName}
         )
         order by name
       `;
@@ -273,6 +298,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         sandboxProviderDeadlineInteractionMigrationName,
         sandboxProviderDeadlineInteractionFollowupMigrationName,
         sandboxDeadlineRotationPreemptionMigrationName,
+        sessionInputWaitMigrationName,
+        commandTrackingRetirementMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);

@@ -11,6 +11,38 @@ const ROLLBACK_OPERATION = "00000000-0000-4000-8000-000000000007";
 const PROPOSAL_OPERATION = "00000000-0000-4000-8000-000000000008";
 
 describe("workspace instruction-policy SDK", () => {
+  for (const stalledStage of ["headers", "body", "error body"] as const) {
+    test(`bounds instruction mutations stalled at ${stalledStage}`, async () => {
+      const client = new OpenGeniClient({
+        baseUrl: "https://api.example.test",
+        sessionCommandTimeoutMs: 10,
+        fetch: (async () => {
+          if (stalledStage === "headers") return await new Promise<Response>(() => {});
+          return new Response(new ReadableStream({ start() {} }), {
+            status: stalledStage === "error body" ? 500 : 200,
+            headers: { "content-type": "application/json" },
+          });
+        }) as unknown as typeof fetch,
+      });
+      await expect(
+        client.createWorkspaceInstructionPolicyDraft(WORKSPACE_ID, {
+          operationId: DRAFT_OPERATION,
+          kind: "policy",
+          scope: "global",
+          roleKey: null,
+          content: "Keep updates concise.",
+        }),
+      ).rejects.toMatchObject({ code: "network_error", outcomeUnknown: true });
+      await expect(
+        client.activateWorkspaceInstructionPolicyRevision(WORKSPACE_ID, REVISION_A, {
+          operationId: ACTIVATE_OPERATION,
+          expectedCurrentRevisionId: null,
+          expectedActivationVersion: 0,
+          reason: "Initial activation",
+        }),
+      ).rejects.toMatchObject({ code: "network_error", outcomeUnknown: true });
+    });
+  }
   test("maps the complete backend control surface to stable routes", async () => {
     const requests: Request[] = [];
     const client = new OpenGeniClient({

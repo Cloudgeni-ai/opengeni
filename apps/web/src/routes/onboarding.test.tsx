@@ -3,6 +3,7 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { OrganizationInvitation } from "@/types";
 
 const completeSetup = mock(
   async (_input: { token: string; name: string; password: string; operationId: string }) => ({
@@ -27,6 +28,27 @@ const previewSetup = mock(
     expiresAt: "2026-09-01T00:00:00.000Z",
   }),
 );
+let currentAuthSession: {
+  session: { id: string; userId: string; expiresAt: string };
+  user: { id: string; name: string; email: string; emailVerified: boolean };
+} | null = null;
+const fetchSession = mock(async () => currentAuthSession);
+const listSetupInvitations = mock(
+  async (): Promise<{
+    invitations: OrganizationInvitation[];
+    nextCursor: null;
+  }> => ({
+    invitations: [],
+    nextCursor: null,
+  }),
+);
+const acceptSetupInvitation = mock(async () => ({
+  status: "complete" as const,
+}));
+const setupClient = {
+  listOrganizationInvitations: listSetupInvitations,
+  acceptOrganizationInvitation: acceptSetupInvitation,
+};
 
 class TestAuthApiError extends Error {
   constructor(
@@ -43,6 +65,8 @@ mock.module("@/api", () => ({
   AuthApiError: TestAuthApiError,
   apiBaseUrl: "",
   completeOrganizationUserSetup: completeSetup,
+  createOpenGeniClient: () => setupClient,
+  fetchAuthSession: fetchSession,
   managedActorMutationBusySnapshot: () => false,
   previewOrganizationUserSetup: previewSetup,
   completeSelfServiceOrganizationSetup: completeSelfServiceSetup,
@@ -64,6 +88,9 @@ mock.module("@tanstack/react-router", () => ({
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
+const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
+const VALID_FRAGMENT_SETUP_TOKEN = "A".repeat(43);
+const VALID_QUERY_SETUP_TOKEN = "B".repeat(43);
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -620,6 +647,99 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("lets the invited signed-in account accept directly without account creation", async () => {
+    const invitationId = crypto.randomUUID();
+    const otherInvitationId = crypto.randomUUID();
+    const workspaceId = crypto.randomUUID();
+    const otherWorkspaceId = crypto.randomUUID();
+    const now = new Date().toISOString();
+    previewSetup.mockImplementationOnce(async () => ({
+      state: "pending",
+      organizationId: "00000000-0000-4000-8000-000000000001",
+      organizationName: "Test Organization",
+      targetEmail: "invitee@example.test",
+      targetName: "Grace Hopper",
+      organizationRole: "member",
+      sharedWorkspaceAccess: [{ workspaceId, workspaceName: "Expected workspace", role: "member" }],
+      expiresAt: now,
+    }));
+    currentAuthSession = {
+      session: { id: "session-1", userId: "user-1", expiresAt: now },
+      user: {
+        id: "user-1",
+        name: "Grace Hopper",
+        email: "INVITEE@example.test",
+        emailVerified: true,
+      },
+    };
+    listSetupInvitations.mockImplementationOnce(async () => ({
+      invitations: [
+        {
+          id: otherInvitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [otherWorkspaceId],
+          role: "admin" as const,
+          status: "pending" as const,
+          revision: 3,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+        {
+          id: invitationId,
+          organizationId: "00000000-0000-4000-8000-000000000001",
+          organizationName: "Test Organization",
+          targetEmail: "invitee@example.test",
+          targetName: "Grace Hopper",
+          initialWorkspaceIds: [workspaceId],
+          role: "member" as const,
+          status: "pending" as const,
+          revision: 7,
+          expiresAt: now,
+          acceptedMembershipId: null,
+          createdAt: now,
+          updatedAt: now,
+          delivery: null,
+        },
+      ],
+      nextCursor: null,
+    }));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SetupAccountRoute token="signed-in-token" />));
+      await flush();
+      await flush();
+      expect(container.textContent).toContain("Signed in as INVITEE@example.test");
+      expect(container.textContent).toContain("No new account or password is needed");
+      expect(container.querySelector("#setup-account-password")).toBeNull();
+      const acceptButton = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Accept and join",
+      )!;
+      await act(async () => acceptButton.click());
+      await flush();
+      expect(acceptSetupInvitation).toHaveBeenCalledWith(invitationId, {
+        expectedRevision: 7,
+        operationId: expect.any(String),
+      });
+      expect(completeSetup).not.toHaveBeenCalledWith(
+        expect.objectContaining({ token: "signed-in-token" }),
+      );
+      expect(container.textContent).toContain("Invitation accepted");
+      expect(container.textContent).toContain("Open OpenGeni");
+    } finally {
+      currentAuthSession = null;
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("keeps setup credentials absent across loading, failure, and every terminal preview", async () => {
     let resolveLoading!: (preview: OrganizationUserSetupPreview) => void;
     previewSetup.mockImplementationOnce(
@@ -689,15 +809,30 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("accepts setup authority only from a bounded fragment and scrubs every URL token", () => {
+  test("accepts one canonical fragment or compatibility query bearer and scrubs every URL token", () => {
     expect(
       setupAccountTokenFromUrl(
-        "https://opengeni.test/setup-account?token=logged&preview=1#token=fragment-secret&tab=invite",
+        `https://opengeni.test/setup-account?preview=1#token=${VALID_FRAGMENT_SETUP_TOKEN}&tab=invite`,
       ),
     ).toEqual({
-      token: "fragment-secret",
+      token: VALID_FRAGMENT_SETUP_TOKEN,
       scrubbedPath: "/setup-account?preview=1#tab=invite",
     });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&preview=1`,
+      ),
+    ).toEqual({ token: VALID_QUERY_SETUP_TOKEN, scrubbedPath: "/setup-account?preview=1" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}#token=${VALID_FRAGMENT_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+    expect(
+      setupAccountTokenFromUrl(
+        `https://opengeni.test/setup-account?token=${VALID_QUERY_SETUP_TOKEN}&token=${VALID_QUERY_SETUP_TOKEN}`,
+      ),
+    ).toEqual({ token: null, scrubbedPath: "/setup-account" });
     expect(setupAccountTokenFromUrl("https://opengeni.test/setup-account?token=logged")).toEqual({
       token: null,
       scrubbedPath: "/setup-account",
@@ -705,6 +840,21 @@ describe("organization onboarding UI", () => {
     expect(
       setupAccountTokenFromUrl(`https://opengeni.test/setup-account#token=${"x".repeat(2_049)}`),
     ).toEqual({ token: null, scrubbedPath: "/setup-account" });
+  });
+
+  test("takes the early bootstrap bearer exactly once and revalidates its canonical shape", () => {
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: VALID_QUERY_SETUP_TOKEN,
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBe(VALID_QUERY_SETUP_TOKEN);
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+      configurable: true,
+      value: "malformed",
+    });
+    expect(takeBootstrappedSetupAccountToken(window)).toBeNull();
+    expect("__OPENGENI_SETUP_ACCOUNT_TOKEN__" in window).toBe(false);
   });
 
   test("keeps the scrubbed fragment bearer across the lazy-route history remount only until preview settles", async () => {
@@ -720,14 +870,14 @@ describe("organization onboarding UI", () => {
         }),
     );
     window.history.replaceState(null, "", "/setup-account");
-    window.location.hash = "token=lazy-remount-fragment-token";
-    expect(window.location.hash).toBe("#token=lazy-remount-fragment-token");
+    window.location.hash = `token=${VALID_FRAGMENT_SETUP_TOKEN}`;
+    expect(window.location.hash).toBe(`#token=${VALID_FRAGMENT_SETUP_TOKEN}`);
 
     const firstContainer = document.createElement("div");
     document.body.appendChild(firstContainer);
     const firstRoot = createRoot(firstContainer);
     await act(async () => firstRoot.render(<SetupAccountRoute />));
-    expect(window.location.href).not.toContain("lazy-remount-fragment-token");
+    expect(window.location.href).not.toContain(VALID_FRAGMENT_SETUP_TOKEN);
     expect(firstContainer.textContent).toContain("Checking this invitation");
     await act(async () => firstRoot.unmount());
     firstContainer.remove();
@@ -739,8 +889,8 @@ describe("organization onboarding UI", () => {
       await act(async () => secondRoot.render(<SetupAccountRoute />));
       expect(secondContainer.textContent).toContain("Checking this invitation");
       expect(previewSetup.mock.calls.slice(-2).map(([request]) => request)).toEqual([
-        { token: "lazy-remount-fragment-token" },
-        { token: "lazy-remount-fragment-token" },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
+        { token: VALID_FRAGMENT_SETUP_TOKEN },
       ]);
       await act(async () =>
         resolveSecondPreview({

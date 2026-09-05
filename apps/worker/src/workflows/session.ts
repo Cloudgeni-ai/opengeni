@@ -95,6 +95,14 @@ export function deferredResultMayContinue(entryWakeups: number, currentWakeups: 
   return currentWakeups !== entryWakeups;
 }
 
+/** A typed activity cancellation is recoverable unless its exact-attempt
+ * redispatch budget was atomically exhausted. */
+export function cancelledAttemptRecoveryMayContinue(
+  action: activities.RecoverDispatchResult["action"],
+): boolean {
+  return action !== "exceeded";
+}
+
 /**
  * Bound repeated failures that happen before an attempt row exists. The
  * activity mirrors this deterministic delay into the durable wake outbox, so
@@ -342,6 +350,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  // PR #2208 changed a typed-cancelled result from a plain re-peek into a
+  // recoverDispatch activity. Version that new command so histories which
+  // already recorded the legacy re-peek remain deterministic on replay.
+  const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -644,6 +656,48 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       }
       continue;
     }
+    if (peek.kind === "input-wait") {
+      const settlement = await activity.settleSessionInputWait({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        waitTurnId: peek.waitTurnId,
+        disposition: peek.disposition,
+      });
+      if (settlement.action !== "held") continue;
+
+      // The durable outbox owns the long deadline. Keep this workflow run open
+      // only for the same bounded close-race window used by ordinary idle; any
+      // signal is a hint to re-peek PostgreSQL truth.
+      const seenWakeups = wakeups;
+      const seenApprovalWakeups = approvalWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      const woke = await condition(
+        () =>
+          interruptionWakeups !== seenInterruptionWakeups ||
+          wakeups !== seenWakeups ||
+          approvalWakeups !== seenApprovalWakeups,
+        "5s",
+      );
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (
+        finalPeek.kind !== "input-wait" ||
+        finalPeek.disposition !== "held" ||
+        finalPeek.waitTurnId !== peek.waitTurnId
+      ) {
+        continue;
+      }
+      await activity.markSessionIdle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (signalVersion !== closeSignalVersion) continue;
+      return;
+    }
     if (peek.kind === "idle") {
       let continuation: activities.MaybeContinueGoalResult = { action: "none" };
       try {
@@ -663,11 +717,10 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
       if (continuation.action === "continue" || continuation.action === "queue") continue;
-      // `none`, `paused`, `held`, and `deferred` all close this run below. A
-      // held or deferred (idle-backoff) goal keeps its durable obligation
-      // armed; the delayed wake-outbox row at the hold/pacing deadline, pending
-      // machine input, a human prompt, or any producer's signalWithStart
-      // restarts the workflow. No Temporal timer is used for pacing.
+      // `none`, `paused`, and `deferred` all close this run below. A deferred
+      // idle-backoff goal keeps its durable obligation armed; the delayed
+      // wake-outbox row at the pacing deadline or any producer signal restarts
+      // the workflow. No Temporal timer is used for pacing.
       const seenWakeups = wakeups;
       const seenApprovalWakeups = approvalWakeups;
       const seenInterruptionWakeups = interruptionWakeups;
@@ -1052,8 +1105,33 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return true;
     }
 
-    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
-      return outcome.result.status === "cancelled";
+    if (outcome.result.status === "failed") {
+      return false;
+    }
+
+    if (outcome.result.status === "cancelled") {
+      // Histories created before session-cancelled-attempt-recovery-v1 must
+      // preserve the old command sequence. Their durable state is still safe:
+      // operator recovery or a later fresh workflow run can close a stranded
+      // owner, while new histories use the bounded exact-attempt transaction.
+      if (!cancelledAttemptRecovery) return true;
+      // A typed cancellation is normally observed through the control-signal
+      // branch above, after Pause/Steer has durably fenced the attempt. A
+      // worker can nevertheless return the same shape after a shutdown or a
+      // stale settlement race without closing its attempt row. Blindly
+      // re-peeking then retries forever against `turn.status = running` and
+      // strands every later prompt. Reconcile the exact attempt through the
+      // same bounded, generation-fenced redispatch transaction used after an
+      // activity heartbeat loss. If the attempt actually settled meanwhile,
+      // the transaction is a stale no-op and the next peek observes truth.
+      const recovery = await activity.recoverDispatch({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId: outcome.result.attemptId,
+        timeoutType: "HEARTBEAT",
+      });
+      return cancelledAttemptRecoveryMayContinue(recovery.action);
     }
 
     if (outcome.result.capacityWait) {

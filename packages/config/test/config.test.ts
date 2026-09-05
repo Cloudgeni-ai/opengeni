@@ -6,6 +6,7 @@ import {
   SandboxBackend,
 } from "@opengeni/contracts";
 import {
+  DEFAULT_MODAL_IMAGE_REF,
   DEFAULT_GOAL_IDLE_BACKOFF_MAX_MS,
   DEFAULT_GOAL_IDLE_BACKOFF_MS,
   collectGitIdentityEnvironment,
@@ -63,6 +64,62 @@ describe(".env.example", () => {
   });
 });
 
+describe("MCP OAuth settings", () => {
+  test("defaults off and requires a credential-free public origin when enabled", () => {
+    const defaults = withEnv({}, () => getSettings());
+    expect(defaults.mcpOauthEnabled).toBe(false);
+    expect(defaults.mcpOauthTrustedProxyHops).toBe(0);
+    expect(() => withEnv({ OPENGENI_MCP_OAUTH_ENABLED: "true" }, () => getSettings())).toThrow(
+      "OPENGENI_PUBLIC_BASE_URL",
+    );
+    expect(
+      withEnv(
+        {
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ).mcpOauthEnabled,
+    ).toBe(true);
+  });
+
+  test("bounds explicit trusted proxy hops", () => {
+    expect(
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2" }, () => getSettings())
+        .mcpOauthTrustedProxyHops,
+    ).toBe(2);
+    expect(() =>
+      withEnv({ OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "17" }, () => getSettings()),
+    ).toThrow();
+  });
+
+  test("requires HTTPS outside local and test", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_ENVIRONMENT: "production",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "http://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must use https");
+  });
+
+  test("requires a product mode with a canonical current-human session", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_PRODUCT_ACCESS_MODE: "configured",
+          OPENGENI_MCP_OAUTH_ENABLED: "true",
+          OPENGENI_PUBLIC_BASE_URL: "https://api.example.test",
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("requires managed or local product access mode");
+  });
+});
+
 describe("goal continuation pacing settings", () => {
   test("defaults to the input-aware idle backoff schedule and cap", () => {
     const settings = withEnv({}, () => getSettings());
@@ -115,7 +172,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("child lifecycle notices default off and parse the rollout flag", () => {
-    expect(getSettings().childLifecycleNoticesEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).childLifecycleNoticesEnabled).toBe(false);
     expect(
       withEnv({ OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true" }, () => getSettings())
         .childLifecycleNoticesEnabled,
@@ -127,7 +184,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("host MCP connection authority defaults off and parses the rollout flag", () => {
-    expect(getSettings().hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
+    expect(withEnv({}, () => getSettings()).hostMcpAuthoritySourceAdmissionEnabled).toBe(false);
     expect(
       withEnv({ OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true" }, () => getSettings())
         .hostMcpAuthoritySourceAdmissionEnabled,
@@ -166,7 +223,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("Slack workspace routing defaults on and parses the rollout flag", () => {
-    expect(getSettings().slackWorkspaceRoutingEnabled).toBe(true);
+    expect(withEnv({}, () => getSettings()).slackWorkspaceRoutingEnabled).toBe(true);
     expect(
       withEnv({ OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "false" }, () => getSettings())
         .slackWorkspaceRoutingEnabled,
@@ -178,7 +235,7 @@ describe("browser analytics configuration", () => {
   });
 
   test("work discovery rollout stages have safe independent defaults", () => {
-    const defaults = getSettings();
+    const defaults = withEnv({}, () => getSettings());
     expect(defaults.workDiscoveryEnabled).toBe(true);
     expect(defaults.workClaimMutationsEnabled).toBe(true);
     expect(defaults.workDiscoveryHumanAdvisoriesEnabled).toBe(true);
@@ -496,6 +553,36 @@ describe("managed auth browser session-set rollout", () => {
         () => getSettings(),
       ),
     ).toThrow(/must use https when browser session sets are enabled/);
+  });
+});
+
+describe("organization setup email token transport rollout", () => {
+  test("defaults to fragment links and requires the explicit query edge-sanitization gate", () => {
+    expect(withEnv({}, () => getSettings()).organizationUserSetupEmailTokenTransport).toBe(
+      "fragment",
+    );
+    expect(
+      withEnv({}, () => getSettings()).organizationUserSetupQueryEdgeSanitizationConfirmed,
+    ).toBe(false);
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query" }, () =>
+        getSettings(),
+      ),
+    ).toThrow(/QUERY_EDGE_SANITIZATION_CONFIRMED=true/);
+    expect(
+      withEnv(
+        {
+          OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "query",
+          OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED: "true",
+        },
+        () => getSettings(),
+      ).organizationUserSetupEmailTokenTransport,
+    ).toBe("query");
+    expect(() =>
+      withEnv({ OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT: "enabled" }, () =>
+        getSettings(),
+      ),
+    ).toThrow();
   });
 });
 
@@ -1965,9 +2052,9 @@ describe("backend-gated sandbox required-credential validation", () => {
     ).not.toThrow();
   });
 
-  test("production modal+desktop requires a digest-pinned image ref", () => {
+  test("production modal+desktop defaults to a public pin and accepts an override", () => {
     const digestRef = `example.azurecr.io/opengeni-desktop@sha256:${"a".repeat(64)}`;
-    expect(() =>
+    expect(
       withEnv(
         {
           OPENGENI_ENVIRONMENT: "production",
@@ -1977,8 +2064,8 @@ describe("backend-gated sandbox required-credential validation", () => {
           OPENGENI_MODAL_TOKEN_SECRET: "as-test",
         },
         () => getSettings(),
-      ),
-    ).toThrow("digest-pinned");
+      ).modalImageRef,
+    ).toBe(DEFAULT_MODAL_IMAGE_REF);
     expect(
       withEnv(
         {

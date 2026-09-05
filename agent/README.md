@@ -25,7 +25,7 @@ never `git clone`s a repo onto the machine.
 | Crate                     | Role                                                                                                                         |
 |---|---|
 | `opengeni-agent-proto`    | Generated wire-protocol types (Rust side of the codegen).                                                                    |
-| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | call` client; multi-deployment dial, RPC dispatch, supervisor. |
+| `opengeni-agent`          | The binary: `run`/`connect`/`connections`/`disconnect`/`service`/`update`/`uninstall`, plus the exact-attempt `codemode list | show | call` client; multi-deployment dial, RPC dispatch, supervisor. |
 | `opengeni-agent-platform` | Per-OS `Platform` + the `service` (systemd/launchd/SCM) renderer.                                                            |
 | `opengeni-agent-stream`   | Relay-edge stream transport + pty/framebuffer pumps.                                                                         |
 | `opengeni-agent-update`   | Self-update: signed-manifest discovery, minisign+sha256 verify, atomic replace, rollback.                                    |

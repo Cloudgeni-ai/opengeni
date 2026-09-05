@@ -1,6 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   CreateScheduledTaskRequest,
+  boundSessionMcpText as capSessionDiscoveryText,
+  compactSessionMcpListRow,
+  sessionMcpIncludesRelatedWork,
   FIRST_PARTY_MCP_TOOL_NAMES,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -30,10 +33,13 @@ import {
   type SessionAuthorizationSurface,
   type Session,
   type WorkspaceMemoryPromptMode,
+  type WorkspaceArtifactMutationResponse,
   type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_SUCCESS_CRITERIA_MAX_BYTES,
@@ -67,6 +73,7 @@ import {
   encryptVariableSetValue,
   getSession,
   getSessionGoal,
+  getSessionMcpMonitoringSummary,
   getSessionQueueSnapshot,
   getSessionTurn,
   getOrCreatePreferenceRegistrySnapshot,
@@ -101,9 +108,9 @@ import {
   serializeEffectiveSessionControl,
   setSessionGoalStatusWithEvent,
   recordSessionGoalProgressWithEvent,
-  holdSessionGoalContinuationWithEvent,
-  SESSION_GOAL_HOLD_MAX_SECONDS,
-  SESSION_GOAL_HOLD_MIN_SECONDS,
+  waitForSessionInputWithEvent,
+  SESSION_INPUT_WAIT_MAX_SECONDS,
+  SESSION_INPUT_WAIT_MIN_SECONDS,
   setVariableSetVariable,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
@@ -114,6 +121,7 @@ import {
   listWorkspaceArtifacts,
   publishWorkspaceArtifactVersion,
   rollbackWorkspaceArtifact,
+  setWorkspaceArtifactStatus,
   archiveTaskNote,
   createTaskNote,
   listTaskNotes,
@@ -163,7 +171,6 @@ import {
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { retryWhileMissing } from "@opengeni/storage";
 import {
   githubBindingStatus,
   listWorkspaceGitHubInstallationBindings,
@@ -171,6 +178,12 @@ import {
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { publishSandboxFileArtifact } from "../sandbox-file-artifacts";
+import {
+  projectWorkspaceArtifactDetailProvenance,
+  projectWorkspaceArtifactMutationProvenance,
+  projectWorkspaceArtifactVersionProvenance,
+  redactWorkspaceArtifactListProvenance,
+} from "../workspace-artifact-provenance";
 import {
   assertSocialConnectionProvider,
   socialMentionsLive,
@@ -232,10 +245,12 @@ import {
   type FleetServices,
   type RunOnOp,
 } from "@opengeni/core";
+import { getSessionBackgroundCommand } from "@opengeni/db/session-background-commands";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
+  boundSessionCompactDetailMcp,
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
@@ -278,6 +293,10 @@ import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
+import {
+  prepareWorkspaceArtifactContent,
+  readWorkspaceArtifactContent,
+} from "../workspace-artifact-content";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -425,7 +444,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   goal_set: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_update: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_progress: { sessionRequired: true, allOf: ["goals:manage"] },
-  goal_wait: { sessionRequired: true, allOf: ["goals:manage"] },
+  wait_for_input: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
@@ -499,6 +518,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // Blocking wait inside a running turn: the live attempt's own session is the
   // self target, so the tool exists only for session-scoped grants.
   session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
+  command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
@@ -618,6 +638,8 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_archive: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  artifacts_restore: { sessionRequired: true, allOf: ["artifacts:publish"] },
   sandbox_file_publish: {
     sessionRequired: true,
     allOf: ["files:read", "files:upload"],
@@ -806,8 +828,11 @@ export function buildOpenGeniMcpServer(
       },
     );
   }
-  // Goal tools require goals:manage (in the default first-party permission set).
-  if (sessionId !== null && can("goals:manage")) {
+  // PolicyMcpServer applies each tool's own permission contract. Register this
+  // mixed group for every session so session-level wait_for_input remains
+  // available with sessions:control even when goals:manage is intentionally
+  // absent.
+  if (sessionId !== null) {
     registerGoalTools(server, deps, grant, sessionId, json);
   }
   if (sessionId !== null && options.workspaceMemoryEnabled === true) {
@@ -2572,6 +2597,12 @@ function registerGoalTools(
     SESSION_GOAL_PROGRESS_MAX_BYTES,
     "goal progress note",
   );
+  const inputWaitReasonSchema = boundedGoalToolString(2 * 1024, "session input wait reason").refine(
+    (value) => value.trim().length > 0,
+    {
+      message: "session input wait reason must not be blank",
+    },
+  );
   server.registerTool(
     "goal_set",
     {
@@ -2730,38 +2761,36 @@ function registerGoalTools(
   );
 
   server.registerTool(
-    "goal_wait",
+    "wait_for_input",
     {
       description:
-        "Hold the active goal's automatic continuation while progress depends on child sessions or an external event. Use it instead of sleeping or polling sessions_list/session_get/session_events, and only after re-checking the child or external state once. Always end your turn right after calling it: you will be woken by a child result, an agent message, a human prompt, or at the deadline, and the goal stays active. The deadline (untilSeconds) is mandatory and capped at 7 days. Never use goal_wait instead of goal_pause when you are blocked on a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists its absolute deadline, and timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Always end your turn immediately after the tool succeeds. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
-        reason: goalRationale,
-        untilSeconds: z4
+        reason: inputWaitReasonSchema,
+        timeoutSeconds: z4
           .number()
           .int()
-          .min(SESSION_GOAL_HOLD_MIN_SECONDS)
-          .max(SESSION_GOAL_HOLD_MAX_SECONDS),
+          .min(SESSION_INPUT_WAIT_MIN_SECONDS)
+          .max(SESSION_INPUT_WAIT_MAX_SECONDS),
         idempotencyKey: z4.string().uuid().optional(),
       },
     },
-    async ({ reason, untilSeconds, idempotencyKey }) => {
-      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+    async ({ reason, timeoutSeconds, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
       const context = exactAgentCommandContext(grant, sessionId);
-      // Without a caller-supplied key the operation is idempotent per (goal
-      // target, turn, exact arguments): a replacement attempt replaying the
-      // same call receives the stored result instead of re-stamping the hold,
-      // while a genuinely new same-turn wait (different reason/deadline) is a
-      // new operation whose later hold wins.
       const operationKey =
         idempotencyKey ??
-        `goal-wait:${context.callerTurnId}:${createHash("sha256")
-          .update(JSON.stringify({ reason, untilSeconds }))
+        `wait-for-input:${context.callerTurnId}:${createHash("sha256")
+          .update(JSON.stringify({ reason, timeoutSeconds }))
           .digest("hex")
           .slice(0, 32)}`;
-      const { goal, events, operationId, replay, untilAt } =
-        await holdSessionGoalContinuationWithEvent(deps.db, grant.workspaceId, sessionId, {
+      const { events, operationId, replay, deadlineAt } = await waitForSessionInputWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
           reason,
-          untilSeconds,
+          timeoutSeconds,
           command: {
             accountId: grant.accountId,
             actor: {
@@ -2773,16 +2802,16 @@ function registerGoalTools(
             },
             operationKey,
           },
-        });
+        },
+      );
       await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
       return json({
-        status: "held",
-        goalId: goal.id,
-        untilAt,
+        status: "waiting_for_input",
+        deadlineAt,
         operationId,
         replay,
         nextAction:
-          "End your turn now; you will be woken by a child result, a message, a human prompt, or at untilAt.",
+          "End your turn now. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
       });
     },
   );
@@ -2922,42 +2951,42 @@ function registerWorkspaceArtifactTools(
   const authorize = async () => {
     await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
   };
-  const prepare = (html: string) => {
+  const canReadProvenanceSession = (sourceSessionId: string): Promise<boolean> =>
+    authorizeFirstPartySession(deps, grant, sourceSessionId, "session.read")
+      .then(() => true)
+      .catch((error) => {
+        if (error instanceof SessionAuthorizationDeniedError) return false;
+        throw error;
+      });
+  const mutation = async (response: WorkspaceArtifactMutationResponse) =>
+    await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
+  const prepare = (
+    html: string,
+    source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
+    requestedTools?: Array<{ serverId: string; toolName: string }>,
+  ) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
-    const bytes = new TextEncoder().encode(html);
-    if (bytes.byteLength < 1 || bytes.byteLength > WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES) {
-      throw new Error(
-        `Artifact HTML must be 1-${WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES} UTF-8 bytes`,
-      );
-    }
-    const contentSha256 = createHash("sha256").update(bytes).digest("hex");
-    const contentKey = `workspaces/${grant.workspaceId}/workspace-artifacts/blobs/${contentSha256}.html`;
-    return {
-      contentKey,
-      contentSha256,
-      sizeBytes: bytes.byteLength,
-      persistContent: async () => {
-        await deps.objectStorage!.putObject({
-          key: contentKey,
-          contentType: "text/html; charset=utf-8",
-          body: bytes,
-          sha256: contentSha256,
-        });
-      },
-    };
+    return prepareWorkspaceArtifactContent(deps.objectStorage, grant.workspaceId, {
+      html,
+      ...(source ? { source } : {}),
+      ...(requestedTools ? { requestedTools } : {}),
+    });
   };
   const provenance = (
     idempotencyKey: string,
-    sourceToolName: "artifacts_create" | "artifacts_publish" | "artifacts_rollback",
+    sourceToolName:
+      | "artifacts_create"
+      | "artifacts_publish"
+      | "artifacts_rollback"
+      | "artifacts_archive"
+      | "artifacts_restore",
   ) => {
     const claims = attempt();
     return {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       operationKey: `attempt:${createHash("sha256")
-        .update(
-          `${claims.sessionId}:${claims.turnId}:${claims.attemptId}:${claims.executionGeneration}:${idempotencyKey}`,
-        )
+        .update(`${claims.sessionId}:${claims.turnId}:${idempotencyKey}`)
         .digest("hex")}`,
       actorSubjectId: grant.subjectId,
       sourceSessionId: claims.sessionId,
@@ -2977,7 +3006,11 @@ function registerWorkspaceArtifactTools(
     },
     async () => {
       await authorize();
-      return json(await listWorkspaceArtifacts(deps.db, grant.workspaceId));
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
     },
   );
 
@@ -2994,21 +3027,27 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId }) => {
       await authorize();
       if (!deps.objectStorage) throw new Error("Object storage is not configured");
-      const [detail, ref] = await Promise.all([
+      const [rawDetail, ref] = await Promise.all([
         getWorkspaceArtifact(deps.db, grant.workspaceId, artifactId),
         getWorkspaceArtifactContentRef(deps.db, grant.workspaceId, artifactId, versionId),
       ]);
-      const object = await retryWhileMissing(async () =>
-        deps.objectStorage!.getObjectBytes(ref.contentKey),
-      );
-      if (!object) throw new Error("Artifact content is unavailable");
-      const actualHash = createHash("sha256").update(object.bytes).digest("hex");
-      if (actualHash !== ref.version.contentSha256)
-        throw new Error("Artifact content failed integrity verification");
+      const sourceAuthorizations = new Map<string, Promise<boolean>>();
+      const canReadSourceSession = (sourceSessionId: string): Promise<boolean> => {
+        const existing = sourceAuthorizations.get(sourceSessionId);
+        if (existing) return existing;
+        const decision = canReadProvenanceSession(sourceSessionId);
+        sourceAuthorizations.set(sourceSessionId, decision);
+        return decision;
+      };
+      const [detail, projectedVersion] = await Promise.all([
+        projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
+        projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
+      ]);
+      const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
       return json({
         detail,
-        version: ref.version,
-        html: new TextDecoder().decode(object.bytes),
+        version: projectedVersion,
+        ...content,
       });
     },
   );
@@ -3027,23 +3066,49 @@ function registerWorkspaceArtifactTools(
           .max(96)
           .optional(),
         html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ title, description, slug, html, idempotencyKey }) => {
+    async ({ title, description, slug, html, source, requestedTools, idempotencyKey }) => {
       await authorize();
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
       const resolvedSlug = slug ?? `${slugBase.slice(0, 87)}-${artifactId.slice(0, 8)}`;
       return json(
-        await createWorkspaceArtifact(deps.db, {
-          artifactId,
-          slug: resolvedSlug,
-          title,
-          description: description ?? null,
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_create"),
-        }),
+        await mutation(
+          await createWorkspaceArtifact(deps.db, {
+            artifactId,
+            slug: resolvedSlug,
+            requestedSlug: slug ?? null,
+            title,
+            description: description ?? null,
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_create"),
+          }),
+        ),
       );
     },
   );
@@ -3059,20 +3124,54 @@ function registerWorkspaceArtifactTools(
         title: z4.string().min(1).max(120).optional(),
         description: z4.string().max(2000).nullable().optional(),
         html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        source: z4
+          .object({
+            entrypoint: z4.string().min(1).max(256),
+            files: z4
+              .array(
+                z4.object({
+                  path: z4.string().min(1).max(256),
+                  content: z4.string(),
+                }),
+              )
+              .min(1)
+              .max(WORKSPACE_ARTIFACT_SOURCE_MAX_FILES),
+          })
+          .optional(),
+        requestedTools: z4
+          .array(
+            z4.object({
+              serverId: z4.string().min(1).max(256),
+              toolName: z4.string().min(1).max(512),
+            }),
+          )
+          .max(WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX)
+          .optional(),
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ artifactId, expectedCurrentVersionId, title, description, html, idempotencyKey }) => {
+    async ({
+      artifactId,
+      expectedCurrentVersionId,
+      title,
+      description,
+      html,
+      source,
+      requestedTools,
+      idempotencyKey,
+    }) => {
       await authorize();
       return json(
-        await publishWorkspaceArtifactVersion(deps.db, {
-          artifactId,
-          expectedCurrentVersionId,
-          ...(title !== undefined ? { title } : {}),
-          ...(description !== undefined ? { description } : {}),
-          ...prepare(html),
-          ...provenance(idempotencyKey, "artifacts_publish"),
-        }),
+        await mutation(
+          await publishWorkspaceArtifactVersion(deps.db, {
+            artifactId,
+            expectedCurrentVersionId,
+            ...(title !== undefined ? { title } : {}),
+            ...(description !== undefined ? { description } : {}),
+            ...prepare(html, source, requestedTools),
+            ...provenance(idempotencyKey, "artifacts_publish"),
+          }),
+        ),
       );
     },
   );
@@ -3093,13 +3192,71 @@ function registerWorkspaceArtifactTools(
     async ({ artifactId, versionId, expectedCurrentVersionId, reason, idempotencyKey }) => {
       await authorize();
       return json(
-        await rollbackWorkspaceArtifact(deps.db, {
-          artifactId,
-          versionId,
-          expectedCurrentVersionId,
-          reason,
-          ...provenance(idempotencyKey, "artifacts_rollback"),
-        }),
+        await mutation(
+          await rollbackWorkspaceArtifact(deps.db, {
+            artifactId,
+            versionId,
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_rollback"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_archive",
+    {
+      description:
+        "Unpublish an active workspace artifact without deleting its immutable versions or retained source.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "archived",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_archive"),
+          }),
+        ),
+      );
+    },
+  );
+
+  server.registerTool(
+    "artifacts_restore",
+    {
+      description:
+        "Republish an archived workspace artifact at its unchanged current immutable version.",
+      inputSchema: {
+        artifactId: z4.string().uuid(),
+        expectedCurrentVersionId: z4.string().uuid(),
+        reason: z4.string().min(1).max(4096),
+        idempotencyKey: z4.string().min(1).max(200),
+      },
+    },
+    async ({ artifactId, expectedCurrentVersionId, reason, idempotencyKey }) => {
+      await authorize();
+      return json(
+        await mutation(
+          await setWorkspaceArtifactStatus(deps.db, {
+            artifactId,
+            status: "active",
+            expectedCurrentVersionId,
+            reason,
+            ...provenance(idempotencyKey, "artifacts_restore"),
+          }),
+        ),
       );
     },
   );
@@ -4423,10 +4580,17 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description: `List compact high-level session status and advisory related-work evidence in this workspace. query searches semantic titles, active goals, and typed work claims; subject performs one exact provider-neutral claim lookup and ranks it ahead of text. Neither path searches initialMessage or grants access to a result. Claims are nonexclusive evidence, never locks or instructions. Relevance cursors are bound to normalized filters and a workspace activity-revision snapshot. Without search, the tool defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. includeLastMessage is opt-in and never previews a human/API prompt whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim): waiting work is represented by queuedPromptCount until the turn is claimed. Rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get only when ordinary target authorization allows it. The list never returns full session objects, instructions, resources, tools, files, or history.`,
+        description: `Discover sessions in this workspace. Default detail=compact returns id, title, status, goal summary/status when present, updatedAt, meaningful parent/pause information, total and nextCursor (null ends the page). Completed/paused goal status is retained; session_get supplies evidence and rationale. detail=full opts into the legacy bounded discovery rows and diagnostic pagination, not full session configuration. Plain compact browse does not read work claims. includeRelatedWork=true adds advisory evidence; query or subject always enables it, even with includeRelatedWork=false. query searches only titles, active goals and typed claims; subject is an exact provider-neutral claim lookup. Evidence preserves advisoryOnly/noAdditionalAccess: claims are nonexclusive, never locks, instructions or authority. Authorization precedes filtering, ranking, counts and cursors. Relevance cursors bind normalized filters and an activity snapshot. Without search the default is creation order; use orderBy=updatedAt and decimal updatedAfter/updatedThrough revision tokens for gap-free incremental monitoring, not timestamps. Pass nextCursor unchanged with the same filters. includeLastMessage opts into previews and nonzero queuedPromptCount; unclaimed human/API prompts are never previewed. Previews share a ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 budget; omitted previews carry a bounded session_events drill-down. Text/page loss facts appear only when loss occurs in compact mode. No instructions, resources, tools, files or history are returned; REST/UI defaults are unchanged.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
+          detail: z4
+            .enum(["compact", "full"])
+            .optional()
+            .describe(
+              "compact (default) omits empty diagnostics but retains positive descendant attention counts and incomplete-tree loss facts; full restores the legacy bounded rows and pagination diagnostics.",
+            ),
+          includeRelatedWork: z4.boolean().optional(),
           includeLastMessage: z4.boolean().optional(),
           orderBy: z4.enum(["createdAt", "updatedAt", "relevance"]).optional(),
           updatedAfter: z4.string().max(64).optional(),
@@ -4464,6 +4628,8 @@ function registerWorkspaceOrchestrationTools(
       async ({
         limit,
         cursor,
+        detail,
+        includeRelatedWork,
         includeLastMessage,
         orderBy: requestedOrderBy,
         updatedAfter,
@@ -4487,6 +4653,12 @@ function registerWorkspaceOrchestrationTools(
           authorizationScope?.kind === "scoped" ? "scoped" : "workspace";
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const relevanceRequested = Boolean(query?.trim() || subject);
+        const relatedWorkRequested = sessionMcpIncludesRelatedWork({
+          detail,
+          includeRelatedWork,
+          query,
+          subject,
+        });
         if (relevanceRequested && !deps.settings.workDiscoveryEnabled) {
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
@@ -4533,18 +4705,24 @@ function registerWorkspaceOrchestrationTools(
             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
             ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
             ...(claimLimit !== undefined ? { claimLimit } : {}),
-            includeWorkDiscovery: deps.settings.workDiscoveryEnabled,
+            includeWorkDiscovery: deps.settings.workDiscoveryEnabled && relatedWorkRequested,
             subjectId: grant.subjectId,
             ...(authorizationScope ? { authorizationScope } : {}),
           });
-          const result = capSessionDiscoveryPage(page, includeLastMessage === true);
+          const result =
+            detail === "full"
+              ? capSessionDiscoveryPage(page, includeLastMessage === true)
+              : capSessionDiscoveryCompactPage(page, {
+                  includeLastMessage: includeLastMessage === true,
+                  includeRelatedWork: relatedWorkRequested,
+                });
           observeWorkDiscovery(deps.observability, {
             surface: "first_party_mcp",
             mode,
             outcome: result.sessions.length === 0 ? "empty" : "ok",
             authorizationScope: metricAuthorizationScope,
             durationMs: performance.now() - startedAtMs,
-            responseBytes: result.bytes,
+            responseBytes: Buffer.byteLength(JSON.stringify(result, null, 2), "utf8"),
             ...summarizeWorkDiscoveryRows(result.sessions),
           });
           return json(result);
@@ -4569,10 +4747,25 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing: status, goal-bearing metadata, resources, persisted tool refs, exact bounded effectiveToolPolicy, and variableSet attachment (names/ids only, never variable values). effectiveToolPolicy distinguishes selected refs from workspace defaults, mandatory carriers, configured/deferred refs, and dropped refs. Do not call this with your own current session id to reconstruct context; your model-facing conversation history and persistent setting state are already supplied directly. Unbounded agent-set fields are clamped so monitoring another session cannot flood this context.",
-        inputSchema: { sessionId: z4.string().uuid() },
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+        inputSchema: {
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Omit only to read the authenticated current agent session, never its parent or root. Sessionless callers must provide an explicit ID.",
+            ),
+          detail: z4.enum(["compact", "full"]).optional(),
+        },
       },
-      async ({ sessionId }) => {
+      async ({ sessionId: requestedSessionId, detail }) => {
+        const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
+        if (sessionId === undefined) {
+          throw new Error(
+            "session_get requires an explicit sessionId without authenticated current agent session context",
+          );
+        }
         const authorization = await authorizeFirstPartySession(
           deps,
           grant,
@@ -4591,12 +4784,18 @@ function registerWorkspaceOrchestrationTools(
           },
           authorization?.relatedSessionAccess ?? "root",
         );
+        if (detail !== "full") {
+          return json(
+            boundSessionCompactDetailMcp(
+              projected,
+              await getSessionMcpMonitoringSummary(deps.db, grant.workspaceId, sessionId),
+              queue,
+            ),
+          );
+        }
         return json(
           boundSessionDetailMcp(
-            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, {
-              ...projected,
-              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
-            }),
+            await withMcpEffectivePolicy(deps, grant.workspaceId, grant.subjectId, projected),
           ),
         );
       },
@@ -4718,7 +4917,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for short waits inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works; for long waits end this turn with goal_wait rather than looping session_wait for hours while holding the turn and sandbox. Pass each target's sessionId and afterSequence (its last seen sequence, 0 for a new session). waitFor=change is the backward-compatible default and returns on turn lifecycle, agent.message.completed, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer, or a background-command result), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for one short wait inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works. Do not immediately repeat it after timedOut=true unless new evidence suggests completion within one more window; for long or uncertain waits call wait_for_input once and end the turn. Pass each target's sessionId and afterSequence (its last consumed event cursor, 0 if none). Do not replace a consumed cursor with session_get.lastSequence: that snapshot watermark may already include an unread completion, and this wait reads strictly after its cursor. waitFor=change is the default and returns on turn lifecycle, agent.message.completed, terminal background commands, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, background commands, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
         inputSchema: {
           targets: z4
             .array(
@@ -4818,6 +5017,127 @@ function registerWorkspaceOrchestrationTools(
         );
       },
     );
+
+    if (callerSessionId !== null) {
+      server.registerTool(
+        "command_wait",
+        {
+          description: `Wait briefly for one background command owned by this session to settle, without provider-specific polling or write_stdin loops. The durable command row is authoritative. This returns immediately when the command is already terminal or otherwise waits up to maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) for its session.command.finished event or other pending input for this session. timedOut=true never cancels the command. Do not immediately repeat command_wait after a timeout unless new evidence suggests completion within one more window; for long or uncertain work call wait_for_input once and end the turn.`,
+          inputSchema: {
+            commandId: z4.string().uuid(),
+            maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
+          },
+        },
+        async ({ commandId, maxWaitSeconds }, extra) => {
+          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+          const initialSession = await requireSession(deps.db, grant.workspaceId, callerSessionId);
+          let command = await getSessionBackgroundCommand(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: callerSessionId,
+            commandId,
+          });
+          if (!command) throw new Error("Background command not found in this session");
+
+          const terminal = () => command?.state === "exited" || command?.state === "lost";
+          let waitResult: Awaited<ReturnType<typeof waitForSessionChanges>> | null = null;
+          if (!terminal()) {
+            waitResult = await waitForSessionChanges({
+              targets: [{ sessionId: callerSessionId, afterSequence: initialSession.lastSequence }],
+              ownSessionId: callerSessionId,
+              maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
+              targetEventTypes: ["session.command.finished"],
+              targetEventMatches: (event) => {
+                const payload = event.payload;
+                return (
+                  payload !== null &&
+                  typeof payload === "object" &&
+                  !Array.isArray(payload) &&
+                  (payload as Record<string, unknown>).commandId === commandId
+                );
+              },
+              signal: extra?.signal,
+              source: {
+                readTargetEvents: async (target) => {
+                  const page = await listSessionEventPage(
+                    deps.db,
+                    grant.workspaceId,
+                    target.sessionId,
+                    {
+                      after: target.afterSequence,
+                      direction: "after",
+                      limit: SESSION_WAIT_EVENTS_PER_TARGET,
+                      payloadMode: "full",
+                      includeTypes: ["session.command.finished"],
+                      maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
+                    },
+                  );
+                  return { events: page.events, hasMore: page.hasMore };
+                },
+                readOwnPendingUpdateKinds: async () =>
+                  (
+                    await listOutstandingSessionSystemUpdates(
+                      deps.db,
+                      grant.workspaceId,
+                      callerSessionId,
+                    )
+                  ).map((update) => update.kind),
+                subscribe: (targetSessionId, onEvents) =>
+                  deps.bus.subscribe(grant.workspaceId, targetSessionId, onEvents),
+              },
+            });
+          }
+
+          command =
+            (await getSessionBackgroundCommand(deps.db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              sessionId: callerSessionId,
+              commandId,
+            })) ?? command;
+          const isTerminal = terminal();
+          const ownPendingUpdateKinds = (
+            await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, callerSessionId)
+          ).map((update) => update.kind);
+          const ownPendingUpdates = ownPendingUpdateKinds.length;
+          if (waitResult) {
+            // A bounded wait may cross a host/session revocation boundary. The
+            // durable command and pending-input reads above are not returned
+            // until the target is authorized again at the response boundary.
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
+          }
+          const timedOut =
+            (waitResult?.timedOut ?? false) && !isTerminal && ownPendingUpdates === 0;
+          return json({
+            command,
+            terminal: isTerminal,
+            waitedMs: waitResult?.waitedMs ?? 0,
+            timedOut,
+            aborted: waitResult?.aborted ?? false,
+            liveFanout: waitResult?.liveFanout ?? true,
+            ownPendingUpdates,
+            ownPendingUpdateKinds,
+            ...(isTerminal
+              ? {
+                  outputLocator: {
+                    eventType: "sandbox.command.output.delta",
+                    commandId,
+                  },
+                }
+              : {}),
+            nextAction: isTerminal
+              ? ownPendingUpdates > 0
+                ? "End this turn to receive the queued command result or other machine input."
+                : "The command is terminal; inspect output events only if more detail is needed."
+              : ownPendingUpdates > 0
+                ? "End this turn to receive pending machine input."
+                : waitResult?.timedOut
+                  ? "Do not immediately repeat this short wait without new completion evidence; use wait_for_input for a long or uncertain wait."
+                  : "The wait was aborted; follow the newer session control or input.",
+          });
+        },
+      );
+    }
   }
 
   if (can("sessions:create") && sessionCreateVisible) {
@@ -6186,36 +6506,90 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
   }
 }
 
-function capSessionDiscoveryText(
-  value: string | null,
-  maxChars = SESSION_DISCOVERY_TEXT_CHARS,
-  originalChars?: number | null,
+export function capSessionDiscoveryCompactPage(
+  page: Awaited<ReturnType<typeof listSessionDiscoverySummaries>>,
+  options: { includeLastMessage?: boolean; includeRelatedWork?: boolean } = {},
+  maxBytes = SESSION_DISCOVERY_PAGE_MAX_BYTES,
 ) {
-  if (value === null) {
-    return { text: value, truncated: false };
-  }
-  const projectedChars = Array.from(value);
-  const sourceChars = Math.max(projectedChars.length, originalChars ?? projectedChars.length);
-  if (sourceChars <= maxChars) {
-    return { text: value, truncated: false };
-  }
-
-  // The database supplies only a bounded prefix plus the original character
-  // count. Iterate to a stable marker width so the reported omission includes
-  // the characters replaced by the marker itself.
-  let bodyChars = maxChars;
-  let marker = "";
-  for (let attempt = 0; attempt < 4; attempt += 1) {
-    const omittedChars = Math.max(0, sourceChars - bodyChars);
-    marker = `…[${omittedChars} chars truncated]…`;
-    const nextBodyChars = Math.max(0, maxChars - Array.from(marker).length);
-    if (nextBodyChars === bodyChars) break;
-    bodyChars = nextBodyChars;
-  }
-  return {
-    text: `${projectedChars.slice(0, bodyChars).join("")}${marker}`,
-    truncated: true,
+  let previewBytes = 0;
+  const projected = page.sessions.map((session) => {
+    const row = {
+      ...compactSessionMcpListRow(session, options.includeRelatedWork),
+      ...(options.includeLastMessage && session.queuedPromptCount > 0
+        ? { queuedPromptCount: session.queuedPromptCount }
+        : {}),
+    };
+    if (!options.includeLastMessage) return row;
+    const preview = capSessionDiscoveryText(
+      session.latestMessage?.preview ?? null,
+      600,
+      session.latestMessage?.previewOriginalChars,
+    );
+    if (!session.latestMessage) return row;
+    const bytes = Buffer.byteLength(preview.text ?? "", "utf8");
+    const omitted = previewBytes + bytes > SESSION_DISCOVERY_PREVIEW_MAX_BYTES;
+    if (!omitted) previewBytes += bytes;
+    return {
+      ...row,
+      latestMessage: {
+        type: session.latestMessage.type,
+        ...(omitted
+          ? {
+              previewOmitted: true,
+              previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+              previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+                session.id,
+                session.latestMessage.type,
+              ),
+            }
+          : {
+              preview: preview.text,
+              ...(preview.truncated ? { previewTruncated: true } : {}),
+            }),
+      },
+    };
+  });
+  let kept = projected;
+  const build = () => {
+    const dropped = kept.length < projected.length;
+    const last = page.sessions[kept.length - 1];
+    const cursor =
+      dropped && last
+        ? {
+            orderBy: page.orderBy,
+            sortRank: last.sortRank,
+            sortRevision: last.sortRevision,
+            sortAt: last.sortAt,
+            id: last.id,
+            snapshotAt: page.snapshotAt,
+            snapshotRevision: page.snapshotRevision,
+            updatedAfter: page.updatedAfter,
+            filterHash: page.filterHash,
+          }
+        : page.nextCursor;
+    return {
+      sessions: kept,
+      total: page.total,
+      nextCursor: cursor ? encodeSessionDiscoveryCursor(cursor) : null,
+      ...(page.orderBy === "updatedAt" ? { updatedThrough: page.updatedThrough } : {}),
+      ...(dropped
+        ? {
+            responseTruncated: true,
+            truncationReason: `response exceeded ${maxBytes} bytes; continue with nextCursor`,
+          }
+        : {}),
+    };
   };
+  let result = build();
+  while (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes && kept.length > 1) {
+    kept = kept.slice(0, -1);
+    result = build();
+  }
+  if (Buffer.byteLength(JSON.stringify(result, null, 2), "utf8") > maxBytes) {
+    throw new RangeError(`sessions_list compact metadata exceeds its ${maxBytes}-byte envelope`);
+  }
+  return result;
 }
 
 export function capSessionDiscoveryPage(

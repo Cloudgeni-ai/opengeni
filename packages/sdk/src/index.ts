@@ -1,4 +1,19 @@
 export { OpenGeniClient } from "./artifact-client";
+export {
+  OpenGeniToolCallError,
+  OpenGeniToolReapprovalRequiredError,
+  OpenGeniToolsClient,
+} from "./tools";
+export type {
+  OpenGeniDynamicToolNamespace,
+  OpenGeniDynamicToolNode,
+  OpenGeniGeneratedTools,
+  OpenGeniToolCallOptions,
+  OpenGeniToolFunction,
+  OpenGeniToolTransport,
+  OpenGeniToolsFacade,
+  OpenGeniWorkspaceTools,
+} from "./tools";
 export type {
   FetchLike,
   FetchResponse,
@@ -10,6 +25,43 @@ export type {
   TranscribeAudioInput,
   WorkspaceControlEventPage,
 } from "./client";
+export {
+  OPENGENI_SITE_BRIDGE_CANCEL,
+  OPENGENI_SITE_BRIDGE_CONNECT,
+  OPENGENI_SITE_BRIDGE_READY,
+  OPENGENI_SITE_BRIDGE_REQUEST,
+  OPENGENI_SITE_BRIDGE_RESPONSE,
+  OPENGENI_SITE_BRIDGE_VERSION,
+  OpenGeniSiteBridgeError,
+  createOpenGeniSiteClient,
+  isOpenGeniSiteBridgeCancelMessage,
+  isOpenGeniSiteBridgeConnectMessage,
+  isOpenGeniSiteBridgeRequestMessage,
+  sanitizeOpenGeniSiteToolCallRequest,
+} from "./site";
+export type {
+  OpenGeniSiteBridgeCancelMessage,
+  OpenGeniSiteBridgeConnectMessage,
+  OpenGeniSiteBridgeReadyMessage,
+  OpenGeniSiteBridgeRequestMessage,
+  OpenGeniSiteBridgeResponseMessage,
+  OpenGeniSiteClient,
+  OpenGeniSiteClientOptions,
+  OpenGeniSiteToolCatalog,
+  OpenGeniSiteToolCallRequest,
+  OpenGeniSiteWorkspaceTools,
+} from "./site";
+export type {
+  ToolGatewayCallRequest,
+  ToolGatewayCallResponse,
+  ToolGatewayApprovalRequest,
+  ToolGatewayApprovalResponse,
+  ToolGatewayCatalog,
+  ToolGatewayCatalogEntry,
+  ToolGatewayDeclarationsResponse,
+  ToolGatewayIdentity,
+  ToolGatewayResult,
+} from "./types";
 export type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -40,6 +92,17 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+export type {
+  ModelContextInstructionLayer,
+  ModelContextInstructionLayerId,
+  ModelContextSkill,
+  ModelContextSkillKind,
+  ModelContextSnapshot,
+  ModelContextTokenCounts,
+  ModelContextTool,
+  ModelContextToolVisibility,
+  SessionModelContextResponse,
+} from "./model-context";
 export {
   formatSseEvent,
   proxySessionEventStream,
@@ -158,6 +221,7 @@ export type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -165,6 +229,8 @@ export type {
   WorkspaceArtifactListOptions,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
   WorkspaceArtifactVersion,
 } from "./workspace-artifacts";
 export {
@@ -920,6 +986,7 @@ export type {
   FsNodeType,
   FsTreeNode,
   FsEncoding,
+  FileSystemRouteIdentity,
   FsListRequest,
   FsListResponse,
   FsListBatchRequest,

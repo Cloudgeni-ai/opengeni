@@ -1585,9 +1585,31 @@ describe("summarizeSessionFailure", () => {
   test("reports nothing for a clean session", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
+      safetyRefusal: false,
       failedAt: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+    });
+  });
+  test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
+    const refusal = event(1, "turn.failed", {
+      error: "Retries exhausted.",
+      lastRetryableError:
+        "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      safetyRefusal: true,
+      reason:
+        "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(
+      summarizeSessionFailure(
+        [refusal, event(2, "turn.failed", { error: "Connection reset." })],
+        "failed",
+      ),
+    ).toMatchObject({
+      safetyRefusal: false,
+      reason: "Connection reset.",
     });
   });
 });

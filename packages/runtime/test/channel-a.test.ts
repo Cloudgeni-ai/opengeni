@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   SandboxChannelAService,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAConflictError,
   ChannelAUnavailableError,
@@ -984,6 +985,179 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     await expect(
       svc.fsRead({ path: "/etc/passwd", encoding: "utf8", maxBytes: 16 }),
     ).rejects.toThrow(/outside the workspace root/);
+  });
+
+  test("Windows drive and UNC namespaces stay canonical while provider paths stay relative", async () => {
+    for (const fixture of [
+      {
+        root: "C:/work/repo",
+        inside: String.raw`c:\work\repo\src\app.ts`,
+        canonical: "C:/work/repo/src/app.ts",
+        outside: "D:/secrets/token.txt",
+      },
+      {
+        root: "//server/share/repo",
+        inside: String.raw`\\SERVER\SHARE\repo\src\app.ts`,
+        canonical: "//SERVER/SHARE/repo/src/app.ts",
+        outside: "//server/other/secrets/token.txt",
+      },
+    ]) {
+      const requested: string[] = [];
+      const listed: string[] = [];
+      const svc = new SandboxChannelAService({
+        workspaceRoot: fixture.root,
+        providerPathMode: "workspace-relative",
+        session: {
+          listDir: async ({ path }) => {
+            listed.push(path);
+            return [
+              {
+                name: "app.ts",
+                path: fixture.canonical,
+                type: "file" as const,
+              },
+            ];
+          },
+          readFile: async ({ path }) => {
+            requested.push(path);
+            return new TextEncoder().encode("ok");
+          },
+        },
+      });
+
+      const listing = await svc.fsList({
+        path: fixture.root,
+        depth: 1,
+        maxEntries: 20,
+        includeHidden: true,
+      });
+      expect(listing.root.path).toBe(fixture.root);
+      expect(listing.root.children?.[0]?.path).toBe(fixture.canonical);
+      expect(listed).toEqual(["."]);
+
+      const read = await svc.fsRead({
+        path: fixture.inside,
+        encoding: "utf8",
+        maxBytes: 16,
+      });
+      expect(read.path).toBe(fixture.canonical);
+      expect(requested).toEqual(["src/app.ts"]);
+      await expect(
+        svc.fsRead({ path: fixture.outside, encoding: "utf8", maxBytes: 16 }),
+      ).rejects.toThrow(/outside the workspace root/);
+    }
+  });
+
+  test("Connected Machine file links read sibling worktrees and Windows volumes", async () => {
+    for (const [root, path] of [
+      ["/home/user/repos/example-app", "/home/user/worktrees/example-app-feature/notes/brief.md"],
+      ["C:/repos/example-app", "D:/worktrees/example-app-feature/notes/brief.md"],
+      ["//server/share/repo", "//server/other/worktree/notes/brief.md"],
+    ] as const) {
+      const requested: string[] = [];
+      const svc = new SandboxChannelAService({
+        workspaceRoot: root,
+        providerPathMode: "workspace-relative",
+        fileReadScope: "machine",
+        leaseEpoch: 7,
+        session: {
+          readFile: async ({ path: requestedPath }) => {
+            requested.push(requestedPath);
+            return "brief";
+          },
+        },
+      });
+      const read = await svc.fsRead({
+        path,
+        encoding: "utf8",
+        maxBytes: 1024,
+        route: { root, epoch: 7 },
+      });
+      expect(read.path).toBe(path);
+      expect(read.content).toBe("brief");
+      expect(requested).toEqual([path]);
+      await svc.fsRead({ path: "notes/brief.md", encoding: "utf8", maxBytes: 1024 });
+      expect(requested[1]).toBe("notes/brief.md");
+      await expect(
+        svc.fsRead({ path, encoding: "utf8", maxBytes: 1024, route: { root, epoch: 6 } }),
+      ).rejects.toBeInstanceOf(ChannelAFileSystemRouteChangedError);
+      expect(requested).toHaveLength(2);
+      await expect(
+        svc.fsWrite({
+          path,
+          encoding: "utf8",
+          content: "changed",
+          overwrite: true,
+          createParents: false,
+        }),
+      ).rejects.toThrow(/outside the workspace root/);
+    }
+  });
+
+  test("Connected Machine exec fallback reads actual outside files with byte limits", async () => {
+    const { session, root } = await makeBox();
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-machine-read-"));
+    temporaryRoots.push(outside);
+    const path = join(outside, "brief with spaces.bin");
+    writeFileSync(path, Buffer.from([0, 1, 2, 3, 255]));
+    for (const nativeFailure of [false, true]) {
+      const svc = new SandboxChannelAService({
+        workspaceRoot: root,
+        providerPathMode: "workspace-relative",
+        fileReadScope: "machine",
+        session: {
+          exec: session.exec!.bind(session),
+          ...(nativeFailure
+            ? {
+                readFile: async () => {
+                  throw new Error("transient native read failure");
+                },
+              }
+            : {}),
+        },
+      });
+      const read = await svc.fsRead({ path, encoding: "base64", maxBytes: 4 });
+      expect(read.path).toBe(path);
+      expect(read.content).toBe(Buffer.from([0, 1, 2, 3]).toString("base64"));
+      await expect(
+        svc.fsRead({ path: join(outside, "missing"), encoding: "utf8", maxBytes: 16 }),
+      ).rejects.toBeInstanceOf(ChannelANotFoundError);
+    }
+  });
+
+  test("a stale capability filesystem identity fails as a retryable route conflict", async () => {
+    const svc = new SandboxChannelAService({
+      workspaceRoot: "/srv/project",
+      leaseEpoch: 7,
+      session: {
+        readFile: async () => new TextEncoder().encode("ok"),
+      },
+    });
+
+    await expect(
+      svc.fsRead({
+        path: "/srv/project/app.ts",
+        encoding: "utf8",
+        maxBytes: 16,
+        route: { epoch: 6, root: "/srv/project" },
+      }),
+    ).rejects.toBeInstanceOf(ChannelAFileSystemRouteChangedError);
+    await expect(
+      svc.fsRead({
+        path: "/srv/project/app.ts",
+        encoding: "utf8",
+        maxBytes: 16,
+        route: { epoch: 7, root: "/srv/previous" },
+      }),
+    ).rejects.toMatchObject({ retryable: true });
+
+    const read = await svc.fsRead({
+      path: "/srv/project/app.ts",
+      encoding: "utf8",
+      maxBytes: 16,
+      route: { epoch: 7, root: "/srv/project" },
+    });
+    expect(read.content).toBe("ok");
   });
 
   test("reads an internal symlink but rejects an escaping symlink", async () => {
@@ -2981,6 +3155,18 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     // The Modal writeStdin non-throwing banner when the exec-session is gone.
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 1", 1)).toBe(true);
     expect(isExecSessionLostBanner("session not found: 1", 1)).toBe(true);
+    expect(
+      isExecSessionLostBanner(
+        "Wall time: 0.001 seconds\nProcess exited with code 1\nOutput:\nwrite_stdin failed: session not found: 1",
+        1,
+      ),
+    ).toBe(true);
+    expect(
+      isExecSessionLostBanner(
+        "untrusted prelude\nOutput:\nwrite_stdin failed: session not found: 1",
+        1,
+      ),
+    ).toBe(false);
     // The hard fence requires the exact tracked numeric id and known complete
     // banner. Generic, malformed, mismatched, and ambiguous text fails closed.
     expect(isExecSessionLostBanner("session not found", 1)).toBe(false);

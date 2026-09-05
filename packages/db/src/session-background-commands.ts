@@ -4,8 +4,8 @@ import type {
 } from "@opengeni/contracts";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 
-import type { Database } from "./database";
-import { withRlsContext } from "./database";
+import type { Database, SessionActivityDatabase } from "./database";
+import { withRlsContext, withSessionActivityRlsContext } from "./database";
 import * as schema from "./schema";
 
 export type ConnectedMachineBackgroundCommandProof = {
@@ -13,6 +13,27 @@ export type ConnectedMachineBackgroundCommandProof = {
   exitCode: number | null;
   reason: string;
   observedAt: Date;
+};
+
+export const SESSION_BACKGROUND_COMMAND_REASON_MAX_BYTES = 512;
+
+export function boundedSessionBackgroundCommandReason(value: string, label: string): string {
+  const normalized = value.trim();
+  let bounded = "";
+  let bytes = 0;
+  for (const character of normalized) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > SESSION_BACKGROUND_COMMAND_REASON_MAX_BYTES) break;
+    bounded += character;
+    bytes += characterBytes;
+  }
+  if (!bounded) throw new Error(`${label} must not be empty`);
+  return bounded;
+}
+
+export type SessionBackgroundCommandTerminalMutation = {
+  prepare: (tx: SessionActivityDatabase) => Promise<void>;
+  commit: (tx: SessionActivityDatabase, command: SessionBackgroundCommand) => Promise<void>;
 };
 
 export type ConnectedMachineBackgroundCommandClaim = {
@@ -263,7 +284,7 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
  * claim expiry is coordination recovery only and never implies command loss. */
 export async function claimConnectedMachineSessionBackgroundCommands(
   db: Database,
-  input: { claimId: string; limit: number; claimTtlMs: number },
+  input: { claimId: string; limit: number; claimTtlMs: number; dueBefore?: Date },
 ): Promise<ConnectedMachineBackgroundCommandClaim[]> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
     throw new Error("Connected command reconciliation limit must be between 1 and 100");
@@ -292,7 +313,8 @@ export async function claimConnectedMachineSessionBackgroundCommands(
       reconcile_proof_reason as "reconcileProofReason",
       reconcile_proof_observed_at as "reconcileProofObservedAt"
     from opengeni_private.claim_connected_machine_background_commands(
-      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+      ${(input.dueBefore ?? new Date()).toISOString()}::timestamptz
     )
   `);
   return rows.map((row: ConnectedMachineBackgroundCommandClaimRow) => {
@@ -360,8 +382,10 @@ export async function recordConnectedMachineBackgroundCommandProof(
     proof: ConnectedMachineBackgroundCommandProof;
   },
 ): Promise<void> {
-  const reason = input.proof.reason.trim().slice(0, 512);
-  if (!reason) throw new Error("Connected command proof reason must not be empty");
+  const reason = boundedSessionBackgroundCommandReason(
+    input.proof.reason,
+    "Connected command proof reason",
+  );
   if (input.proof.outcome === "exited" && input.proof.exitCode === null) {
     throw new Error("Connected command exit proof requires an exit code");
   }
@@ -444,44 +468,54 @@ export async function deferConnectedMachineBackgroundCommandReconciliation(
 }
 
 /** Settle only from the proof already checkpointed under this exact claim. */
-export async function settleClaimedConnectedMachineBackgroundCommand(
+export async function settleClaimedConnectedMachineBackgroundCommandWithMutation(
   db: Database,
   input: { claim: ConnectedMachineBackgroundCommandClaim },
+  mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<boolean> {
-  return await withRlsContext(
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.claim.accountId, workspaceId: input.claim.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{ id: string }>(sql`
-        update ${schema.sessionBackgroundCommands} command set
-          state = command.reconcile_proof_outcome,
-          exit_code = case
-            when command.reconcile_proof_outcome = 'exited'
-              then command.reconcile_proof_exit_code
-            else null
-          end,
-          settlement_reason = command.reconcile_proof_reason,
-          settled_at = command.reconcile_proof_observed_at,
-          reconcile_claim_id = null,
-          reconcile_claimed_at = null,
-          last_reconcile_outcome = 'settled_' || command.reconcile_proof_outcome,
-          updated_at = clock_timestamp()
-        where command.id = ${input.claim.commandId}
-          and command.account_id = ${input.claim.accountId}
-          and command.workspace_id = ${input.claim.workspaceId}
-          and command.session_id = ${input.claim.sessionId}
-          and command.provider = 'connected_machine'
-          and command.control_workspace_id = ${input.claim.controlWorkspaceId}
-          and command.enrollment_id = ${input.claim.enrollmentId}
-          and command.connection_instance_id = ${input.claim.connectionInstanceId}
-          and command.op_id = ${input.claim.opId}
-          and command.reconcile_claim_id = ${input.claim.claimId}
-          and command.state in ('running', 'stopping')
-          and command.reconcile_proof_outcome in ('exited', 'lost')
-          and command.reconcile_proof_observed_at is not null
-        returning command.id
-      `);
-      return rows.length === 1;
+    async (tx) => {
+      await mutateTerminal.prepare(tx);
+      const rows = await tx.execute<{ id: string }>(sql`
+          update ${schema.sessionBackgroundCommands} command set
+            state = command.reconcile_proof_outcome,
+            exit_code = case
+              when command.reconcile_proof_outcome = 'exited'
+                then command.reconcile_proof_exit_code
+              else null
+            end,
+            settlement_reason = command.reconcile_proof_reason,
+            settled_at = command.reconcile_proof_observed_at,
+            reconcile_claim_id = null,
+            reconcile_claimed_at = null,
+            last_reconcile_outcome = 'settled_' || command.reconcile_proof_outcome,
+            updated_at = clock_timestamp()
+          where command.id = ${input.claim.commandId}
+            and command.account_id = ${input.claim.accountId}
+            and command.workspace_id = ${input.claim.workspaceId}
+            and command.session_id = ${input.claim.sessionId}
+            and command.provider = 'connected_machine'
+            and command.control_workspace_id = ${input.claim.controlWorkspaceId}
+            and command.enrollment_id = ${input.claim.enrollmentId}
+            and command.connection_instance_id = ${input.claim.connectionInstanceId}
+            and command.op_id = ${input.claim.opId}
+            and command.reconcile_claim_id = ${input.claim.claimId}
+            and command.state in ('running', 'stopping')
+            and command.reconcile_proof_outcome in ('exited', 'lost')
+            and command.reconcile_proof_observed_at is not null
+          returning command.id
+        `);
+      if (rows.length !== 1) return false;
+      const [row] = await tx
+        .select()
+        .from(schema.sessionBackgroundCommands)
+        .where(eq(schema.sessionBackgroundCommands.id, input.claim.commandId))
+        .limit(1);
+      if (!row) throw new Error("Settled Connected Machine command disappeared");
+      await mutateTerminal.commit(tx, mapCommand(row));
+      return true;
     },
   );
 }
@@ -652,8 +686,8 @@ export async function requestWorkspaceBackgroundCommandCancellationsInTransactio
   return Number(rows[0]?.commandCount ?? 0);
 }
 
-export async function settleSessionBackgroundCommandForRetainedProcess(
-  db: Database,
+export async function settleSessionBackgroundCommandForRetainedProcessInTransaction(
+  tx: SessionActivityDatabase,
   input: {
     accountId: string;
     workspaceId: string;
@@ -663,38 +697,76 @@ export async function settleSessionBackgroundCommandForRetainedProcess(
     exitCode: number | null;
     reason: string;
   },
+  mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .update(schema.sessionBackgroundCommands)
-        .set({
-          state: input.outcome,
-          exitCode: input.outcome === "exited" ? input.exitCode : null,
-          settlementReason: input.reason.slice(0, 512),
-          settledAt: new Date(),
-          reconcileClaimId: null,
-          reconcileClaimedAt: null,
-          lastReconcileOutcome: `settled_${input.outcome}`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
-            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
-            eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
-            inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
-          ),
-        )
-        .returning();
-      return row ? mapCommand(row) : null;
-    },
+  const reason = boundedSessionBackgroundCommandReason(
+    input.reason,
+    "Managed command settlement reason",
   );
+  await mutateTerminal.prepare(tx);
+  const [updatedRow] = await tx
+    .update(schema.sessionBackgroundCommands)
+    .set({
+      state: input.outcome,
+      exitCode: input.outcome === "exited" ? input.exitCode : null,
+      settlementReason: reason,
+      settledAt: new Date(),
+      reconcileClaimId: null,
+      reconcileClaimedAt: null,
+      lastReconcileOutcome: `settled_${input.outcome}`,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+        eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+        eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
+        inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
+      ),
+    )
+    .returning();
+  let row = updatedRow;
+  if (!row) {
+    const [current] = await tx
+      .select()
+      .from(schema.sessionBackgroundCommands)
+      .where(
+        and(
+          eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+          eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+          eq(schema.sessionBackgroundCommands.retainedProcessId, input.retainedProcessId),
+        ),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) return null;
+    if (
+      current.state !== input.outcome ||
+      current.exitCode !== (input.outcome === "exited" ? input.exitCode : null)
+    ) {
+      throw new Error("Managed background command terminal state conflicts with process proof");
+    }
+    const [existingEvent] = await tx
+      .select({ id: schema.sessionEvents.id })
+      .from(schema.sessionEvents)
+      .where(
+        and(
+          eq(schema.sessionEvents.workspaceId, input.workspaceId),
+          eq(schema.sessionEvents.sessionId, input.sessionId),
+          eq(schema.sessionEvents.type, "session.command.finished"),
+          sql`${schema.sessionEvents.payload} ->> 'commandId' = ${current.id}`,
+        ),
+      )
+      .limit(1);
+    if (existingEvent) return mapCommand(current);
+    row = current;
+  }
+  const command = mapCommand(row);
+  await mutateTerminal.commit(tx, command);
+  return command;
 }
 
-export async function settleConnectedMachineSessionBackgroundCommand(
+export async function settleConnectedMachineSessionBackgroundCommandWithMutation(
   db: Database,
   input: {
     accountId: string;
@@ -709,21 +781,25 @@ export async function settleConnectedMachineSessionBackgroundCommand(
     exitCode: number | null;
     reason: string;
   },
+  mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
-  return await withRlsContext(
+  const reason = boundedSessionBackgroundCommandReason(
+    input.reason,
+    "Connected command settlement reason",
+  );
+  if (input.outcome === "exited" && input.exitCode === null) {
+    throw new Error("Connected command exit settlement requires an exit code");
+  }
+  if (input.outcome === "lost" && input.exitCode !== null) {
+    throw new Error("Connected command loss settlement cannot carry an exit code");
+  }
+  return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
+    async (tx) => {
+      await mutateTerminal.prepare(tx);
       const settledAt = new Date();
-      const reason = input.reason.trim().slice(0, 512);
-      if (!reason) throw new Error("Connected command settlement reason must not be empty");
-      if (input.outcome === "exited" && input.exitCode === null) {
-        throw new Error("Connected command exit settlement requires an exit code");
-      }
-      if (input.outcome === "lost" && input.exitCode !== null) {
-        throw new Error("Connected command loss settlement cannot carry an exit code");
-      }
-      const [row] = await scopedDb
+      const [row] = await tx
         .update(schema.sessionBackgroundCommands)
         .set({
           state: input.outcome,
@@ -753,6 +829,33 @@ export async function settleConnectedMachineSessionBackgroundCommand(
           ),
         )
         .returning();
+      if (!row) return null;
+      const command = mapCommand(row);
+      await mutateTerminal.commit(tx, command);
+      return command;
+    },
+  );
+}
+
+export async function getSessionBackgroundCommand(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; commandId: string },
+): Promise<SessionBackgroundCommand | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.sessionBackgroundCommands)
+        .where(
+          and(
+            eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+            eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            eq(schema.sessionBackgroundCommands.id, input.commandId),
+          ),
+        )
+        .limit(1);
       return row ? mapCommand(row) : null;
     },
   );

@@ -21,6 +21,7 @@
 // `createEditor` for text when `exec` is absent.
 
 import type {
+  FileSystemRouteIdentity,
   FsChangedPayload,
   FsDeleteRequest,
   FsDeleteResponse,
@@ -59,6 +60,14 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import {
+  connectedMachinePathWithinRoot,
+  connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
+  isWindowsConnectedMachinePath,
+  relativeConnectedMachinePath,
+  resolveConnectedMachinePath,
+} from "./selfhosted/workspace-path";
 import {
   isExecSessionLostBanner,
   parseExecBannerExitCode,
@@ -232,6 +241,20 @@ export class ChannelAConflictError extends Error {
     this.name = "ChannelAConflictError";
   }
 }
+/** A caller used a filesystem identity negotiated for a different active route
+ * or effective root. This is retryable after refreshing capabilities; it must
+ * never be downgraded to a bad-path response. */
+export class ChannelAFileSystemRouteChangedError extends Error {
+  readonly retryable = true;
+
+  constructor(
+    public readonly expected: FileSystemRouteIdentity,
+    public readonly actual: FileSystemRouteIdentity,
+  ) {
+    super("filesystem route changed; refresh capabilities and retry");
+    this.name = "ChannelAFileSystemRouteChangedError";
+  }
+}
 export class ChannelANotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -265,8 +288,15 @@ export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
-  // after validation that they remain inside this authority.
+  // after validation against the operation's path scope.
   workspaceRoot?: string;
+  // Connected Machine providers already resolve relative paths against their
+  // exact host root. Keep provider commands relative while preserving the
+  // canonical host-native root as the public FileSystem namespace.
+  providerPathMode?: "canonical" | "workspace-relative";
+  // Selected Connected Machines can read host-absolute paths outside their cwd.
+  // This is server-derived; managed providers retain workspace confinement.
+  fileReadScope?: "workspace" | "machine";
   // The lease epoch the box was resumed under (paired with `revision` for cache
   // invalidation — H3). 0 when ownership is off / no lease.
   leaseEpoch?: number;
@@ -386,6 +416,8 @@ async function settleConcurrentReads<const T extends readonly unknown[]>(reads: 
 export class SandboxChannelAService {
   private readonly session: ChannelASession;
   private readonly workspaceRoot: string;
+  private readonly providerPathMode: "canonical" | "workspace-relative";
+  private readonly fileReadScope: "workspace" | "machine";
   private readonly leaseEpoch: number;
   private revision: number;
   private readonly emit?: ChannelAEmitter | undefined;
@@ -394,11 +426,28 @@ export class SandboxChannelAService {
   constructor(opts: SandboxChannelAServiceOptions) {
     this.session = opts.session;
     const workspaceRoot = opts.workspaceRoot ?? "";
-    this.workspaceRoot = workspaceRoot === "/" ? "/" : workspaceRoot.replace(/\/+$/, "");
+    this.workspaceRoot = isConnectedMachineAbsolutePath(workspaceRoot)
+      ? resolveConnectedMachinePath(workspaceRoot, undefined)
+      : workspaceRoot === "."
+        ? ""
+        : workspaceRoot.replace(/\/+$/, "");
+    this.providerPathMode = opts.providerPathMode ?? "canonical";
+    this.fileReadScope = opts.fileReadScope ?? "workspace";
     this.leaseEpoch = opts.leaseEpoch ?? 0;
     this.revision = opts.revision ?? 0;
     this.emit = opts.emit;
     this.runAs = opts.runAs;
+  }
+
+  private assertFileSystemRoute(route: FileSystemRouteIdentity | undefined): void {
+    if (!route) return;
+    const actual = { epoch: this.leaseEpoch, root: this.workspaceRoot };
+    if (
+      route.epoch !== actual.epoch ||
+      !connectedMachineWorkspaceRootsEqual(route.root, actual.root)
+    ) {
+      throw new ChannelAFileSystemRouteChangedError(route, actual);
+    }
   }
 
   /** Capability probe — the compact Channel-A projection. */
@@ -509,6 +558,7 @@ export class SandboxChannelAService {
     req: FsListRequest,
     pruneDirectoryNames: readonly string[],
   ): Promise<FsListResponse> {
+    this.assertFileSystemRoute(req.route);
     const root = assertSafeRelPathOrRoot(req.path, this.workspaceRoot);
     const pruneNames = [...new Set(pruneDirectoryNames)].map(assertSafePruneDirectoryName);
     if (pruneNames.length === 0 && this.session.listDir && Math.max(req.depth, 1) === 1) {
@@ -655,16 +705,20 @@ export class SandboxChannelAService {
   }
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
-    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+    this.assertFileSystemRoute(req.route);
+    const path =
+      this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
+        ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
+        : assertSafeRelPath(req.path, this.workspaceRoot);
     if (!this.session.readFile) {
-      // No native readFile: open the file once, prove that exact descriptor is
-      // rooted beneath the workspace, then base64 it through exec.
+      // No native readFile: read an exact descriptor through exec, retaining
+      // workspace confinement for managed providers.
       return await this.fsReadViaExec(path, req);
     }
     let raw: string | Uint8Array;
     try {
       raw = await this.session.readFile({
-        path: this.joinRoot(path),
+        path: this.fileReadPath(path),
         maxBytes: req.maxBytes,
         ...(this.runAs ? { runAs: this.runAs } : {}),
       });
@@ -679,7 +733,7 @@ export class SandboxChannelAService {
         throw new ChannelANotFoundError(`file not found: ${path}`);
       }
       // A native provider read can fail while exec on the same live box remains
-      // healthy. The descriptor path below is equally confined and binary-safe,
+      // healthy. The descriptor path below uses the same scope and is binary-safe,
       // so use it as a single recovery path. Unknown provider failures must never
       // be downgraded into a false 404.
       if (this.session.exec || this.session.execCommand) {
@@ -694,7 +748,7 @@ export class SandboxChannelAService {
   }
 
   private async assertConfinedExistingDirectory(path: string): Promise<void> {
-    const root = this.workspaceRoot || ".";
+    const root = this.providerWorkspaceRoot();
     const abs = this.joinRoot(path);
     const rejectLink = path
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
@@ -716,7 +770,7 @@ export class SandboxChannelAService {
     path: string,
     options: { allowMissingParents: boolean; rejectFinalSymlink: boolean },
   ): Promise<void> {
-    const root = this.workspaceRoot || ".";
+    const root = this.providerWorkspaceRoot();
     const abs = this.joinRoot(path);
     const rejectLink = options.rejectFinalSymlink
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
@@ -767,19 +821,27 @@ export class SandboxChannelAService {
     );
   }
 
-  /** Binary-safe fallback for sessions without native reads. The file is opened
-   * before its resolved path is root-checked and matched to the descriptor's
-   * inode, so a symlink/path swap cannot redirect the subsequent read. */
+  /** Binary-safe fallback for sessions without native reads. Match the resolved
+   * path to the open descriptor's inode before reading; managed providers also
+   * require that path to remain beneath the workspace. */
   private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
-    const root = this.workspaceRoot || ".";
-    const abs = this.joinRoot(path);
+    const root = this.providerWorkspaceRoot();
+    const abs = this.fileReadPath(path);
     const script = [
       PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_DESCRIPTOR_FUNCTIONS,
-      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      ...(this.fileReadScope === "workspace"
+        ? [
+            `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+          ]
+        : []),
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      ...(this.fileReadScope === "workspace"
+        ? [
+            `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+          ]
+        : []),
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `opened_identity=$(opengeni_fd_identity 3) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target_identity=$(opengeni_path_identity "$target") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
@@ -842,6 +904,7 @@ export class SandboxChannelAService {
   }
 
   async fsWrite(req: FsWriteRequest): Promise<FsWriteResponse> {
+    this.assertFileSystemRoute(req.route);
     const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     const bytes =
@@ -1048,7 +1111,7 @@ export class SandboxChannelAService {
     const destination = this.workspaceRoot
       ? this.joinRoot(destinationPath)
       : `./${destinationPath}`;
-    const root = this.workspaceRoot || ".";
+    const root = this.providerWorkspaceRoot();
     const frame = crypto.randomUUID().replaceAll("-", "");
     const replayMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_REPLAY__`;
     const absentMarker = `__OPENGENI_WORKSPACE_INSPECT_${frame}_ABSENT__`;
@@ -1177,7 +1240,7 @@ export class SandboxChannelAService {
     const escapeMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_ESCAPE__`;
     const unavailableMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_UNAVAILABLE__`;
     const integrityMarker = `__OPENGENI_WORKSPACE_IMPORT_${frame}_INTEGRITY__`;
-    const root = this.workspaceRoot || ".";
+    const root = this.providerWorkspaceRoot();
     const tempName = `.opengeni-download-${operationId}-${frame}.tmp`;
     const allowReplace = req.overwrite && req.mayReplaceExisting;
     const script = [
@@ -1320,6 +1383,7 @@ export class SandboxChannelAService {
   }
 
   async fsDelete(req: FsDeleteRequest): Promise<FsDeleteResponse> {
+    this.assertFileSystemRoute(req.route);
     const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     await this.assertConfinedMutationParent(path, {
@@ -1339,6 +1403,7 @@ export class SandboxChannelAService {
   }
 
   async fsMove(req: FsMoveRequest): Promise<FsMoveResponse> {
+    this.assertFileSystemRoute(req.route);
     const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const newPath = assertSafeRelPath(req.newPath, this.workspaceRoot);
     const abs = this.joinRoot(path);
@@ -1392,6 +1457,7 @@ export class SandboxChannelAService {
   }
 
   async fsMkdir(req: FsMkdirRequest): Promise<FsMkdirResponse> {
+    this.assertFileSystemRoute(req.route);
     const path = assertSafeRelPath(req.path, this.workspaceRoot);
     const abs = this.joinRoot(path);
     await this.assertConfinedMutationParent(path, {
@@ -2156,7 +2222,7 @@ export class SandboxChannelAService {
       ].join("\n");
       const { stdout } = await this.runReadOnly({
         cmd: internalBashCommand(command),
-        workdir: this.workspaceRoot || undefined,
+        workdir: this.providerWorkspaceRoot(),
         yieldTimeMs: 20_000,
         // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
         // prevents a provider's ordinary output cap from dropping the trailer
@@ -2368,11 +2434,30 @@ export class SandboxChannelAService {
     return this.revision;
   }
 
+  private fileReadPath(path: string): string {
+    if (this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(path)) return path;
+    return this.joinRoot(path);
+  }
+
   private joinRoot(rel: string): string {
-    if (rel.startsWith("/")) return rel;
+    if (this.providerPathMode === "workspace-relative") {
+      if (isConnectedMachineAbsolutePath(rel)) {
+        const relative = relativeConnectedMachinePath(this.workspaceRoot, rel);
+        if (relative === null) {
+          throw new ChannelAValidationError(`absolute path is outside the workspace root: ${rel}`);
+        }
+        return relative || ".";
+      }
+      return rel === "" ? "." : rel;
+    }
+    if (isConnectedMachineAbsolutePath(rel)) return rel;
     if (!this.workspaceRoot) return rel === "" ? "." : rel;
     if (rel === "") return this.workspaceRoot;
     return this.workspaceRoot === "/" ? `/${rel}` : `${this.workspaceRoot}/${rel}`;
+  }
+
+  private providerWorkspaceRoot(): string {
+    return this.providerPathMode === "workspace-relative" ? "." : this.workspaceRoot || ".";
   }
 
   private async fsListFromNativeListDir(req: FsListRequest): Promise<FsListResponse> {
@@ -2438,7 +2523,7 @@ export class SandboxChannelAService {
     wallTimeSeconds: number;
   }> {
     const safe = assertSafeRelPathOrRoot(rel, this.workspaceRoot);
-    const root = this.workspaceRoot || ".";
+    const root = this.providerWorkspaceRoot();
     const abs = this.joinRoot(safe);
     const rejectLink = safe
       ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
@@ -2646,27 +2731,18 @@ function normalizeRelPath(p: string): string {
   return trimmed;
 }
 
-function normalizeAbsolutePath(p: string): string {
-  return p === "/" ? p : p.replace(/\/+$/, "");
-}
-
-function pathIsWithinRoot(path: string, root: string): boolean {
-  return root === "/" ? path.startsWith("/") : path === root || path.startsWith(`${root}/`);
-}
-
 function assertSafeRelPathOrRoot(p: string, workspaceRoot = ""): string {
-  const segments = p.split("/");
+  const portable = isWindowsConnectedMachinePath(workspaceRoot) ? p.replaceAll("\\", "/") : p;
+  const segments = portable.split("/");
   if (segments.some((segment) => segment === "..")) {
     throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
   }
-  if (!p.startsWith("/")) return normalizeRelPath(p);
+  if (!isConnectedMachineAbsolutePath(portable)) return normalizeRelPath(portable);
 
-  const root = workspaceRoot.startsWith("/") ? normalizeAbsolutePath(workspaceRoot) : "";
-  const path = normalizeAbsolutePath(p);
-  if (!root || !pathIsWithinRoot(path, root)) {
+  if (!workspaceRoot || !connectedMachinePathWithinRoot(workspaceRoot, portable)) {
     throw new ChannelAValidationError(`absolute path is outside the workspace root: ${p}`);
   }
-  return path;
+  return resolveConnectedMachinePath(workspaceRoot, portable);
 }
 
 // Relative paths remain supported for compatibility. An absolute path is valid
@@ -2872,49 +2948,33 @@ function dirnameRel(p: string, root: string): string {
   return p.slice(0, idx);
 }
 
-function joinPathRoot(root: string, path: string): string {
-  if (!path) return root;
-  return root === "/" ? `/${path}` : `${root}/${path}`;
-}
-
 function stripDotSlash(rawPath: string, root: string, workspaceRoot = ""): string {
-  let p = rawPath.startsWith("./") ? rawPath.slice(2) : rawPath;
-  if (p.startsWith("/")) {
-    const absolute = normalizeAbsolutePath(p);
-    if (root.startsWith("/")) {
-      if (!pathIsWithinRoot(absolute, normalizeAbsolutePath(root))) {
-        throw new ChannelAValidationError(`listed path is outside the requested root: ${p}`);
-      }
-      return absolute;
+  const windows = isWindowsConnectedMachinePath(workspaceRoot);
+  let p = windows ? rawPath.replaceAll("\\", "/") : rawPath;
+  p = p.startsWith("./") ? p.slice(2) : p;
+  if (isConnectedMachineAbsolutePath(p)) {
+    const containmentRoot = isConnectedMachineAbsolutePath(root) ? root : workspaceRoot;
+    if (!containmentRoot || !connectedMachinePathWithinRoot(containmentRoot, p)) {
+      throw new ChannelAValidationError(
+        `listed path is outside the ${isConnectedMachineAbsolutePath(root) ? "requested" : "workspace"} root: ${p}`,
+      );
     }
-    const canonicalWorkspaceRoot = workspaceRoot.startsWith("/")
-      ? normalizeAbsolutePath(workspaceRoot)
-      : "";
-    if (!canonicalWorkspaceRoot || !pathIsWithinRoot(absolute, canonicalWorkspaceRoot)) {
+    const absolute = resolveConnectedMachinePath(containmentRoot, p);
+    if (isConnectedMachineAbsolutePath(root)) return absolute;
+    const relative = relativeConnectedMachinePath(workspaceRoot, absolute);
+    if (relative === null) {
       throw new ChannelAValidationError(`listed path is outside the workspace root: ${p}`);
     }
-    p =
-      absolute === canonicalWorkspaceRoot
-        ? ""
-        : canonicalWorkspaceRoot === "/"
-          ? absolute.slice(1)
-          : absolute.slice(canonicalWorkspaceRoot.length + 1);
+    p = relative;
   }
 
-  if (root.startsWith("/")) {
-    const canonicalWorkspaceRoot = workspaceRoot.startsWith("/")
-      ? normalizeAbsolutePath(workspaceRoot)
-      : root;
-    const rootRelative =
-      canonicalWorkspaceRoot === "/"
-        ? root.slice(1)
-        : root === canonicalWorkspaceRoot
-          ? ""
-          : root.slice(canonicalWorkspaceRoot.length + 1);
+  if (isConnectedMachineAbsolutePath(root)) {
+    const canonicalWorkspaceRoot = workspaceRoot || root;
+    const rootRelative = relativeConnectedMachinePath(canonicalWorkspaceRoot, root) ?? "";
     if (rootRelative && (p === rootRelative || p.startsWith(`${rootRelative}/`))) {
-      return joinPathRoot(canonicalWorkspaceRoot, p);
+      return resolveConnectedMachinePath(canonicalWorkspaceRoot, p);
     }
-    return joinPathRoot(root, p);
+    return resolveConnectedMachinePath(root, p);
   }
 
   // find run with workdir=root and findRoot="." gives paths relative to root,

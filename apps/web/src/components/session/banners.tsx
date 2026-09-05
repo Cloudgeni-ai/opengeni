@@ -131,8 +131,9 @@ export function FailedSessionBanner({
             {failure.failedTurnCount > 1 ? (
               <>{failure.failedTurnCount} turns have failed in this session. </>
             ) : null}
-            The conversation history is preserved — send a message to revive the session and keep
-            working.
+            {failure.safetyRefusal
+              ? "The conversation history is preserved. Automatic retries are stopped."
+              : "The conversation history is preserved — send a message to revive the session and keep working."}
           </div>
         </div>
       </div>

@@ -1,5 +1,41 @@
 # @opengeni/db
 
+## 4.0.0
+
+### Major Changes
+
+- 6f84c02: Make durable Codex credential leasing unconditional, preserve rotation-off as an active-account-only capacity policy, and recover definitive credential failures through same-turn failover or durable capacity waiting.
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/config@1.0.0
+  - @opengeni/codex@0.2.21
+  - @opengeni/codemode@0.4.27
+
+## 3.9.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- fab39d2: Keep lazy session-history reads sub-second on large sessions by fitting each browser window and its continuation lookahead into one byte- and count-bounded database query instead of walking the page through sequential reads. Fresh and foreground tail loads may use one additional bounded page to preserve a complete turn boundary, and foreground replacement keeps the prior timeline visible until the new window is ready.
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/codemode@0.4.26
+  - @opengeni/config@0.23.3
+
 ## 3.8.2
 
 ### Patch Changes

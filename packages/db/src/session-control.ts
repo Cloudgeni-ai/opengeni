@@ -244,11 +244,11 @@ export async function assertAgentCommandAuthorityInTransaction(
     workspaceId: string;
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     targetSessionId: string;
-    action: "pause" | "resume" | "steer" | "message" | "goal";
+    action: "pause" | "resume" | "steer" | "message" | "goal" | "wait";
   },
 ): Promise<void> {
-  if (input.action === "goal" && input.targetSessionId !== input.actor.sessionId) {
-    throw new SessionControlInvariantError("An agent goal command must target its own session");
+  if (["goal", "wait"].includes(input.action) && input.targetSessionId !== input.actor.sessionId) {
+    throw new SessionControlInvariantError("An agent self command must target its own session");
   }
   // Every command caller establishes the control/workspace prefix first.
   // Reusing the event-write helper here keeps cross-session actor authority on
@@ -1391,26 +1391,21 @@ async function stoppingBackgroundCommandCounts(
 ): Promise<Map<string, number>> {
   const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    command_ancestry(command_id, ancestor_id, depth, path) as (
-      select command.id, command.session_id, 0::integer, array[command.session_id]::uuid[]
-      from ${schema.sessionBackgroundCommands} command
-      where command.workspace_id = ${workspaceId}
-        and command.state = 'stopping'
+    descendants(target_id, session_id, depth, path) as (
+      select target.id, target.id, 0::integer, array[target.id]::uuid[] from targets target
       union all
-      select ancestry.command_id, current.parent_session_id,
-        ancestry.depth + 1, ancestry.path || current.parent_session_id
-      from command_ancestry ancestry
-      join ${schema.sessions} current
-        on current.workspace_id = ${workspaceId}
-       and current.id = ancestry.ancestor_id
-      where current.parent_session_id is not null
-        and not current.parent_session_id = any(ancestry.path)
-        and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
+      select parent.target_id, child.id, parent.depth + 1, parent.path || child.id
+      from descendants parent
+      join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.session_id
+      where not child.id = any(parent.path) and parent.depth < ${SESSION_ANCESTRY_LIMIT}
     )
-    select target.id as "sessionId", count(distinct ancestry.command_id)::integer as "commandCount"
-    from targets target
-    join command_ancestry ancestry on ancestry.ancestor_id = target.id
-    group by target.id
+    select descendant.target_id as "sessionId", count(distinct command.id)::integer as "commandCount"
+    from descendants descendant
+    join ${schema.sessionBackgroundCommands} command
+      on command.workspace_id = ${workspaceId} and command.session_id = descendant.session_id
+      and command.state = 'stopping'
+    group by descendant.target_id
   `);
   return new Map(
     rows.map((row: { sessionId: string; commandCount: number | string }) => [
@@ -1855,13 +1850,13 @@ async function findCommandReceipt(
     targetSessionId: string | null;
     targetTurnId: string | null;
     operationKey: string;
-    identityScope: "actor" | "goal_operation";
+    identityScope: "actor" | "target_operation";
   },
 ): Promise<SessionCommandReceiptRow | null> {
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
   const actorAttemptId = input.actor.type === "agent_attempt" ? input.actor.attemptId : null;
   const identity =
-    input.identityScope === "goal_operation"
+    input.identityScope === "target_operation"
       ? and(
           eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
           eq(schema.sessionCommandReceipts.actorType, "agent_attempt"),
@@ -2063,21 +2058,21 @@ export async function reserveSessionCommandReceipt(
     targetTurnId: string | null;
     operationKey: string;
     canonicalRequestHash: string;
-    identityScope?: "actor" | "goal_operation";
+    identityScope?: "actor" | "target_operation";
     initialResult?: Record<string, unknown>;
   },
 ): Promise<{ receipt: SessionCommandReceiptRow; replay: boolean }> {
   if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
   const identityScope = input.identityScope ?? "actor";
   if (
-    identityScope === "goal_operation" &&
+    identityScope === "target_operation" &&
     (input.actor.type !== "agent_attempt" ||
-      !["goal.update", "goal.progress", "goal.wait"].includes(input.action) ||
+      !["goal.update", "goal.progress", "session.wait_for_input"].includes(input.action) ||
       input.targetSessionId === null ||
       input.targetTurnId !== null)
   ) {
     throw new SessionControlInvariantError(
-      "Target-scoped receipt identity is reserved for agent goal commands",
+      "Target-scoped receipt identity is reserved for agent self commands",
     );
   }
   const actorSubjectId = input.actor.type === "agent_attempt" ? null : input.actor.subjectId;
@@ -2160,13 +2155,12 @@ async function registerContinuableWakes(
       )
     ), upserted as (
       insert into ${schema.sessionWorkflowWakeOutbox} (
-        session_id, account_id, workspace_id, temporal_workflow_id, reason, control_revision
+        session_id, account_id, workspace_id, temporal_workflow_id, reason
       )
-      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}, 1
+      select session_id, account_id, workspace_id, temporal_workflow_id, ${input.reason}
       from eligible
       on conflict (session_id) do update set
         wake_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
-        control_revision = ${schema.sessionWorkflowWakeOutbox}.wake_revision + 1,
         temporal_workflow_id = excluded.temporal_workflow_id,
         reason = excluded.reason,
         attempts = 0,

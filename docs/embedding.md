@@ -240,6 +240,55 @@ frozen catalog—including admitted first-party tools—through the same executo
 It cannot widen the catalog, attach servers, mint authority, or survive a
 successor attempt.
 
+### Unified workspace tool gateway
+
+Canonical sources: `@opengeni/tool-gateway`,
+`prepareWorkspaceToolGatewayTools` in `@opengeni/runtime/workspace-tool-gateway`,
+and the current-human adapters in `apps/api/src/workspace-tool-gateway.ts`.
+
+Runtime preparation is the one provider-assembly seam for enabled first-party
+and integration tools. Model MCP, Codemode, current-human MCP, HTTP/SDK, and
+Site adapters project protocol-specific names from the same canonical catalog
+and dispatch the same executor closures. Model names and generated JavaScript
+paths are presentation only; authority is always the exact
+`{ serverId, toolName }` identity plus the active catalog digest.
+
+Attempt-frozen connector Allow/Ask/Block policy and connector-action request
+rows belong to model/Codemode execution. Direct current-human HTTP/SDK and
+workspace MCP calls use `requireApproval`; Sites use their separately verified
+active-version bypass. Direct calls keep operation ids for provider-specific
+handling but do not create a second generalized execution journal.
+
+The ordinary browser SDK uses `/tools/catalog`, `/tools/calls`, and
+`/tools/declarations`. Approval-required HTTP calls cannot trust a caller
+boolean: the authenticated parent first creates a five-minute, hash-only,
+single-use approval capability bound to the current human, operation, catalog,
+identity, and arguments, then presents that token on the exact matching call.
+After consumption, its hash-only row remains as an operation tombstone so the
+same operation id cannot be approved again after an ambiguous provider outcome.
+Live approval issuance and expiry queries use a subject-scoped partial index
+that excludes consumed tombstones.
+Sites use a different host-owned boundary: an active immutable Site version may
+call its retained tool identities directly without per-call approval, while the
+parent intersects that allowlist with the viewer's live catalog and the API
+revalidates the active version on every call. The opaque-origin Site iframe
+never receives a token. External MCP clients use the aggregate workspace MCP route;
+deployments may opt into its resource-bound OAuth authorization server as
+documented in `docs/deployment.md`. Because that MCP adapter has no
+server-verifiable one-shot approval exchange, it omits tools classified for
+human approval and rejects direct calls to their projected names. OAuth consent
+does not satisfy that separate per-call approval requirement.
+
+Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
+and requested tool identities per immutable version. The parent renders the
+runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
+`contentWindow`. It intersects the retained identities with the viewer's live
+gateway, dispatches allowed calls directly, and aborts pending calls when the
+Site reloads, stops, navigates, replaces its bridge port, or unmounts. Duplicate
+live request ids are rejected, archived Sites receive no bridge, and no
+credential, cookie, API URL, workspace id, or parent DOM authority crosses into
+publisher-controlled code.
+
 ### Session Authorization
 
 Canonical sources: `SessionAuthorizationPort` in

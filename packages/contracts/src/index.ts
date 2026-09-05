@@ -32,11 +32,13 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
@@ -45,6 +47,7 @@ export {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -54,7 +57,11 @@ export {
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactRequestedTools,
   WorkspaceArtifactSlug,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
+  WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
@@ -62,6 +69,9 @@ export {
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_LIST_DEFAULT,
   WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   normalizeWorkspaceArtifactSlug,
 } from "./artifacts";
@@ -760,7 +770,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
-  "goal_wait",
+  "wait_for_input",
   "goal_complete",
   "goal_pause",
   "memory_search",
@@ -800,6 +810,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_get",
   "session_events",
   "session_wait",
+  "command_wait",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -891,6 +902,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "artifacts_archive",
+  "artifacts_restore",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -5996,7 +6009,7 @@ export const SessionGoalContinuation = z.object({
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
   /**
-   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
    * human can see why the goal is waiting and until when (`nextAttemptAt`).
    * Null for every other state; omitted by older servers.
    */
@@ -7493,6 +7506,8 @@ export const SessionSystemUpdateKind = z.enum([
   "goal_continuation",
   "agent_message",
   "agent_steer_instruction",
+  "session_wait_timeout",
+  "background_command_result",
   "child_terminal_result",
   "media_generation_result",
   "child_requires_action",
@@ -7506,7 +7521,7 @@ export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 /**
  * How a newly pending machine input affects an idle receiving session.
  * `immediate` registers a workflow wake in the same commit (the behaviour of
- * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * every pre-existing kind) and ends a `wait_for_input` hold at the next idle
  * evaluation; `deferred` only inserts the durable pending row plus its
  * `system.update.pending` event and is delivered coalesced with the next claim.
  */
@@ -7520,6 +7535,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   goal_continuation: "immediate",
   agent_message: "immediate",
   agent_steer_instruction: "immediate",
+  session_wait_timeout: "immediate",
+  background_command_result: "immediate",
   child_terminal_result: "immediate",
   media_generation_result: "immediate",
   child_requires_action: "immediate",
@@ -7701,6 +7718,29 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("agent_steer_instruction"),
       instruction: z.string().min(1),
       operationId: z.string().uuid(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("session_wait_timeout"),
+      waitTurnId: z.string().uuid(),
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: boundedUtf8String(2 * 1024),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("background_command_result"),
+      commandId: z.string().uuid(),
+      state: z.enum(["exited", "lost"]),
+      exitCode: z.number().int().nullable(),
+      reason: boundedUtf8String(512),
+      outputLocator: z
+        .object({
+          eventType: z.literal("sandbox.command.output.delta"),
+          commandId: z.string().uuid(),
+        })
+        .strict(),
     })
     .passthrough(),
   z
@@ -12177,6 +12217,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -12382,6 +12424,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.command.backgrounded",
+    "session.wait.started",
+    "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -12789,6 +12833,16 @@ export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 // --- A2 FileSystem request/response (NOT events; returned inline) ------------
 export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
 export type FsNodeType = z.infer<typeof FsNodeType>;
+/** Optional identity copied from one stream-capabilities response. File callers
+ * use it to fail with a retryable route conflict instead of reinterpreting a
+ * canonical path after the selected sandbox or effective root changes. */
+export const FileSystemRouteIdentity = z
+  .object({
+    epoch: z.number().int().nonnegative(),
+    root: z.string().min(1).max(4_096),
+  })
+  .strict();
+export type FileSystemRouteIdentity = z.infer<typeof FileSystemRouteIdentity>;
 // The Pierre-tree node. `children` is present only when the dir was listed with
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
@@ -12823,6 +12877,7 @@ export const FsListRequest = z.object({
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsListRequest = z.infer<typeof FsListRequest>;
 export const FsListResponse = z.object({
@@ -12855,6 +12910,7 @@ export const FsReadRequest = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(5 * 1024 * 1024),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
 export const FsReadResponse = z.object({
@@ -12874,6 +12930,7 @@ export const FsWriteRequest = z.object({
   content: z.string(),
   overwrite: z.boolean().default(true), // false + existing path => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
 export const FsWriteResponse = z.object({
@@ -12886,6 +12943,7 @@ export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
 export const FsDeleteRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(false), // required true to delete a non-empty dir
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
 export const FsDeleteResponse = z.object({
@@ -12898,6 +12956,7 @@ export const FsMoveRequest = z.object({
   newPath: z.string(),
   overwrite: z.boolean().default(false), // false + existing destination => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
 export const FsMoveResponse = z.object({
@@ -12910,6 +12969,7 @@ export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
 export const FsMkdirRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(true), // false + existing path => 400
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
 export const FsMkdirResponse = z.object({
@@ -15911,6 +15971,92 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
 );
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
 
+/**
+ * Secret-safe Codex allocator policy accepted with the first durable lease of
+ * a logical turn. Account ids are policy references only; credential material
+ * and provider tokens must never be stored here.
+ */
+export const CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY =
+  "codexCredentialPolicySnapshotV1" as const;
+
+export const CodexCredentialPolicySnapshotV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      activeCredentialId: z.string().min(1).max(256).nullable(),
+      rotationEnabled: z.boolean(),
+      rotationStrategy: z.string().min(1).max(64),
+      /** Effective allocator source; absent only on pre-source snapshots. */
+      source: z.enum(["workspace", "organization", "disabled"]).optional(),
+      pinnedCredentialId: z.string().min(1).max(256).nullable(),
+      pinSource: z.enum(["manual", "policy"]).nullable(),
+      lastCredentialId: z.string().min(1).max(256).nullable(),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if ((policy.pinnedCredentialId === null) !== (policy.pinSource === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pinSource"],
+          message: "pinnedCredentialId and pinSource must both be null or both be present",
+        });
+      }
+    }),
+);
+export type CodexCredentialPolicySnapshotV1 = z.infer<typeof CodexCredentialPolicySnapshotV1>;
+
+export type CodexCredentialPolicySnapshotReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: CodexCredentialPolicySnapshotV1 };
+
+/**
+ * Read the accepted Codex allocator policy from turn metadata. A present but
+ * malformed snapshot fails closed; only a missing key is legacy metadata.
+ */
+export function readCodexCredentialPolicySnapshotV1(
+  metadata: unknown,
+): CodexCredentialPolicySnapshotReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error(
+      "Malformed Codex credential policy snapshot metadata: turn metadata is not an object",
+    );
+  }
+  const record = metadata as Record<string, unknown>;
+  if (
+    !Object.prototype.hasOwnProperty.call(record, CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY)
+  ) {
+    return { kind: "absent" };
+  }
+  const parsed = CodexCredentialPolicySnapshotV1.safeParse(
+    record[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY],
+  );
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed Codex credential policy snapshot metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted Codex allocator policy snapshot into turn metadata. */
+export function metadataWithCodexCredentialPolicySnapshotV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: CodexCredentialPolicySnapshotV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: CodexCredentialPolicySnapshotV1.parse(policy),
+  };
+}
+
 export type TurnExecutionPolicyReadV1 =
   | { kind: "absent" }
   | { kind: "valid"; policy: TurnExecutionPolicyV1 };
@@ -16349,6 +16495,7 @@ export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
+export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";

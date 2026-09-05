@@ -49,17 +49,32 @@ already reports its absolute launch root; OpenGeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
-`/workspace` has no special meaning on a machine. Durable artifact receipts and
-`sandbox:` UI links may still use their provider-independent `/workspace/...`
-identity, projected to cwd-relative paths when shown to the model.
+`/workspace` has no special meaning on a machine.
+
+The Files surface advertises that effective path as `FileSystem.root`, including
+Windows drive and UNC roots. A canonical absolute `sandbox:` link opens the tree
+in the same namespace and sends the negotiated `{ epoch, root }` identity with
+each list, read, or mutation. The API validates that the path remains beneath
+the advertised root, pins the request to the first resolved active route, and
+uses a contained workspace-relative path for machine execution. Responses keep
+the canonical host-native spelling; a route or root change returns a retryable
+conflict instead of a misleading outside-workspace validation error or a read
+from a different target. Provider-independent artifact receipts may still use
+their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
 installing a machine credential. OpenGeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
-so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
-Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|show|call` works even without
+Bun/Node/`ogtool`. Default text and `list --json` return all authorized tools with
+short summaries, without an aggregate stdout cap or default pagination;
+use `list --query <substring>` to filter, or explicitly opt into a slice with
+`--limit <1..100> --offset <integer>`,
+`list --json` for digest/count/continuation metadata, or `list --full` for the legacy
+complete catalog. `show <path>` returns one tool's details/schema, capped at 64 KiB.
+It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 
 This authority follows the session's **active** execution path. The fleet

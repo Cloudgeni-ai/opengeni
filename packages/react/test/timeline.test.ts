@@ -203,6 +203,41 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
+  test("projects allocator-disabled policy waits without exposing credential identity", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      actualOutcome: "waiting",
+      actualCandidateKey: null,
+      actualReason: "allocator_disabled",
+    });
+    expect(JSON.stringify(item)).not.toContain("credential-secret");
+  });
+
+  test("projects authoritative allocator-disabled waits without the shadow feature", () => {
+    reset();
+    const [item] = buildTimeline([
+      event("codex.capacity.waiting", {
+        code: "codex_allocator_disabled",
+        detail: "waiting for a credential policy mutation",
+      }),
+    ]);
+    expect(item).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "waiting for a credential policy mutation",
+    });
+  });
+
   test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
     const cases = [
@@ -2314,20 +2349,19 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({ kind: "goal", action: "paused" });
   });
 
-  test("agent goal.held is suppressed like the other agent goal tool events", () => {
+  test("agent session.wait.started is suppressed beside the wait tool", () => {
     reset();
     const groups = groupTimeline(
       buildTimeline([
         event("agent.toolCall.created", {
           id: "call-wait",
-          name: "opengeni__goal_wait",
-          arguments: { reason: "two children still running", untilSeconds: 900 },
+          name: "opengeni__wait_for_input",
+          arguments: { reason: "two children still running", timeoutSeconds: 900 },
         }),
         event("agent.toolCall.output", { id: "call-wait", output: "ok" }),
-        event("goal.held", {
-          goalId: "goal-1",
-          turnId: "turn-1",
-          untilAt: "2026-01-01T00:15:00.000Z",
+        event("session.wait.started", {
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-09-03T23:15:00.000Z",
           reason: "two children still running",
           actor: "agent",
         }),
@@ -2340,7 +2374,7 @@ describe("buildTimeline", () => {
       activities[0]!.items
         .filter((item): item is ToolCallItem => item.kind === "tool-call")
         .map((item) => item.name),
-    ).toEqual(["opengeni__goal_wait"]);
+    ).toEqual(["opengeni__wait_for_input"]);
   });
 
   test("non-agent goal.held renders a held landmark with its reason", () => {
@@ -2748,11 +2782,11 @@ describe("groupTimeline", () => {
       }),
       event("agent.toolCall.created", {
         id: "call-2",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      event("goal.held", { actor: "agent", reason: "child still running" }),
-      event("agent.toolCall.output", { id: "call-2", output: { status: "held" } }),
+      event("session.wait.started", { actor: "agent", reason: "child still running" }),
+      event("agent.toolCall.output", { id: "call-2", output: { status: "waiting_for_input" } }),
       event("turn.completed", {}),
     ];
     const items = buildTimeline(events);
@@ -2760,7 +2794,7 @@ describe("groupTimeline", () => {
 
     expect((items[0] as AgentMessageItem).streaming).toBe(false);
     expect((items[0] as AgentMessageItem).phase).toBe("commentary");
-    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
     const visible = groups[1]?.kind === "item" ? groups[1].item : null;
     expect(visible).toMatchObject({
       kind: "agent-message",
@@ -2785,6 +2819,11 @@ describe("groupTimeline", () => {
           group.item.text === "I am checking the worker.",
       ),
     ).toBe(true);
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: "Waiting: child still running",
+    });
 
     expect(groupTimeline(buildTimeline(events))).toEqual(groups);
   });
@@ -2815,6 +2854,346 @@ describe("groupTimeline", () => {
     });
   });
 
+  test("surfaces a session wait reason when an empty turn has no assistant response", () => {
+    reset();
+    const reason = "Two delegated reviews are still running.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("agent.message.completed", { text: "" }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
+  });
+
+  test("repairs legacy agent goal holds without duplicating the hidden tool row", () => {
+    reset();
+    const reason = "PR review and CI are still in flight.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("goal.held", {
+          actor: "agent",
+          goalId: "goal-1",
+          reason,
+          turnId: "turn-1",
+          untilAt: "2026-06-10T13:00:00.000Z",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-legacy",
+          name: "goal_wait",
+          arguments: { reason, untilSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-legacy",
+          output: { status: "held" },
+        }),
+        event("agent.message.completed", { text: "" }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
+    const [turn] = turnGroups(groups);
+    expect(turn?.groups.some((group) => group.kind === "item" && group.item.kind === "goal")).toBe(
+      false,
+    );
+  });
+
+  test("keeps the terminal wait reason visible beside earlier commentary", () => {
+    reset();
+    const reason = "Two reviews are still running.";
+    const commentary = "Checking the reviewers now.";
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", {
+          text: commentary,
+          phase: "commentary",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          deadlineAt: "2026-06-10T13:00:00.000Z",
+          reason,
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        // The worker mirrors the stream's final output without phase metadata.
+        // A commentary echo is not a final answer and must not hide the wait.
+        event("agent.message.completed", { text: commentary }),
+        event("turn.completed", { output: commentary }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: commentary,
+      phase: "commentary",
+    });
+    expect(groups[2]?.kind === "item" ? groups[2].item : null).toMatchObject({
+      kind: "notice",
+      tone: "waiting",
+      text: `Waiting: ${reason}`,
+    });
+  });
+
+  test.each([
+    ["an explicit final answer", "final_answer"],
+    ["a phase-less legacy final answer", undefined],
+  ] as const)("does not append a wait outcome after %s", (_label, phase) => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          reason: "Waiting on stale work.",
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason: "Waiting on stale work.", timeoutSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+        event("agent.message.completed", {
+          text: "The work is complete.",
+          ...(phase ? { phase } : {}),
+        }),
+        event("turn.completed", { output: "" }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "The work is complete.",
+      streaming: false,
+    });
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
+  test.each([
+    ["the completed agent message", ""],
+    ["the retained turn output", "citeopaque-handle"],
+  ] as const)(
+    "keeps the wait outcome when only an opaque citation remains in %s",
+    (_label, output) => {
+      reset();
+      const reason = "A child review is still running.";
+      const events = [
+        event("session.wait.started", {
+          actor: "agent",
+          waitTurnId: "turn-1",
+          reason,
+        }),
+        event("agent.toolCall.created", {
+          id: "wait-1",
+          name: "wait_for_input",
+          arguments: { reason, timeoutSeconds: 3600 },
+        }),
+        event("agent.toolCall.output", {
+          id: "wait-1",
+          output: { status: "waiting_for_input" },
+        }),
+      ];
+      if (!output) {
+        events.push(
+          event("agent.message.completed", {
+            text: "citeopaque-handle",
+            phase: "final_answer",
+          }),
+        );
+      }
+      events.push(event("turn.completed", { output }));
+
+      const groups = groupTimeline(buildTimeline(events));
+      const waitingNotices = groups.flatMap((group) =>
+        group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting"
+          ? [group.item]
+          : [],
+      );
+
+      expect(waitingNotices).toHaveLength(1);
+      expect(waitingNotices[0]).toMatchObject({
+        text: `Waiting: ${reason}`,
+      });
+    },
+  );
+
+  test("recovers a retained terminal output when its message event is absent", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("completes a retained partial delta from the authoritative terminal output", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.delta", { text: "All checks" }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("promotes an exact retained delta when its completion event is absent", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.delta", { text: "All checks passed." }),
+        event("agent.toolCall.created", {
+          id: "call-1",
+          name: "exec_command",
+          arguments: { cmd: "bun test" },
+        }),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }),
+        event("turn.completed", { output: "All checks passed." }),
+      ]),
+    );
+
+    expect(groups.map((group) => group.kind)).toEqual(["turn", "item"]);
+    expect(groups[1]?.kind === "item" ? groups[1].item : null).toMatchObject({
+      kind: "agent-message",
+      text: "All checks passed.",
+      streaming: false,
+    });
+  });
+
+  test("does not leak a discarded wait reason into a later turn", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event(
+          "session.wait.started",
+          { actor: "agent", reason: "Waiting on an obsolete worker." },
+          { turnId: "turn-failed" },
+        ),
+        event("turn.failed", { error: "worker failed" }, { turnId: "turn-failed" }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
+          { turnId: "turn-retry" },
+        ),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-retry" }),
+        event("turn.completed", { output: "" }, { turnId: "turn-retry" }),
+      ]),
+    );
+
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
+  test("does not carry unscoped legacy response state across a new user boundary", () => {
+    reset();
+    const groups = groupTimeline(
+      buildTimeline([
+        event("agent.message.completed", { text: "Old partial result." }, { turnId: null }),
+        event(
+          "session.wait.started",
+          { actor: "agent", reason: "Waiting on obsolete work." },
+          { turnId: null },
+        ),
+        event("user.message", { text: "Start fresh." }, { turnId: null }),
+        event(
+          "agent.toolCall.created",
+          { id: "call-1", name: "exec_command", arguments: { cmd: "retry" } },
+          { turnId: "turn-retry" },
+        ),
+        event("agent.toolCall.output", { id: "call-1", output: "ok" }, { turnId: "turn-retry" }),
+        event("turn.completed", { output: "Fresh final result." }, { turnId: "turn-retry" }),
+      ]),
+    );
+
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" &&
+          group.item.kind === "agent-message" &&
+          group.item.text === "Fresh final result.",
+      ),
+    ).toBe(true);
+    expect(
+      groups.some(
+        (group) =>
+          group.kind === "item" && group.item.kind === "notice" && group.item.tone === "waiting",
+      ),
+    ).toBe(false);
+  });
+
   test("keeps a resumed continuation separate from the prior held-turn fallback", () => {
     reset();
     const groups = groupTimeline(
@@ -2826,12 +3205,12 @@ describe("groupTimeline", () => {
         ),
         event(
           "agent.toolCall.created",
-          { id: "wait-1", name: "goal_wait", arguments: { untilSeconds: 900 } },
+          { id: "wait-1", name: "wait_for_input", arguments: { timeoutSeconds: 900 } },
           { turnId: "turn-held" },
         ),
         event(
           "agent.toolCall.output",
-          { id: "wait-1", output: { status: "held" } },
+          { id: "wait-1", output: { status: "waiting_for_input" } },
           { turnId: "turn-held" },
         ),
         event("turn.completed", {}, { turnId: "turn-held" }),
@@ -3248,6 +3627,19 @@ describe("sessionStatusFromEvents", () => {
     expect(sessionStatusFromEvents(events)).toBe("idle");
     expect(sessionStatusFromEvents([event("user.message", { text: "x" })])).toBeNull();
   });
+
+  test("accepts durable capacity wait and recovery statuses", () => {
+    reset();
+    expect(
+      sessionStatusFromEvents([event("session.status.changed", { status: "waiting_capacity" })]),
+    ).toBe("waiting_capacity");
+    expect(
+      sessionStatusFromEvents([
+        event("session.status.changed", { status: "waiting_capacity" }),
+        event("session.status.changed", { status: "recovering" }),
+      ]),
+    ).toBe("recovering");
+  });
 });
 
 describe("extractSessionRef", () => {
@@ -3398,6 +3790,26 @@ describe("credit exhaustion", () => {
       kind: "notice",
       tone: "failed",
       text: CREDIT_EXHAUSTION_MESSAGE,
+    });
+  });
+
+  test("legacy safety refusal is visible in both turn summary and notice", () => {
+    reset();
+    const detail =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    const items = buildTimeline([
+      event("turn.failed", {
+        error: "Upstream unavailable. Send a message to retry.",
+        lastRetryableError: detail,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "turn-end",
+      failureText: `The model provider blocked this request. ${detail}`,
+    });
+    expect(items[1]).toMatchObject({
+      kind: "notice",
+      text: `The model provider blocked this request. ${detail}`,
     });
   });
 

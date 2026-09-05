@@ -1183,17 +1183,23 @@ export function MessageTimeline({
         applyPinned(false);
       }
     } else if (prepended) {
+      const olderAttemptState = olderLoadAttemptRef.current?.[1];
+      const underfillOwned =
+        !!olderLoadAttemptRef.current &&
+        olderAttemptState !== 1 &&
+        olderAttemptState !== 2 &&
+        olderAttemptState !== 3;
       if (
         autoFollow &&
         pinnedRef.current &&
         !hasNewer &&
         !pendingReaderLeaveRef.current &&
-        (wasAtLiveTailBeforeCommit || olderLoadAttemptRef.current)
+        (wasAtLiveTailBeforeCommit || underfillOwned)
       ) {
-        // A pending short-window load owns the prepend even when live growth
-        // has left its still-pinned camera with raw geometry debt. Unrelated
-        // prepends retain the prior-tip fallback so a stale pin after an
-        // extension/programmatic history jump still restores its row anchor.
+        // Still following the live tip: underfill, or a prefetch the reader
+        // started and then returned from. Park at the new tip. A stale pin
+        // while they are actually up in a short window (gap is not inside
+        // PIN_THRESHOLD of maxScroll, so wasAtLiveTail is false) restores.
         clearPendingReaderLeave();
         snapToBottom(node);
       } else {
@@ -1598,6 +1604,19 @@ export function MessageTimeline({
       return;
     }
 
+    if (programmatic && !pinnedRef.current) {
+      // Restore/camera writes while reading history are not a return to the tip.
+      // Still expire a pending Jump-to-latest latch: the in-window jump itself
+      // is a programmatic snap, and a later reader scroll-away can arrive
+      // before that echo is consumed. Skipping this left the latch armed and
+      // snapped the reader when hasNewer later flipped false.
+      syncScrollBaseline(node);
+      if (wantPinRef.current && !isNearBottom(node)) {
+        wantPinRef.current = false;
+      }
+      return;
+    }
+
     if (autoFollow && pinnedRef.current && !hasNewer) {
       // Fold / composer / SessionChrome: viewport shrink raises maxScroll without
       // growing content. Must hit tipFollow before we adopt the new clientHeight
@@ -1659,10 +1678,15 @@ export function MessageTimeline({
     syncScrollBaseline(node);
     const nearBottom = isNearBottom(node);
 
-    // Re-pin only when the reader moved toward/at the tip — not when a fold
-    // clamp dragged scrollTop down onto nearBottom.
+    // Re-pin only when the reader moved toward/at the tip without a content
+    // insertion. Prepend restore and overflow-anchor raise scrollTop by
+    // roughly the same amount as maxScroll; treating that as a scroll-down
+    // re-pinned a compact-tail history reader (their preserved gap falls
+    // inside PIN_THRESHOLD once the window is tall) and snapped them back.
+    const inserted = Math.max(0, nextMaxScroll - previousMaxScroll);
+    const towardTip = nextTop - previousTop - inserted;
     const nextPinned =
-      !hasNewer && nearBottom && nextTop >= previousTop - TIP_FOLLOW_READER_UP_EPS_PX;
+      !hasNewer && nearBottom && towardTip >= -TIP_FOLLOW_READER_UP_EPS_PX && inserted <= 1;
     if (!nextPinned) {
       stopFollow();
     }

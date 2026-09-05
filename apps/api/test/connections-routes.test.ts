@@ -1846,6 +1846,138 @@ describe("connections routes", () => {
     }
   });
 
+  test("oauth start/callback supports same-origin 2025-03-26 metadata without RFC 8707 resource parameters", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const upstreamMcp = startTestMcpServer();
+    const tokenRequests: URLSearchParams[] = [];
+    const metadataRequests: string[] = [];
+    let origin = "";
+    const legacy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname === "/mcp") {
+          if (request.headers.get("authorization") !== "Bearer legacy-access-token") {
+            return new Response(JSON.stringify({ error: "invalid_token" }), {
+              status: 401,
+              headers: {
+                "content-type": "application/json",
+                "www-authenticate": 'Bearer error="invalid_token", scope="documents:read"',
+              },
+            });
+          }
+          return await fetch(upstreamMcp.url, {
+            method: request.method,
+            headers: request.headers,
+            ...(request.method === "GET" || request.method === "HEAD"
+              ? {}
+              : { body: await request.arrayBuffer() }),
+          });
+        }
+        if (url.pathname.includes("oauth-protected-resource")) {
+          metadataRequests.push(url.pathname);
+          return new Response("not found", { status: 404 });
+        }
+        if (url.pathname === "/.well-known/oauth-authorization-server") {
+          metadataRequests.push(url.pathname);
+          return Response.json({
+            issuer: origin,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+            client_id_metadata_document_supported: true,
+          });
+        }
+        if (url.pathname === "/token") {
+          const body = new URLSearchParams(await request.text());
+          tokenRequests.push(body);
+          return Response.json({
+            access_token: "legacy-access-token",
+            refresh_token: "legacy-refresh-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: body.get("scope") ?? "documents:read",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${legacy.port}`;
+    const mcpUrl = `${origin}/mcp`;
+    try {
+      const response = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "legacy.example.com",
+            mcpUrl,
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      const responseText = await response.clone().text();
+      expect(response.status, responseText).toBe(200);
+      const body = (await response.json()) as { state: string; authorizationUrl: string };
+      const authorizationUrl = new URL(body.authorizationUrl);
+      expect(authorizationUrl.searchParams.get("resource")).toBeNull();
+      expect(authorizationUrl.searchParams.get("scope")).toBe("documents:read");
+      expect(authorizationUrl.searchParams.get("code_challenge_method")).toBe("S256");
+      const state = readSignedState(body.state, STATE_SECRET) as Record<string, unknown>;
+      expect(state).toMatchObject({
+        discoveryMode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        resourceParameterSupported: false,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(state.protectedResourceMetadataUrl).toBeUndefined();
+      expect(state.discoveryMetadataSha256).toMatch(/^[0-9a-f]{64}$/);
+
+      const callback = await publicApp(client.db).request(
+        `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(body.state)}`,
+      );
+      expect(callback.status).toBe(302);
+      expect(callback.headers.get("location")).toContain("integration_oauth=success");
+      expect(tokenRequests).toHaveLength(1);
+      expect(tokenRequests[0]!.get("resource")).toBeNull();
+      expect(metadataRequests).toEqual([
+        "/.well-known/oauth-protected-resource/mcp",
+        "/mcp/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-protected-resource",
+        "/.well-known/oauth-authorization-server",
+      ]);
+
+      const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
+        workspaceId: workspace.workspaceId,
+        providerDomain: "legacy.example.com",
+        kind: "oauth2",
+        allowSubjectOwned: false,
+      });
+      expect(loaded?.credential).toMatchObject({
+        access_token: "legacy-access-token",
+        resource: mcpUrl,
+        resource_parameter_supported: false,
+      });
+      expect(loaded?.metadata.oauthDiscovery).toMatchObject({
+        mode: "legacy_2025_03_26_metadata",
+        resource: mcpUrl,
+        issuer: `${origin}/`,
+        authorizationServerMetadataUrl: `${origin}/.well-known/oauth-authorization-server`,
+      });
+      expect(loaded?.metadata.oauthDiscovery).not.toHaveProperty("protectedResourceMetadataUrl");
+    } finally {
+      legacy.stop(true);
+      upstreamMcp.close();
+    }
+  });
+
   test("oauth start fails promptly with a structured stage when metadata streaming stalls", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

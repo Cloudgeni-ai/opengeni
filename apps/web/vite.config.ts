@@ -6,9 +6,11 @@ import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import viteReact from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { compactProtectedIndexHtml } from "./vite-index-html";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const canonicalIndexFilename = path.resolve(dirname, "index.html");
 const browserExtensionArchive = path.resolve(
   dirname,
   "../browser-extension/dist/opengeni-browser-extension.tar",
@@ -16,7 +18,6 @@ const browserExtensionArchive = path.resolve(
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
-
 export default defineConfig({
   build: {
     // The canonical post-build budget below computes gzip sizes for the exact
@@ -234,7 +235,15 @@ export default defineConfig({
       name: "compact-index-html",
       transformIndexHtml: {
         order: "post",
-        handler: (html) => html.replace(/>\s+</g, "><").trim(),
+        // Vite and React inject dev-client scripts at head-prepend even when
+        // the source bootstrap appears first. Reorder the final transformed
+        // document so setup authority is scrubbed before those subrequests in
+        // dev, preview, and production builds.
+        handler: (html, context) =>
+          compactProtectedIndexHtml(html, {
+            filename: context.filename,
+            canonicalFilename: canonicalIndexFilename,
+          }),
       },
     },
   ],

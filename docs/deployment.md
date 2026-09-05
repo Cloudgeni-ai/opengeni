@@ -9,6 +9,74 @@ fake-provider conformance, rollback, and unsupported-operation contract in
 not enable an external recovery notification provider or perform a production
 mutation.
 
+## Workspace MCP OAuth
+
+The public MCP authorization server is disabled by default. Enable it only in
+managed or local product-access mode with
+`OPENGENI_MCP_OAUTH_ENABLED=true` and an exact credential-free
+`OPENGENI_PUBLIC_BASE_URL` origin. Non-local environments require HTTPS.
+Generated runtime env and Helm artifacts carry the explicit enable switch and
+`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS`; enabling OAuth makes the public base
+URL a required artifact input and rejects configured product-access profiles
+before deployment.
+
+The deployment then publishes authorization-server and protected-resource
+metadata, public Dynamic Client Registration, and authorization-code/token
+endpoints for the exact workspace MCP resources. Consent uses the existing
+current-human browser session; no separate OAuth signing secret is required.
+Access and refresh values are opaque, only their hashes are retained, and the
+runtime accepts access tokens only on `/v1/workspaces/:workspaceId/mcp`,
+`/mcp/docs`, or `/mcp/files`. Keep the public base URL stable across upgrades
+because it is the issuer and part of every exact resource identifier. See
+[`mcp-surfaces.md`](mcp-surfaces.md) for the client-facing contract.
+
+Dynamic client registration is durably limited to 20 registrations per source
+and 600 registrations globally per ten-minute window. Registrations that are
+never used expire after one day; successful client use extends retention
+through the refresh-token lifetime plus one day. Bounded opportunistic cleanup
+removes expired clients, consent requests, authorization codes, access tokens,
+and refresh tokens without requiring a separate scheduler.
+
+The source quota uses the transport peer address reported by Bun and ignores
+caller-provided `X-Forwarded-For` and `X-Real-IP` by default. A deployment behind
+a fixed trusted proxy chain may set
+`OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=<count>`; OpenGeni then walks
+`X-Forwarded-For` from the server side by exactly that many hops, so a caller
+cannot evade the quota by prepending values. Enable this only when firewall or
+network-policy rules prevent direct API access and every declared hop overwrites
+or appends the forwarding chain. A missing or shorter chain fails back to the
+server-owned transport peer.
+
+Current-human HTTP/SDK calls classified for human approval use the ordinary API
+database and require migration `0405_tool_gateway_approval_capabilities.sql`.
+No additional secret or service is required. The API stores only a token hash,
+binds each capability to the current human and exact call, expires it after five
+minutes, and consumes it once. Issuance opportunistically removes bounded
+expired/consumed rows. Existing database readiness therefore covers this path.
+Site calls do not use this approval store: their active immutable version's
+requested identities are intersected with the current viewer's live gateway and
+revalidated by the API on every direct call.
+
+Migrations `0404_mcp_oauth_authorization_server.sql` and
+`0405_tool_gateway_approval_capabilities.sql` are one drained maintenance
+boundary even when `OPENGENI_MCP_OAUTH_ENABLED=false`. They add tables, grants,
+and FORCE-RLS state to the exact startup/readiness posture, so neither the
+previous runtime evaluator nor the target evaluator can operate in a mixed
+pre/post-schema fleet. Follow the
+[0404-0405 operator cutover](#mcp-oauth-and-tool-gateway-posture-cutover-0404-0405)
+before deploying the release that contains them.
+
+Refresh-token rotation is family-fenced. Reuse of any known revoked generation
+atomically revokes every descendant refresh and access token before returning
+`invalid_grant`.
+
+Gateway calls emit `opengeni_tool_gateway_operations_total` and
+`opengeni_tool_gateway_operation_duration_seconds` with bounded adapter,
+operation, source, and outcome labels. The same observer emits
+`opengeni.tool_gateway.operation` spans and safe structured log attributes
+(`surface`, `op`, `provider`, `outcome`, `durationMs`). It never emits workspace,
+subject, tool-name, argument, result, credential, or approval-token values.
+
 ## Personal GitHub OAuth
 
 Personal GitHub is disabled by default. Managed staging and production must use
@@ -274,12 +342,35 @@ maintenance migration must be selected explicitly; migration 0389 uses
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0389_model_catalog_and_gateway_custom_models`
 plus `OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true` after the
 operator completes the documented database-role, image-digest, and application
-drain preflight. Migration 0394 likewise requires a complete API and worker
+drain preflight. The 0404-0405 posture boundary uses
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0404_mcp_oauth_authorization_server`
+with the same preflight acknowledgement. Migration 0394 likewise requires a complete API and worker
 drain and
 `OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0394_session_selected_skill_activation`;
 a pre-0394 worker would treat the newly admitted activation mode as an ambient
 workspace Skill, so none may remain live or restart after the cutover. Postgres
-and Garage PVCs remain attached. Database migrations
+and Garage PVCs remain attached. Migration 0402 is another clean maintenance
+cutover: stop every API, control worker, and turn worker, provide the exact old
+and new runtime database login list through
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`, and select
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0402_session_input_wait_and_background_command_results`.
+It moves active long-wait state from `session_goals` to `sessions`, removes the
+old columns and `goal_wait` protocol, and activates terminal background-command
+agent input. After it commits, never restart a pre-0402 image. This forward-only
+cutover was documented on September 3, 2026. Migration 0403 likewise requires
+a complete API and worker drain and
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0403_codex_unconditional_credential_leasing`;
+before applying it, provide
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` as the comma-separated list of
+every old and new runtime database login that may still be connected. Include
+both roles when rotating the runtime login, and use
+`MigrationRuntimeOptions.applicationDatabaseRoles` for embedded callers. The
+list must be explicit, non-empty, unique, and contain no role longer than 63
+UTF-8 bytes; migration 0403 rechecks it before and after taking its locks and
+aborts with SQLSTATE `55000` when the list is missing, malformed, or any listed
+application session remains live. It removes the temporary Codex allocator
+cutover columns, so pre-0403 binaries must never run or restart after commit.
+Database migrations
 are forward-only: after a maintenance migration succeeds, remain on the new
 image/schema and fix forward.
 
@@ -574,8 +665,77 @@ configuration validation requires the provider key. Embedded hosts may bind an
 equivalent host-owned `ManagedEmailTransport` at API composition, but that seam
 does not relax the deployment preflight today. Keep
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_BETTER_AUTH_SECRET` stable: invitation
-bearers are stable HMAC identities and the browser receives them only in the
-email URL fragment.
+bearers are stable HMAC identities. The repository-safe default,
+`OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT=fragment`, preserves
+compatibility with pre-query web images. Query transport is a deliberate
+second-stage rollout because API and web replicas update independently:
+
+Apply rolling migration
+`0401_organization_user_setup_token_transport.sql` before deploying the API
+that freezes and recovers per-delivery transport. Old API replicas continue to
+use the v1 claim/prepare capabilities while the new API uses additive v2
+capabilities. Migration 0401 replaces the v1 claim with a compatibility fence:
+an old replica that reaches a query-frozen retry receives a clear database
+error, and its nested claim/attempt mutation rolls back so a v2 replica can
+service the row. Do not deploy the new API against a pre-0401 database.
+
+1. deploy the new chart/web and 0401-aware API image everywhere while the
+   setting remains
+   `fragment`; verify every public web replica returns the protected
+   `/setup-account` shell, its first inline head bootstrap executes before any
+   subresource, and the dedicated Ingress exists for every host that routes to
+   web. Confirm no pre-0401 API replica remains before enabling query mode;
+2. prove every controller and external edge suppresses or redacts query-bearing
+   request targets in access logs, traces, and error logs. Then set
+   `OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED=true`,
+   change the transport setting to `query`, and roll the API. Email links then
+   use a bounded query parameter so mail security gateways preserve it;
+3. before any rollback, restore `fragment` on every API replica. A rollback to
+   a pre-0401 API image additionally requires every retryable query-frozen
+   failed or `outcome_unknown` delivery to be drained through a v2 replica or
+   its invitation to be revoked and reissued; old replicas are deliberately
+   unable to claim those rows. Before rolling web back to an image that
+   predates query normalization, also wait until every previously sent query
+   link has expired or revoke/reissue those invitations. An emergency rollback
+   that skips either drain can strand live or retryable invitations.
+
+The production web handler serves the setup shell directly with no-store,
+no-referrer, and noindex protections and emits no redirect at all, preserving
+the no-downgrade and untrusted-Host boundary behind TLS termination. HTTP
+servers cannot inspect a URL fragment, so the first executable inline script in
+the HTML head counts canonical query and fragment candidates together, rejects
+ambiguity, and scrubs both with `history.replaceState` before the favicon,
+module graph, or API work. It hands one token to the SPA through short-lived
+process memory and never stores it. The same bootstrap works under Vite and
+generic static serving. A deployment Content Security Policy must authorize
+this exact inline bootstrap with its existing nonce/hash process; if it cannot,
+leave query transport disabled. This compatibility does not make rollback to
+an older SPA safe; follow the staged rollout above.
+
+The managed Helm chart renders a dedicated exact ingress-nginx location only
+for hosts that actually route to web and unconditionally disables both access
+logging and ingress-nginx OpenTelemetry tracing there. Keep those protections,
+and keep `ingress.setupAccountIngress.enabled=true` in query mode: chart
+rendering fails closed if query transport would fall through the normally
+logged/traced primary Ingress. This chart-owned route is required in addition
+to the separate controller/edge error-log proof,
+but do not treat them as query-log sanitization: ingress-nginx configures a
+controller-wide `error_log`, and NGINX upstream failures/timeouts can append the
+full request line, including `?token=...`. The chart and runtime therefore fail
+query mode closed until the separate confirmation flag above is true.
+
+For ingress-nginx, a location-scoped `error_log /dev/null;` supplied through
+`nginx.ingress.kubernetes.io/configuration-snippet` is one supported mitigation
+when the controller explicitly enables snippet annotations and admits their
+Critical risk level. Because many clusters correctly disable snippets, this is
+not a chart default or a portable guarantee. Verify the generated NGINX config
+and force both upstream connection failures and timeouts while checking every
+controller/sidecar sink before setting the confirmation flag. If snippets are
+forbidden, use a reviewed custom controller template or an upstream edge with a
+demonstrated request-target redaction policy; otherwise keep query transport
+disabled. External load balancers, CDNs, WAFs, service meshes, analytics SDKs,
+APM agents, non-NGINX ingresses, and other edges need the same access/trace/error
+proof. The database continues to retain only the bearer digest.
 
 The API records a durable attempt and `provider_started` marker before provider
 I/O. A clear refusal is shown as `failed`; a network timeout, server ambiguity,
@@ -591,6 +751,15 @@ the exact delivery id, provider scope/key, bearer digest, effective
 becomes `reconciliation_required`: inspect Resend/provider history and do not
 resend. A retry that fails before provider I/O cannot downgrade an older
 unresolved outcome to an ordinary failure.
+The delivery also freezes its setup-link transport at first preparation.
+Changing the deployment default later does not change retries. For rolling rows
+prepared by an older API, the new API derives both link forms and selects only
+the one whose rendered message matches the stored payload digest, then persists
+that recovered transport before provider I/O. Once a query transport has been
+frozen, pre-0401 replicas cannot retry it: the v1 claim fence rolls back without
+leaving a claim or attempt, while a v2 replica remains able to claim and prepare
+the exact frozen query payload. Drain those rows or revoke/reissue their
+invitations before a pre-0401 API rollback.
 After confirming provider state, revoke the old invitation before deliberately
 creating a new one if access is still required.
 
@@ -1337,11 +1506,13 @@ package. It builds API, worker, web, relay, and stock headless-sandbox images
 under fresh run-and-attempt-scoped candidate tags. Migrations explicitly reuse
 the API manifest. The official BOM does **not** include `opengeni-desktop`.
 Modal Computer/Browser need `docker/desktop.Dockerfile` (Xvfb/XFCE/Chrome/browserd),
-published by `.github/workflows/publish-desktop-image.yml`. Set Helm
-`desktop.imageRef` to that digest (`registry/opengeni-desktop@sha256:…`). The
-chart fails closed when `OPENGENI_SANDBOX_BACKEND=modal` and
-`OPENGENI_SANDBOX_DESKTOP_ENABLED=true` without a digest pin. Do not point Modal
-at official `opengeni-sandbox`. A pin change applies to **new** sandbox creates;
+published by `.github/workflows/publish-desktop-image.yml`. OpenGeni defaults to
+a public, digest-pinned desktop image in both runtime config and Helm. Override
+Helm `desktop.imageRef` only with another compatible digest
+(`registry/opengeni-desktop@sha256:…`). The chart fails closed when
+`OPENGENI_SANDBOX_BACKEND=modal` and `OPENGENI_SANDBOX_DESKTOP_ENABLED=true`
+without a valid digest pin. Do not point Modal at official `opengeni-sandbox`.
+A pin change applies to **new** sandbox creates;
 rotate or reap the warm lease before an existing session can use the new box.
 Protected main CI uses the separate `canary-sha-<source>` namespace for its
 SHA-configured images and records that tag in the canary receipt. The
@@ -1852,6 +2023,62 @@ The runtime secret must provide values such as:
 
 Do not commit real secret values.
 
+### MCP OAuth and tool-gateway posture cutover (0404-0405)
+
+Migrations `0404_mcp_oauth_authorization_server.sql` and
+`0405_tool_gateway_approval_capabilities.sql` change the exact application-role
+table, grant, and RLS inventory. The previous API/worker runtime-posture
+evaluator rejects the provisioned target schema, while the target evaluator
+rejects the old schema. This is therefore a single drained, forward-only
+maintenance rollout; it is not safe to let the normal Helm pre-upgrade Job run
+while old application pods still serve traffic.
+
+1. Bind the exact database, schema, release artifacts, and every API/control
+   worker/turn worker database login. Set
+   `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` to the complete
+   comma-separated old/new login list (normally `opengeni_app`). During a role
+   rotation, include both identities. This list is drain detection only; it is
+   not a grant allow-list. `OPENGENI_APP_DATABASE_USER` and its password name
+   the sole target role that `db:provision-roles` grants after migration.
+2. Bind the drain and final upgrade to the same immutable API/worker/web and
+   migrations images. For a generated Kubernetes plan, set:
+
+   ```bash
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0404_mcp_oauth_authorization_server
+   export OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true
+   ```
+
+   Do not set the confirmation until the release/database/login binding,
+   accepted-turn handling, and exact image digests have been reviewed. The
+   generated plan emits the migrations-disabled application drain only with
+   both values present.
+3. Stop every API, control worker, and turn worker using the target database and
+   prove that every listed old/new login has zero other sessions in
+   `pg_stat_activity`. Keep the application stopped through migration, role
+   provisioning, and posture assertion.
+4. From the exact new image, run the ordinary rollout gate in this order:
+
+   ```bash
+   bun run db:migrate
+   bun run db:provision-roles
+   bun run db:assert-runtime-posture
+   ```
+
+   Migration 0404 and migration 0405 each validate the explicit role list and
+   repeat the live-session check after installing their schema. A live listed
+   identity aborts with SQLSTATE `55000` and rolls back that migration. Both
+   migrations remove every explicit non-owner ACL inherited from owner default
+   privileges; they grant none of the listed drain identities. Only the
+   following role-provision step grants the exact current target role.
+5. Require both migration receipts in `schema_migrations`, then start only the
+   same new image generation and require startup/readiness posture checks before
+   reopening admission. `OPENGENI_MCP_OAUTH_ENABLED` may remain false; feature
+   enablement is independent of the mandatory schema/posture cutover.
+
+After either migration commits, do not restart a pre-0404 application image or
+attempt a mixed-version rolling rollback. Keep the application drained and fix
+forward on the target schema.
+
 ### Deployment database model catalog cutover
 
 The default source remains the reviewed code/env catalog. Database mode is an
@@ -1919,8 +2146,12 @@ fleet is unsupported even while every process still uses `code`:
    Verify the application Deployments are absent and the configured database
    login has zero sessions. Then run the ordinary upgrade with those disable
    overrides removed; its pre-upgrade Job applies pending migrations through
-   0387 before Helm recreates the application. If the second upgrade fails,
-   remain drained and fix forward.
+   0387 before Helm recreates the application. Generated maintenance plans make
+   this final upgrade atomic and clean up newly created resources on failure.
+   Its rollback target is the immediately preceding new-chart, exact-image,
+   migrations-disabled revision above, so a failed post-migration rollout
+   restores the drained state without starting pre-migration application bytes.
+   Remain drained and fix forward.
 
 3. Apply `0389_model_catalog_and_gateway_custom_models.sql`, provision roles,
    and assert runtime posture using the catalog-aware release artifacts. The

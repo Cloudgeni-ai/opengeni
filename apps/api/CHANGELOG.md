@@ -1,5 +1,67 @@
 # @opengeni/api-router
 
+## 2.10.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- 876396d: Support safe same-origin legacy MCP OAuth discovery when RFC 9728 Protected Resource Metadata is absent, and expose shared runtime/catalog discovery classifications.
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/db@4.0.0
+  - @opengeni/runtime@2.3.0
+  - @opengeni/core@2.7.5
+  - @opengeni/config@1.0.0
+  - @opengeni/capabilities@0.3.2
+  - @opengeni/codex@0.2.21
+  - @opengeni/github@0.7.3
+  - @opengeni/xai-subscription@0.1.3
+  - @opengeni/artifact-tool@0.3.19
+  - @opengeni/codemode@0.4.27
+  - @opengeni/documents@0.8.19
+  - @opengeni/events@0.4.17
+  - @opengeni/observability@0.8.19
+  - @opengeni/storage@0.2.120
+
+## 2.9.1
+
+### Patch Changes
+
+- Updated dependencies [599a64e]
+  - @opengeni/runtime@2.2.1
+  - @opengeni/core@2.7.4
+
+## 2.9.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+- Updated dependencies [fab39d2]
+- Updated dependencies [d8f84ac]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/core@2.7.3
+  - @opengeni/runtime@2.2.0
+  - @opengeni/db@3.9.0
+  - @opengeni/artifact-tool@0.3.18
+  - @opengeni/codemode@0.4.26
+  - @opengeni/config@0.23.3
+  - @opengeni/documents@0.8.18
+  - @opengeni/events@0.4.16
+  - @opengeni/github@0.7.2
+  - @opengeni/observability@0.8.18
+  - @opengeni/storage@0.2.119
+
 ## 2.8.1
 
 ### Patch Changes

@@ -152,6 +152,10 @@ execution of that turn. Worker death, recovery, interruption, or capacity
 waiting may create another attempt without creating another logical turn or
 replaying an already-completed side effect.
 
+Internal-update delivery is atomic per batch, not unique per logical turn:
+resumed attempts may append a new batch while retaining earlier receipts.
+Canonical model history owns their ordered, exactly-once inclusion.
+
 The full `runAgentTurn` activity is non-retryable by default because model,
 tool, sandbox, Git, connector, and cloud operations can have external effects.
 Recovery is explicit and attempt-fenced. Provider work occurs outside database
@@ -175,6 +179,24 @@ A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
 adoption, ordinary turn completion and Steer detach from it, while explicit
 command cancellation, Pause, or terminal Cancel control its lifetime.
+An explicitly stopped, revoked, or replaced Connected Machine instance ends
+command tracking as `lost`; this never asserts operating-system process death.
+A temporary transport outage alone preserves tracking. Reconciliation drains
+a fixed due-time frontier in batches, sharing offline observations per instance.
+The historical retirement migration preserves command records without creating
+model input or waking old sessions.
+Exact terminal proof (including confirmed tracking retirement) settles the command row and appends its terminal session
+event in one PostgreSQL transaction. A nonterminal session also receives one
+typed model input and any idle workflow wake in that commit; a failed or
+cancelled session remains terminal and keeps event-only audit rather than
+reopening machine input. Live fanout is post-commit and replaceable.
+
+A long external wait is likewise session state, not workflow memory or goal
+state. `wait_for_input` records the exact declaring turn and an absolute
+PostgreSQL deadline, then the agent ends its turn. The workflow closes while
+the wait is current and is restarted by durable input or the deadline outbox;
+timeout becomes typed machine input. `session_wait` and `command_wait` remain
+short in-turn reads and never hold an inference indefinitely.
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
@@ -360,6 +382,16 @@ universal `/workspace`. An unavailable machine surfaces as a typed operation
 outcome; text-only reasoning can still begin without contacting it. OpenGeni
 never interprets an offline machine as permission to cold-create a rival box,
 snapshot it, or provider-terminate the user's computer.
+
+The structured Files boundary advertises the selected machine's effective
+host-native working directory as `FileSystem.root`. Canonical file links and
+tree nodes stay in that namespace. Connected Machine file reads also accept
+absolute paths outside the working directory, subject to the machine account’s
+OS permissions; the working directory is a browsing default, not a read boundary.
+Managed provider reads and structured mutations retain workspace confinement. Files requests carry the capability epoch plus root;
+the API binds one active route for the request and returns a retryable conflict
+if the selected target or root changes instead of reinterpreting the path on a
+different filesystem.
 
 Generated-session schedules follow the same explicit route: they persist an
 exact workspace- or organization-scoped machine target and seed the session's
@@ -905,6 +937,29 @@ Provider-refusal cooldowns carry separate provenance and revision authority so
 fresh usage repairs only an older quota refusal, never generic backpressure or
 a concurrently newer refusal. All-capped admission and durable capacity waits
 run that reconciliation through bounded control-plane refreshes.
+Every Codex turn owns one durable credential lease before provider work. The
+lease protocol is unconditional execution fencing; `rotation_enabled` only
+decides whether a new or recovered turn may leave the active account. Rotation
+off therefore waits on a capped active account instead of using a healthy
+alternate, while rotation on may recover the same checkpointed turn elsewhere.
+The first allocator decision also atomically records a bounded
+`codexCredentialPolicySnapshotV1` in the durable turn metadata, including a
+new turn's no-credential result before it enters a capacity wait. The snapshot
+freezes the effective workspace/organization/disabled allocator source as well
+as active-pointer, rotation, effective strategy, and pin state. Re-acquisition
+and definitive-failure settlement reuse that accepted policy while reading current
+account health/cooldowns; a
+missing or expired last database-confirmed lease deadline fails closed before
+provider dispatch and follows the existing lease-loss recovery path.
+Heartbeat renewal is fail-closed as well: a response that arrives after the
+prior worker-confirmed deadline is discarded, while expiry-sensitive lease SQL
+uses execution-time database time after its relevant locks are acquired.
+An effective workspace/organization source transition is a serialized hard
+cutover: the source advisory lock rejects it while a Codex turn is running,
+awaiting action, recovering, waiting for capacity, or still holds a live lease.
+This keeps a capacity waiter from resuming against an obsolete allocator pool;
+same-source pointer, rotation, allocator, and health mutations may wake and
+re-evaluate the immutable accepted snapshot.
 
 Canonical: `packages/core/src/billing/`, `packages/runtime/src/usage-telemetry.ts`,
 [`model-providers.md`](model-providers.md),
@@ -947,7 +1002,7 @@ handlers because its host owns process lifecycle.
 | --- | --- | --- |
 | `packages/contracts` | `@opengeni/contracts` | Cross-boundary schemas, enums, permissions, events, capability descriptors, and tokens |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
-| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport |
+| `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
 | `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
@@ -955,6 +1010,7 @@ handlers because its host owns process lifecycle.
 | `packages/storage` | `@opengeni/storage` | Object-storage abstraction for files, recordings, and retained bytes |
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
 | `packages/capabilities` | `@opengeni/capabilities` | Integration definitions, facets, local MCP bridges, and protocol compilers |
+| `packages/tool-gateway` | `@opengeni/tool-gateway` | Protocol-neutral tool identity, cataloging, schemas, validation, authorization, approval classification, and execution |
 | `packages/codemode` | `@opengeni/codemode` | Attempt-frozen programmatic tool catalog and execution client |
 | `packages/ogtool` | `@opengeni/ogtool` | CLI over the Codemode catalog and journal |
 | `packages/codex` | `@opengeni/codex` | Codex subscription authentication, transport, and provider normalization |
@@ -1066,9 +1122,102 @@ Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
 
+`@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
+authorization, approval-classification, and execution boundary. Runtime prepares
+one canonical provider set from enabled first-party and integration MCP servers;
+the model adapter, exact-attempt Codemode adapter, current-human MCP route, and
+workspace HTTP/SDK adapter project that same catalog and invoke the same executor
+closures. Friendly model names and JavaScript paths are projections of the
+opaque `{serverId, toolName}` identity and never authority. Canonical allocation
+adds an identity-derived suffix whenever a requested path must be normalized, so
+the resulting path does not change when neighboring catalog entries appear or
+disappear, and rejects every remaining namespace/tool prefix or exact collision
+before a catalog can be published. In-process local model tools
+bind only to the final combined local-plus-MCP attempt environment used by
+Codemode, never to a provisional local-only gateway.
+
+Codemode adds only attempt scope, active-attempt fencing, its durable operation
+journal, sandbox delivery, and recovery semantics. Input and authorization
+preflight finish before its execution-start marker. The API exposes a stable
+pre-creation `codemode_catalog_stale` response, allowing one safe client refresh
+and path/identity re-resolution without retrying an existing or ambiguous
+operation. Deterministic submission conflicts are never reconciled to an
+existing row; ambiguous submission failures may adopt a row only after exact
+attempt scope, catalog, identity, and canonical-argument comparison. Once an
+exact operation has been admitted, a later deterministic wake failure
+reconciles through that exact journal row; if the recovery read is unavailable,
+the client returns a typed outcome-unknown error carrying the same operation id.
+While an admitted operation remains queued or running, the client periodically
+re-notifies the owning dispatcher with that same id. This does not replay the
+tool: a live claim answers already-running, an expired pre-execution claim may
+be reclaimed, and an expired post-execution claim settles outcome-unknown with
+its visible `agent.toolCall.output` in the same PostgreSQL commit as the
+terminal journal state.
+Concurrent first submissions serialize on the caller-owned operation id and
+converge to one creation plus one replay. Client abort is observer-only; server
+cancellation remains owned by the attempt/turn lifecycle. The current-human gateway
+rebuilds live authority for each request. Browser callers use
+`client.tools.forWorkspace(...)`; opaque-origin Sites use the narrower
+parent-held `@opengeni/sdk/site` MessagePort adapter and receive neither bearer
+credentials nor workspace routing context. The active immutable Site version's
+retained tool identities are its direct-call allowlist: the parent intersects
+them with the current viewer's live gateway, and the API revalidates the exact
+active version and identity on every call. Publishing grants no tool authority:
+requested identities are only a maximum allowlist, and ordinary live gateway
+approval still applies at execution. An agent-authored version may retain any
+identity present in its exact attempt catalog. The host
+injects a pre-application bootstrap receiver into the exact iframe document so
+a Site client constructed after `load` can use the retained document port; the
+port and every derived tool-call port are revoked on navigation or replacement.
+Archived Sites receive no bridge.
+Every immutable version retains its causal session/turn/attempt provenance.
+List projections omit those source identifiers, and artifact detail exposes a
+source-session link only when the current viewer can read that session; private
+session relationships otherwise remain redacted.
+Provider construction is permission-filtered and resource-filtered before any
+connection or `tools/list` traffic.
+
+Current-human approval capabilities bind a private provider-authority digest in
+addition to the public catalog identity and arguments. Integration revision,
+instance, or connection changes therefore invalidate older approvals without
+changing the public catalog. Connection-backed approval issuance uses a
+credential preflight mode that never refreshes tokens or records provider usage;
+an approval-required provider adapter without that seam is omitted from the
+current-human catalog until it can fail safely before capability issuance. A
+pre-execution reapproval may replace an unconsumed capability, but consumption
+retains a hash-only operation tombstone permanently: an ambiguous provider
+outcome cannot reapprove and replay the same operation id. Live issuance and
+expiry queries use a subject-scoped partial index that excludes those permanent
+tombstones, so replay evidence does not make later approvals progressively more
+expensive.
+
+External MCP clients may use the opt-in OAuth authorization server. Its public
+metadata and dynamic registration lead to an authorization-code flow with
+mandatory PKCE S256, one exact RFC 8707 workspace MCP resource, issuer-bound
+redirects, opaque short-lived access tokens, and rotating refresh tokens.
+Consent freezes the current human's permissions and tool identities; every MCP
+request intersects that snapshot with live workspace authority and the current
+gateway catalog. OAuth persistence accepts the same 4,096-entry ceiling as the
+canonical gateway catalog. Reuse of a rotated refresh-token generation revokes
+every refresh and access token in that family. OAuth bearer tokens are never
+accepted as REST credentials. Because MCP currently has no server-verifiable one-shot
+human approval capability, the MCP projection omits entries classified for
+human approval and rejects direct calls to their projected names; those entries
+remain available through the current-human HTTP/SDK approval path and the Site
+direct-call path.
+
 Provider adapters may narrow destinations, credentials, and retry policy, but
 they must preserve the shared connection, approval, idempotency, and audit
 boundaries.
+
+The attempt-frozen connector Allow/Ask/Block policy and
+`connector_action_requests` ledger apply to model and Codemode execution only.
+Current-human HTTP/SDK and workspace MCP calls are direct human actions: they
+use the ordinary `requireApproval` classification and preserve a caller-generated
+operation id only for provider-specific handling. Sites bypass that per-call
+approval after active-version allowlist revalidation. These direct surfaces do
+not synthesize attempt-owned connector rows or a second generalized exactly-once
+journal.
 
 GitHub App binding keeps account selection explicit whenever owner-authorized
 installations already exist: the owner may choose one of them or enter GitHub's
@@ -1099,7 +1248,12 @@ remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
-are different products and must not share mutable truth accidentally.
+are different products and must not share mutable truth accidentally. Workspace
+Sites are immutable versions of the existing HTML artifact primitive: one
+self-contained HTML runtime, one retained source bundle, an exact requested-tool
+allowlist, rollback, and recoverable archive/restore. They run in the existing
+opaque-origin iframe; there is no second host, wildcard domain, or compute
+runtime.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1359,6 +1513,7 @@ This index intentionally routes at subsystem granularity. Use
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/` | [`run-lifecycle.md`](run-lifecycle.md) |
+| Session Debug model-visible context | `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/inspector.tsx` | this map §4 and [`run-lifecycle.md`](run-lifecycle.md) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
@@ -1391,6 +1546,7 @@ This index intentionally routes at subsystem granularity. Use
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
 | SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
+| Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Capabilities, packs, or integration definitions | `packages/capabilities/`, `packages/core/src/domain/capabilities.ts` | [`capabilities.md`](capabilities.md), [`packs.md`](packs.md) |
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
@@ -1408,7 +1564,7 @@ This index intentionally routes at subsystem granularity. Use
 | Generated images or media | `apps/worker/src/activities/generated-images.ts`, `packages/contracts/src/image-generation.ts` | [`image-generation.md`](image-generation.md) |
 | Composer voice input or resumable transcription | `packages/contracts/src/transcription-recordings.ts`, `apps/api/src/routes/transcription-recordings.ts`, `packages/react/src/hooks/use-voice-input.ts` | [`transcription.md`](transcription.md) |
 | Composer draft submission or native embedding host seam | `packages/core/src/application/composer-submit.ts`, `apps/api/src/routes/sessions.ts`, `packages/react/src/embedded-session-client.ts` | [`embedding.md`](embedding.md), package READMEs, and §7.1 |
-| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
+| Provider integrations and social connectors | `apps/api/src/integrations/`, `packages/network/src/mcp-oauth-discovery.ts`, `packages/github/` | [`integrations-design.md`](integrations-design.md), [`github-app.md`](github-app.md), [`google-drive.md`](google-drive.md), [`slack-bot.md`](slack-bot.md), [`social-connectors.md`](social-connectors.md), [`fiken.md`](fiken.md) |
 | OpenGeni Review Bot and pull-request automation | `packages/core/src/domain/pr-review.ts`, `apps/api/src/routes/pr-review.ts`, `apps/api/src/routes/pr-review-github.ts` | [`automations.md`](automations.md), [`pr-review-pack.md`](pr-review-pack.md) |
 | HTTP routes or SSE | `apps/api/src/app.ts`, `apps/api/src/http/sse.ts` | §4 and [`../packages/sdk/README.md`](../packages/sdk/README.md) |
 | SDK, React, or browser bundle surface | `packages/sdk/src/`, `packages/react/src/`, `packages/sdk/test/core-bundle-boundary.test.ts`, `packages/sdk/test/browser-client-surface.test.ts` | Package READMEs, §3.10, and §7.6 |

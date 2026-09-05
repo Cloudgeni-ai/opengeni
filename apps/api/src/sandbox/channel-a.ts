@@ -65,9 +65,11 @@ import {
   NatsOpStreamTransport,
   SandboxResumeIdentityMismatchError,
   SandboxResumeIdentityUnavailableError,
+  RoutingActiveRouteChangedError,
   RoutingWorkspaceRootChangedError,
   SelfhostedWorkspaceRootChangedError,
   ChannelAConflictError,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
@@ -612,11 +614,18 @@ async function withChannelAOperation<T>(
           codemodeTokenFileFromEnvironment(environment, session.id),
         )
       : credentialSession;
-    const fileSystemRoot = await routingSession.fileSystemRoot();
+    const fileSystemAuthority = await routingSession.fileSystemAuthority();
+    const fileSystemEpoch =
+      fileSystemAuthority.backendKind === "selfhosted"
+        ? fileSystemAuthority.activeEpoch
+        : (lease?.leaseEpoch ?? fileSystemAuthority.activeEpoch);
     const service = new SandboxChannelAService({
       session: scopedSession as ChannelASession,
-      workspaceRoot: fileSystemRoot,
-      leaseEpoch: lease?.leaseEpoch ?? session.activeEpoch,
+      workspaceRoot: fileSystemAuthority.root,
+      leaseEpoch: fileSystemEpoch,
+      ...(fileSystemAuthority.backendKind === "selfhosted"
+        ? { providerPathMode: "workspace-relative" as const, fileReadScope: "machine" as const }
+        : {}),
       emit,
     });
     const result = await fn({
@@ -1200,8 +1209,10 @@ export function mapChannelAError(error: unknown, waitSignal?: AbortSignal): unkn
   )
     return new HTTPException(409, { message: error.message });
   if (
+    error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
-    error instanceof SelfhostedWorkspaceRootChangedError
+    error instanceof SelfhostedWorkspaceRootChangedError ||
+    error instanceof ChannelAFileSystemRouteChangedError
   )
     return new ApiHttpError(409, {
       code: "conflict",
@@ -1299,8 +1310,10 @@ export function channelAOperationFailureDiagnostic(
   if (
     error instanceof SandboxResumeIdentityMismatchError ||
     error instanceof SandboxResumeIdentityUnavailableError ||
+    error instanceof RoutingActiveRouteChangedError ||
     error instanceof RoutingWorkspaceRootChangedError ||
     error instanceof SelfhostedWorkspaceRootChangedError ||
+    error instanceof ChannelAFileSystemRouteChangedError ||
     (error instanceof HTTPException && error.status === 409)
   ) {
     return {

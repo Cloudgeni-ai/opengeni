@@ -64,17 +64,23 @@ export function computerToolModeForTurn(
 /** Chat wires and Gateway models do not advertise OpenAI's hosted sandbox tool types. */
 export function structuredToolTransportForTurn(
   resolvedModel: {
-    provider: { kind: ResolvedModelProvider["kind"]; api: ModelProviderApi };
+    provider: {
+      id: string;
+      kind: ResolvedModelProvider["kind"];
+      api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
   } | null,
 ): boolean {
   if (!resolvedModel) return true;
-  if (resolvedModel.provider.api === "chat") return false;
-  return ![
-    "codex-subscription",
-    "xai-subscription",
-    "vercel-gateway-managed",
-    "vercel-gateway-workspace",
-  ].includes(resolvedModel.provider.kind);
+  const provider = resolvedModel.provider;
+  if (provider.api === "chat" || provider.kind === "codex-subscription") return false;
+  return (
+    provider.wireProfile === "azure-openai" ||
+    (provider.builtin && provider.id === "openai" && provider.baseUrl === undefined)
+  );
 }
 
 /**

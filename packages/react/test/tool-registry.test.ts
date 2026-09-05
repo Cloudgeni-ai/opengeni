@@ -60,6 +60,19 @@ describe("defaultToolRegistry leaf resolution", () => {
     expect(direct.name).toBe("SandboxFilePublishRenderer");
   });
 
+  test("resolves Site publication tools for direct and prefixed MCP names", () => {
+    const create = registry.resolve(tool({ name: "artifacts_create" }));
+    const publish = registry.resolve(tool({ name: "opengeni__artifacts_publish" }));
+    expect(create).toBe(publish);
+    expect(create.name).toBe("SiteArtifactRenderer");
+  });
+
+  test("does not trust an external MCP tool as a platform Site publication", () => {
+    const renderer = registry.resolve(tool({ name: "external__artifacts_create" }));
+    expect(renderer).toBe(registry.fallback);
+    expect(renderer.name).toBe("GenericRenderer");
+  });
+
   test("resolves ToolSearch by name and tool_search_call raw type", () => {
     const byName = registry.resolve(tool({ name: "tool_search" }));
     const byRaw = registry.resolve(

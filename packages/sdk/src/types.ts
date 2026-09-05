@@ -72,6 +72,80 @@ export type GatewayRealtimeConnectResponse = {
   replay: false;
 };
 
+export type ToolGatewayIdentity = {
+  serverId: string;
+  toolName: string;
+};
+
+export type ToolGatewayCatalogEntry = {
+  identity: ToolGatewayIdentity;
+  modelName: string;
+  codemodePath: string[];
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown> | undefined;
+  annotations?: Record<string, unknown> | undefined;
+  icons?: Array<Record<string, unknown>> | undefined;
+  source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
+  approval: "none" | "human" | "policy";
+};
+
+export type ToolGatewayCatalog = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  generation: number;
+  digest: string;
+  createdAt: string;
+  entries: ToolGatewayCatalogEntry[];
+};
+
+export type ToolGatewayResult = {
+  content: Array<{ type: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown> | undefined;
+  isError?: boolean | undefined;
+  _meta?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+};
+
+export type ToolGatewayCallRequest = {
+  operationId?: string | undefined;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+  siteArtifactId?: string | undefined;
+  siteVersionId?: string | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  approvalToken: string;
+  expiresAt: string;
+};
+
+export type ToolGatewayCallResponse = {
+  operationId: string;
+  catalogDigest: string;
+  result: ToolGatewayResult;
+};
+
+export type ToolGatewayDeclarationsResponse = {
+  catalogDigest: string;
+  moduleSpecifier: string;
+  source: string;
+};
+
 export type ActivateCodexRealtimeConnectionRequest = {
   operationId: string;
   browserInstanceId: string;
@@ -1753,6 +1827,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -2076,7 +2152,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {
@@ -2227,11 +2310,16 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
+export type FileSystemRouteIdentity = {
+  epoch: number;
+  root: string;
+};
 export type FsListRequest = {
   path?: string;
   depth?: number;
   maxEntries?: number;
   includeHidden?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsListResponse = {
   root: FsTreeNode;
@@ -2244,6 +2332,7 @@ export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
   maxBytes?: number;
+  route?: FileSystemRouteIdentity;
 };
 export type FsReadResponse = {
   path: string;
@@ -2268,26 +2357,36 @@ export type FsWriteRequest = {
   content: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsWriteResponse = {
   path: string;
   sizeBytes: number;
   revision: number;
 };
-export type FsDeleteRequest = { path: string; recursive?: boolean };
+export type FsDeleteRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
   path: string;
   newPath: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsMoveResponse = {
   path: string;
   newPath: string;
   revision: number;
 };
-export type FsMkdirRequest = { path: string; recursive?: boolean };
+export type FsMkdirRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
@@ -2854,7 +2953,7 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
-  | "goal_wait"
+  | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
   | "memory_search"
@@ -2894,6 +2993,7 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -2986,6 +3086,8 @@ export type FirstPartyMcpToolName =
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -3245,6 +3347,12 @@ export type CodexConnectionStatus = {
     label?: string | null;
     chatgptAccountId?: string | null;
   } | null;
+  /** Live model-catalog probe result for the active account only. */
+  activeAccountValid?: boolean;
+  /** Cached readiness of any account in the effective worker pool. */
+  poolReady?: boolean;
+  /** Cached unpinned worker routability; rotation-off remains active-pointer-only. */
+  workerRoutable?: boolean;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
   source?: WorkspaceCodexSubscriptionSource;
@@ -4577,7 +4685,7 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  /** Agent-stated reason for a `wait_for_input` hold; null otherwise. */
   holdReason?: string | null | undefined;
 };
 
@@ -4777,6 +4885,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
+  | "session_wait_timeout"
+  | "background_command_result"
   | "child_terminal_result"
   | "media_generation_result"
   | "child_requires_action"
@@ -4792,6 +4902,30 @@ export type SessionSystemUpdateState =
   | "superseded"
   | "failed";
 
+export type SessionSystemUpdatePayload =
+  | {
+      type: "session_wait_timeout";
+      waitTurnId: string;
+      deadlineAt: string;
+      reason: string;
+      [key: string]: unknown;
+    }
+  | {
+      type: "background_command_result";
+      commandId: string;
+      state: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+      outputLocator: {
+        eventType: "sandbox.command.output.delta";
+        commandId: string;
+      };
+      [key: string]: unknown;
+    }
+  | ({
+      type: Exclude<SessionSystemUpdateKind, "session_wait_timeout" | "background_command_result">;
+    } & Record<string, unknown>);
+
 export type SessionSystemUpdate = {
   id: string;
   sessionId: string;
@@ -4800,7 +4934,7 @@ export type SessionSystemUpdate = {
   sourceId: string;
   dedupeKey: string;
   summary: string;
-  payload: Record<string, unknown>;
+  payload: SessionSystemUpdatePayload;
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
