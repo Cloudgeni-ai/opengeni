@@ -440,7 +440,11 @@ const effectiveBudgets = {
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
-    625 * kib,
+    // Untouched main 0f3dc9a02 measures 640,863 gzip bytes on macOS/arm64;
+    // the instruction-save head measures 640,920 locally and 640,937 in the
+    // configured Linux/x64 acceptance build. Use the established whole-KiB
+    // envelope with at least 1 KiB headroom; all other limits stay fixed.
+    627 * kib,
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

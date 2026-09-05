@@ -4873,11 +4873,13 @@ export class OpenGeniClient {
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyRevision> {
-    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyRevision>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
       request,
+      options,
     );
   }
 
@@ -4937,11 +4939,13 @@ export class OpenGeniClient {
     workspaceId: string,
     revisionId: string,
     request: ActivateWorkspaceInstructionPolicyRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyActivationResponse> {
-    return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyActivationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/${encodeURIComponent(revisionId)}/activate`,
       request,
+      options,
     );
   }
 
@@ -7663,14 +7667,18 @@ export class OpenGeniClient {
         throw error;
       }
       assertApiContractResponse(response);
-      if (!response.ok) {
-        throw await apiErrorFromResponse(response, { method, correlationId });
-      }
-      await assertJsonResponse(response, { method, correlationId });
       try {
-        return (await response.json()) as T;
+        if (!response.ok) {
+          throw await awaitWithAbort(
+            apiErrorFromResponse(response, { method, correlationId }),
+            abort.signal,
+          );
+        }
+        await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
+        return (await awaitWithAbort(response.json(), abort.signal)) as T;
       } catch (error) {
         if (options.signal?.aborted) throw error;
+        if (error instanceof OpenGeniApiError) throw error;
         if (isMutationMethod(method)) {
           throw mutationTransportError(correlationId);
         }

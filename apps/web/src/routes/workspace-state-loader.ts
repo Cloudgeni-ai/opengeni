@@ -4,6 +4,7 @@ import type {
   PreferenceRegistryDetailResponse,
   PreferenceRegistryListResponse,
   WorkspaceInstructionPolicyOnboardingProposalListResponse,
+  WorkspaceInstructionPolicyHead,
   WorkspaceStateResponse,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,8 +26,11 @@ export function useWorkspaceStateInventory(
   attemptId?: string,
 ): Omit<WorkspaceStateLoad, "client" | "workspaceId" | "attemptId"> & {
   reload: () => Promise<void>;
+  acceptInstructionHead: (head: WorkspaceInstructionPolicyHead) => void;
 } {
   const generation = useRef(0);
+  const currentScope = useRef({ client, workspaceId, attemptId });
+  currentScope.current = { client, workspaceId, attemptId };
   const [result, setResult] = useState<WorkspaceStateLoad>(() => ({
     client,
     workspaceId,
@@ -73,6 +77,55 @@ export function useWorkspaceStateInventory(
     }
   }, [attemptId, client, workspaceId]);
 
+  const acceptInstructionHead = useCallback(
+    (head: WorkspaceInstructionPolicyHead) => {
+      if (
+        head.workspaceId !== workspaceId ||
+        currentScope.current.client !== client ||
+        currentScope.current.workspaceId !== workspaceId ||
+        currentScope.current.attemptId !== attemptId
+      )
+        return;
+      // A refresh started before activation must not restore its old snapshot.
+      generation.current += 1;
+      setResult((previous) => {
+        if (
+          previous.client !== client ||
+          previous.workspaceId !== workspaceId ||
+          previous.attemptId !== attemptId ||
+          !previous.state
+        )
+          return previous;
+        const sameTarget = (
+          candidate:
+            | WorkspaceInstructionPolicyHead
+            | WorkspaceStateResponse["policy"]["activeHeads"][number],
+        ) =>
+          candidate.kind === head.kind &&
+          candidate.scope === head.scope &&
+          candidate.roleKey === head.roleKey;
+        const current = previous.state.policy.activeHeads.find(sameTarget);
+        if (current && current.activationVersion > head.activationVersion) return previous;
+        return {
+          ...previous,
+          loading: false,
+          error: null,
+          state: {
+            ...previous.state,
+            policy: {
+              ...previous.state.policy,
+              activeHeads: [
+                ...previous.state.policy.activeHeads.filter((candidate) => !sameTarget(candidate)),
+                head,
+              ],
+            },
+          },
+        };
+      });
+    },
+    [attemptId, client, workspaceId],
+  );
+
   useEffect(() => {
     void reload();
     return () => {
@@ -85,9 +138,15 @@ export function useWorkspaceStateInventory(
     result.workspaceId !== workspaceId ||
     result.attemptId !== attemptId
   ) {
-    return { state: null, error: null, loading: true, reload };
+    return { state: null, error: null, loading: true, reload, acceptInstructionHead };
   }
-  return { state: result.state, error: result.error, loading: result.loading, reload };
+  return {
+    state: result.state,
+    error: result.error,
+    loading: result.loading,
+    reload,
+    acceptInstructionHead,
+  };
 }
 
 type OnboardingProposalClient = Pick<
