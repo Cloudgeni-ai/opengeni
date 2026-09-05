@@ -245,7 +245,7 @@ pub struct CodemodeArgs {
 /// Native Codemode client operations.
 #[derive(Debug, Subcommand)]
 pub enum CodemodeAction {
-    /// List callable paths and short descriptions from the frozen catalog.
+    /// List all callable paths and short descriptions from the frozen catalog.
     List(CodemodeListArgs),
     /// Show one tool's details and schemas (at most 64 KiB).
     Show(CodemodeShowArgs),
@@ -268,7 +268,7 @@ pub struct CodemodeListArgs {
     /// Literal case-sensitive substring in the path or full normalized description.
     #[arg(long)]
     pub query: Option<String>,
-    /// Maximum tools per compact page (default 50; range 1..100).
+    /// Opt-in maximum tools (range 1..100); omitted lists all matching tools.
     #[arg(long, value_parser = parse_list_limit)]
     pub limit: Option<usize>,
     /// Nonnegative offset in the filtered frozen catalog (default 0).
