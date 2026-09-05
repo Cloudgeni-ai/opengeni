@@ -1645,6 +1645,9 @@ describe("embedding host session authorization routes", () => {
       expect(JSON.stringify(paused)).toContain("An ancestor session");
       expect(JSON.stringify(paused)).not.toContain("private parent reason");
       expect(JSON.stringify(paused)).not.toContain(value.root.id);
+      if (mode === "full") {
+        expect(paused.effectiveToolPolicy).toMatchObject({ inheritedFromSessionId: null });
+      }
       await expect(
         callMcpTool(server, "session_get", { sessionId: value.hidden.id, detail: mode }),
       ).rejects.toThrow("Session not found or access denied");

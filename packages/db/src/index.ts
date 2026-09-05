@@ -32610,16 +32610,30 @@ export function projectEffectiveControlForRelatedAccess(
 
 /**
  * Remove metadata derived from sessions other than the exact authorized
- * target, including parent identity and descendant counts.
+ * target, including parent identity, policy provenance, and descendant counts.
  */
 export function projectSessionForRelatedAccess(
   session: Session,
   access: "target" | "root",
 ): Session {
   if (access === "root") return session;
+  // Effective policy can be assembled either before or after this projection.
+  // Hide both provenance carriers so later policy assembly cannot restore an
+  // unauthorized ancestor id. Policy mode/selection/counts remain exact; this
+  // changes only the read projection, never persisted policy or enforcement.
+  const projectPolicyLineage = <T extends { inheritedFromSessionId: string | null }>(
+    policy: T,
+  ): T =>
+    policy.inheritedFromSessionId !== null && policy.inheritedFromSessionId !== session.id
+      ? { ...policy, inheritedFromSessionId: null }
+      : policy;
   return {
     ...session,
     parentSessionId: null,
+    toolPolicy: projectPolicyLineage(session.toolPolicy),
+    ...(session.effectiveToolPolicy === undefined
+      ? {}
+      : { effectiveToolPolicy: projectPolicyLineage(session.effectiveToolPolicy) }),
     treeStats: EMPTY_SESSION_TREE_STATS,
     effectiveControl: projectEffectiveControlForRelatedAccess(
       session.effectiveControl,
