@@ -26,11 +26,11 @@ describe("workspace rail destinations", () => {
 
     expect(primaryTargets).toEqual([
       "/workspaces/$workspaceId/plugins",
-      "/workspaces/$workspaceId/documents",
       "/workspaces/$workspaceId/state",
       "/workspaces/$workspaceId/schedules",
       "/workspaces/$workspaceId/artifacts",
     ]);
+    expect(PRIMARY_WORKSPACE_ITEMS.map((item) => item.label)).not.toContain("Documents");
     expect(settingsTargets.filter((target) => primaryTargets.includes(target))).toEqual([]);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/schedules", "ws-1")).toBe(false);
     expect(isWorkspaceConfigPath("/workspaces/ws-1/artifacts", "ws-1")).toBe(false);
