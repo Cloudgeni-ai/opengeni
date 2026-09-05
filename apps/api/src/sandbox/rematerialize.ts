@@ -1,4 +1,5 @@
 import type { Settings } from "@opengeni/config";
+import { parseWorkspaceArchiveObjectRef } from "@opengeni/contracts";
 import {
   adoptLegacyModalCheckpointArtifact,
   beginSandboxRematerialization,
@@ -13,6 +14,7 @@ import {
   type LeaseSnapshot,
 } from "@opengeni/db";
 import {
+  inlineWorkspaceArchiveForRestore,
   describeLegacyNativeSnapshotArchive,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
@@ -30,15 +32,47 @@ import {
   type EstablishedSandboxSession,
   type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime/sandbox";
+import type { ObjectStorage } from "@opengeni/storage";
 
 function hasWorkspaceArchive(envelope: Record<string, unknown> | null): boolean {
   const sessionState =
-    envelope?.sessionState && typeof envelope.sessionState === "object"
+    envelope?.sessionState &&
+    typeof envelope.sessionState === "object" &&
+    !Array.isArray(envelope.sessionState)
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   return (
-    typeof sessionState?.workspaceArchive === "string" && sessionState.workspaceArchive.length > 0
+    (typeof sessionState?.workspaceArchive === "string" &&
+      sessionState.workspaceArchive.length > 0) ||
+    parseWorkspaceArchiveObjectRef(sessionState?.workspaceArchiveRef) !== null
   );
+}
+
+async function materializeArchiveObjectRef(
+  envelope: Record<string, unknown> | null,
+  objectStorage: ObjectStorage | null | undefined,
+): Promise<Record<string, unknown> | null> {
+  if (!envelope) return null;
+  const sessionState =
+    envelope.sessionState &&
+    typeof envelope.sessionState === "object" &&
+    !Array.isArray(envelope.sessionState)
+      ? (envelope.sessionState as Record<string, unknown>)
+      : null;
+  if (!sessionState) return envelope;
+  if (!parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) return envelope;
+  if (!objectStorage) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_base64_invalid",
+      "workspace archive object storage is not configured",
+    );
+  }
+  return {
+    ...envelope,
+    sessionState: await inlineWorkspaceArchiveForRestore(sessionState, (key) =>
+      objectStorage.getObjectBytes(key),
+    ),
+  };
 }
 
 function legacyNativeArchiveFromEnvelope(envelope: Record<string, unknown> | null) {
@@ -82,6 +116,7 @@ export async function establishApiSandboxSpawner(input: {
   acquiredLease: LeaseSnapshot;
   fallbackEnvelope: Record<string, unknown> | null;
   dataPlaneUrl: string | null;
+  objectStorage?: ObjectStorage | null;
 }): Promise<{ established: EstablishedSandboxSession; lease: LeaseSnapshot }> {
   const fallbackArchiveEnvelope =
     input.acquiredLease.recovery.archive.status === "none" &&
@@ -162,8 +197,10 @@ export async function establishApiSandboxSpawner(input: {
       );
     }
 
+    const hydrateEnvelope = await materializeArchiveObjectRef(spawnEnvelope, input.objectStorage);
+
     const providerCreateStartedAt = new Date();
-    established = await establishSandboxSessionFromEnvelope(input.settings, spawnEnvelope, {
+    established = await establishSandboxSessionFromEnvelope(input.settings, hydrateEnvelope, {
       sessionId: input.sessionId,
       recovery: "create-or-restore",
       backendOverride: input.backend as never,
