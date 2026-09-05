@@ -842,6 +842,16 @@ Human preference snapshots require an exact causal human. Service-only turns
 with no causal human skip that human-bound capability; service continuations
 and legacy subject turns use only their already-frozen causal human.
 
+`session_turns.initiating_human_subject_id` is a bounded, update-immutable
+causal-human selector, not standalone authorization. Agent-side generic
+workspace-artifact create/publish/rollback is one named consumer:
+service-initiated work must retain a causal human, the request must carry
+worker-signed exact attempt claims, and the database must revalidate their
+session/turn/attempt/execution generation, current live turn and attempt,
+selected artifact mutation tool, `artifacts:publish`, and absence of a pending
+interruption. Pure service work fails closed; direct human artifact API requests
+use their authenticated access grant.
+
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
 still resolves through the current authorized catalog and the same execution

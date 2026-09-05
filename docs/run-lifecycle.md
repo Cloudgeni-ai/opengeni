@@ -426,10 +426,21 @@ Service-only turns have no human preference scope and skip the preference
 snapshot capability entirely; service continuations carrying a frozen causal
 human and legacy subject turns still snapshot that human's applicable entries.
 The session's normalized policy role is independent of workspace membership and
-memory roles. Service-initiated goal continuations and compactions may preserve
-the causal human in `initiating_human_subject_id` solely for personal
-preference authority while retaining their service initiator; pure service work
-has no personal authority. Runtime composition is deterministic: core safety,
+memory roles. The bounded, update-immutable
+`session_turns.initiating_human_subject_id` is the accepted turn's causal-human
+selector, not a standalone grant or a way for a service to impersonate that
+human. Named human-bound capabilities may consume it only with their own exact
+fences. Generic workspace-artifact create/publish/rollback is one narrow
+attempt-scoped use: a service-initiated turn may proceed only when the field
+retains a human, the request carries worker-signed exact attempt claims, and
+PostgreSQL revalidates their session/turn/attempt/execution generation, current
+live turn and attempt, selected artifact mutation tool, `artifacts:publish`, and
+absence of a pending interruption; pure service work fails closed. Direct human
+artifact API requests instead authorize from their ordinary authenticated access
+grant. Within governance, service-initiated goal continuations and compactions
+use the frozen causal human as the personal-preference subject while retaining
+their service initiator; pure service work has no personal-preference scope.
+Runtime composition is deterministic: core safety,
 organization/workspace/user preference descriptors plus organization/global,
 workspace, and role policy, then durable session instructions, tool/repository/
 skill substrate, and memory. Optional application `modelContext` is not part of
