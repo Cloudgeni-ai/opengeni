@@ -3793,6 +3793,26 @@ describe("credit exhaustion", () => {
     });
   });
 
+  test("legacy safety refusal is visible in both turn summary and notice", () => {
+    reset();
+    const detail =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    const items = buildTimeline([
+      event("turn.failed", {
+        error: "Upstream unavailable. Send a message to retry.",
+        lastRetryableError: detail,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "turn-end",
+      failureText: `The model provider blocked this request. ${detail}`,
+    });
+    expect(items[1]).toMatchObject({
+      kind: "notice",
+      text: `The model provider blocked this request. ${detail}`,
+    });
+  });
+
   test("groupTimeline folds a credit-exhausted turn as failed", () => {
     reset();
     const groups = groupTimeline(
