@@ -642,9 +642,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(scroller.scrollTop).toBe(0);
 
     layout.setContentHeight(2_440);
-    await r.rerender(
-      <MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} />,
-    );
+    await r.rerender(<MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} />);
     await flush();
     await drainFrames(frames);
 

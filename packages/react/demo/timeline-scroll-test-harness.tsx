@@ -159,9 +159,7 @@ function Harness() {
       <section data-timeline-test style={{ margin: "0 auto", maxWidth: 900 }}>
         <MessageTimeline
           className={
-            compactTail
-              ? "timeline-test-shell timeline-test-shell-compact"
-              : "timeline-test-shell"
+            compactTail ? "timeline-test-shell timeline-test-shell-compact" : "timeline-test-shell"
           }
           items={items}
           hasOlder

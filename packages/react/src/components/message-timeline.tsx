@@ -1686,10 +1686,7 @@ export function MessageTimeline({
     const inserted = Math.max(0, nextMaxScroll - previousMaxScroll);
     const towardTip = nextTop - previousTop - inserted;
     const nextPinned =
-      !hasNewer &&
-      nearBottom &&
-      towardTip >= -TIP_FOLLOW_READER_UP_EPS_PX &&
-      inserted <= 1;
+      !hasNewer && nearBottom && towardTip >= -TIP_FOLLOW_READER_UP_EPS_PX && inserted <= 1;
     if (!nextPinned) {
       stopFollow();
     }
