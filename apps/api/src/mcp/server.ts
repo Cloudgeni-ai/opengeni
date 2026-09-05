@@ -4747,13 +4747,25 @@ function registerWorkspaceOrchestrationTools(
       "session_get",
       {
         description:
-          "Get another session you are managing. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Do not use your own session id to reconstruct context; conversation history and persistent settings are supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
+          "Get an authorized session. Omit sessionId to read only the authenticated current agent session (a child reads itself, never its parent or root); sessionless/operator callers must provide an explicit ID. Both forms retain live-attempt and target authorization checks. Default detail=compact returns status, goal (including completion evidence or pause rationale), latest recorded goal progress, meaningful pause/wait state, queue counts, active turn and snapshot lastSequence. Goal completion is not a terminal child result: join with session_wait waitFor=completion from the last consumed event cursor (0 if none), not this snapshot lastSequence, which may already include an unread completion. For an already-settled child, retrieve its result-bearing completion with session_events or join from the last consumed cursor. Use detail=full for the legacy bounded configuration including resources, persisted tool refs, effectiveToolPolicy and variableSet ids (never variable values). Full mode is configuration, not a substitute for compact goal/progress facts. Self reads inspect session state, not conversation history, which is supplied directly. Text loss is explicit; REST/UI defaults are unchanged.",
         inputSchema: {
-          sessionId: z4.string().uuid(),
+          sessionId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Omit only to read the authenticated current agent session, never its parent or root. Sessionless callers must provide an explicit ID.",
+            ),
           detail: z4.enum(["compact", "full"]).optional(),
         },
       },
-      async ({ sessionId, detail }) => {
+      async ({ sessionId: requestedSessionId, detail }) => {
+        const sessionId = requestedSessionId ?? exactAgentAttemptClaims(grant)?.sessionId;
+        if (sessionId === undefined) {
+          throw new Error(
+            "session_get requires an explicit sessionId without authenticated current agent session context",
+          );
+        }
         const authorization = await authorizeFirstPartySession(
           deps,
           grant,

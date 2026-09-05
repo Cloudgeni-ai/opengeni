@@ -7,6 +7,16 @@ tool gateway and Codemode invoke the same MCP handlers and receive the same
 projection. Clients that need the previous MCP fields must request
 `detail: "full"` explicitly.
 
+`session_get({})` reads only the authenticated current agent session: a child
+reads itself, never its parent or root. Omission requires exact agent-attempt
+claims and still validates that the attempt is live before reading state.
+Sessionless/operator callers must provide an explicit `sessionId`; non-agent
+session metadata is not sufficient. Explicit IDs keep the same private-session
+and optional host authorization checks. This applies to compact and full mode,
+not to conversation-history reconstruction. REST/SDK session reads still need
+explicit IDs. Fresh attempt catalogs and generated Codemode declarations derive
+the optional field from the canonical MCP schema; frozen catalogs stay frozen.
+
 ## Discovery
 
 An ordinary `sessions_list` row has exactly `id`, `title`, `status`, and
