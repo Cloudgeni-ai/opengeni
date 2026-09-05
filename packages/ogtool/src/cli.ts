@@ -14,7 +14,8 @@ const VERSION = packageManifest.version;
 function usage(exitCode = 1): void {
   const output = [
     "usage:",
-    "  ogtool list",
+    "  ogtool list [--full | --json]",
+    "  ogtool show <tool-path-or-model-name>",
     "  ogtool call <tool-path-or-model-name> [json-object]",
     "  ogtool declarations [output-file]",
     "  ogtool doctor",
@@ -148,6 +149,39 @@ export function listProjection(catalog: AttemptToolCatalog): Record<string, unkn
   };
 }
 
+const DESCRIPTION_MAX_CHARS = 160;
+const SHOW_MAX_BYTES = 64 * 1024;
+
+export function shortDescription(entry: AttemptToolCatalogEntry): string {
+  const text = (entry.description || entry.title || "")
+    .split(/\p{White_Space}+/u)
+    .filter(Boolean)
+    .join(" ");
+  const characters = Array.from(text);
+  return characters.length <= DESCRIPTION_MAX_CHARS
+    ? text
+    : `${characters.slice(0, DESCRIPTION_MAX_CHARS - 1).join("")}…`;
+}
+
+export function compactProjection(catalog: AttemptToolCatalog) {
+  return {
+    tools: catalog.entries.map((entry) => ({
+      path: entry.codemodePath.join("."),
+      description: shortDescription(entry),
+    })),
+  };
+}
+
+export function showOutput(catalog: AttemptToolCatalog, name: string): string {
+  const entry = resolveTool(catalog, name);
+  const projection = listProjection({ ...catalog, entries: [entry] });
+  const output = JSON.stringify((projection.tools as unknown[])[0], null, 2);
+  if (Buffer.byteLength(output, "utf8") + 1 > SHOW_MAX_BYTES) {
+    throw new Error("Tool details exceed 65536 bytes; use list --full or declarations <output-file>");
+  }
+  return `${output}\n`;
+}
+
 export function parseToolArguments(raw: string | undefined): Record<string, unknown> {
   if (raw === undefined) return {};
   let value: unknown;
@@ -172,9 +206,38 @@ async function main(): Promise<void> {
   if (command === "doctor") return doctor();
   if (!command) return usage();
 
+  const args = process.argv.slice(3);
+  if (
+    (command === "list" || command === "show") &&
+    args.length === 1 &&
+    (args[0] === "--help" || args[0] === "-h")
+  ) return usage(0);
+  if (
+    command === "list" &&
+    !(args.length === 0 || (args.length === 1 && (args[0] === "--full" || args[0] === "--json")))
+  ) {
+    throw new Error("usage: ogtool list [--full | --json]");
+  }
+  if (command === "show" && (args.length !== 1 || !args[0] || args[0].startsWith("-"))) {
+    throw new Error("usage: ogtool show <tool-path-or-model-name>");
+  }
+
   const client = configuredClient();
   if (command === "list") {
-    process.stdout.write(`${JSON.stringify(listProjection(await client.catalog()), null, 2)}\n`);
+    const catalog = await client.catalog();
+    if (args[0] === "--full") {
+      process.stdout.write(`${JSON.stringify(listProjection(catalog), null, 2)}\n`);
+    } else if (args[0] === "--json") {
+      process.stdout.write(`${JSON.stringify(compactProjection(catalog))}\n`);
+    } else {
+      for (const tool of compactProjection(catalog).tools) {
+        process.stdout.write(`${tool.path}${tool.description ? ` — ${tool.description}` : ""}\n`);
+      }
+    }
+    return;
+  }
+  if (command === "show") {
+    process.stdout.write(showOutput(await client.catalog(), args[0]!));
     return;
   }
   if (command === "call") {

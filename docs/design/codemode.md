@@ -109,7 +109,7 @@ into each newly launched exact child exec. It is absent from machine storage,
 argv, stable environment, session/RunState serialization, and logs. A process
 already running retains its launch value; the next exec sees renewal. The Rust
 agent adds its own absolute executable path only to an authorized child, making
-`opengeni-agent codemode list|call` a dependency-free client. This is transport
+`opengeni-agent codemode list|show|call` a dependency-free client. This is transport
 only: it terminates at the same API journal and `AttemptToolEnvironment`.
 
 ## Clients
@@ -117,13 +117,25 @@ only: it terminates at the same API journal and `AttemptToolEnvironment`.
 `@opengeni/codemode` exposes a persistent typed client and generates a nested,
 collision-safe namespace from `codemodePath`. `@opengeni/ogtool` is the small
 JavaScript command-line client; the installed Connected Machine agent contains
-the equivalent no-runtime list/call client:
+the equivalent no-runtime list/show/call client:
 
 ```bash
 ogtool list
+ogtool list --json
+ogtool show docs.search
 ogtool call docs.search '{"query":"durable catalogs"}'
 "$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode call docs.search '{"query":"durable catalogs"}'
 ```
+
+Discovery is compact by default: `list` prints callable paths plus descriptions
+bounded to 160 Unicode code points; `list --json` returns only `{tools:
+[{path, description}]}`. `list --full` preserves the previous full catalog JSON
+for explicit inspection and existing scripts. The two flags are mutually exclusive.
+`show <path>` resolves exactly one tool using the same aliases as `call` and emits
+its details and schemas as JSON, capped at 64 KiB including the final newline.
+Unknown/ambiguous tools and oversized details fail without partial schema output;
+use `list --full` redirected to a file for oversized entries. These are local CLI
+projections only: the frozen catalog, authority, and API responses are unchanged.
 
 All clients retain one caller-owned operation id, submit once, poll the journal,
 and recover by `GET` if a POST response is lost after commit. None silently
