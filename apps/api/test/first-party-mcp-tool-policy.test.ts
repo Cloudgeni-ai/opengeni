@@ -19,6 +19,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { listSessionDiscoverySummaries } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { buildFilesMcpServer } from "../src/mcp/files";
 
@@ -181,6 +182,7 @@ describe("first-party MCP tool visibility policy", () => {
     )._registeredTools["session_get"]!.description;
     expect(getDescription).toContain("last consumed event cursor");
     expect(getDescription).toContain("not this snapshot lastSequence");
+    expect(getDescription).toContain("authenticated current agent session");
     for (const detail of [undefined, "compact", "full"]) {
       expect(
         registeredToolInputSchema(server, "sessions_list").safeParse({
@@ -190,6 +192,9 @@ describe("first-party MCP tool visibility policy", () => {
       ).toBeTrue();
       expect(
         registeredToolInputSchema(server, "session_get").safeParse({ sessionId, detail }).success,
+      ).toBeTrue();
+      expect(
+        registeredToolInputSchema(server, "session_get").safeParse({ detail }).success,
       ).toBeTrue();
     }
     expect(
@@ -204,6 +209,63 @@ describe("first-party MCP tool visibility policy", () => {
         buildOpenGeniMcpServer(deps(), grant([], ["sessions_list", "session_get"])),
       ),
     ).toEqual([]);
+  });
+  test("session_get omission requires exact agent claims, not operator metadata", async () => {
+    const scoped = grant(["sessions:read"], ["session_get"]);
+    for (const caller of [
+      { ...scoped, principalKind: "service" as const },
+      { ...scoped, principalKind: "human_session" as const },
+      { ...scoped, metadata: {} },
+      { ...scoped, metadata: { sessionId } },
+      { ...scoped, metadata: { ...scoped.metadata, executionGeneration: 0 } },
+    ]) {
+      await expect(
+        callRegisteredTool(buildOpenGeniMcpServer(deps(), caller), "session_get", {}),
+      ).rejects.toThrow("requires an explicit sessionId");
+    }
+  });
+
+  test("session_get tools/list and generated attempt declarations allow an omitted ID", async () => {
+    const server = buildOpenGeniMcpServer(deps(), grant(["sessions:read"], ["session_get"]));
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "session-get-schema-test", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const tool = (await client.listTools()).tools.find((entry) => entry.name === "session_get")!;
+      expect(tool.inputSchema.required ?? []).not.toContain("sessionId");
+      expect(tool.inputSchema.properties?.sessionId).toMatchObject({
+        type: "string",
+        format: "uuid",
+      });
+      const catalog = createAttemptToolEnvironment({
+        scope: { accountId, workspaceId, sessionId, turnId, attemptId, executionGeneration: 1 },
+        generation: 1,
+        definitions: [
+          {
+            identity: { serverId: "opengeni", toolName: tool.name },
+            modelName: "opengeni__session_get",
+            description: tool.description!,
+            inputSchema: tool.inputSchema,
+            source: "opengeni",
+            approval: "none",
+            execute: async () => ({ content: [] }),
+          },
+        ],
+      }).catalog;
+      const declarations = generateCodemodeDeclarations(catalog);
+      expect(declarations).toContain("readonly sessionId?: string");
+      expect(declarations).toContain('readonly detail?: "compact" | "full"');
+      for (const invalid of [null, "", "not-a-uuid"]) {
+        expect(
+          registeredToolInputSchema(server, "session_get").safeParse({ sessionId: invalid })
+            .success,
+        ).toBeFalse();
+      }
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
   test("omission splits the complete safe default catalog across broad and local adapters", () => {
     const server = buildOpenGeniMcpServer(deps(), grant([...Permission.options]), {
