@@ -23,11 +23,32 @@ to disk. `ogtool doctor` reports the selected delivery mode without printing the
 
 Commands:
 
-- `ogtool list`
+- `ogtool list` — callable paths and short descriptions, one tool per line
+- `ogtool list --json` — compact JSON `{ "tools": [{ "path", "description" }] }`
+- `ogtool list --full` — the previous full catalog JSON, including identity and schemas
+- `ogtool show <tool-path-or-model-name>` — one tool's details and schemas as JSON
 - `ogtool call <tool-path-or-model-name> [json-object]`
 - `ogtool declarations [output-file]`
 - `ogtool doctor`
 - `ogtool --version`
+
+Start with `list`, then use `show docs.search` before constructing a call. Compact
+descriptions collapse whitespace and use at most 160 Unicode code points, including
+an ellipsis when shortened; a missing/empty description falls back to the title.
+Catalog order and callable paths are preserved. An empty catalog prints no text,
+or `{ "tools": [] }` with `--json`. Compact output contains no identities, schemas,
+approval annotations, attempt IDs, or catalog digests.
+
+`--full` and `--json` are mutually exclusive; unknown flags and extra arguments
+are errors. `show` accepts the same exact path/model-name/identity aliases as `call`
+and rejects unknown or ambiguous names. Its JSON output (including the final newline)
+is limited to 64 KiB; oversized details fail without partial output or schema
+truncation. Use `list --full` redirected to a file, or `declarations <output-file>`,
+for larger schemas. Existing scripts parsing the old `list` JSON must use `list --full`.
+
+The Connected Machine fallback, `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode`,
+supports the same `list`, `list --json`, `list --full`, and `show` discovery behavior.
+It does not provide the JavaScript CLI's `declarations` command.
 
 The HTTP client submits a caller-chosen operation id and polls the durable result. A lost response
 therefore cannot silently replay a side effect. `@opengeni/ogtool` also re-exports the typed

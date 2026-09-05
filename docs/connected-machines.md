@@ -67,7 +67,7 @@ installing a machine credential. OpenGeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
-so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|call` works even without
+so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|show|call` works even without
 Bun/Node/`ogtool`. It reaches the same journal/executor as model MCP; the machine
 still owns every ordinary credential and ambient environment.
 

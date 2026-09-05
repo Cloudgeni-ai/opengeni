@@ -106,8 +106,8 @@ pub enum CodemodeError {
     Operation(String),
 }
 
-/// Run one native Codemode command. Output is JSON so shell/Bun/Python callers
-/// can consume it without parsing prose.
+/// Run one native Codemode command. Discovery is compact text by default;
+/// `list --json`, `list --full`, and `show` provide explicit JSON output.
 pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
     if matches!(args.action, CodemodeAction::Doctor) {
         let report = doctor_report();
@@ -123,12 +123,21 @@ pub async fn run(args: CodemodeArgs) -> Result<(), CodemodeError> {
 
     let client = CodemodeClient::from_environment()?;
     match args.action {
-        CodemodeAction::List => {
+        CodemodeAction::List(args) => {
             let catalog = client.catalog().await?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&catalog.list_projection())?
-            );
+            if args.full {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&catalog.list_projection())?
+                );
+            } else if args.json {
+                println!("{}", serde_json::to_string(&catalog.compact_projection())?);
+            } else {
+                print!("{}", catalog.compact_text());
+            }
+        }
+        CodemodeAction::Show(args) => {
+            print!("{}", client.catalog().await?.show_output(&args.tool)?);
         }
         CodemodeAction::Call(args) => {
             let result = client.call(args).await?;
@@ -405,6 +414,44 @@ struct Catalog {
 }
 
 impl Catalog {
+    fn compact_projection(&self) -> Value {
+        json!({ "tools": self.entries.iter().map(|entry| json!({
+            "path": entry.codemode_path.join("."),
+            "description": short_description(entry),
+        })).collect::<Vec<_>>() })
+    }
+
+    fn compact_text(&self) -> String {
+        self.entries
+            .iter()
+            .map(|entry| {
+                let path = entry.codemode_path.join(".");
+                let description = short_description(entry);
+                if description.is_empty() {
+                    format!("{path}\n")
+                } else {
+                    format!("{path} — {description}\n")
+                }
+            })
+            .collect()
+    }
+
+    fn show_output(&self, name: &str) -> Result<String, CodemodeError> {
+        let entry = self.resolve(name)?;
+        let single = Catalog {
+            attempt_id: self.attempt_id.clone(),
+            digest: self.digest.clone(),
+            entries: vec![entry.clone()],
+        };
+        let output = serde_json::to_string_pretty(&single.list_projection()["tools"][0])?;
+        if output.len() + 1 > 64 * 1024 {
+            return Err(CodemodeError::InvalidArguments(
+                "Tool details exceed 65536 bytes; use list --full".to_string(),
+            ));
+        }
+        Ok(format!("{output}\n"))
+    }
+
     fn resolve(&self, name: &str) -> Result<&CatalogEntry, CodemodeError> {
         let matches: Vec<_> = self
             .entries
@@ -460,6 +507,23 @@ impl Catalog {
             "attemptId": self.attempt_id,
             "tools": tools,
         })
+    }
+}
+
+fn short_description(entry: &CatalogEntry) -> String {
+    let text = entry
+        .description
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(entry.title.as_deref())
+        .unwrap_or("")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.chars().count() <= 160 {
+        text
+    } else {
+        format!("{}…", text.chars().take(159).collect::<String>())
     }
 }
 
@@ -608,6 +672,68 @@ mod tests {
             Err(CodemodeError::InvalidArguments(_))
         ));
         assert_eq!(parse_arguments(r#"{"x":1}"#).expect("object")["x"], 1);
+    }
+
+    #[test]
+    fn compact_discovery_is_closed_and_unicode_safe() {
+        let mut tool = entry("server", "tool", "server__tool", &["server", "tool"]);
+        tool.title = Some("Fallback title".to_string());
+        for (description, expected) in [
+            (
+                "  Search\n\t docs\u{2003}now  ".to_string(),
+                "Search docs now".to_string(),
+            ),
+            ("😀".repeat(160), "😀".repeat(160)),
+            ("界😀".repeat(81), format!("{}界…", "界😀".repeat(79))),
+            (String::new(), "Fallback title".to_string()),
+        ] {
+            tool.description = Some(description);
+            assert_eq!(short_description(&tool), expected);
+            let catalog = catalog(vec![tool.clone()]);
+            assert_eq!(
+                catalog.compact_projection(),
+                json!({"tools": [{"path": "server.tool", "description": expected}]})
+            );
+            assert_eq!(catalog.compact_text(), format!("server.tool — {expected}\n"));
+        }
+        tool.description = None;
+        tool.title = None;
+        assert_eq!(catalog(vec![tool]).compact_text(), "server.tool\n");
+        assert_eq!(catalog(vec![]).compact_text(), "");
+        assert_eq!(catalog(vec![]).compact_projection(), json!({"tools": []}));
+    }
+
+    #[test]
+    fn show_is_single_tool_bounded_and_fails_closed() {
+        let tool = entry("server", "tool", "server__tool", &["server", "tool"]);
+        let mut catalog = catalog(vec![
+            tool,
+            entry("other", "tool", "other__tool", &["other", "tool"]),
+        ]);
+        for name in ["server.tool", "server__tool"] {
+            let shown: Value = serde_json::from_str(&catalog.show_output(name).unwrap()).unwrap();
+            assert_eq!(shown, catalog.list_projection()["tools"][0]);
+        }
+        assert!(catalog.show_output("missing").is_err());
+        catalog.entries.push(entry("alias", "tool", "server.tool", &["alias", "tool"]));
+        assert!(catalog
+            .show_output("server.tool")
+            .unwrap_err()
+            .to_string()
+            .contains("Ambiguous"));
+        catalog.entries.pop();
+        catalog.entries[0].input_schema = json!({"type": "object", "description": ""});
+        let remaining = 65_536 - catalog.show_output("server.tool").unwrap().len();
+        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining));
+        assert_eq!(catalog.show_output("server.tool").unwrap().len(), 65_536);
+        catalog.entries[0].input_schema["description"] = json!("x".repeat(remaining + 1));
+        assert!(catalog.show_output("server.tool").is_err());
+        catalog.entries[0].input_schema = json!({"type": "object", "description": "😀".repeat(17_000)});
+        assert!(catalog
+            .show_output("server.tool")
+            .unwrap_err()
+            .to_string()
+            .contains("exceed 65536 bytes"));
     }
 
     #[test]

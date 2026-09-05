@@ -245,13 +245,33 @@ pub struct CodemodeArgs {
 /// Native Codemode client operations.
 #[derive(Debug, Subcommand)]
 pub enum CodemodeAction {
-    /// List the exact frozen tool catalog for this execution attempt.
-    List,
+    /// List callable paths and short descriptions from the frozen catalog.
+    List(CodemodeListArgs),
+    /// Show one tool's details and schemas (at most 64 KiB).
+    Show(CodemodeShowArgs),
     /// Call one tool by generated path, model name, or `server.tool` identity.
     Call(CodemodeCallArgs),
     /// Report whether the attempt-scoped client environment is usable. Secret
     /// values are never printed.
     Doctor,
+}
+
+/// Output selection for `codemode list`.
+#[derive(Debug, clap::Args)]
+pub struct CodemodeListArgs {
+    /// Retain the complete legacy catalog JSON output.
+    #[arg(long, conflicts_with = "json")]
+    pub full: bool,
+    /// Emit compact machine-readable paths and descriptions.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `codemode show`.
+#[derive(Debug, clap::Args)]
+pub struct CodemodeShowArgs {
+    /// Generated path, model name, or `server.tool` identity.
+    pub tool: String,
 }
 
 /// Arguments for `codemode call`.
@@ -460,12 +480,56 @@ mod tests {
     }
 
     #[test]
+    fn codemode_discovery_flags_and_errors() {
+        for flag in ["--full", "--json"] {
+            let cli = Cli::try_parse_from(["opengeni-agent", "codemode", "list", flag]).unwrap();
+            match cli.command {
+                Some(Command::Codemode(CodemodeArgs {
+                    action: CodemodeAction::List(args),
+                })) => {
+                    assert_eq!(args.full, flag == "--full");
+                    assert_eq!(args.json, flag == "--json");
+                }
+                other => panic!("expected list, got {other:?}"),
+            }
+        }
+        let cli = Cli::try_parse_from(["opengeni-agent", "codemode", "show", "docs.search"]).unwrap();
+        assert!(matches!(cli.command, Some(Command::Codemode(CodemodeArgs {
+            action: CodemodeAction::Show(CodemodeShowArgs { tool })
+        })) if tool == "docs.search"));
+        for args in [
+            vec!["list", "--full", "--json"],
+            vec!["list", "--json", "--full"],
+            vec!["list", "--full", "--full"],
+            vec!["list", "--json", "--json"],
+            vec!["list", "--unknown"],
+            vec!["list", "extra"],
+            vec!["show"],
+            vec!["show", "docs.search", "extra"],
+            vec!["show", "--full"],
+            vec!["show", "docs.search", "--json"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["opengeni-agent", "codemode"].into_iter().chain(args)).is_err()
+            );
+        }
+        for command in ["list", "show"] {
+            let error =
+                Cli::try_parse_from(["opengeni-agent", "codemode", command, "--help"]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
+        }
+    }
+
+    #[test]
     fn codemode_commands_parse() {
         let list = Cli::parse_from(["opengeni-agent", "codemode", "list"]);
         assert!(matches!(
             list.command,
             Some(Command::Codemode(CodemodeArgs {
-                action: CodemodeAction::List
+                action: CodemodeAction::List(CodemodeListArgs {
+                    full: false,
+                    json: false
+                })
             }))
         ));
 
