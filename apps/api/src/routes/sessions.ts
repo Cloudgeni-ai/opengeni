@@ -335,6 +335,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     db,
     settings,
     bus,
+    objectStorage,
     observability: deps.observability,
   };
   const workspaceCaptureManifestCache = new WorkspaceCaptureManifestCache();
@@ -516,6 +517,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     db,
     settings,
     bus,
+    objectStorage,
     ...(deps.establishSandboxSession
       ? { establishSandboxSession: deps.establishSandboxSession }
       : {}),

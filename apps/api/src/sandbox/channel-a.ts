@@ -55,6 +55,7 @@ import {
 } from "@opengeni/observability";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError } from "../http/api-error";
+import type { ObjectStorage } from "@opengeni/storage";
 
 import {
   buildSelfhostedBackendSession,
@@ -101,6 +102,7 @@ export type ChannelAServices = {
   db: Database;
   settings: Settings;
   bus: EventBus;
+  objectStorage?: ObjectStorage | null;
   observability?: Observability | undefined;
 };
 
@@ -1012,6 +1014,9 @@ async function withChannelAOperation<T>(
           acquiredLease: acquired.lease,
           fallbackEnvelope: envelope,
           dataPlaneUrl: acquired.lease.dataPlaneUrl,
+          ...(services.objectStorage !== undefined
+            ? { objectStorage: services.objectStorage }
+            : {}),
         });
         established = result.established;
         leaseSnapshot = result.lease;

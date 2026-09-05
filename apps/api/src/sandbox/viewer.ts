@@ -55,6 +55,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
+import type { ObjectStorage } from "@opengeni/storage";
 
 // The leaf — agent-loop-free. apps/api imports sandbox symbols ONLY from here
 // (enforced by sandbox-access-import-guard.test.ts).
@@ -98,6 +99,7 @@ export type ViewerServices = {
   db: Database;
   settings: Settings;
   bus?: EventBus;
+  objectStorage?: ObjectStorage | null;
   /** Provider-establish dependency used by API-direct readiness and stream
    *  operations. Production uses the runtime leaf; isolated tests may supply a
    *  deterministic provider without replacing a process-global module. */
@@ -381,6 +383,7 @@ export async function attachViewer(
         acquiredLease: acquired.lease,
         fallbackEnvelope: envelope,
         dataPlaneUrl: null,
+        ...(services.objectStorage !== undefined ? { objectStorage: services.objectStorage } : {}),
       });
       established = result.established;
       return {
