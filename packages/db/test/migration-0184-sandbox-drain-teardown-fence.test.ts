@@ -25,6 +25,7 @@ const withheldMigrationNames = [
   "0391_sandbox_provider_deadline_interaction_followup.sql",
   "0397_sandbox_deadline_rotation_preemption.sql",
   "0402_session_input_wait_and_background_command_results.sql",
+  "0407_connected_command_tracking_retirement.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

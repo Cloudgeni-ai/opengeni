@@ -1391,26 +1391,21 @@ async function stoppingBackgroundCommandCounts(
 ): Promise<Map<string, number>> {
   const rows = await db.execute<{ sessionId: string; commandCount: number | string }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
-    command_ancestry(command_id, ancestor_id, depth, path) as (
-      select command.id, command.session_id, 0::integer, array[command.session_id]::uuid[]
-      from ${schema.sessionBackgroundCommands} command
-      where command.workspace_id = ${workspaceId}
-        and command.state = 'stopping'
+    descendants(target_id, session_id, depth, path) as (
+      select target.id, target.id, 0::integer, array[target.id]::uuid[] from targets target
       union all
-      select ancestry.command_id, current.parent_session_id,
-        ancestry.depth + 1, ancestry.path || current.parent_session_id
-      from command_ancestry ancestry
-      join ${schema.sessions} current
-        on current.workspace_id = ${workspaceId}
-       and current.id = ancestry.ancestor_id
-      where current.parent_session_id is not null
-        and not current.parent_session_id = any(ancestry.path)
-        and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
+      select parent.target_id, child.id, parent.depth + 1, parent.path || child.id
+      from descendants parent
+      join ${schema.sessions} child
+        on child.workspace_id = ${workspaceId} and child.parent_session_id = parent.session_id
+      where not child.id = any(parent.path) and parent.depth < ${SESSION_ANCESTRY_LIMIT}
     )
-    select target.id as "sessionId", count(distinct ancestry.command_id)::integer as "commandCount"
-    from targets target
-    join command_ancestry ancestry on ancestry.ancestor_id = target.id
-    group by target.id
+    select descendant.target_id as "sessionId", count(distinct command.id)::integer as "commandCount"
+    from descendants descendant
+    join ${schema.sessionBackgroundCommands} command
+      on command.workspace_id = ${workspaceId} and command.session_id = descendant.session_id
+      and command.state = 'stopping'
+    group by descendant.target_id
   `);
   return new Map(
     rows.map((row: { sessionId: string; commandCount: number | string }) => [
