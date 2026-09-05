@@ -375,8 +375,10 @@ snapshot it, or provider-terminate the user's computer.
 
 The structured Files boundary advertises the selected machine's effective
 host-native working directory as `FileSystem.root`. Canonical file links and
-tree nodes stay in that namespace, while provider commands use contained paths
-relative to the same root. Files requests carry the capability epoch plus root;
+tree nodes stay in that namespace. Connected Machine file reads also accept
+absolute paths outside the working directory, subject to the machine account’s
+OS permissions; the working directory is a browsing default, not a read boundary.
+Managed provider reads and structured mutations retain workspace confinement. Files requests carry the capability epoch plus root;
 the API binds one active route for the request and returns a retryable conflict
 if the selected target or root changes instead of reinterpreting the path on a
 different filesystem.

@@ -288,12 +288,15 @@ export type SandboxChannelAServiceOptions = {
   session: ChannelASession;
   // Canonical filesystem root advertised by the selected target. Relative paths
   // resolve beneath it; already-canonical absolute paths stay byte-for-byte paths
-  // after validation that they remain inside this authority.
+  // after validation against the operation's path scope.
   workspaceRoot?: string;
   // Connected Machine providers already resolve relative paths against their
   // exact host root. Keep provider commands relative while preserving the
   // canonical host-native root as the public FileSystem namespace.
   providerPathMode?: "canonical" | "workspace-relative";
+  // Selected Connected Machines can read host-absolute paths outside their cwd.
+  // This is server-derived; managed providers retain workspace confinement.
+  fileReadScope?: "workspace" | "machine";
   // The lease epoch the box was resumed under (paired with `revision` for cache
   // invalidation — H3). 0 when ownership is off / no lease.
   leaseEpoch?: number;
@@ -414,6 +417,7 @@ export class SandboxChannelAService {
   private readonly session: ChannelASession;
   private readonly workspaceRoot: string;
   private readonly providerPathMode: "canonical" | "workspace-relative";
+  private readonly fileReadScope: "workspace" | "machine";
   private readonly leaseEpoch: number;
   private revision: number;
   private readonly emit?: ChannelAEmitter | undefined;
@@ -428,6 +432,7 @@ export class SandboxChannelAService {
         ? ""
         : workspaceRoot.replace(/\/+$/, "");
     this.providerPathMode = opts.providerPathMode ?? "canonical";
+    this.fileReadScope = opts.fileReadScope ?? "workspace";
     this.leaseEpoch = opts.leaseEpoch ?? 0;
     this.revision = opts.revision ?? 0;
     this.emit = opts.emit;
@@ -701,16 +706,19 @@ export class SandboxChannelAService {
 
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     this.assertFileSystemRoute(req.route);
-    const path = assertSafeRelPath(req.path, this.workspaceRoot);
+    const path =
+      this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(req.path)
+        ? resolveConnectedMachinePath(this.workspaceRoot, req.path)
+        : assertSafeRelPath(req.path, this.workspaceRoot);
     if (!this.session.readFile) {
-      // No native readFile: open the file once, prove that exact descriptor is
-      // rooted beneath the workspace, then base64 it through exec.
+      // No native readFile: read an exact descriptor through exec, retaining
+      // workspace confinement for managed providers.
       return await this.fsReadViaExec(path, req);
     }
     let raw: string | Uint8Array;
     try {
       raw = await this.session.readFile({
-        path: this.joinRoot(path),
+        path: this.fileReadPath(path),
         maxBytes: req.maxBytes,
         ...(this.runAs ? { runAs: this.runAs } : {}),
       });
@@ -725,7 +733,7 @@ export class SandboxChannelAService {
         throw new ChannelANotFoundError(`file not found: ${path}`);
       }
       // A native provider read can fail while exec on the same live box remains
-      // healthy. The descriptor path below is equally confined and binary-safe,
+      // healthy. The descriptor path below uses the same scope and is binary-safe,
       // so use it as a single recovery path. Unknown provider failures must never
       // be downgraded into a false 404.
       if (this.session.exec || this.session.execCommand) {
@@ -813,19 +821,27 @@ export class SandboxChannelAService {
     );
   }
 
-  /** Binary-safe fallback for sessions without native reads. The file is opened
-   * before its resolved path is root-checked and matched to the descriptor's
-   * inode, so a symlink/path swap cannot redirect the subsequent read. */
+  /** Binary-safe fallback for sessions without native reads. Match the resolved
+   * path to the open descriptor's inode before reading; managed providers also
+   * require that path to remain beneath the workspace. */
   private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
     const root = this.providerWorkspaceRoot();
-    const abs = this.joinRoot(path);
+    const abs = this.fileReadPath(path);
     const script = [
       PORTABLE_REALPATH_EXISTING_FUNCTION,
       PORTABLE_DESCRIPTOR_FUNCTIONS,
-      `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      ...(this.fileReadScope === "workspace"
+        ? [
+            `root=$(opengeni_realpath_existing ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+          ]
+        : []),
       `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target=$(opengeni_realpath_existing ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
-      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      ...(this.fileReadScope === "workspace"
+        ? [
+            `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+          ]
+        : []),
       `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `opened_identity=$(opengeni_fd_identity 3) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `target_identity=$(opengeni_path_identity "$target") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
@@ -2416,6 +2432,11 @@ export class SandboxChannelAService {
   /** The current FS revision (for the caller to persist/seed). */
   currentRevision(): number {
     return this.revision;
+  }
+
+  private fileReadPath(path: string): string {
+    if (this.fileReadScope === "machine" && isConnectedMachineAbsolutePath(path)) return path;
+    return this.joinRoot(path);
   }
 
   private joinRoot(rel: string): string {
