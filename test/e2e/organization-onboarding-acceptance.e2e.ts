@@ -1147,6 +1147,8 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     const resetEmail = await takeEmail("password_reset", registeredEmail);
     const resetUrl = new URL(firstUrl(resetEmail));
     expect(resetUrl.pathname.startsWith("/v1/auth/reset-password/")).toBe(true);
+    // Stop authenticated background reads before removing their credentials.
+    await registeredPage.goto("about:blank");
     await registeredContext.clearCookies();
     await registeredPage.goto(resetUrl.toString(), {
       waitUntil: "domcontentloaded",
