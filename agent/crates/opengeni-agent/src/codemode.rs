@@ -434,6 +434,23 @@ impl Catalog {
                 })
             })
             .collect();
+        let text_lines: Vec<String> = if args.json {
+            Vec::new()
+        } else {
+            tools
+                .iter()
+                .map(|tool| {
+                    let path = tool["path"].as_str().unwrap_or_default();
+                    let description = tool["description"].as_str().unwrap_or_default();
+                    if description.is_empty() {
+                        format!("{path}\n")
+                    } else {
+                        let description = terminal_description(description);
+                        format!("{path} — {description}\n")
+                    }
+                })
+                .collect()
+        };
         loop {
             let next_offset =
                 (offset + tools.len() < matches.len()).then_some(offset + tools.len());
@@ -449,18 +466,7 @@ impl Catalog {
                     }))?
                 )
             } else {
-                let mut output: String = tools
-                    .iter()
-                    .map(|tool| {
-                        let path = tool["path"].as_str().unwrap_or_default();
-                        let description = tool["description"].as_str().unwrap_or_default();
-                        if description.is_empty() {
-                            format!("{path}\n")
-                        } else {
-                            format!("{path} — {description}\n")
-                        }
-                    })
-                    .collect();
+                let mut output = text_lines[..tools.len()].concat();
                 let _ = writeln!(
                     output,
                     "# total: {}; offset: {offset}; nextOffset: {}",
@@ -559,6 +565,19 @@ impl Catalog {
             "tools": tools,
         })
     }
+}
+
+// Terminal-only presentation; catalog, query, and JSON content remain unchanged.
+fn terminal_description(text: &str) -> String {
+    let mut output = String::new();
+    for character in text.chars() {
+        if matches!(character, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}') {
+            let _ = write!(output, "\\u{:04x}", u32::from(character));
+        } else {
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn normalized_description(entry: &CatalogEntry) -> String {
@@ -780,6 +799,95 @@ mod tests {
     }
 
     #[test]
+    fn terminal_controls_are_escaped_only_in_text_not_catalog_json_or_queries() {
+        let controls: String = (0_u8..=31).chain(127..=159).map(char::from).collect();
+        let payload = format!(
+            "Search\u{1b}]52;c;VEVTVA==\u{7} CSI\u{1b}[2J Back\u{8} DEL\u{7f} C1\u{9b}{controls}"
+        );
+        for title_fallback in [false, true] {
+            let mut tool = entry("docs", "tool", "docs__tool", &["docs", "tool"]);
+            if title_fallback {
+                tool.title = Some(payload.clone());
+            } else {
+                tool.description = Some(payload.clone());
+            }
+            let frozen = catalog(vec![tool]);
+            let before = frozen.list_projection();
+            let json_args = CodemodeListArgs {
+                json: true,
+                ..Default::default()
+            };
+            let json_before = frozen.compact_output(&json_args).unwrap();
+            let output = frozen.compact_output(&CodemodeListArgs::default()).unwrap();
+            assert!(output.chars().all(|character| character == '\n'
+                || !matches!(character, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}')));
+            assert!(output.contains("Search\\u001b]52;c;VEVTVA==\\u0007"));
+            assert!(output.contains("CSI\\u001b[2J Back\\u0008 DEL\\u007f C1\\u009b"));
+            for character in controls
+                .chars()
+                .filter(|character| !character.is_whitespace())
+            {
+                assert!(output.contains(&format!("\\u{:04x}", u32::from(character))));
+            }
+            assert_eq!(frozen.list_projection(), before);
+            assert_eq!(frozen.compact_output(&json_args).unwrap(), json_before);
+            for (query, total) in [("\u{1b}]52", 1), ("\\u001b]52", 0)] {
+                let output = frozen
+                    .compact_output(&CodemodeListArgs {
+                        json: true,
+                        query: Some(query.to_string()),
+                        ..Default::default()
+                    })
+                    .unwrap();
+                let page: Value = serde_json::from_str(&output).unwrap();
+                assert_eq!(page["total"], total);
+                if total == 1 {
+                    assert_eq!(
+                        page["tools"][0]["description"],
+                        short_description(&frozen.entries[0])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_escape_expansion_is_included_in_page_byte_budget() {
+        let frozen = catalog(
+            (0..100)
+                .map(|index| {
+                    let name = format!("tool{index}");
+                    let mut tool = entry("docs", &name, &name, &["docs", &name]);
+                    tool.description = Some("\u{1b}".repeat(160));
+                    tool
+                })
+                .collect(),
+        );
+        let output = frozen
+            .compact_output(&CodemodeListArgs {
+                limit: Some(100),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(output.len() <= 16_384);
+        assert!(!output.contains('\u{1b}'));
+        let count = output
+            .lines()
+            .filter(|line| line.starts_with("docs."))
+            .count();
+        assert!(count > 0 && count < 100);
+        assert!(output.contains(&format!("nextOffset: {count}\n")));
+        assert!(output.contains(&"\\u001b".repeat(160)));
+        let next = frozen
+            .compact_output(&CodemodeListArgs {
+                offset: Some(count),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(next.starts_with(&format!("docs.tool{count} — ")));
+    }
+
+    #[test]
     fn compact_pages_walk_all_4096_tools_with_maximum_paths_without_skips() {
         for extreme in [false, true] {
             let tools = (0..4096)
@@ -830,6 +938,7 @@ mod tests {
                                 .map(|value| usize::try_from(value).unwrap()),
                         )
                     } else {
+                        assert!(output.chars().all(|character| character == '\n' || !matches!(character, '\u{0000}'..='\u{001f}' | '\u{007f}'..='\u{009f}')));
                         let paths = output
                             .lines()
                             .filter(|line| !line.starts_with('#'))

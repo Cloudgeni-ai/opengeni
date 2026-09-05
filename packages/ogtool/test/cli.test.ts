@@ -208,6 +208,40 @@ describe("ogtool CLI", () => {
             expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
           }
         }
+        const controls = String.fromCharCode(
+          ...Array.from({ length: 32 }, (_, index) => index),
+          ...Array.from({ length: 33 }, (_, index) => 127 + index),
+        );
+        const payload = `Search\u001b]52;c;VEVTVA==\u0007 CSI\u001b[2J Back\u0008${controls}`;
+        for (const field of ["description", "title"] as const) {
+          for (const entry of mock.catalog.entries) {
+            delete entry.description;
+            delete entry.title;
+            entry[field] = payload;
+          }
+          for (const args of [
+            ["list"],
+            ["list", "--json"],
+            ["list", "--full"],
+            ["show", "docs.tool0"],
+            ["list", "--query", "\u001b]52"],
+          ]) {
+            const [js, rust] = await Promise.all([
+              run(args, environment),
+              run(args, environment, native),
+            ]);
+            expect(js.exitCode).toBe(0);
+            expect(rust.exitCode).toBe(0);
+            if (args.includes("--json") || args.includes("--full") || args[0] === "show") {
+              expect(JSON.parse(rust.stdout)).toEqual(JSON.parse(js.stdout));
+            } else {
+              expect(rust.stdout).toBe(js.stdout);
+              expect(js.stdout).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
+              expect(js.stdout).toContain("Search\\u001b]52;c;VEVTVA==\\u0007");
+              expect(Buffer.byteLength(js.stdout, "utf8")).toBeLessThanOrEqual(16_384);
+            }
+          }
+        }
       } finally {
         mock.server.stop(true);
       }
