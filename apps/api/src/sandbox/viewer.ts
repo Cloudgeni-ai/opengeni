@@ -383,9 +383,7 @@ export async function attachViewer(
         acquiredLease: acquired.lease,
         fallbackEnvelope: envelope,
         dataPlaneUrl: null,
-        ...(services.objectStorage !== undefined
-          ? { objectStorage: services.objectStorage }
-          : {}),
+        ...(services.objectStorage !== undefined ? { objectStorage: services.objectStorage } : {}),
       });
       established = result.established;
       return {
