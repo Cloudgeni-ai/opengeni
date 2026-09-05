@@ -330,6 +330,7 @@ export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
   projectSessionMcpProgressText,
   SESSION_MCP_PROGRESS_STORAGE_CHARS,
+  sessionMcpProgressScalarIsEncodedSql,
 } from "./session-mcp-progress";
 import {
   seedNewSessionDraftInTransaction,
@@ -56958,6 +56959,10 @@ export async function getSessionMcpMonitoringSummary(
           number | null
         >`char_length(${schema.sessionEvents.payload}->>'progressNote')::integer`,
         codecVersion: schema.sessionEvents.payloadCodecVersion,
+        scalarIsEncoded: sessionMcpProgressScalarIsEncodedSql(
+          sql`${schema.sessionEvents.payload}->>'progressNote'`,
+          schema.sessionEvents.payloadCodecVersion,
+        ),
         occurredAt: schema.sessionEvents.occurredAt,
       })
       .from(schema.sessionEvents)
@@ -56987,6 +56992,7 @@ export async function getSessionMcpMonitoringSummary(
               progress.storedPrefix,
               progress.storedChars,
               progress.codecVersion,
+              progress.scalarIsEncoded,
             ),
             occurredAt: progress.occurredAt.toISOString(),
           }
