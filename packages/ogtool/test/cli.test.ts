@@ -185,12 +185,19 @@ describe("ogtool CLI", () => {
           description: `${"😀".repeat(160)} Needle 界`,
         }));
         for (const args of [
-          ["list"], ["list", "--json"], ["list", "--full"], ["show", "docs.tool0"],
+          ["list"],
+          ["list", "--json"],
+          ["list", "--full"],
+          ["show", "docs.tool0"],
           ["list", "--json", "--limit=100", "--offset=7"],
           ["list", "--query=Needle 界", "--limit=2", "--offset=1"],
-          ["list", "--json", "--query=needle"], ["list", "--json", "--offset=999"],
+          ["list", "--json", "--query=needle"],
+          ["list", "--json", "--offset=999"],
         ]) {
-          const [js, rust] = await Promise.all([run(args, environment), run(args, environment, native)]);
+          const [js, rust] = await Promise.all([
+            run(args, environment),
+            run(args, environment, native),
+          ]);
           expect(js.exitCode).toBe(0);
           expect(rust.exitCode).toBe(0);
           if (args.includes("--json") || args.includes("--full") || args[0] === "show") {
@@ -289,14 +296,26 @@ describe("ogtool CLI", () => {
     const environment = { OPENGENI_CODEMODE_URL: mock.url, OPENGENI_CODEMODE_TOKEN: "test" };
     try {
       const text = await run(["list"], environment);
-      expect(text).toEqual({ exitCode: 0, stdout: "docs.search — Search docs\n# total: 1; offset: 0; nextOffset: none\n", stderr: "" });
+      expect(text).toEqual({
+        exitCode: 0,
+        stdout: "docs.search — Search docs\n# total: 1; offset: 0; nextOffset: none\n",
+        stderr: "",
+      });
       const compact = await run(["list", "--json"], environment);
       expect(compact.exitCode).toBe(0);
-      expect(JSON.parse(compact.stdout)).toEqual({ catalogDigest: mock.catalog.digest, total: 1, offset: 0, nextOffset: null, tools: [{ path: "docs.search", description: "Search docs" }] });
+      expect(JSON.parse(compact.stdout)).toEqual({
+        catalogDigest: mock.catalog.digest,
+        total: 1,
+        offset: 0,
+        nextOffset: null,
+        tools: [{ path: "docs.search", description: "Search docs" }],
+      });
       for (const name of ["docs.search", "docs__search"]) {
         const shown = await run(["show", name], environment);
         expect(shown.exitCode).toBe(0);
-        expect(JSON.parse(shown.stdout)).toEqual(JSON.parse((await run(["list", "--full"], environment)).stdout).tools[0]);
+        expect(JSON.parse(shown.stdout)).toEqual(
+          JSON.parse((await run(["list", "--full"], environment)).stdout).tools[0],
+        );
       }
       expect(mock.requests.every(({ method }) => method === "GET")).toBe(true);
     } finally {
@@ -319,14 +338,30 @@ describe("ogtool CLI", () => {
         entry.title = "Fallback title";
         const result = await run(["list", "--json"], environment);
         expect(result.exitCode).toBe(0);
-        expect(JSON.parse(result.stdout)).toEqual({ catalogDigest: mock.catalog.digest, total: 1, offset: 0, nextOffset: null, tools: [{ path: "docs.search", description: expected }] });
+        expect(JSON.parse(result.stdout)).toEqual({
+          catalogDigest: mock.catalog.digest,
+          total: 1,
+          offset: 0,
+          nextOffset: null,
+          tools: [{ path: "docs.search", description: expected }],
+        });
       }
       delete entry.description;
       delete entry.title;
-      expect((await run(["list"], environment)).stdout).toBe("docs.search\n# total: 1; offset: 0; nextOffset: none\n");
+      expect((await run(["list"], environment)).stdout).toBe(
+        "docs.search\n# total: 1; offset: 0; nextOffset: none\n",
+      );
       mock.catalog.entries = [];
-      expect((await run(["list"], environment)).stdout).toBe("# total: 0; offset: 0; nextOffset: none\n");
-      expect(JSON.parse((await run(["list", "--json"], environment)).stdout)).toEqual({ catalogDigest: mock.catalog.digest, total: 0, offset: 0, nextOffset: null, tools: [] });
+      expect((await run(["list"], environment)).stdout).toBe(
+        "# total: 0; offset: 0; nextOffset: none\n",
+      );
+      expect(JSON.parse((await run(["list", "--json"], environment)).stdout)).toEqual({
+        catalogDigest: mock.catalog.digest,
+        total: 0,
+        offset: 0,
+        nextOffset: null,
+        tools: [],
+      });
     } finally {
       mock.server.stop(true);
     }
@@ -334,13 +369,20 @@ describe("ogtool CLI", () => {
 
   test("discovery rejects invalid flags and arity before configuration or HTTP", async () => {
     for (const args of [
-      ["list", "--full", "--json"], ["list", "--json", "--full"],
-      ["list", "--full", "--full"], ["list", "--json", "--json"],
-      ["list", "--unknown"], ["list", "extra"], ["show"],
-      ["show", "docs.search", "extra"], ["show", "--full"],
+      ["list", "--full", "--json"],
+      ["list", "--json", "--full"],
+      ["list", "--full", "--full"],
+      ["list", "--json", "--json"],
+      ["list", "--unknown"],
+      ["list", "extra"],
+      ["show"],
+      ["show", "docs.search", "extra"],
+      ["show", "--full"],
       ["show", "docs.search", "--json"],
-      ["list", "--full", "--offset", "0"], ["list", "--limit", "101"],
-      ["list", "--query"], ["list", "--offset", "-1"],
+      ["list", "--full", "--offset", "0"],
+      ["list", "--limit", "101"],
+      ["list", "--query"],
+      ["list", "--offset", "-1"],
     ]) {
       const result = await run(args);
       expect(result.exitCode).toBe(1);
@@ -379,16 +421,26 @@ describe("ogtool CLI", () => {
           expect(page.catalogDigest).toBe(mock.catalog.digest);
           expect(page.nextOffset).toBe(page.tools.length);
           expect(page.tools.length).toBeLessThan(100);
-          const next = JSON.parse((await run(["list", "--json", "--offset", String(page.nextOffset)], environment)).stdout);
-          expect(next.tools[0].path).toBe(mock.catalog.entries[page.nextOffset]!.codemodePath.join("."));
+          const next = JSON.parse(
+            (await run(["list", "--json", "--offset", String(page.nextOffset)], environment))
+              .stdout,
+          );
+          expect(next.tools[0].path).toBe(
+            mock.catalog.entries[page.nextOffset]!.codemodePath.join("."),
+          );
         } else expect(first.stdout).toContain("# Continue with --offset");
       }
-      const query = await run(["list", "--json", "--query=t42", "--limit=1", "--offset=1"], environment);
+      const query = await run(
+        ["list", "--json", "--query=t42", "--limit=1", "--offset=1"],
+        environment,
+      );
       expect(query.exitCode).toBe(0);
       const result = JSON.parse(query.stdout);
       expect(result.tools).toHaveLength(1);
       expect(result.offset).toBe(1);
-      const noMatch = JSON.parse((await run(["list", "--json", "--query", "absent"], environment)).stdout);
+      const noMatch = JSON.parse(
+        (await run(["list", "--json", "--query", "absent"], environment)).stdout,
+      );
       expect(noMatch.total).toBe(0);
       expect(noMatch.nextOffset).toBeNull();
       expect(noMatch.tools).toEqual([]);
