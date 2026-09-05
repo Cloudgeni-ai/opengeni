@@ -1,4 +1,11 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+import type {
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyActorState,
+  GitHubActionPolicyDecision,
+  GitHubActionPolicyGroup,
+} from "@opengeni/sdk";
 
 import type {
   IntegrationChip,
@@ -20,6 +27,28 @@ export const GITHUB_APP_DESCRIPTION =
 // provider-hosted logo with the monogram as the offline fallback.
 export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon.svg";
 
+const GITHUB_ACTION_POLICY_GROUPS: Array<{
+  id: GitHubActionPolicyGroup;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: "routine",
+    label: "Create and update work",
+    description: "Branches, issues, pull requests, comments, and reviewer requests.",
+  },
+  {
+    id: "review",
+    label: "Submit reviews",
+    description: "Comment, approve, or request changes on a pull request.",
+  },
+  {
+    id: "merge",
+    label: "Merge pull requests",
+    description: "Merge, squash, or rebase a pull request. This can change protected branches.",
+  },
+];
+
 /**
  * Maps the workspace GitHub App binding onto the shared integration view-model.
  * The GitHub status, repositories, and mutations already live in the app
@@ -29,12 +58,21 @@ export const GITHUB_LOGO_URL = "https://github.githubassets.com/favicons/favicon
 export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): IntegrationAdapter {
   const context = useAppContext();
   const canManage = hasWorkspacePermission(context.accessContext, workspaceId, "github:manage");
+  const canManagePersonal = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "connections:write",
+  );
   const status = context.githubStatus;
   const repositories = context.githubRepos;
   const [disconnectOpen, setDisconnectOpen] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [personalOpen, setPersonalOpen] = useState(false);
   const [personalDisconnectOpen, setPersonalDisconnectOpen] = useState(false);
+  const [actionPolicies, setActionPolicies] = useState<GitHubActionPoliciesResponse | null>(null);
+  const [actionPolicyFailed, setActionPolicyFailed] = useState(false);
+  const [actionPolicyBusy, setActionPolicyBusy] = useState<string | null>(null);
+  const actionPolicyRequest = useRef(0);
   const installations = status?.installations ?? [];
   const busy = context.githubAppBusy || disconnecting;
 
@@ -56,6 +94,66 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         ? ({ label: "Connected", tone: "ok" } as const)
         : githubChip(status, canManage, statusFailed);
   const connectUrl = status?.installUrl ?? status?.linkUrl ?? null;
+  const actionPolicyActorKey = [
+    ...installations.map((installation) => `app:${installation.installationId}`),
+    personalConnection ? `personal:${personalConnection.id}` : "",
+  ].join("|");
+
+  const refreshActionPolicies = useCallback(async () => {
+    const request = ++actionPolicyRequest.current;
+    setActionPolicyFailed(false);
+    try {
+      const policies = await context.client.getGitHubActionPolicies(workspaceId);
+      if (actionPolicyRequest.current !== request) return;
+      setActionPolicies(policies);
+    } catch {
+      if (actionPolicyRequest.current !== request) return;
+      setActionPolicies(null);
+      setActionPolicyFailed(true);
+    }
+  }, [context.client, workspaceId]);
+
+  useEffect(() => {
+    void refreshActionPolicies();
+    return () => {
+      actionPolicyRequest.current += 1;
+    };
+  }, [actionPolicyActorKey, refreshActionPolicies]);
+
+  async function updateActionPolicy(
+    actor: GitHubActionPolicyActorState,
+    group: GitHubActionPolicyGroup,
+    decision: GitHubActionPolicyDecision,
+  ) {
+    const key = githubActionPolicyOptionId(actor, group);
+    setActionPolicyBusy(key);
+    try {
+      const updated = await context.client.updateGitHubActionPolicy(workspaceId, {
+        actor:
+          actor.kind === "workspace_app"
+            ? { kind: "workspace_app", installationId: actor.installationId }
+            : { kind: "personal", connectionId: actor.connectionId },
+        group,
+        decision,
+      });
+      setActionPolicies((current) =>
+        current
+          ? {
+              ...current,
+              actors: current.actors.map((candidate) =>
+                sameGitHubActionPolicyActor(candidate, updated) ? updated : candidate,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      toast.error("Could not update GitHub action approvals", {
+        description: error instanceof Error ? error.message : "Try again.",
+      });
+    } finally {
+      setActionPolicyBusy((current) => (current === key ? null : current));
+    }
+  }
 
   const facts: IntegrationViewModel["connection"] = [];
   for (const installation of installations) {
@@ -212,7 +310,45 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         },
       ]
     : [];
-  const options = [...personalOption, ...installationOptions];
+  const actionPolicyOptions: IntegrationOption[] = actionPolicyFailed
+    ? [
+        {
+          kind: "link",
+          id: "github-action-policy-retry",
+          label: "Action approvals",
+          description: "Approval settings could not be loaded.",
+          action: { label: "Retry", onClick: () => void refreshActionPolicies() },
+        },
+      ]
+    : actionPolicies?.enabled
+      ? actionPolicies.actors.flatMap((actor) =>
+          GITHUB_ACTION_POLICY_GROUPS.map((group) => {
+            const value = actor.groups[group.id];
+            const optionId = githubActionPolicyOptionId(actor, group.id);
+            return {
+              kind: "choice" as const,
+              id: optionId,
+              label: `${actor.label} · ${group.label}`,
+              description: group.description,
+              value,
+              choices: [
+                ...(value === "mixed" ? [{ value: "mixed", label: "Mixed", disabled: true }] : []),
+                { value: "ask", label: "Ask every time" },
+                { value: "allow", label: "Allow" },
+                { value: "block", label: "Block" },
+              ],
+              disabled: actor.kind === "workspace_app" ? !canManage : !canManagePersonal,
+              busy: actionPolicyBusy === optionId,
+              onChange: (next: string) => {
+                if (next === "allow" || next === "ask" || next === "block") {
+                  void updateActionPolicy(actor, group.id, next);
+                }
+              },
+            };
+          }),
+        )
+      : [];
+  const options = [...personalOption, ...installationOptions, ...actionPolicyOptions];
 
   const model: IntegrationViewModel = {
     id: "github",
@@ -337,4 +473,26 @@ function githubEmptyRepositoriesMessage(installations: GitHubAppInfo["installati
   return installations.some((installation) => installation.repositoryScope === "all")
     ? "This installation shares every repository it can see."
     : "No repositories are shared with OpenGeni yet. Change repositories on GitHub to allow some.";
+}
+
+function githubActionPolicyOptionId(
+  actor: GitHubActionPolicyActorState,
+  group: GitHubActionPolicyGroup,
+): string {
+  const actorId =
+    actor.kind === "workspace_app"
+      ? `app-${actor.installationId}`
+      : `personal-${actor.connectionId}`;
+  return `github-action-policy-${actorId}-${group}`;
+}
+
+function sameGitHubActionPolicyActor(
+  left: GitHubActionPolicyActorState,
+  right: GitHubActionPolicyActorState,
+): boolean {
+  return left.kind === "workspace_app" && right.kind === "workspace_app"
+    ? left.installationId === right.installationId
+    : left.kind === "personal" && right.kind === "personal"
+      ? left.connectionId === right.connectionId
+      : false;
 }

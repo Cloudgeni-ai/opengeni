@@ -7362,6 +7362,30 @@ export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
 };
 
+export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
+export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
+export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+
+export type GitHubActionPolicyActor =
+  | { kind: "workspace_app"; installationId: number }
+  | { kind: "personal"; connectionId: string };
+
+export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
+  label: string;
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+};
+
+export type GitHubActionPoliciesResponse = {
+  enabled: boolean;
+  actors: GitHubActionPolicyActorState[];
+};
+
+export type UpdateGitHubActionPolicyRequest = {
+  actor: GitHubActionPolicyActor;
+  group: GitHubActionPolicyGroup;
+  decision: GitHubActionPolicyDecision;
+};
+
 export type VerifyPublicGitHubRepositoryRefRequest = {
   url: string;
   ref: string;

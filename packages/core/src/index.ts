@@ -80,6 +80,7 @@ export * from "./domain/product-integration-pack";
 export * from "./domain/personal-connection-delegations";
 export * from "./domain/resources";
 export * from "./domain/github-repository-bindings";
+export * from "./domain/github-action-policies";
 export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";

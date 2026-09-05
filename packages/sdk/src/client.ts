@@ -258,6 +258,8 @@ import type {
   FileAsset,
   FileDownloadUrlResponse,
   GetPackResponse,
+  GitHubActionPoliciesResponse,
+  GitHubActionPolicyActorState,
   GitHubAppInfo,
   GitHubRepositoriesResponse,
   GoogleDriveBrowseResponse,
@@ -272,6 +274,7 @@ import type {
   ListUserResourceAuthoritiesResponse,
   IssueUserResourceGrantRequest,
   UserResourceGrantMutationResponse,
+  UpdateGitHubActionPolicyRequest,
   RevokeUserResourceGrantResponse,
   ListOrganizationInvitationsPageResponse,
   ListOrganizationAdministrationMembersResponse,
@@ -7172,6 +7175,26 @@ export class OpenGeniClient {
     return await this.requestJson<GitHubRepositoriesResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/github/repositories`,
+    );
+  }
+
+  /** Effective confirmation policy for each GitHub identity available to this caller. */
+  async getGitHubActionPolicies(workspaceId: string): Promise<GitHubActionPoliciesResponse> {
+    return await this.requestJson<GitHubActionPoliciesResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/github/action-policies`,
+    );
+  }
+
+  /** Change one GitHub action group without broadening review or merge policy. */
+  async updateGitHubActionPolicy(
+    workspaceId: string,
+    request: UpdateGitHubActionPolicyRequest,
+  ): Promise<GitHubActionPolicyActorState> {
+    return await this.requestJson<GitHubActionPolicyActorState>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/github/action-policies`,
+      request,
     );
   }
 
