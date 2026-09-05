@@ -30,6 +30,11 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+Provider safety refusals terminate the turn with `provider_safety_refusal` and
+the original diagnostic. They are neither temporary provider unavailability
+nor credential failures, even when carried by a 5xx response. Same-turn recovery
+and account rotation must not replay them.
+
 Session display titles are durable session metadata, not a truncation of model
 history. Creation and migration use `New conversation` only as the durable
 marker that semantic naming is still pending. Human-facing clients render a
