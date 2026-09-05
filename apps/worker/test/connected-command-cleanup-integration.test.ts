@@ -126,7 +126,7 @@ test("offline commands remain tracked while one sweep shares failed connection o
   };
   await reconcile(client.db, settings, observability, bus, rpc);
   expect(queries).toBeGreaterThan(0);
-  expect(queries).toBeLessThan(25);
+  expect(queries).toBe(1);
   const [row] =
     await shared.admin`select count(*)::int n,min(reconcile_attempts)::int attempts from session_background_commands where session_id=${sessionId} and state='running'`;
   expect(row!.n).toBe(25);

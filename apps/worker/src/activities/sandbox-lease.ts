@@ -1040,6 +1040,7 @@ export async function reconcileConnectedMachineBackgroundCommands(
   const dueBefore = new Date();
   const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
   const offlineConnections = new Set<string>();
+  const firstConnectionProbes = new Map<string, Promise<void>>();
   // Drain the fixed due frontier with the existing concurrency. Yield to the
   // remaining maintenance work each period; retries belong to a later sweep.
   do {
@@ -1072,11 +1073,23 @@ export async function reconcileConnectedMachineBackgroundCommands(
         claim.enrollmentId,
         claim.connectionInstanceId,
       ]);
-      if (!proof && offlineConnections.has(connectionKey)) {
-        await deferConnectedCommandClaim(db, settings, observability, claim, "provider_offline");
-        return;
-      }
       if (!proof) {
+        const firstProbe = firstConnectionProbes.get(connectionKey);
+        if (firstProbe) await firstProbe;
+        if (offlineConnections.has(connectionKey)) {
+          await deferConnectedCommandClaim(db, settings, observability, claim, "provider_offline");
+          return;
+        }
+        // Share only the initial connection observation, never another command's result.
+        let finishFirstProbe: (() => void) | undefined;
+        if (!firstProbe) {
+          firstConnectionProbes.set(
+            connectionKey,
+            new Promise<void>((resolve) => {
+              finishFirstProbe = resolve;
+            }),
+          );
+        }
         try {
           proof = await probeConnectedMachineBackgroundCommand(
             claim,
@@ -1117,6 +1130,8 @@ export async function reconcileConnectedMachineBackgroundCommands(
             offline ? "provider_offline" : "provider_error",
           );
           return;
+        } finally {
+          finishFirstProbe?.();
         }
 
         try {

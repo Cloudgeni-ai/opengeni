@@ -93,7 +93,9 @@ test("historical repair retires ended tracking without notifications, preserving
   const proven = await fixture("replaced", true);
   const [before] = await shared.admin`select count(*)::int n from session_system_updates`;
   await owner.begin(async (tx) => {
-    await tx.unsafe(source.slice(source.indexOf("DO $repair$"), source.indexOf("-- Keep the three-argument")));
+    await tx.unsafe(
+      source.slice(source.indexOf("DO $repair$"), source.indexOf("-- Keep the three-argument")),
+    );
   });
   const rows =
     await shared.admin`select id,state,settlement_reason from session_background_commands`;
