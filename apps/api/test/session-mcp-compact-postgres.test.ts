@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
@@ -28,7 +29,10 @@ import {
   fromPostgresLosslessJson,
   toPostgresLosslessJson,
 } from "../../../packages/db/src/lossless-json";
-import { SESSION_MCP_PROGRESS_STORAGE_CHARS } from "../../../packages/db/src/session-mcp-progress";
+import {
+  SESSION_MCP_PROGRESS_STORAGE_CHARS,
+  sessionMcpProgressScalarIsEncodedSql,
+} from "../../../packages/db/src/session-mcp-progress";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
@@ -143,6 +147,37 @@ async function call(name: string, args: Record<string, unknown> = {}) {
 }
 
 describe("compact session MCP database boundary", () => {
+  test("bound scalar offsets use PostgreSQL character slicing in both preparation modes", async () => {
+    if (!shared) return;
+    const valid = toPostgresLosslessJson("tests\u0000green") as string;
+    const longValid = toPostgresLosslessJson("🙂".repeat(5000) + "\u0000") as string;
+    for (const prepare of [true, false]) {
+      const scalarClient = postgres(shared.appUrl, { max: 1, prepare });
+      const scalarDb = drizzle(scalarClient);
+      try {
+        for (const [value, version] of [
+          [valid, 1],
+          [longValid, 1],
+          [valid, null],
+          [longValid + "!", 1],
+          [null, 1],
+        ] as const) {
+          const [row] = await scalarDb.execute(sql`
+            select ${sessionMcpProgressScalarIsEncodedSql(
+              sql`${value}::text`,
+              sql`${version}::integer`,
+            )} as "scalarIsEncoded"
+          `);
+          expect(row!.scalarIsEncoded).toBe(
+            value !== null && fromPostgresLosslessJson(value, version) !== value,
+          );
+        }
+      } finally {
+        await scalarClient.end();
+      }
+    }
+  });
+
   test("plain browse skips claim SQL; full, explicit evidence, query and subject opt in", async () => {
     if (!shared) return;
     const compact = await call("sessions_list");

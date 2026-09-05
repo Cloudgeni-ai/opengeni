@@ -27,10 +27,12 @@ export function sessionMcpProgressScalarIsEncodedSql(
 ): SQL<boolean> {
   // SIMILAR TO matches the whole string, including trailing whitespace. A
   // valid prefix alone cannot prove that the canonical codec would decode it.
+  // The bound offset needs an integer cast: substring(text, unknown) can
+  // otherwise resolve to the regex overload rather than a character offset.
   return sql<boolean>`coalesce(
     ${codecVersion} = ${LOSSLESS_CONTENT_CODEC_VERSION}
     and left(${value}, ${LOSSLESS_JSON_STRING_PREFIX.length}) = ${LOSSLESS_JSON_STRING_PREFIX}
-    and substring(${value} from ${LOSSLESS_JSON_STRING_PREFIX.length + 1}) collate "C"
+    and substring(${value} from ${LOSSLESS_JSON_STRING_PREFIX.length + 1}::integer) collate "C"
       similar to ${SESSION_MCP_PROGRESS_UTF16_BASE64_PATTERN},
     false
   )`;
