@@ -1,5 +1,5 @@
 import type { OpenGeniClient } from "./client";
-import type { StreamSessionEventsOptions } from "./stream";
+import { sessionEventStreamCoveredThrough, type StreamSessionEventsOptions } from "./stream";
 import type { SessionEvent } from "./types";
 
 /**
@@ -12,12 +12,22 @@ import type { SessionEvent } from "./types";
  * OpenGeni's own SSE stream (`id: <sequence>`, `event: <type>`,
  * `data: <event JSON>`), so the browser side can consume it with this same
  * SDK's streaming core (or a plain `EventSource`), including resume via
- * `?after=` / `Last-Event-ID`.
+ * `?after=` / `Last-Event-ID`. An ordinary event uses its own sequence as the
+ * SSE `id`; a compact event uses the server-owned sequence it covers through.
  */
 
-/** Format one event exactly as OpenGeni's API emits it over SSE. */
+/** Format one event with the exact OpenGeni data and resume-cursor semantics. */
 export function formatSseEvent(event: SessionEvent): string {
-  return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+  const streamedCoverage = sessionEventStreamCoveredThrough(event);
+  const projectedCoverage = event.coveredThrough;
+  const coveredThrough =
+    streamedCoverage ??
+    (typeof projectedCoverage === "number" &&
+    Number.isSafeInteger(projectedCoverage) &&
+    projectedCoverage >= event.sequence
+      ? projectedCoverage
+      : event.sequence);
+  return `id: ${coveredThrough}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 export type SseReStreamOptions = {
@@ -115,8 +125,9 @@ export function sessionEventsToSseResponse(
 
 /**
  * Read the resume cursor a reconnecting SSE client sent: the `after` query
- * parameter, or the standard `Last-Event-ID` header (the re-emitted stream
- * sets `id:` to the sequence). Returns 0 (full replay) when absent.
+ * parameter, or the standard `Last-Event-ID` header. Re-emitted streams set
+ * `id:` to the event sequence for ordinary events and the covered high-water
+ * sequence for compact events. Returns 0 (full replay) when absent.
  */
 export function resumeSequenceFromRequest(request: Request): number {
   const url = new URL(request.url);
