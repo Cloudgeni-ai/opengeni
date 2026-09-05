@@ -1589,6 +1589,7 @@ describe("summarizeSessionFailure", () => {
       failedAt: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+      safetyRefusal: false,
     });
   });
   test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
