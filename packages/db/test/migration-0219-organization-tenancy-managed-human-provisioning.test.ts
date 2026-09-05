@@ -346,6 +346,50 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(grantCount).toEqual({ count: 0 });
   });
 
+  test("excludes orphaned workspace memberships from managed access projection", async () => {
+    if (!shared || !client) return;
+
+    const userId = `orphaned-workspace-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const input = {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Managed human with legacy membership",
+    };
+    const initial = await ensureManagedAccessForUser(client.db, input);
+    const activeAccountId = initial.accountGrants[0]!.accountId;
+    const orphanedAccountId = crypto.randomUUID();
+    const orphanedWorkspaceId = crypto.randomUUID();
+
+    await shared.admin`
+      insert into managed_accounts (id, name, external_source, external_id)
+      values (
+        ${orphanedAccountId}, 'Orphaned legacy organization', 'test', ${crypto.randomUUID()}
+      )`;
+    await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (
+        ${orphanedWorkspaceId}, ${orphanedAccountId}, 'Orphaned legacy workspace',
+        'test', ${crypto.randomUUID()}
+      )`;
+    await shared.admin`
+      insert into workspace_inference_controls (account_id, workspace_id)
+      values (${orphanedAccountId}, ${orphanedWorkspaceId})`;
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${orphanedAccountId}, ${orphanedWorkspaceId}, ${subjectId}, 'member')`;
+
+    const projected = await ensureManagedAccessForUser(client.db, input);
+
+    expect(projected.accountGrants.map((grant) => grant.accountId)).toEqual([activeAccountId]);
+    expect(
+      projected.workspaceGrants.some((grant) => grant.workspaceId === orphanedWorkspaceId),
+    ).toBe(false);
+    expect(projected.workspaceGrants.every((grant) => grant.accountId === activeAccountId)).toBe(
+      true,
+    );
+  });
+
   test("keeps the capability narrow and fails closed for fabricated, foreign, and terminal authority", async () => {
     if (!shared || !client) return;
 
