@@ -13,7 +13,7 @@ import {
 } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeftIcon, BrainCircuitIcon, ChevronDownIcon } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ContentPage } from "@/components/ui/content-layout";
@@ -23,6 +23,7 @@ import { useAppContext } from "@/context";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
+import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 
 import { BrainOverview } from "./agent-brain-overview";
 import { AgentKnowledgePrompt } from "./agent-brain-prompt";
@@ -1046,21 +1047,27 @@ export function AttemptGovernanceInventory({
   );
 }
 
-function FocusedInstructions({
+export function FocusedInstructions({
   state,
   workspaceId,
   personalWorkspace,
-  onWorkspaceStateReload,
 }: {
   state: WorkspaceStateResponse;
   workspaceId: string;
   personalWorkspace: boolean;
-  onWorkspaceStateReload: () => Promise<void>;
 }) {
   const context = useAppContext();
   const { client } = context;
   const canEdit = hasWorkspacePermission(context.accessContext, workspaceId, "workspace:admin");
-  const activeHead = activeGlobalWorkspaceInstructionHead(state);
+  const [confirmedSave, setConfirmedSave] = useState<Awaited<
+    ReturnType<ReturnType<typeof createWorkspaceInstructionSave>["run"]>
+  > | null>(null);
+  const projectedHead = activeGlobalWorkspaceInstructionHead(state);
+  const activeHead =
+    confirmedSave && confirmedSave.head.activationVersion >= (projectedHead?.activationVersion ?? 0)
+      ? confirmedSave.head
+      : projectedHead;
+  const pendingSave = useRef<ReturnType<typeof createWorkspaceInstructionSave> | null>(null);
   const activeRevisionId = activeHead?.revisionId ?? null;
   const instructionConfigured =
     activeRevisionId !== null || state.policy.legacyRuntime.workspaceOverrideConfigured;
@@ -1072,6 +1079,13 @@ function FocusedInstructions({
 
   useEffect(() => {
     let cancelled = false;
+    // Activation already returned the durable head and draft content. Do not
+    // gate completion (or the next edit's baseline) on another inventory read.
+    if (confirmedSave?.head.revisionId === activeRevisionId) {
+      setContent(confirmedSave.content);
+      setLoadingContent(false);
+      return;
+    }
     setLoadingContent(true);
     setContent("");
     setMessage(null);
@@ -1098,6 +1112,7 @@ function FocusedInstructions({
     };
   }, [
     activeRevisionId,
+    confirmedSave,
     client,
     state.policy.legacyRuntime.workspaceOverrideConfigured,
     workspaceId,
@@ -1105,31 +1120,32 @@ function FocusedInstructions({
 
   const save = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    if (!canEdit || saving || !content.trim()) return;
+    if (!canEdit || saving || loadingContent || !content.trim()) return;
     setSaving(true);
     setMessage(null);
     setEditorError(null);
     try {
-      const draft = await client.createWorkspaceInstructionPolicyDraft(workspaceId, {
-        operationId: crypto.randomUUID(),
-        kind: "policy",
-        scope: "global",
-        roleKey: null,
-        content,
-        provenanceSource: "human",
-        provenanceSourceId: null,
-        supersedesRevisionId: activeHead?.revisionId ?? null,
-      });
-      await client.activateWorkspaceInstructionPolicyRevision(workspaceId, draft.id, {
-        operationId: crypto.randomUUID(),
-        expectedCurrentRevisionId: activeHead?.revisionId ?? null,
-        expectedActivationVersion: activeHead?.activationVersion ?? 0,
-        reason: "Updated by a workspace admin from Agent Knowledge",
-      });
-      await onWorkspaceStateReload();
+      if (!pendingSave.current?.matches(client, workspaceId, content, activeHead)) {
+        pendingSave.current = createWorkspaceInstructionSave(
+          client,
+          workspaceId,
+          content,
+          activeHead,
+        );
+      }
+      setConfirmedSave(await pendingSave.current.run());
+      pendingSave.current = null;
       setMessage("Saved. New agent turns will use these workspace instructions.");
     } catch (error) {
-      setEditorError(error instanceof Error ? error.message : String(error));
+      const uncertain = error instanceof OpenGeniApiError && error.outcomeUnknown;
+      if (!uncertain) pendingSave.current = null;
+      setEditorError(
+        uncertain
+          ? "Could not confirm whether these instructions were saved. Your text is still here. Save again to retry."
+          : error instanceof Error
+            ? error.message
+            : String(error),
+      );
     } finally {
       setSaving(false);
     }
@@ -1318,10 +1334,10 @@ export function WorkspaceStateRoute({
             ) : null}
             {view === "instructions" ? (
               <FocusedInstructions
+                key={workspaceId}
                 state={state}
                 workspaceId={workspaceId}
                 personalWorkspace={personalWorkspace}
-                onWorkspaceStateReload={reload}
               />
             ) : null}
             {view === "skills" ? (
