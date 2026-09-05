@@ -600,6 +600,7 @@ export {
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   stringifyPayload,
   truncate,

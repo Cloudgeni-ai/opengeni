@@ -10,7 +10,7 @@ import {
 import fleetDecisionItem from "./fleet-decision-projection";
 import {
   CREDIT_EXHAUSTION_MESSAGE,
-  humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   tryParseJson,
 } from "../lib/format";
@@ -2273,15 +2273,7 @@ function elapsedDurationMs(startedAt: string, completedAt: string): number | nul
 }
 
 function failureMessage(payload: Record<string, unknown>): string | null {
-  for (const key of ["error", "message"] as const) {
-    const value = payload[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      // Auth/quota provider errors are rewritten for the right audience
-      // (raw text remains in the event payload for debug surfaces).
-      return humanizeFailureReason(value);
-    }
-  }
-  return null;
+  return presentFailure(payload).reason;
 }
 
 function goalText(payload: Record<string, unknown>): string | null {

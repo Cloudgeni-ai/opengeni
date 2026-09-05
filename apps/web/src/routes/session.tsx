@@ -2074,7 +2074,9 @@ function SessionChatPane(props: {
                     // the reply turn dies the same budget death.
                     "Out of OpenGeni credits — add credits to continue."
                   : props.session.status === "failed"
-                    ? "This session failed — send a message to revive it."
+                    ? props.failure?.safetyRefusal
+                      ? "The model provider blocked the previous request."
+                      : "This session failed — send a message to revive it."
                     : "Send a follow-up…"
             }
             controls={
