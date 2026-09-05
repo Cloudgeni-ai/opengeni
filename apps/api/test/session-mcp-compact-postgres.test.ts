@@ -183,7 +183,7 @@ describe("compact session MCP database boundary", () => {
     const compact = await call("sessions_list");
     expect(compact.sessions[0].goal.status).toBe("completed");
     expect(compact.sessions[0]).not.toHaveProperty("relatedWork");
-    expect(queries.some((sql) => sql.includes("session_work_claims"))).toBeFalse();
+    expect(queries.some((query) => query.includes("session_work_claims"))).toBeFalse();
     const full = await call("sessions_list", { detail: "full" });
     expect(full.sessions[0].relatedWork).toMatchObject({
       advisoryOnly: true,
@@ -191,9 +191,9 @@ describe("compact session MCP database boundary", () => {
     });
     expect(full).toHaveProperty("bytes");
     expect(full.sessions[0]).toHaveProperty("children");
-    expect(queries.some((sql) => sql.includes("session_work_claims"))).toBeTrue();
+    expect(queries.some((query) => query.includes("session_work_claims"))).toBeTrue();
     await call("sessions_list", { detail: "full", includeRelatedWork: false });
-    expect(queries.some((sql) => sql.includes("session_work_claims"))).toBeFalse();
+    expect(queries.some((query) => query.includes("session_work_claims"))).toBeFalse();
     for (const args of [
       { includeRelatedWork: true },
       { query: "Compact", includeRelatedWork: false },
@@ -203,7 +203,7 @@ describe("compact session MCP database boundary", () => {
       },
     ]) {
       const result = await call("sessions_list", args);
-      expect(queries.some((sql) => sql.includes("session_work_claims"))).toBeTrue();
+      expect(queries.some((query) => query.includes("session_work_claims"))).toBeTrue();
       for (const row of result.sessions)
         expect(row.relatedWork).toMatchObject({ advisoryOnly: true, noAdditionalAccess: true });
     }
