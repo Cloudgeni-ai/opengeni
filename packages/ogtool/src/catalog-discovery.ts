@@ -29,9 +29,10 @@ export type ListOptions = {
 export function parseListOptions(args: string[]): ListOptions {
   const options: ListOptions = { full: false, json: false, query: "", limit: 50, offset: 0 };
   const seen = new Set<string>();
-  const invalid = () => new Error(
-    "usage: ogtool list [--full | --json] [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
-  );
+  const invalid = () =>
+    new Error(
+      "usage: ogtool list [--full | --json] [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
+    );
   for (let index = 0; index < args.length; index++) {
     const argument = args[index]!;
     const equals = argument.indexOf("=");
@@ -59,17 +60,18 @@ export function parseListOptions(args: string[]): ListOptions {
 
 /** Render first, then emit: the bound includes metadata, escaping, hints, and newline. */
 export function compactOutput(catalog: AttemptToolCatalog, options: ListOptions): string {
-  const matches = catalog.entries.filter((entry) =>
-    entry.codemodePath.join(".").includes(options.query) ||
-    normalizedDescription(entry).includes(options.query),
+  const matches = catalog.entries.filter(
+    (entry) =>
+      entry.codemodePath.join(".").includes(options.query) ||
+      normalizedDescription(entry).includes(options.query),
   );
   const tools = matches.slice(options.offset, options.offset + options.limit).map((entry) => ({
     path: entry.codemodePath.join("."),
     description: shortDescription(entry),
   }));
   for (;;) {
-    const nextOffset = options.offset + tools.length < matches.length
-      ? options.offset + tools.length : null;
+    const nextOffset =
+      options.offset + tools.length < matches.length ? options.offset + tools.length : null;
     const page = {
       catalogDigest: catalog.digest,
       total: matches.length,
@@ -79,12 +81,18 @@ export function compactOutput(catalog: AttemptToolCatalog, options: ListOptions)
     };
     const output = options.json
       ? `${JSON.stringify(page)}\n`
-      : tools.map((tool) => `${tool.path}${tool.description ? ` — ${tool.description}` : ""}\n`).join("") +
+      : tools
+          .map((tool) => `${tool.path}${tool.description ? ` — ${tool.description}` : ""}\n`)
+          .join("") +
         `# total: ${page.total}; offset: ${page.offset}; nextOffset: ${nextOffset ?? "none"}\n` +
-        (nextOffset === null ? "" : `# Continue with --offset ${nextOffset} (keep the same --query and --limit).\n`);
+        (nextOffset === null
+          ? ""
+          : `# Continue with --offset ${nextOffset} (keep the same --query and --limit).\n`);
     if (Buffer.byteLength(output, "utf8") <= LIST_MAX_BYTES) return output;
     if (tools.length <= 1) {
-      throw new Error("One tool exceeds the 16384-byte compact page limit; use list --full redirected to a file");
+      throw new Error(
+        "One tool exceeds the 16384-byte compact page limit; use list --full redirected to a file",
+      );
     }
     tools.pop();
   }

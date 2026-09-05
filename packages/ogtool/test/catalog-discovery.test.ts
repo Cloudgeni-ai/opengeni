@@ -50,17 +50,27 @@ describe("compact catalog pages", () => {
           let nextOffset: number | null;
           if (json) {
             const page = JSON.parse(output);
-            expect(Object.keys(page).sort()).toEqual(["catalogDigest", "nextOffset", "offset", "tools", "total"]);
+            expect(Object.keys(page).sort()).toEqual([
+              "catalogDigest",
+              "nextOffset",
+              "offset",
+              "tools",
+              "total",
+            ]);
             expect(page.catalogDigest).toBe(frozen.digest);
             expect(page.total).toBe(4096);
             expect(page.offset).toBe(offset);
             paths = page.tools.map((tool: { path: string }) => tool.path);
             nextOffset = page.nextOffset;
           } else {
-            paths = output.split("\n").filter((line) => line && !line.startsWith("#")).map((line) => line.split(" — ")[0]!);
+            paths = output
+              .split("\n")
+              .filter((line) => line && !line.startsWith("#"))
+              .map((line) => line.split(" — ")[0]!);
             const next = /nextOffset: (none|[0-9]+)/u.exec(output)![1];
             nextOffset = next === "none" ? null : Number(next);
-            if (nextOffset !== null) expect(output).toContain(`# Continue with --offset ${nextOffset}`);
+            if (nextOffset !== null)
+              expect(output).toContain(`# Continue with --offset ${nextOffset}`);
           }
           expect(paths.length).toBeGreaterThan(0);
           expect(paths.length).toBeLessThanOrEqual(50);
@@ -73,7 +83,9 @@ describe("compact catalog pages", () => {
         expect(seen).toEqual(frozen.entries.map((entry) => entry.codemodePath.join(".")));
       }
     }
-    const maximum = JSON.parse(compactOutput(catalog(101), parseListOptions(["--json", "--limit", "100"])));
+    const maximum = JSON.parse(
+      compactOutput(catalog(101), parseListOptions(["--json", "--limit", "100"])),
+    );
     expect(maximum.tools).toHaveLength(100);
     expect(maximum.nextOffset).toBe(100);
   }, 60_000);
@@ -89,34 +101,66 @@ describe("compact catalog pages", () => {
       ["Needle 界", ["docs.tool0", "docs.tool1"]],
       ["docs.tool2", ["docs.tool2"]],
       ["Title", ["docs.tool3"]],
-      ["needle", []], [".*", []],
+      ["needle", []],
+      [".*", []],
     ] as const) {
-      const page = JSON.parse(compactOutput(frozen, parseListOptions(["--json", "--query", query])));
+      const page = JSON.parse(
+        compactOutput(frozen, parseListOptions(["--json", "--query", query])),
+      );
       expect(page.total).toBe(expected.length);
       expect(page.tools.map((tool: { path: string }) => tool.path)).toEqual(expected);
       expect(page.nextOffset).toBeNull();
     }
-    const page = JSON.parse(compactOutput(frozen, parseListOptions(["--json", "--query=Needle 界", "--limit=1", "--offset=1"])));
+    const page = JSON.parse(
+      compactOutput(
+        frozen,
+        parseListOptions(["--json", "--query=Needle 界", "--limit=1", "--offset=1"]),
+      ),
+    );
     expect(page.total).toBe(2);
     expect(page.tools[0].path).toBe("docs.tool1");
     expect(page.nextOffset).toBeNull();
     for (const offset of [4, 5, Number.MAX_SAFE_INTEGER]) {
-      const past = JSON.parse(compactOutput(frozen, parseListOptions(["--json", "--offset", String(offset)])));
+      const past = JSON.parse(
+        compactOutput(frozen, parseListOptions(["--json", "--offset", String(offset)])),
+      );
       expect(past).toMatchObject({ total: 4, offset, nextOffset: null, tools: [] });
     }
   });
 
   test("invalid flags, conflicting full mode, duplicate values, and unsafe numbers fail", () => {
     for (const args of [
-      ["--limit", "0"], ["--limit", "101"], ["--limit", "1.5"], ["--limit", ""],
-      ["--offset", "-1"], ["--offset", "1e2"], ["--offset", "0x10"], ["--offset", "+1"],
-      ["--offset", "9007199254740992"], ["--offset", " 1"], ["--limit", "９"],
-      ["--query"], ["--limit"], ["--offset"], ["--query", "--json"],
-      ["--full", "--limit", "50"], ["--full", "--offset=0"], ["--full", "--query="],
-      ["--full", "--json"], ["--json=true"], ["--limit=2", "--limit", "3"],
-      ["--offset=0", "--offset=1"], ["--query=a", "--query=b"], ["--bogus"],
-    ]) expect(() => parseListOptions(args)).toThrow("usage:");
-    expect(parseListOptions(["--query=--flag", "--limit=01", "--offset=0"])).toMatchObject({ query: "--flag", limit: 1, offset: 0 });
+      ["--limit", "0"],
+      ["--limit", "101"],
+      ["--limit", "1.5"],
+      ["--limit", ""],
+      ["--offset", "-1"],
+      ["--offset", "1e2"],
+      ["--offset", "0x10"],
+      ["--offset", "+1"],
+      ["--offset", "9007199254740992"],
+      ["--offset", " 1"],
+      ["--limit", "９"],
+      ["--query"],
+      ["--limit"],
+      ["--offset"],
+      ["--query", "--json"],
+      ["--full", "--limit", "50"],
+      ["--full", "--offset=0"],
+      ["--full", "--query="],
+      ["--full", "--json"],
+      ["--json=true"],
+      ["--limit=2", "--limit", "3"],
+      ["--offset=0", "--offset=1"],
+      ["--query=a", "--query=b"],
+      ["--bogus"],
+    ])
+      expect(() => parseListOptions(args)).toThrow("usage:");
+    expect(parseListOptions(["--query=--flag", "--limit=01", "--offset=0"])).toMatchObject({
+      query: "--flag",
+      limit: 1,
+      offset: 0,
+    });
     expect(parseListOptions(["--full"]).full).toBe(true);
   });
 
@@ -124,7 +168,9 @@ describe("compact catalog pages", () => {
     const frozen = catalog(1);
     frozen.entries[0]!.codemodePath = ["x".repeat(20_000), "tool"];
     for (const flags of [[], ["--json"]]) {
-      expect(() => compactOutput(frozen, parseListOptions(flags))).toThrow("16384-byte compact page limit");
+      expect(() => compactOutput(frozen, parseListOptions(flags))).toThrow(
+        "16384-byte compact page limit",
+      );
     }
   });
 });
