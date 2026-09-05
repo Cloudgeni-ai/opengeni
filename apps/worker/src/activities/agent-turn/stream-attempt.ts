@@ -1060,7 +1060,7 @@ export async function runTurnStreamAttempt(
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
           await historySink.reconcileConversationTruth();
-          turnLifecycleMetricsFor(observability).progress(attempt.turnId!);
+          turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
           try {
             await ensureRunAllowed(
