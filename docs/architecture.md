@@ -152,6 +152,10 @@ execution of that turn. Worker death, recovery, interruption, or capacity
 waiting may create another attempt without creating another logical turn or
 replaying an already-completed side effect.
 
+Internal-update delivery is atomic per batch, not unique per logical turn:
+resumed attempts may append a new batch while retaining earlier receipts.
+Canonical model history owns their ordered, exactly-once inclusion.
+
 The full `runAgentTurn` activity is non-retryable by default because model,
 tool, sandbox, Git, connector, and cloud operations can have external effects.
 Recovery is explicit and attempt-fenced. Provider work occurs outside database

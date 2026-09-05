@@ -30,6 +30,13 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+A resumed attempt may attach another atomic internal-update batch to the same
+logical turn after its resolved open suffix. Each delivered update retains its
+own batch's durable history-item receipt; a turn-wide update query can therefore
+span multiple batches. Model input reads those batches from canonical history
+in position order, never reconstructs them from update rows, and never requires
+one shared history-item id across the whole turn.
+
 Session display titles are durable session metadata, not a truncation of model
 history. Creation and migration use `New conversation` only as the durable
 marker that semantic naming is still pending. Human-facing clients render a
