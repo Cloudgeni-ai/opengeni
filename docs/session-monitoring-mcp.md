@@ -110,6 +110,10 @@ narrowing. Authorization runs before list filtering, ranking, totals, cursors,
 and evidence reads. A target-only grant can see a generic ancestor blocker, but
 not that ancestor's id, title, actor, or pause reason. Queue control must be
 projected before either detail serializer and never reapplied raw afterward.
+Policy provenance follows the same boundary: target-only reads null a non-target
+`inheritedFromSessionId` in both `toolPolicy` and `effectiveToolPolicy`, so later
+effective-policy assembly cannot restore the hidden identity. Policy mode, tool
+sets, counts, and root-authorized lineage remain unchanged.
 
 Canonical compact row, detail, pause, text and evidence-selection helpers live
 in `packages/contracts/src/session-mcp-projections.ts`. The API's
