@@ -647,6 +647,9 @@ describe("P4.4 Channel-A route discipline", () => {
     expect(channelASeam.slice(serviceAt, serviceAt + 300)).toContain(
       "workspaceRoot: fileSystemAuthority.root",
     );
+    expect(channelASeam.slice(serviceAt, serviceAt + 650)).toContain(
+      'fileSystemAuthority.backendKind === "selfhosted"\n        ? { providerPathMode: "workspace-relative" as const, fileReadScope: "machine" as const }',
+    );
   });
 
   test("the PTY write route adopts the exact durable process identity", () => {
