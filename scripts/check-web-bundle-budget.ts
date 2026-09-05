@@ -7,6 +7,10 @@ import {
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
 } from "./web-bundle-budget-unified-tool-gateway";
+import {
+  WORKBENCH_CREDIT_DRAIN_HANGS_BROWSER_GZIP_BUDGET,
+  WORKBENCH_CREDIT_DRAIN_HANGS_BROWSER_RAW_BUDGET,
+} from "./web-bundle-budget-workbench-credit-drain";
 
 type ManifestEntry = {
   file: string;
@@ -420,7 +424,15 @@ const budgets = {
   // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
   // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
   // headroom; gzip and every unrelated cap remain fixed.
-  directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  // The workbench credit-drain hang-fix shares Files/Terminal unavailable
+  // overlay copy and maps viewer/interaction 402/429. That graph measures
+  // 2,292,551 raw / 640,121 gzip bytes on Linux/x64 Bun 1.4. Advance only
+  // this hang-fix envelope; do not rewrite the PR-review gzip measurement
+  // or the unified-tool-gateway raw export.
+  directSessionRaw: Math.max(
+    EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+    WORKBENCH_CREDIT_DRAIN_HANGS_BROWSER_RAW_BUDGET,
+  ),
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
@@ -441,6 +453,7 @@ const effectiveBudgets = {
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
     625 * kib,
+    WORKBENCH_CREDIT_DRAIN_HANGS_BROWSER_GZIP_BUDGET,
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -14,6 +14,10 @@ import { filePathVisibility, type FileNodeVisibilityPredicate } from "../file-no
 import { CodeEditor } from "./code-editor";
 import { FileBrowser } from "./file-browser";
 import { PierreFile } from "./pierre-file";
+import {
+  SANDBOX_UNAVAILABLE_FALLBACK,
+  SandboxUnavailableNotice,
+} from "./sandbox-unavailable-notice";
 
 export type SandboxFilesProps = {
   /** From `useSandboxFiles(...)`. */
@@ -59,6 +63,10 @@ export type SandboxFilesProps = {
   liveWorkspaceReady?: boolean | undefined;
   /** Deliberately wake the machine to read content absent from the capture. */
   onWakeWorkspace?: (() => void) | undefined;
+  /** Handshake/admission failure (credit drain, forbidden viewer). Beats resting/waking. */
+  capabilitiesError?: Error | null | undefined;
+  /** Retry the capability handshake after a sandbox-unavailable error. */
+  onRetry?: (() => void) | undefined;
   themeType?: "dark" | "light" | undefined;
   className?: string | undefined;
 };
@@ -86,8 +94,10 @@ export function SandboxFiles({
   requestedPathReady = true,
   workspaceResting = false,
   workspaceWaking = false,
+  capabilitiesError = null,
   liveWorkspaceReady = true,
   onWakeWorkspace,
+  onRetry,
   themeType,
   className,
 }: SandboxFilesProps) {
@@ -257,6 +267,23 @@ export function SandboxFiles({
     liveRequestedPath === viewPath &&
     (!liveWorkspaceReady || files.loading) &&
     captureFileUnavailable !== null;
+
+  if (capabilitiesError && (workspaceResting || workspaceWaking || !fileSystemAvailable)) {
+    return (
+      <div
+        className={cn(
+          "flex h-full items-center justify-center p-4 text-center text-og-sm",
+          className,
+        )}
+        role="alert"
+      >
+        <SandboxUnavailableNotice
+          message={capabilitiesError.message || SANDBOX_UNAVAILABLE_FALLBACK}
+          onRetry={onRetry ?? onWakeWorkspace}
+        />
+      </div>
+    );
+  }
 
   if (workspaceResting || workspaceWaking) {
     return (

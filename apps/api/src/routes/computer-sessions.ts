@@ -34,6 +34,7 @@ import {
   ComputerSessionStateError,
   dispatchComputerSessionOperation,
   failComputerSessionOperation,
+  SandboxViewerAdmissionBlockedError,
   findComputerSessionControlRecordByOperation,
   getAttachedBrowserDevice,
   getComputerSessionControlRecord,
@@ -85,6 +86,10 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import {
+  httpExceptionForSandboxViewerAdmission,
+  sandboxViewerAdmissionInteractionError,
+} from "../http/sandbox-viewer-admission-error.js";
 import {
   deriveBrowserControllerAdminToken,
   deriveComputerSessionControllerTokens,
@@ -263,13 +268,27 @@ export function registerComputerSessionRoutes(app: Hono, deps: ApiRouteDeps): vo
           }
           if (isTerminalOperation(prepared.operation.state)) return prepared;
 
-          const interactionHeld = await ensureInteractionHolder(
-            grant,
-            sourceSession,
-            prepared.session.id,
-            placement,
-            context.req.raw.signal,
-          );
+          let interactionHeld = false;
+          try {
+            interactionHeld = await ensureInteractionHolder(
+              grant,
+              sourceSession,
+              prepared.session.id,
+              placement,
+              context.req.raw.signal,
+            );
+          } catch (error) {
+            if (error instanceof SandboxViewerAdmissionBlockedError) {
+              await failComputerSessionOperation(deps.db, {
+                accountId: grant.accountId,
+                workspaceId,
+                operationId: request.operationId,
+                computerSessionId: prepared.session.id,
+                error: sandboxViewerAdmissionInteractionError(error),
+              });
+            }
+            throw error;
+          }
           const record = await ensureDispatchedGeneration(
             grant,
             workspaceId,
@@ -1871,6 +1890,8 @@ function computerRouteError(error: unknown): HTTPException {
   const connectedMachineError = interactionControlApiError(error, "computer");
   if (connectedMachineError) return connectedMachineError;
   if (error instanceof HTTPException) return error;
+  const admission = httpExceptionForSandboxViewerAdmission(error);
+  if (admission) return admission;
   if (error instanceof ComputerSessionNotFoundError) {
     return new HTTPException(404, { message: error.message, cause: error });
   }

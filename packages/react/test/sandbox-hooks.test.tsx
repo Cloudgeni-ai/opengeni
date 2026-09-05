@@ -6,6 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type AttachViewerRequest, type SessionEvent } from "@opengeni/sdk";
 import { actRun, registerDom, renderHook, flush } from "./render-hook";
+import { CREDIT_EXHAUSTION_MESSAGE } from "../src/lib/format";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import {
   fakeAttachResponse,
@@ -230,6 +231,53 @@ describe("useSessionCapabilities", () => {
     await flush();
     expect(hook.result.current.viewerId).toBe("44444444-4444-4444-8444-444444444444");
     expect(hook.result.current.capabilities?.DesktopStream.url).toContain("box.modal.example");
+    await hook.unmount();
+  });
+
+  test("desktop attach 402 is a hard credit-exhaustion error and does not poll", async () => {
+    let capabilityCalls = 0;
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        capabilityCalls += 1;
+        return fakeCapabilities();
+      },
+      attachViewer: async () => {
+        throw new OpenGeniApiError(402, "insufficient OpenGeni credits for an idle sandbox viewer");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSessionCapabilities(SESSION_ID, {
+          ...ctx,
+          client,
+          attachDesktop: true,
+          warmingPollMs: 20,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toBe(CREDIT_EXHAUSTION_MESSAGE);
+    expect(hook.result.current.viewerCapReached).toBe(false);
+    await flush(200);
+    expect(hook.result.current.state).toBe("error");
+    expect(capabilityCalls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("a 402 on negotiate is a hard credit-exhaustion error", async () => {
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        throw new OpenGeniApiError(402, "insufficient OpenGeni credits for an idle sandbox viewer");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionCapabilities(SESSION_ID, { ...ctx, client }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.state).toBe("error");
+    expect(hook.result.current.error?.message).toBe(CREDIT_EXHAUSTION_MESSAGE);
     await hook.unmount();
   });
 

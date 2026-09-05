@@ -7,6 +7,10 @@ import { resolveTerminalFont, xtermThemeFromTokens } from "../lib/xterm-theme";
 import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
+import {
+  SANDBOX_UNAVAILABLE_FALLBACK,
+  SandboxUnavailableNotice,
+} from "./sandbox-unavailable-notice";
 
 /**
  * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
@@ -89,6 +93,10 @@ export type SandboxTerminalProps = {
   onActivate?: (() => void) | undefined;
   /** Re-negotiate the terminal capability after an unexpected socket failure. */
   onReconnectNeeded?: (() => void) | undefined;
+  /** Handshake/admission failure (credit drain). Stops the infinite wake line. */
+  capabilitiesError?: Error | null | undefined;
+  /** Retry the capability handshake after a sandbox-unavailable error. */
+  onRetry?: (() => void) | undefined;
   className?: string | undefined;
 };
 
@@ -134,8 +142,10 @@ export function terminalSurfaceState(input: {
   inputPending: boolean;
   ptyStatus: TerminalStreamStatus;
   booting: boolean;
+  capabilitiesError?: boolean;
 }): TerminalSurfaceState {
   if (!input.ready) return "loading";
+  if (input.capabilitiesError) return "error";
   if (input.acceptsInput) return "interactive";
   if (input.inputPending) return "connecting";
   if (input.ptyStatus === "connecting") return "connecting";
@@ -227,6 +237,8 @@ export function SandboxTerminal({
   shell,
   onActivate,
   onReconnectNeeded,
+  capabilitiesError = null,
+  onRetry,
   className,
 }: SandboxTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -295,6 +307,7 @@ export function SandboxTerminal({
   // firehose transcript to show yet (otherwise the projected output is shown).
   const warm = sandboxAcceptsLiveIo(liveness);
   const booting =
+    !capabilitiesError &&
     activated &&
     !ptyMode &&
     !warm &&
@@ -307,6 +320,7 @@ export function SandboxTerminal({
     inputPending,
     ptyStatus,
     booting,
+    capabilitiesError: Boolean(capabilitiesError),
   });
 
   function handleActivate() {
@@ -634,6 +648,17 @@ export function SandboxTerminal({
           data-opengeni-terminal-state={surfaceState}
           data-opengeni-terminal-status={ptyAttachable ? ptyStatus : "firehose"}
         />
+        {capabilitiesError && result.chunks.length === 0 ? (
+          <div
+            className="absolute inset-0 z-10 flex items-center justify-center bg-og-bg p-4 text-center"
+            role="alert"
+          >
+            <SandboxUnavailableNotice
+              message={capabilitiesError.message || SANDBOX_UNAVAILABLE_FALLBACK}
+              onRetry={onRetry ?? onReconnectNeeded}
+            />
+          </div>
+        ) : null}
       </div>
     </div>
   );

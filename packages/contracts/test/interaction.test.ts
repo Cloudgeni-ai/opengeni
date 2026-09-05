@@ -14,6 +14,7 @@ import {
   BrowserRevision,
   BrowserRevisionMaterialization,
   BrowserSessionAttachment,
+  BrowserSessionCapabilities,
   BrowserWorkspaceFileStageRequest,
   ComputerActionCommand,
   ComputerActionRequest,
@@ -86,6 +87,43 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("defaults omitted BrowserSession capabilities permissions to false", () => {
+    expect(
+      BrowserSessionCapabilities.parse({
+        semanticObservation: true,
+        screenshots: true,
+        liveFrames: true,
+        humanInput: true,
+        tabs: true,
+        downloads: true,
+        uploads: true,
+        clipboard: true,
+        diagnostics: true,
+        rawCdp: true,
+        linkedComputer: false,
+        privateCheckpoint: true,
+        identityPublication: true,
+        parallelTargets: false,
+      }),
+    ).toEqual({
+      semanticObservation: true,
+      screenshots: true,
+      liveFrames: true,
+      humanInput: true,
+      tabs: true,
+      downloads: true,
+      uploads: true,
+      clipboard: true,
+      permissions: false,
+      diagnostics: true,
+      rawCdp: true,
+      linkedComputer: false,
+      privateCheckpoint: true,
+      identityPublication: true,
+      parallelTargets: false,
+    });
+  });
+
   test("keeps public actions actor-free and defaults new browsers to headless", () => {
     expect(
       CreateBrowserSessionRequest.parse({
