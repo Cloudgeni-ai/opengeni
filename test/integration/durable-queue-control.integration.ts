@@ -147,7 +147,7 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
           Array.from({ length: 100 }, (_, index) =>
             addSessionSystemUpdate(
               dbClient.db,
-              systemUpdateInput(grant, session.id, "children:integration", index),
+              neutralSystemUpdateInput(grant, session.id, "notices:integration", index),
             ),
           ),
         );
@@ -1376,6 +1376,30 @@ function systemUpdateInput(
       status: "idle" as const,
     },
     lineage: { childIndex: index },
+  };
+}
+
+function neutralSystemUpdateInput(
+  grant: AccessGrant,
+  sessionId: string,
+  groupingKey: string,
+  index: number,
+) {
+  const operationId = crypto.randomUUID();
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+    kind: "agent_message" as const,
+    classification: "info" as const,
+    sourceId: `notice-${index}`,
+    dedupeKey: `${groupingKey}:notice-${index}`,
+    summary: `Ordinary notice ${index}`,
+    payload: {
+      type: "agent_message" as const,
+      text: `Ordinary notice ${index}`,
+      operationId,
+    },
   };
 }
 
