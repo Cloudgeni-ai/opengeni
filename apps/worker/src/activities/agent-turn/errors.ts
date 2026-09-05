@@ -725,7 +725,18 @@ export function isExactStatuslessUpstreamConnectivityMessage(message: string): b
   return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
 }
 
+function isProviderSafetyRefusal(error: unknown): boolean {
+  return collectErrorStrings(error).some(
+    (value) =>
+      /^(?:content_policy_violation|content_filter|safety_violation|bio_policy|cyber_policy)$/.test(
+        value,
+      ) || /\bthis request was blocked by our safety systems\b/i.test(value),
+  );
+}
+
 export function isTransientProviderError(error: unknown): boolean {
+  // A semantic refusal can arrive inside a 5xx transport envelope.
+  if (isProviderSafetyRefusal(error)) return false;
   const status =
     typeof error === "object" && error !== null
       ? Number(
@@ -842,6 +853,15 @@ export function agentRunFailurePayload(
     return {
       ...underlying,
       historyPersistenceStage: error.stage,
+    };
+  }
+  if (isProviderSafetyRefusal(error)) {
+    return {
+      error:
+        "The model provider blocked this request through its safety systems. Automatic retries stopped.",
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: error instanceof Error ? error.message : collectErrorStrings(error).join(": "),
     };
   }
   const message = error instanceof Error ? error.message : String(error);
@@ -1106,6 +1126,8 @@ export function codexCredentialCooldownUntil(
  * progress and therefore MUST NOT walk the credential pool automatically.
  */
 export function classifyCodexCredentialFailure(error: unknown): CodexCredentialFailure | null {
+  // A request safety refusal is not evidence that another account should run it.
+  if (isProviderSafetyRefusal(error)) return null;
   // A permanent OAuth refresh failure is definitive and the shared resolver has
   // already fenced/stamped the exact credential version. The OpenAI client can
   // wrap a rejection from its custom fetch in APIConnectionError, so recognize
