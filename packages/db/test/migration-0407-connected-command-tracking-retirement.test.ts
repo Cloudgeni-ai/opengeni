@@ -73,10 +73,10 @@ async function fixture(
   const id = crypto.randomUUID();
   await shared.admin`insert into session_background_commands
     (id,account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,
-     connection_instance_id,op_id,cancel_requested_at,cancel_requested_by,
+     connection_instance_id,op_id,cancel_requested_at,cancel_requested_by,reconcile_after,
      reconcile_proof_outcome,reconcile_proof_exit_code,reconcile_proof_reason,reconcile_proof_observed_at)
     values (${id},${accountId},${workspaceId!},${session.id},'connected_machine','stopping',
-      ${workspaceId!},${enrollment.id},'launch',${id},now(),'test',
+      ${workspaceId!},${enrollment.id},'launch',${id},now(),'test',now() - interval '1 minute',
       ${proof ? "exited" : null},${proof ? 0 : null},${proof ? "op_exit" : null},${proof ? new Date() : null})`;
   return { id, sessionId: session.id, workspaceId: workspaceId! };
 }
@@ -144,8 +144,8 @@ test("runtime claims classify retirement, preserve exact exit proof, and never t
 test("a fixed frontier drains multiple batches without revisiting claims even with zero claim TTL", async () => {
   const value = await fixture("current");
   await shared.admin`insert into session_background_commands
-    (account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id)
-    select account_id,workspace_id,session_id,provider,'running',control_workspace_id,enrollment_id,connection_instance_id,gen_random_uuid()::text
+    (account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+    select account_id,workspace_id,session_id,provider,'running',control_workspace_id,enrollment_id,connection_instance_id,gen_random_uuid()::text,now() - interval '1 minute'
     from session_background_commands cross join generate_series(1,24) where id=${value.id}`;
   const dueBefore = new Date();
   const claim = () =>
