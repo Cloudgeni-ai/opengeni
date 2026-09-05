@@ -780,6 +780,7 @@ export type XaiCredentialFailure = {
  * without an accepted model response; refresh relogin is equally definitive.
  */
 export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailure | null {
+  if (isProviderSafetyRefusal(error)) return null;
   let relogin: unknown = error;
   for (let depth = 0; depth < 6 && relogin && typeof relogin === "object"; depth += 1) {
     if (relogin instanceof XaiSubscriptionReloginRequired) {

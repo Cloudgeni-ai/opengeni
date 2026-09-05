@@ -5289,6 +5289,14 @@ describe("transient provider error classifier", () => {
       });
       expect(isTransientProviderError(error)).toBe(false);
       expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(
+        classifyXaiCredentialFailure(
+          Object.assign(new Error(message), {
+            status,
+            headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
+          }),
+        ),
+      ).toBeNull();
       expect(agentRunFailurePayload(error)).toMatchObject({
         code: "provider_safety_refusal",
         retryable: false,
