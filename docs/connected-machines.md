@@ -68,8 +68,10 @@ token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
 so `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode list|show|call` works even without
-Bun/Node/`ogtool`. Discovery defaults to 50 tools per page and at most 16 KiB stdout;
-use `list --query <substring> --limit <1..100> --offset <integer>` to narrow or continue,
+Bun/Node/`ogtool`. Default text and `list --json` return all authorized tools with
+short summaries, without an aggregate stdout cap or default pagination;
+use `list --query <substring>` to filter, or explicitly opt into a slice with
+`--limit <1..100> --offset <integer>`,
 `list --json` for digest/count/continuation metadata, or `list --full` for the legacy
 complete catalog. `show <path>` returns one tool's details/schema, capped at 64 KiB.
 It reaches the same journal/executor as model MCP; the machine

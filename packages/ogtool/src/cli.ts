@@ -23,6 +23,8 @@ function usage(exitCode = 1): void {
     "  ogtool doctor",
     "  ogtool --version",
     "",
+    "list returns all authorized tools by default; --limit/--offset are opt-in slices",
+    "",
     "requires OPENGENI_CODEMODE_URL and OPENGENI_CODEMODE_TOKEN or OPENGENI_CODEMODE_TOKEN_FILE",
   ].join("\n");
   (exitCode === 0 ? process.stdout : process.stderr).write(`${output}\n`);

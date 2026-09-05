@@ -130,10 +130,11 @@ ogtool call docs.search '{"query":"durable catalogs"}'
 
 Discovery is compact by default: `list` prints callable paths plus descriptions
 bounded to 160 Unicode code points. `--query` matches literal case-sensitive substrings
-in paths or full whitespace-normalized descriptions; `--limit` defaults to 50 and is
-bounded to 1..100; `--offset` is a nonnegative safe integer in the filtered catalog.
-The complete text/JSON page is capped at 16 KiB, including escaping, metadata, newline,
-and text continuation hints. Trailing entries are dropped to fit, never partial paths.
+in paths or full whitespace-normalized descriptions. Default text and `--json` return
+all authorized entries, with no aggregate output byte cap or default pagination.
+`--limit` is a strictly opt-in compatibility slice bounded to 1..100; `--offset` is a
+nonnegative safe integer in the filtered catalog and alone returns all remaining tools.
+No trailing entries or partial paths are dropped to fit a byte budget.
 `list --json` returns `{catalogDigest, total, offset, nextOffset, tools:
 [{path, description}]}`. `total` is the filtered count; follow `nextOffset` until null,
 keeping the query and frozen digest unchanged. Empty and past-end pages have no tools
