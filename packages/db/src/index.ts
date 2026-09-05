@@ -328,6 +328,11 @@ import {
 } from "./lossless-json";
 export { LOSSLESS_TEXT_PREFIX } from "./lossless-json";
 import {
+  projectSessionMcpProgressText,
+  SESSION_MCP_PROGRESS_STORAGE_CHARS,
+  sessionMcpProgressScalarIsEncodedSql,
+} from "./session-mcp-progress";
+import {
   seedNewSessionDraftInTransaction,
   rememberNewSessionSelectionInTransaction,
   type NewSessionDraftSnapshot,
@@ -56947,10 +56952,17 @@ export async function getSessionMcpMonitoringSummary(
     const [progress] = await tx
       .select({
         sequence: schema.sessionEvents.sequence,
-        text: sql<string | null>`left(${schema.sessionEvents.payload}->>'progressNote', 600)`,
-        originalChars: sql<
+        storedPrefix: sql<
+          string | null
+        >`left(${schema.sessionEvents.payload}->>'progressNote', ${SESSION_MCP_PROGRESS_STORAGE_CHARS})`,
+        storedChars: sql<
           number | null
         >`char_length(${schema.sessionEvents.payload}->>'progressNote')::integer`,
+        codecVersion: schema.sessionEvents.payloadCodecVersion,
+        scalarIsEncoded: sessionMcpProgressScalarIsEncodedSql(
+          sql`${schema.sessionEvents.payload}->>'progressNote'`,
+          schema.sessionEvents.payloadCodecVersion,
+        ),
         occurredAt: schema.sessionEvents.occurredAt,
       })
       .from(schema.sessionEvents)
@@ -56973,7 +56985,18 @@ export async function getSessionMcpMonitoringSummary(
       .limit(1);
     return {
       goal: goal ? { ...goal, status: goal.status as SessionGoalStatus } : null,
-      progress: progress ? { ...progress, occurredAt: progress.occurredAt.toISOString() } : null,
+      progress: progress
+        ? {
+            sequence: progress.sequence,
+            ...projectSessionMcpProgressText(
+              progress.storedPrefix,
+              progress.storedChars,
+              progress.codecVersion,
+              progress.scalarIsEncoded,
+            ),
+            occurredAt: progress.occurredAt.toISOString(),
+          }
+        : null,
       wait:
         wait?.reason && wait.until
           ? { reason: wait.reason, until: wait.until.toISOString() }

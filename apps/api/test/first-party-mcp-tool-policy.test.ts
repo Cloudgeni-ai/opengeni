@@ -147,11 +147,40 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("session_wait needs caller-session context as well as sessions:read", () => {
+    const scoped = grant(["sessions:read"], ["session_wait"]);
+    const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...scoped,
+          metadata: sessionlessMetadata,
+        }),
+      ),
+    ).not.toContain("session_wait");
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), scoped))).toContain("session_wait");
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...scoped,
+          permissions: [],
+        }),
+      ),
+    ).not.toContain("session_wait");
+  });
+
   test("session monitoring offers explicit full mode without changing permission gates", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
       grant(["sessions:read"], ["sessions_list", "session_get"]),
     );
+    const getDescription = (
+      server as unknown as {
+        _registeredTools: Record<string, { description: string }>;
+      }
+    )._registeredTools["session_get"]!.description;
+    expect(getDescription).toContain("last consumed event cursor");
+    expect(getDescription).toContain("not this snapshot lastSequence");
     for (const detail of [undefined, "compact", "full"]) {
       expect(
         registeredToolInputSchema(server, "sessions_list").safeParse({

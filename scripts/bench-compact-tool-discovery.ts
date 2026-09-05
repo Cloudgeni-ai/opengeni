@@ -59,7 +59,7 @@ const server = Bun.serve({
 });
 try {
   const commands = process.argv.includes("--baseline")
-    ? [["list"]]
+    ? [["list", "--full"]]
     : [["list"], ["list", "--json"], ["list", "--full"], ["show", "fixture.search_0"]];
   const results = [];
   for (const args of commands) {
@@ -80,7 +80,27 @@ try {
       child.exited,
     ]);
     if (exitCode !== 0) throw new Error(`${args.join(" ")}: ${stderr}`);
-    results.push({ command: `ogtool ${args.join(" ")}`, bytes: Buffer.byteLength(stdout) });
+    const paths =
+      args[0] !== "list"
+        ? []
+        : args.length === 1
+          ? stdout
+              .split("\n")
+              .filter((line) => line && !line.startsWith("#"))
+              .map((line) => line.split(" — ")[0])
+          : JSON.parse(stdout).tools.map((tool: { path: string }) => tool.path);
+    if (
+      args[0] === "list" &&
+      JSON.stringify(paths) !==
+        JSON.stringify(catalog.entries.map((entry) => entry.codemodePath.join(".")))
+    ) {
+      throw new Error(`${args.join(" ")} did not retain every fixture path in order`);
+    }
+    results.push({
+      command: `ogtool ${args.join(" ")}`,
+      tools: args[0] === "list" ? paths.length : 1,
+      bytes: Buffer.byteLength(stdout),
+    });
   }
   console.log(JSON.stringify({ fixtureTools: toolCount, results }, null, 2));
 } finally {
