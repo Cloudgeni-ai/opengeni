@@ -147,6 +147,28 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("session_wait needs caller-session context as well as sessions:read", () => {
+    const scoped = grant(["sessions:read"], ["session_wait"]);
+    const { sessionId: _sessionId, ...sessionlessMetadata } = scoped.metadata!;
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...scoped,
+          metadata: sessionlessMetadata,
+        }),
+      ),
+    ).not.toContain("session_wait");
+    expect(registeredToolNames(buildOpenGeniMcpServer(deps(), scoped))).toContain("session_wait");
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(deps(), {
+          ...scoped,
+          permissions: [],
+        }),
+      ),
+    ).not.toContain("session_wait");
+  });
+
   test("session monitoring offers explicit full mode without changing permission gates", () => {
     const server = buildOpenGeniMcpServer(
       deps(),
