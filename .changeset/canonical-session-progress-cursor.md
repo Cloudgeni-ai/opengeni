@@ -5,3 +5,5 @@
 ---
 
 Decode bounded session-monitoring progress scalars with their persisted lossless codec version. Preserve canonical prefixes and explicit truncation without reporting encoded storage lengths as original character counts. Clarify that completion joins use the last consumed event cursor, not a session snapshot watermark that may already include an unread child result.
+
+Validate the complete stored progress scalar before decoding its bounded prefix, preserving literal malformed codec markers even when an invalid suffix lies beyond the read boundary.

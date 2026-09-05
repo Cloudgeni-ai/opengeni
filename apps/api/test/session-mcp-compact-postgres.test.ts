@@ -25,6 +25,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import {
   LOSSLESS_JSON_STRING_PREFIX,
+  fromPostgresLosslessJson,
   toPostgresLosslessJson,
 } from "../../../packages/db/src/lossless-json";
 import { SESSION_MCP_PROGRESS_STORAGE_CHARS } from "../../../packages/db/src/session-mcp-progress";
@@ -249,6 +250,39 @@ describe("compact session MCP database boundary", () => {
     const compact = await call("session_get", { sessionId });
     expect(compact.progress.text).toBe(marker);
     expect(compact.progress).not.toHaveProperty("textTruncated");
+  });
+
+  test("malformed versioned suffixes beyond the prefix match canonical full-scalar decoding", async () => {
+    if (!shared || !client) return;
+    const prefix = LOSSLESS_JSON_STRING_PREFIX + "YQBhAGEA".repeat(600);
+    expect(prefix.length).toBeGreaterThan(SESSION_MCP_PROGRESS_STORAGE_CHARS);
+    for (const suffix of ["!", "\n", "=", "YQ==", "YWF=", "YQBh="]) {
+      const stored = prefix + suffix;
+      const canonical = fromPostgresLosslessJson(stored, 1);
+      expect(canonical).toBe(stored);
+      const [event] = await appendSessionEvents(client.db, grant.workspaceId, sessionId, [
+        { type: "goal.progress", payload: { progressNote: "malformed scalar fixture" } },
+      ]);
+      // Preserve an explicit version while injecting malformed retained data.
+      // The projection must match the codec, not assume new-writer validity.
+      await shared.admin.begin(async (tx) => {
+        await tx`select set_config('opengeni.lossless_content_writer', '1', true)`;
+        await tx`
+          update session_events
+          set payload = ${tx.json({ progressNote: stored })}, payload_codec_version = 1
+          where id = ${event!.id}
+        `;
+      });
+      const summary = await getSessionMcpMonitoringSummary(client.db, grant.workspaceId, sessionId);
+      expect(summary.progress!.text).toBe(canonical.slice(0, 600));
+      expect(summary.progress!.originalChars).toBe(canonical.length);
+      const compact = await call("session_get", { sessionId });
+      expect(compact.progress.text).toStartWith(LOSSLESS_JSON_STRING_PREFIX);
+      expect(compact.progress.textTruncated).toBeTrue();
+      const progressRead = queries.find((query) => query.includes("progressNote"))!;
+      expect(progressRead).toContain("similar to");
+      expect(progressRead).not.toMatch(/"session_events"\."payload"\s*,/);
+    }
   });
 
   test("a completion committed before session_get remains joinable from the consumed cursor", async () => {
