@@ -239,6 +239,11 @@ cutover drains and terminates every old session workflow before the new worker
 starts, so no removed activity/signal identifier or replay adapter belongs in
 the new runtime.
 
+Internal-update history receipts are per atomic delivery batch, not per logical
+turn. A resumed attempt can attach a new batch after its resolved open suffix;
+preserve earlier receipts and canonical history order instead of requiring one
+history-item id for every update delivered to that turn.
+
 ## Pull-request delivery across moving `main`
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of

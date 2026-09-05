@@ -30,6 +30,13 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+A resumed attempt may attach another atomic internal-update batch to the same
+logical turn after its resolved open suffix. Each delivered update retains its
+own batch's durable history-item receipt; a turn-wide update query can therefore
+span multiple batches. Model input reads those batches from canonical history
+in position order, never reconstructs them from update rows, and never requires
+one shared history-item id across the whole turn.
+
 Provider safety refusals terminate the turn with `provider_safety_refusal` and
 the original diagnostic. They are neither temporary provider unavailability
 nor credential failures, even when carried by a 5xx response. Same-turn recovery

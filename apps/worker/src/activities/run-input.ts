@@ -416,13 +416,12 @@ export async function turnInput(
         options.turnId,
       ),
   );
-  if (updates.length > 0) {
-    const historyItemIds = new Set(
-      updates.map((update) => update.deliveredHistoryItemId).filter(Boolean),
-    );
-    if (historyItemIds.size !== 1 || updates.some((update) => !update.deliveredHistoryItemId)) {
-      throw new Error("Delivered internal updates have no single durable model-memory batch");
-    }
+  // A logical turn can receive another atomic batch when an interrupted
+  // attempt resumes. Every update must retain its durable receipt, but the
+  // turn-wide query legitimately spans multiple history items. Canonical
+  // history owns their ordering and exactly-once inclusion below.
+  if (updates.some((update) => !update.deliveredHistoryItemId)) {
+    throw new Error("Delivered internal update has no durable model-memory batch");
   }
   const internalContext = joinInternalContext(
     options.recovering
