@@ -1050,9 +1050,9 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
 
   test("Connected Machine file links read sibling worktrees and Windows volumes", async () => {
     for (const [root, path] of [
-      ["/home/jorge/repos/peloton", "/home/jorge/peloton-worktrees/unified/.agent/brief.md"],
-      ["C:/repos/peloton", "D:/worktrees/unified/brief.md"],
-      ["//server/share/repo", "//server/other/worktree/brief.md"],
+      ["/home/user/repos/example-app", "/home/user/worktrees/example-app-feature/notes/brief.md"],
+      ["C:/repos/example-app", "D:/worktrees/example-app-feature/notes/brief.md"],
+      ["//server/share/repo", "//server/other/worktree/notes/brief.md"],
     ] as const) {
       const requested: string[] = [];
       const svc = new SandboxChannelAService({
@@ -1076,8 +1076,8 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       expect(read.path).toBe(path);
       expect(read.content).toBe("brief");
       expect(requested).toEqual([path]);
-      await svc.fsRead({ path: ".agent/brief.md", encoding: "utf8", maxBytes: 1024 });
-      expect(requested[1]).toBe(".agent/brief.md");
+      await svc.fsRead({ path: "notes/brief.md", encoding: "utf8", maxBytes: 1024 });
+      expect(requested[1]).toBe("notes/brief.md");
       await expect(
         svc.fsRead({ path, encoding: "utf8", maxBytes: 1024, route: { root, epoch: 6 } }),
       ).rejects.toBeInstanceOf(ChannelAFileSystemRouteChangedError);
