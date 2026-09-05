@@ -7,6 +7,7 @@ import {
   type AttemptToolCatalogEntry,
 } from "@opengeni/codemode";
 import packageManifest from "../package.json" with { type: "json" };
+import { compactOutput, parseListOptions } from "./catalog-discovery";
 
 const PACKAGE_NAME = "@opengeni/ogtool";
 const VERSION = packageManifest.version;
@@ -15,6 +16,7 @@ function usage(exitCode = 1): void {
   const output = [
     "usage:",
     "  ogtool list [--full | --json]",
+    "              [--query <substring>] [--limit <1..100>] [--offset <nonnegative integer>]",
     "  ogtool show <tool-path-or-model-name>",
     "  ogtool call <tool-path-or-model-name> [json-object]",
     "  ogtool declarations [output-file]",
@@ -149,28 +151,7 @@ export function listProjection(catalog: AttemptToolCatalog): Record<string, unkn
   };
 }
 
-const DESCRIPTION_MAX_CHARS = 160;
 const SHOW_MAX_BYTES = 64 * 1024;
-
-export function shortDescription(entry: AttemptToolCatalogEntry): string {
-  const text = (entry.description || entry.title || "")
-    .split(/\p{White_Space}+/u)
-    .filter(Boolean)
-    .join(" ");
-  const characters = Array.from(text);
-  return characters.length <= DESCRIPTION_MAX_CHARS
-    ? text
-    : `${characters.slice(0, DESCRIPTION_MAX_CHARS - 1).join("")}…`;
-}
-
-export function compactProjection(catalog: AttemptToolCatalog) {
-  return {
-    tools: catalog.entries.map((entry) => ({
-      path: entry.codemodePath.join("."),
-      description: shortDescription(entry),
-    })),
-  };
-}
 
 export function showOutput(catalog: AttemptToolCatalog, name: string): string {
   const entry = resolveTool(catalog, name);
@@ -212,12 +193,7 @@ async function main(): Promise<void> {
     args.length === 1 &&
     (args[0] === "--help" || args[0] === "-h")
   ) return usage(0);
-  if (
-    command === "list" &&
-    !(args.length === 0 || (args.length === 1 && (args[0] === "--full" || args[0] === "--json")))
-  ) {
-    throw new Error("usage: ogtool list [--full | --json]");
-  }
+  const listOptions = command === "list" ? parseListOptions(args) : null;
   if (command === "show" && (args.length !== 1 || !args[0] || args[0].startsWith("-"))) {
     throw new Error("usage: ogtool show <tool-path-or-model-name>");
   }
@@ -225,14 +201,10 @@ async function main(): Promise<void> {
   const client = configuredClient();
   if (command === "list") {
     const catalog = await client.catalog();
-    if (args[0] === "--full") {
+    if (listOptions!.full) {
       process.stdout.write(`${JSON.stringify(listProjection(catalog), null, 2)}\n`);
-    } else if (args[0] === "--json") {
-      process.stdout.write(`${JSON.stringify(compactProjection(catalog))}\n`);
     } else {
-      for (const tool of compactProjection(catalog).tools) {
-        process.stdout.write(`${tool.path}${tool.description ? ` — ${tool.description}` : ""}\n`);
-      }
+      process.stdout.write(compactOutput(catalog, listOptions!));
     }
     return;
   }
