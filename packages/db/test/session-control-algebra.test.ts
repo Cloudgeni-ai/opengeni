@@ -143,6 +143,23 @@ describe("recursive session control algebra", () => {
       opId,
       command: "printf done",
     });
+    const listInput = {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.root.id,
+    };
+    expect(
+      (await listSessionBackgroundCommands(client.db, { ...listInput, activeOnly: true })).map(
+        (item) => item.id,
+      ),
+    ).toEqual([commandId]);
+    expect(
+      await listSessionBackgroundCommands(client.db, {
+        ...listInput,
+        sessionId: value.child.id,
+        activeOnly: true,
+      }),
+    ).toEqual([]);
     const turnSettlement = await applySessionTurnSettlement(client.db, value.grant.workspaceId!, {
       sessionId: value.root.id,
       turnId: attempt.turn.id,
@@ -170,6 +187,10 @@ describe("recursive session control algebra", () => {
       reason: multibyteReason,
     });
     expect(terminal?.command).toMatchObject({ id: commandId, state: "exited", exitCode: 0 });
+    expect(
+      await listSessionBackgroundCommands(client.db, { ...listInput, activeOnly: true }),
+    ).toEqual([]);
+    expect(await listSessionBackgroundCommands(client.db, listInput)).toHaveLength(1);
     expect(terminal?.events.map((event) => event.type)).toEqual([
       "session.command.finished",
       "system.update.pending",
@@ -186,6 +207,7 @@ describe("recursive session control algebra", () => {
     expect(updates[0]).toMatchObject({
       kind: "background_command_result",
       classification: "success",
+      summary: "printf done: completed successfully.",
       payload: {
         type: "background_command_result",
         commandId,
@@ -300,6 +322,7 @@ describe("recursive session control algebra", () => {
         accountId: value.grant.accountId,
         workspaceId: value.grant.workspaceId!,
         sessionId,
+        activeOnly: true,
       });
       expect(commands).toHaveLength(1);
       expect(commands[0]).toMatchObject({ state: "stopping" });

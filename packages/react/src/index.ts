@@ -606,3 +606,4 @@ export {
   truncate,
   tryParseJson,
 } from "./lib/format";
+export { SessionCommandsPanel } from "./components/session-commands-panel";

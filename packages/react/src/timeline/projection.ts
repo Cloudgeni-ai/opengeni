@@ -1853,8 +1853,7 @@ function isTurnBoundary(group: TimelineGroup | undefined): boolean {
       (group.item.kind === "user-message" ||
         group.item.kind === "human-input" ||
         group.item.kind === "context-compaction" ||
-        (group.item.kind === "machine-input-batch" &&
-          group.item.members.some((member) => member.kind === "media_generation_result")) ||
+        group.item.kind === "machine-input-batch" ||
         (group.item.kind === "notice" && group.item.tone === "input")))
   );
 }
@@ -2021,6 +2020,8 @@ function machineInputMembers(value: unknown): MachineInputBatchItem["members"] {
   const kinds = new Set<MachineInputBatchItem["members"][number]["kind"]>([
     "scheduled_occurrence",
     "goal_continuation",
+    "background_command_result",
+    "session_wait_timeout",
     "agent_message",
     "agent_steer_instruction",
     "child_terminal_result",

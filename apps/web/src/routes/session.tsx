@@ -65,6 +65,7 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
+import { SessionCommands } from "@/components/session/commands";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import {
@@ -1966,6 +1967,14 @@ function SessionChatPane(props: {
             composer={terminal ? undefined : composer}
             goal={props.goal}
             readOnly={terminal}
+            commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
+            commandsPanel={
+              <SessionCommands
+                key={props.session.id}
+                sessionId={props.session.id}
+                readOnly={terminal}
+              />
+            }
             agentsSignal={agentsSignal}
             agentsPanel={
               props.agentNodes.length > 0 ? (

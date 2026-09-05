@@ -1238,13 +1238,18 @@ export class OpenGeniClient {
     );
   }
 
+  /** Running and stopping commands only; settled results remain in session history. */
   async listSessionBackgroundCommands(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<SessionBackgroundCommandListResponse> {
     return await this.requestJson<SessionBackgroundCommandListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands`,
+      undefined,
+      {},
+      options,
     );
   }
 
