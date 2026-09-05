@@ -425,6 +425,98 @@ describe("timeline scroll ownership browser regression", () => {
     await page.setViewportSize({ width: 1280, height: 900 });
   }, 30_000);
 
+  test("a compact newest-suffix prepend keeps the reader instead of snapping to the live tip", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-scroll-test.html?compact-tail`);
+    await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
+    await page.locator('[data-timeline-row="row-13"]').waitFor({ timeout: 15_000 });
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+    });
+    await page.waitForFunction(() => {
+      const node = document.querySelector<HTMLElement>(
+        "[data-timeline-test] [data-og-timeline-scroller]",
+      );
+      return !!node && node.style.visibility !== "hidden" && node.scrollHeight > 0;
+    });
+
+    // Size the shell so the newest suffix barely overflows. That is the
+    // production first-paint shape: the reader can sit at y=0 while the
+    // restored gap after prepend is still inside PIN_THRESHOLD of the tip.
+    await page.evaluate(() => {
+      const shell = document.querySelector<HTMLElement>(".timeline-test-shell-compact");
+      const node = document.querySelector<HTMLElement>(
+        "[data-timeline-test] [data-og-timeline-scroller]",
+      );
+      if (!shell || !node) {
+        throw new Error("compact tail scroller missing");
+      }
+      const targetMaxScroll = 36;
+      const chrome = shell.clientHeight - node.clientHeight;
+      shell.style.height = `${Math.max(chrome + 80, node.scrollHeight - targetMaxScroll + chrome)}px`;
+    });
+    await page.waitForTimeout(50);
+
+    const scroller = page.locator("[data-timeline-test] [data-og-timeline-scroller]");
+    const beforeWheel = await scroller.evaluate((node) => ({
+      scrollTop: node.scrollTop,
+      maxScroll: node.scrollHeight - node.clientHeight,
+      gap: node.scrollHeight - node.clientHeight - node.scrollTop,
+    }));
+    expect(beforeWheel.maxScroll).toBeGreaterThan(1);
+    expect(beforeWheel.maxScroll).toBeLessThanOrEqual(48);
+    expect(beforeWheel.gap).toBeLessThan(2);
+
+    await scroller.hover();
+    for (let index = 0; index < 8; index += 1) {
+      await page.mouse.wheel(0, -120);
+      if ((await scroller.evaluate((node) => node.scrollTop)) < 2) {
+        break;
+      }
+    }
+    await page.waitForFunction(
+      () => {
+        const node = document.querySelector<HTMLElement>(
+          "[data-timeline-test] [data-og-timeline-scroller]",
+        );
+        return !!node && node.scrollTop < 2;
+      },
+      undefined,
+      { timeout: 5_000 },
+    );
+    await page.locator("[data-og-jump-to-latest]").waitFor({ timeout: 5_000 });
+
+    const atTop = await scroller.evaluate((node) => ({
+      scrollTop: node.scrollTop,
+      gap: node.scrollHeight - node.clientHeight - node.scrollTop,
+      height: node.scrollHeight,
+    }));
+    expect(atTop.scrollTop).toBeLessThan(2);
+    expect(atTop.gap).toBeGreaterThan(1);
+    expect(atTop.gap).toBeLessThanOrEqual(48);
+
+    const anchor = page.locator('[data-timeline-row="row-13"]').first();
+    const beforeAnchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+
+    await page.evaluate(() => window.timelineScrollHarness!.prepend());
+    await page.locator('[data-timeline-row="row-1"]').waitFor({ timeout: 5_000 });
+    await page.waitForTimeout(80);
+
+    const after = await scroller.evaluate((node) => ({
+      scrollTop: node.scrollTop,
+      gap: node.scrollHeight - node.clientHeight - node.scrollTop,
+      height: node.scrollHeight,
+      pin: node.getAttribute("data-og-bottom-follow"),
+    }));
+    const afterAnchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+    expect(after.height).toBeGreaterThan(atTop.height + 200);
+    expect(after.scrollTop).toBeGreaterThan(200);
+    expect(after.gap).toBeCloseTo(atTop.gap, 0);
+    expect(after.pin).toBe("false");
+    expect(afterAnchorTop).toBeCloseTo(beforeAnchorTop, 0);
+    expect(await page.locator("[data-og-jump-to-latest]").count()).toBe(1);
+  }, 30_000);
+
   test("keeps a nested row anchored when prepend merges into its activity group", async () => {
     await page.goto(`${baseUrl}/timeline-scroll-merge-test.html`);
     await page.waitForFunction(() => window.timelineMergeHarness !== undefined);
