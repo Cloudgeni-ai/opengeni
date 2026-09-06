@@ -2765,7 +2765,7 @@ function registerGoalTools(
     "wait_for_input",
     {
       description:
-        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists its absolute deadline, and timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Always end your turn immediately after the tool succeeds. Use goal_pause instead when the active goal itself should stop pending a human decision.",
+        "End the current turn and wait out of turn for relevant session input. This is self-only and does not require a goal. After success, the production runtime ends the turn at the tool-batch boundary without another model step or final message. Use it for long or uncertain waits instead of sleeping or repeatedly calling session_wait/command_wait. timeoutSeconds is a relative safety-wake duration; OpenGeni persists the first absolute deadline for the turn, and repeated calls do not extend it. Timeout never cancels a background command. A human/API prompt, agent message or Steer, child terminal result, scheduled input, terminal background-command result, or the deadline wakes the session. Use goal_pause instead when the active goal itself should stop pending a human decision.",
       inputSchema: {
         reason: inputWaitReasonSchema,
         timeoutSeconds: z4
@@ -2812,7 +2812,7 @@ function registerGoalTools(
         operationId,
         replay,
         nextAction:
-          "End your turn now. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
+          "The runtime yields this turn after the tool batch settles. Relevant input or the timeout deadline will start a new turn; the timeout does not cancel commands.",
       });
     },
   );

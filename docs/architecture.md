@@ -156,6 +156,9 @@ Internal-update delivery is atomic per batch, not unique per logical turn:
 resumed attempts may append a new batch while retaining earlier receipts.
 Canonical model history owns their ordered, exactly-once inclusion.
 
+Successful `wait_for_input` ends model execution after tool-batch settlement;
+trusted runtime state and immutable same-turn deadlines preserve wait/wake authority.
+
 The full `runAgentTurn` activity is non-retryable by default because model,
 tool, sandbox, Git, connector, and cloud operations can have external effects.
 Recovery is explicit and attempt-fenced. Provider work occurs outside database

@@ -1571,6 +1571,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         videoGenerationAcceptancesByCallId,
       });
     } catch (error) {
+      // Stop new external wait mutations before asynchronous failure
+      // persistence. Do not drain here: the original failure/cancellation and
+      // durable attempt fence retain authority over already-running calls.
+      eventing.preparedTools?.inputWaitYield?.closeAdmission();
       return await settleTurnFailure({
         error,
         input,

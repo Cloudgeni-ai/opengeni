@@ -58756,6 +58756,26 @@ export async function waitForSessionInputWithEvent(
           `Session ${sessionId} has no Temporal workflow identity`,
         );
       }
+      // The first wait owns the logical turn's deadline, not a renewable lease.
+      // Fresh operation keys and recovered attempts retain its receipt facts.
+      if (session.inputWaitTurnId === input.command.actor.turnId && session.inputWaitUntil) {
+        const deadlineAt = session.inputWaitUntil.toISOString();
+        await updateSessionCommandReceiptResult(tx, reserved.receipt.id, {
+          result: {
+            waitTurnId: session.inputWaitTurnId,
+            deadlineAt,
+            reason: session.inputWaitReason,
+          },
+        });
+        return {
+          events: [],
+          operationId: reserved.receipt.id,
+          replay: false,
+          waitTurnId: session.inputWaitTurnId,
+          deadlineAt,
+        };
+      }
+
       const now = await transactionNow(tx);
       const deadline = new Date(now.getTime() + input.timeoutSeconds * 1000);
       const deadlineAt = deadline.toISOString();

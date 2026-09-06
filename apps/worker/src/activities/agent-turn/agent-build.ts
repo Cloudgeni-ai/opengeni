@@ -599,6 +599,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
       return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
+        ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),

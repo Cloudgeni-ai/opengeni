@@ -1012,7 +1012,7 @@ describe("API component integration", () => {
     }>(mcp, "wait_for_input", waitArgs);
     expect(held).toMatchObject({ status: "waiting_for_input", replay: false });
     expect(new Date(held.deadlineAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
-    expect(held.nextAction).toContain("End your turn now");
+    expect(held.nextAction).toContain("runtime yields this turn");
     const heldReplay = await callMcpTool<{ replay: boolean; deadlineAt: string }>(
       mcp,
       "wait_for_input",

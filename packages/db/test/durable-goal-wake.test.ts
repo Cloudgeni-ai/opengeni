@@ -2542,6 +2542,33 @@ describe("session-level wait_for_input", () => {
     expect(refreshedWake!.next_attempt_at.toISOString()).toBe(waiting.deadlineAt);
   });
 
+  test("fresh same-turn wait operations retain the original deadline and start receipt", async () => {
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const first = await wait(ctx, { timeoutSeconds: 600, reason: "Original wait" });
+    const originalColumns = await waitColumns(ctx);
+    const originalWake = await outboxRow(ctx);
+    const operationKey = crypto.randomUUID();
+    const duplicates = await Promise.all([
+      wait(ctx, { timeoutSeconds: 1800, reason: "Changed reason", operationKey }),
+      wait(ctx, { timeoutSeconds: 3600, reason: "Concurrent wait" }),
+    ]);
+    for (const duplicate of duplicates) {
+      expect(duplicate.deadlineAt).toBe(first.deadlineAt);
+      expect(duplicate.events).toEqual([]);
+    }
+    expect(await waitColumns(ctx)).toEqual(originalColumns);
+    expect(await outboxRow(ctx)).toEqual(originalWake);
+    const replay = await wait(ctx, {
+      timeoutSeconds: 1800,
+      reason: "Changed reason",
+      operationKey,
+    });
+    expect(replay.replay).toBe(true);
+    expect(replay.deadlineAt).toBe(first.deadlineAt);
+    expect(replay.events).toEqual([]);
+  });
+
   test("a replacement attempt replays the original wait instead of moving its deadline", async () => {
     const ctx = await runningGoalFixture();
     await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
@@ -2593,6 +2620,30 @@ describe("session-level wait_for_input", () => {
       deadlineAt: first.deadlineAt,
     });
     expect((await waitColumns(ctx)).input_wait_until?.toISOString()).toBe(first.deadlineAt);
+    const fresh = await waitForSessionInputWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        reason: "Recovered attempt still waiting",
+        timeoutSeconds: 3600,
+        command: {
+          accountId: ctx.grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            sessionId: ctx.session.id,
+            turnId: replacement.turn.id,
+            attemptId: replacementAttemptId,
+            executionGeneration: replacement.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
+        },
+      },
+    );
+    expect(fresh.deadlineAt).toBe(first.deadlineAt);
+    expect(fresh.events).toEqual([]);
+    await expect(wait(ctx, { timeoutSeconds: 3600 })).rejects.toThrow();
+    expect((await waitColumns(ctx)).input_wait_until?.toISOString()).toBe(first.deadlineAt);
   });
 
   test("human and API prompts wake the session before the safety deadline", async () => {
@@ -2637,63 +2688,67 @@ describe("session-level wait_for_input", () => {
     });
   });
 
-  test("immediate machine input wins and the later finished turn supersedes the wait", async () => {
-    const ctx = await runningGoalFixture();
-    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
-    const waiting = await wait(ctx, { timeoutSeconds: 3600 });
-    await settleIdle(ctx);
+  test.each(["before", "after"] as const)(
+    "machine input arriving %s turn settlement supersedes the wait",
+    async (timing) => {
+      const ctx = await runningGoalFixture();
+      await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      const waiting = await wait(ctx, { timeoutSeconds: 3600 });
+      if (timing === "after") await settleIdle(ctx);
 
-    const input = await addSessionSystemUpdate(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      kind: "agent_message",
-      classification: "info",
-      sourceId: crypto.randomUUID(),
-      dedupeKey: `agent-message-${crypto.randomUUID()}`,
-      summary: "Peer session finished",
-      payload: {
-        type: "agent_message",
-        text: "Peer session finished: PR opened",
-        operationId: crypto.randomUUID(),
-      },
-    });
-    if (!input.added) throw new Error("agent message was not inserted");
-    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
-      kind: "runnable",
-    });
+      const input = await addSessionSystemUpdate(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `agent-message-${crypto.randomUUID()}`,
+        summary: "Peer session finished",
+        payload: {
+          type: "agent_message",
+          text: "Peer session finished: PR opened",
+          operationId: crypto.randomUUID(),
+        },
+      });
+      if (!input.added) throw new Error("agent message was not inserted");
+      if (timing === "before") await settleIdle(ctx);
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "runnable",
+      });
 
-    const attemptId = crypto.randomUUID();
-    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
-      sessionId: ctx.session.id,
-      workflowId: `session-${ctx.session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: `dispatch-${crypto.randomUUID()}`,
-      trigger: { kind: "next" },
-    });
-    expect(claimed.action).toBe("claimed");
-    if (claimed.action !== "claimed") return;
-    await settleClaimedIdle(ctx, claimed, attemptId);
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        workflowId: `session-${ctx.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed") return;
+      await settleClaimedIdle(ctx, claimed, attemptId);
 
-    expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
-      kind: "input-wait",
-      disposition: "superseded",
-      waitTurnId: ctx.turn.id,
-      deadlineAt: waiting.deadlineAt,
-    });
-    const superseded = await settleSessionInputWait(client.db, {
-      accountId: ctx.grant.accountId,
-      workspaceId: ctx.grant.workspaceId!,
-      sessionId: ctx.session.id,
-      waitTurnId: ctx.turn.id,
-      disposition: "superseded",
-    });
-    expect(superseded.action).toBe("superseded");
-    expect(superseded.events.map((event) => event.type)).toEqual(["session.wait.finished"]);
-    expect(superseded.events[0]!.payload).toMatchObject({ outcome: "input" });
-    expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
-  });
+      expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
+        kind: "input-wait",
+        disposition: "superseded",
+        waitTurnId: ctx.turn.id,
+        deadlineAt: waiting.deadlineAt,
+      });
+      const superseded = await settleSessionInputWait(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        waitTurnId: ctx.turn.id,
+        disposition: "superseded",
+      });
+      expect(superseded.action).toBe("superseded");
+      expect(superseded.events.map((event) => event.type)).toEqual(["session.wait.finished"]);
+      expect(superseded.events[0]!.payload).toMatchObject({ outcome: "input" });
+      expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
+    },
+  );
 
   test("deadline settlement queues one typed timeout input in the same transaction", async () => {
     const ctx = await runningGoalFixture();

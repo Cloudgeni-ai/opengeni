@@ -346,8 +346,14 @@ export function assertAgentStreamNotCancelled(cancelled: boolean): void {
 }
 
 /** Interruption streams do not produce a normal final output. Call this only
- * after the interruption branch has settled any required action. */
-export function requireAgentStreamFinalOutput(finalOutput: unknown | undefined): unknown {
+ * after the interruption branch has settled any required action. A successful
+ * runtime-owned input wait is a normal terminal result without assistant text;
+ * its authority comes from prepared tools, never the provider's output. */
+export function requireAgentStreamFinalOutput(
+  finalOutput: unknown | undefined,
+  inputWaitYielded = false,
+): unknown {
+  if (inputWaitYielded) return "";
   if (finalOutput === undefined) {
     throw new IncompleteAgentStreamError();
   }

@@ -1409,6 +1409,26 @@ never repeats provider execution.
 the durable command row. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+A successful first-party `wait_for_input` is an enforced production-runtime
+boundary, not a request for the model to volunteer a final answer. The trusted
+tool transport records acceptance in attempt-local control state; after the
+tool batch settles, the runner returns without another model step. Canonical
+tool receipts and parallel sibling results remain in history and the worker
+uses ordinary turn settlement. Codemode shares the same trusted acceptance
+state; stdout and third-party lookalike tools cannot request a yield. Failed
+wait calls do not yield. Repeated accepted waits in the same logical turn keep
+the first deadline and reason rather than renewing the wait, including across
+attempt recovery. Acceptance is coordinated with provider dispatch and sealed
+before terminal settlement. Calls racing an already-sealed dispatch are rejected
+before the remote wait mutation. Only an actual runner yield suppresses a final
+assistant message, never late acceptance alone. Failure settlement closes new
+wait admission without waiting for stalled calls; already-running mutations
+remain subject to durable attempt fencing. Compaction recovery may start a new
+stream generation, but old callbacks cannot control its admission and pending
+or accepted waits are retained across the retry. Durable input/deadline
+arbitration remains in the existing session wait transaction and workflow;
+this does not resume a paused session.
+
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
 deletion takes a separate transaction-scoped background-command advisory prefix
