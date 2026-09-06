@@ -224,6 +224,7 @@ describe("useSessionEvents", () => {
     let durableHead = 2;
     let failHeadRead = false;
     let delayedTail: Promise<SessionEvent[]> | null = null;
+    let delayedOlder: Promise<void> | null = null;
     const headReadCalls: GetSessionOptions[] = [];
     const listCalls: ListOptions[] = [];
     const streamCalls: number[] = [];
@@ -235,6 +236,11 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
+        if (delayedOlder && options.before === 146) {
+          const page = listPage(store, options);
+          await delayedOlder;
+          return page;
+        }
         if (delayedTail && options.before === Number.MAX_SAFE_INTEGER) {
           return await delayedTail;
         }
@@ -372,6 +378,16 @@ describe("useSessionEvents", () => {
       expect(hook.result.current.events[0]?.sequence).toBe(146);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
 
+      let releaseOlder!: () => void;
+      delayedOlder = new Promise<void>((resolve) => {
+        releaseOlder = resolve;
+      });
+      let pendingOlder!: ReturnType<typeof hook.result.current.loadOlder>;
+      await actRun(() => {
+        pendingOlder = hook.result.current.loadOlder();
+      });
+      expect(hook.result.current.loadingOlder).toBe(true);
+
       // A gap beyond the bounded one-page probe budget skips the forward
       // read entirely and goes straight to the latest compact tail.
       store = Array.from({ length: 6_000 }, (_, index) => event(index + 1));
@@ -403,6 +419,16 @@ describe("useSessionEvents", () => {
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
       expect(hook.result.current.events[0]?.sequence).toBe(5_746);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
+
+      // Replacement retires navigation against the discarded window. The old
+      // page must not splice 1–145 onto 5746–6000, leaving an inaccessible gap.
+      expect(hook.result.current.loadingOlder).toBe(false);
+      releaseOlder();
+      await actRun(() => pendingOlder);
+      expect(pendingOlder.committed).toBe(false);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
+      expect(hook.result.current.hasOlder).toBe(true);
 
       // The head read is only an optimization. A transient failure falls back
       // to the SDK's exact cursor replay and keeps the existing timeline.

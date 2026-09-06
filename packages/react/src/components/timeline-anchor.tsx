@@ -21,7 +21,9 @@ export class TimelineBeforeLayout extends Component<{
 export function captureTimelineAnchor(scroller: HTMLElement): TimelineAnchor | null {
   const viewport = scroller.getBoundingClientRect();
   if (viewport.height <= 0) return null;
-  const groups = Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]"));
+  const groups = Array.from(scroller.querySelectorAll<HTMLElement>("[data-og-group-key]")).filter(
+    (group) => group.getBoundingClientRect().height > 0,
+  );
   const anchors: TimelineAnchor = [];
   // A disclosure is the reader's explicit point of interaction. In particular,
   // anchoring a paragraph below an expanding disclosure would move its button.

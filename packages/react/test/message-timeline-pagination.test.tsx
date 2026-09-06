@@ -641,7 +641,7 @@ describe("MessageTimeline pagination affordances", () => {
     await flush();
     expect(scroller.scrollTop).toBe(0);
 
-    layout.setContentHeight(2_440);
+    layout.setContentHeightOnPrepend(2_440);
     await r.rerender(<MessageTimeline events={manyEvents(20)} hasOlder loadingOlder={false} />);
     await flush();
     await drainFrames(frames);
@@ -730,7 +730,7 @@ describe("MessageTimeline pagination affordances", () => {
     expect(scroller.scrollTop).toBe(0);
 
     controlled.commit();
-    layout.setContentHeight(2_440);
+    layout.setContentHeightOnPrepend(2_440);
     await r.rerender(
       <PublicMessageTimeline events={manyEvents(20)} hasOlder onLoadOlder={onLoadOlder} />,
     );
@@ -4225,6 +4225,17 @@ function mockScrollerLayout(
   let tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;
   let currentScrollTop = Math.max(0, contentHeight - options.clientHeight);
   const scrollerTop = 100;
+  let pendingHeight: { height: number; rows: number } | null = null;
+  const refreshLayout = () => {
+    if (
+      pendingHeight &&
+      scroller.querySelectorAll("[data-og-group-key]").length !== pendingHeight.rows
+    ) {
+      contentHeight = pendingHeight.height;
+      tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;
+      pendingHeight = null;
+    }
+  };
 
   const findTip = (): HTMLElement | null => {
     const inner = scroller.firstElementChild;
@@ -4245,7 +4256,10 @@ function mockScrollerLayout(
   });
   Object.defineProperty(scroller, "scrollHeight", {
     configurable: true,
-    get: () => contentHeight,
+    get: () => {
+      refreshLayout();
+      return contentHeight;
+    },
   });
   Object.defineProperty(scroller, "scrollTop", {
     configurable: true,
@@ -4266,6 +4280,7 @@ function mockScrollerLayout(
 
   const scrollerElementRect = Element.prototype.getBoundingClientRect;
   Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+    refreshLayout();
     if (this === scroller) {
       return {
         top: scrollerTop,
@@ -4317,6 +4332,14 @@ function mockScrollerLayout(
   };
 
   return {
+    // Pre-commit snapshots must see the old DOM's geometry. Growing the mock
+    // before React mutates rows would simulate an unrelated prior resize.
+    setContentHeightOnPrepend(next: number) {
+      pendingHeight = {
+        height: next,
+        rows: scroller.querySelectorAll("[data-og-group-key]").length,
+      };
+    },
     setContentHeight(next: number) {
       contentHeight = next;
       tipTopInScroller = contentHeight - options.paddingBottom - options.tipHeight;

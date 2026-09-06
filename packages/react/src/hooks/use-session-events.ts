@@ -427,6 +427,16 @@ export function useSessionEvents(
           }
           const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = boundBrowserSessionEventWindow(window.events);
+          // A replacement tail retires requests against the discarded window.
+          // Ordinary SSE reconnects preserve navigation, but splicing an old
+          // page into this new tail could leave an inaccessible history gap.
+          navigationGenerationRef.current += 1;
+          loadingOlderRef.current = false;
+          loadingNewerRef.current = false;
+          loadingOldestRef.current = false;
+          setLoadingOlder(false);
+          setLoadingNewer(false);
+          setLoadingOldest(false);
           eventWindowRef.current = retained;
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
           newestSequenceRef.current =
