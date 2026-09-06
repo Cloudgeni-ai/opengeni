@@ -132,7 +132,7 @@ afterAll(() => {
   GlobalRegistrator.unregister();
 });
 
-describe("Learning & autonomy", () => {
+describe("Workspace instruction and Skill autonomy", () => {
   test("renders only the learning-mode selector and saves with preserved overrides", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -143,8 +143,10 @@ describe("Learning & autonomy", () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
       expect(container.textContent).toContain("Off");
-      expect(container.textContent).toContain("Review first");
+      expect(container.textContent).toContain("Require approval");
       expect(container.textContent).toContain("Autonomous");
+      expect(container.textContent).toContain("Workspace instruction & Skill autonomy");
+      expect(container.textContent).toContain("Workspace instructions and Skills automatically");
       expect(container.querySelectorAll('input[name="learning-mode"]')).toHaveLength(3);
       expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
         true,
@@ -187,7 +189,7 @@ describe("Learning & autonomy", () => {
       );
       expect(rollbackRevision).not.toHaveBeenCalled();
       expect(undoActivation).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("Learning mode saved.");
+      expect(container.textContent).toContain("Instruction and Skill mode saved.");
     } finally {
       await act(async () => root.unmount());
     }
@@ -213,18 +215,20 @@ describe("Learning & autonomy", () => {
       );
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
-      expect(container.querySelector<HTMLInputElement>('input[value="off"]')?.checked).toBe(true);
+      expect(container.querySelector<HTMLInputElement>('input[value="suggest"]')?.checked).toBe(
+        true,
+      );
 
-      const reviewFirst = container.querySelector<HTMLInputElement>('input[value="suggest"]');
+      const off = container.querySelector<HTMLInputElement>('input[value="off"]');
       await act(async () => {
-        reviewFirst!.click();
+        off!.click();
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
       expect(createRevision).toHaveBeenCalledTimes(1);
       expect(createRevision).toHaveBeenCalledWith(
         workspaceId,
         expect.objectContaining({
-          workspaceMode: "suggest",
+          workspaceMode: "off",
           sourceOverrides: [],
           supersedesRevisionId: null,
         }),
@@ -238,7 +242,7 @@ describe("Learning & autonomy", () => {
           expectedActivationVersion: 0,
         }),
       );
-      expect(container.textContent).toContain("Learning mode saved.");
+      expect(container.textContent).toContain("Instruction and Skill mode saved.");
     } finally {
       await act(async () => root.unmount());
     }
@@ -256,7 +260,7 @@ describe("Learning & autonomy", () => {
       await act(async () => new Promise((resolve) => setTimeout(resolve, 0)));
 
       expect(container.textContent).toContain(
-        "Workspace admin access is required to change learning policy.",
+        "Workspace admin access is required to change instruction and Skill autonomy.",
       );
       expect(container.querySelector<HTMLFieldSetElement>("fieldset")?.disabled).toBe(true);
     } finally {

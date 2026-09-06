@@ -1931,7 +1931,10 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       holderId: "viewer-waits-for-provider-pause",
       backend: "modal",
       leaseTtlMs: 60_000,
-      captureWaitMs: 1_000,
+      // The active child froze a 60s claim before this lower-config caller
+      // arrived. The persisted deadline, not this now-short local budget, owns
+      // how long an opted-in lifecycle waiter may keep observing.
+      captureWaitMs: 25,
     }).finally(() => {
       acquireWaitSettled = true;
     });
@@ -1964,11 +1967,11 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedEpoch: 14,
       expectedInstanceId: "box-capture-gate",
       operation: "waitsForExactCapture",
-      captureWaitMs: 1_000,
+      captureWaitMs: 25,
     }).finally(() => {
       waitSettled = true;
     });
-    await Bun.sleep(50);
+    await Bun.sleep(75);
     expect(waitSettled).toBe(false);
     expect(acquireWaitSettled).toBe(false);
     const mutationWaitController = new AbortController();
@@ -2312,7 +2315,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     });
     const settings = testSettings({
       sandboxSnapshotIntervalMs: 1,
-      sandboxSnapshotTimeoutMs: 5_000,
+      sandboxSnapshotTimeoutMs: 25,
     });
     const capture = maybePersistWarmWorkspaceSnapshot(
       { db, settings },
@@ -2358,11 +2361,19 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       return admission;
     })();
     await Bun.sleep(75);
+    expect(await capture).toBe(false);
+    let capturePhysicallySettled = false;
+    void capture.settled.then(() => {
+      capturePhysicallySettled = true;
+    });
+    await Bun.sleep(0);
+    expect(capturePhysicallySettled).toBe(false);
     expect(providerReadCalls).toBe(0);
     expect(providerCommandCalls).toBe(0);
 
     finishPersist?.(new TextEncoder().encode("tar-test-archive"));
-    expect(await capture).toBe(true);
+    await capture.settled;
+    expect(capturePhysicallySettled).toBe(true);
     expect(await read).toBe("read-after-capture");
     expect(providerReadCalls).toBe(1);
     const admission = await command;

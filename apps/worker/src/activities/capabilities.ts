@@ -8,6 +8,12 @@ import {
   withWorkspaceGatewayCredential,
   withWorkspaceOpenRouterCatalogProvider,
   withWorkspaceOpenRouterCredential,
+  withOrganizationGatewayCatalogProvider,
+  withOrganizationGatewayCredential,
+  withOrganizationOpenRouterCatalogProvider,
+  withOrganizationOpenRouterCredential,
+  ORGANIZATION_GATEWAY_MODEL_ID_PREFIX,
+  ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX,
   withXaiSubscriptionCatalogProvider,
 } from "@opengeni/config";
 import { settingsWithEnabledCapabilityMcpServers } from "@opengeni/core";
@@ -21,6 +27,9 @@ import {
   workspaceCodexSubscriptionActive,
   loadWorkspaceVercelAiGatewayApiKey,
   loadWorkspaceOpenRouterApiKey,
+  listOrganizationModelProviderCustomModelsForWorkspace,
+  getOrganizationModelProviderCustomModelForExecution,
+  loadOrganizationModelProviderApiKey,
   type Database,
   type SessionMcpServerForRun,
 } from "@opengeni/db";
@@ -202,4 +211,52 @@ export async function settingsWithWorkspaceOpenRouterCredential(
   return apiKey
     ? withWorkspaceOpenRouterCredential(catalogSettings, apiKey, customModels)
     : catalogSettings;
+}
+
+export async function settingsWithOrganizationProviderCredentials(
+  db: Database,
+  accountId: string,
+  workspaceId: string,
+  settings: Settings,
+  retainedProductModelId?: string | null,
+): Promise<Settings> {
+  const buildModels = async (providerKind: "vercel_gateway" | "openrouter", prefix: string) => {
+    const active = await listOrganizationModelProviderCustomModelsForWorkspace(db, {
+      accountId,
+      workspaceId,
+      providerKind,
+    });
+    const upstreamModelId = retainedProductModelId?.startsWith(prefix)
+      ? retainedProductModelId.slice(prefix.length)
+      : null;
+    const retained = upstreamModelId
+      ? await getOrganizationModelProviderCustomModelForExecution(db, {
+          accountId,
+          workspaceId,
+          providerKind,
+          upstreamModelId,
+        })
+      : null;
+    return retained && !active.some((model) => model.id === retained.id)
+      ? [...active, retained]
+      : active;
+  };
+  const gatewayModels = await buildModels("vercel_gateway", ORGANIZATION_GATEWAY_MODEL_ID_PREFIX);
+  const openRouterModels = await buildModels("openrouter", ORGANIZATION_OPENROUTER_MODEL_ID_PREFIX);
+  const gatewayKey = await loadOrganizationModelProviderApiKey(db, settings, {
+    accountId,
+    workspaceId,
+    providerKind: "vercel_gateway",
+  });
+  const gatewaySettings = gatewayKey
+    ? withOrganizationGatewayCredential(settings, gatewayKey, gatewayModels)
+    : withOrganizationGatewayCatalogProvider(settings, gatewayModels);
+  const openRouterKey = await loadOrganizationModelProviderApiKey(db, settings, {
+    accountId,
+    workspaceId,
+    providerKind: "openrouter",
+  });
+  return openRouterKey
+    ? withOrganizationOpenRouterCredential(gatewaySettings, openRouterKey, openRouterModels)
+    : withOrganizationOpenRouterCatalogProvider(gatewaySettings, openRouterModels);
 }

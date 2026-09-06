@@ -495,6 +495,7 @@ describe("embedded worker lifecycle contract", () => {
           can_trigger: false,
         })),
         ...[
+          "additional_organization_creation_receipts",
           "canonical_human_identities",
           "canonical_human_identity_subjects",
           "canonical_human_login_bindings",
@@ -503,6 +504,7 @@ describe("embedded worker lifecycle contract", () => {
           ...organizationRecoveryTables,
           "organization_user_setup_deliveries",
           "organization_user_setup_delivery_attempts",
+          "session_tenancy_additional_organization_activation_evidence",
         ].map((name) => ({
           name,
           owner: "opengeni_migrator",
@@ -648,6 +650,7 @@ describe("embedded worker lifecycle contract", () => {
       expectedRole: "opengeni_app",
       targetSchema: "public",
       protectedTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -656,9 +659,11 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
       tablePrivileges: {},
       protectedNoDirectDmlTables: [
+        "additional_organization_creation_receipts",
         "canonical_human_identities",
         "canonical_human_identity_subjects",
         "canonical_human_login_bindings",
@@ -667,6 +672,7 @@ describe("embedded worker lifecycle contract", () => {
         ...organizationRecoveryTables,
         "organization_user_setup_deliveries",
         "organization_user_setup_delivery_attempts",
+        "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
     expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([

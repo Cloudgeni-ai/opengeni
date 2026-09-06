@@ -70,6 +70,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
     byok: "Billed to the workspace provider account",
+    organization_byok: "Billed to the organization provider account",
   },
 };
 
@@ -160,6 +161,7 @@ export function BillingClassMark(props: {
     codex_subscription: "Codex",
     supergrok_subscription: "SuperGrok",
     byok: "Workspace provider account",
+    organization_byok: "Organization provider account",
   };
   const label = props["aria-label"] ?? labels[props.billingClass];
   const accessibility =

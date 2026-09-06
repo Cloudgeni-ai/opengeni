@@ -1,4 +1,5 @@
 import {
+  armCodexCapacityWait,
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
@@ -9,7 +10,7 @@ import {
   type CodexCapacityWakeTarget,
   type CodexCapacitySelectionContext,
 } from "@opengeni/db";
-import type { Settings } from "@opengeni/config";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
@@ -85,14 +86,12 @@ export async function signalPendingCodexCapacityWakeTargets(
   await signalCodexCapacityWakeTargets(services, targets);
 }
 
-export function codexCapacityDecision(
-  context: CodexCapacitySelectionContext,
-  settings: Settings,
+export function codexCapacityDecision<TPolicyScope = never, TUnavailableDiagnostic = never>(
+  context: CodexCapacitySelectionContext<TPolicyScope, TUnavailableDiagnostic>,
 ): ReturnType<Parameters<typeof reconcileCodexCapacityWaitDb>[2]> {
   const now = new Date();
   const selected = selectCodexCredentialLeaseForTurn({
     context,
-    leasingEnabled: settings.codexCredentialLeasingEnabled,
     sessionId: context.sessionId,
     sessionPinnedCredentialId: context.sessionPinnedCredentialId,
     sessionPinSource: context.sessionPinSource,
@@ -118,8 +117,17 @@ export function codexCapacityDecision(
       },
     };
   }
-  const authoritativeReset = authoritativeCodexCapacityResetAt(context.accounts, now);
-  const hasReconcilableQuotaCooldown = context.accounts.some(
+  const policyCredentialId =
+    context.sessionPinSource === "manual" && context.sessionPinnedCredentialId
+      ? context.sessionPinnedCredentialId
+      : !context.rotationEnabled
+        ? context.activeCredentialId
+        : null;
+  const capacityAccounts = policyCredentialId
+    ? context.accounts.filter((account) => account.id === policyCredentialId)
+    : context.accounts;
+  const authoritativeReset = authoritativeCodexCapacityResetAt(capacityAccounts, now);
+  const hasReconcilableQuotaCooldown = capacityAccounts.some(
     (account) =>
       account.status === "active" &&
       account.allocatorEnabled &&
@@ -127,17 +135,83 @@ export function codexCapacityDecision(
       account.exhaustedUntil !== null &&
       account.exhaustedUntil > now,
   );
+  const policyAccount = capacityAccounts[0] ?? null;
+  const mutationOnlyStatusBlock =
+    (policyAccount != null &&
+      (!policyAccount.allocatorEnabled || policyAccount.status !== "active")) ||
+    (authoritativeReset === null &&
+      capacityAccounts.length > 0 &&
+      capacityAccounts.every(
+        (account) => !account.allocatorEnabled || account.status !== "active",
+      ));
+  const noneReason =
+    selected.decision.kind === "none"
+      ? context.sessionPinSource === "manual" && context.sessionPinnedCredentialId !== null
+        ? "manual_pin_missing"
+        : !context.rotationEnabled && context.activeCredentialId === null
+          ? "rotation_off_active_pointer_missing"
+          : context.policyScope !== null && context.accounts.length === 0
+            ? "policy_filtered_pool_empty"
+            : context.accounts.length === 0
+              ? "no_connected_credentials"
+              : "no_eligible_credential"
+      : null;
   return {
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
     resetKind:
-      authoritativeReset && !hasReconcilableQuotaCooldown ? "authoritative" : "bounded_refresh",
+      selected.decision.kind === "none" ||
+      selected.decision.kind === "allocatorDisabled" ||
+      mutationOnlyStatusBlock
+        ? "mutation_only"
+        : authoritativeReset && !hasReconcilableQuotaCooldown
+          ? "authoritative"
+          : "bounded_refresh",
     diagnostic: {
       connectedCount: context.accounts.length,
       allocatorEnabledCount: context.accounts.filter((account) => account.allocatorEnabled).length,
       policyHash: context.policyHash,
+      ...(noneReason ? { reason: noneReason } : {}),
     },
   };
+}
+
+/**
+ * Arm a durable Codex waiter and immediately re-evaluate it under the
+ * allocator lock. A capacity mutation that commits just before the waiter is
+ * inserted cannot signal a row that does not exist yet, so every arm site must
+ * close that edge before returning an hours-away reset timer to the workflow.
+ * Mutations after the arm commit still advance the waiter's wake revision.
+ */
+export async function armAndReconcileCodexCapacityWait(
+  services: Pick<ControlActivityServices, "db" | "bus">,
+  input: Parameters<typeof armCodexCapacityWait>[1],
+  options: { onArmed?: () => void } = {},
+) {
+  const armed = await armCodexCapacityWait(services.db, input);
+  if (armed.action !== "waiting") return armed;
+
+  options.onArmed?.();
+  await publishDurableSessionEvents(services.bus, input.workspaceId, input.sessionId, armed.events);
+  const evaluated = await reconcileCodexCapacityWaitDb(
+    services.db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      waiterId: armed.waiter.id,
+      generation: armed.waiter.generation,
+      ...(input.now ? { now: input.now } : {}),
+    },
+    (context) => codexCapacityDecision(context),
+  );
+  await publishDurableSessionEvents(
+    services.bus,
+    input.workspaceId,
+    input.sessionId,
+    evaluated.events,
+  );
+  return evaluated;
 }
 
 async function refreshCapacityMetadata(
@@ -239,7 +313,11 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
     if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
       return { action: "stale" };
     }
-    if (input.cause === "timer" && current.nextCheckAt.getTime() <= Date.now()) {
+    const boundedRefreshAttempted =
+      current.resetKind === "bounded_refresh" &&
+      input.cause === "timer" &&
+      current.nextCheckAt.getTime() <= Date.now();
+    if (boundedRefreshAttempted) {
       // This is a bounded secret-safe control-plane quota refresh. It creates no
       // turn, model call, user message, schedule, or entitlement action.
       await refreshCapacityMetadata(resolved, input.workspaceId);
@@ -252,8 +330,9 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
         sessionId: input.sessionId,
         waiterId: input.waiterId,
         generation: input.generation,
+        boundedRefreshAttempted,
       },
-      (context) => codexCapacityDecision(context, resolved.settings),
+      (context) => codexCapacityDecision(context),
     );
     if (result.events.length > 0) {
       try {

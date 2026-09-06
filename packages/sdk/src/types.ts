@@ -72,6 +72,80 @@ export type GatewayRealtimeConnectResponse = {
   replay: false;
 };
 
+export type ToolGatewayIdentity = {
+  serverId: string;
+  toolName: string;
+};
+
+export type ToolGatewayCatalogEntry = {
+  identity: ToolGatewayIdentity;
+  modelName: string;
+  codemodePath: string[];
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema: Record<string, unknown>;
+  outputSchema?: Record<string, unknown> | undefined;
+  annotations?: Record<string, unknown> | undefined;
+  icons?: Array<Record<string, unknown>> | undefined;
+  source: "opengeni" | "files" | "docs" | "mcp" | "codex_apps" | "interaction";
+  approval: "none" | "human" | "policy";
+};
+
+export type ToolGatewayCatalog = {
+  version: 1;
+  accountId: string;
+  workspaceId: string;
+  generation: number;
+  digest: string;
+  createdAt: string;
+  entries: ToolGatewayCatalogEntry[];
+};
+
+export type ToolGatewayResult = {
+  content: Array<{ type: string; [key: string]: unknown }>;
+  structuredContent?: Record<string, unknown> | undefined;
+  isError?: boolean | undefined;
+  _meta?: Record<string, unknown> | undefined;
+  [key: string]: unknown;
+};
+
+export type ToolGatewayCallRequest = {
+  operationId?: string | undefined;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+  siteArtifactId?: string | undefined;
+  siteVersionId?: string | undefined;
+  approvalToken?: string | undefined;
+};
+
+export type ToolGatewayApprovalRequest = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  arguments: Record<string, unknown>;
+};
+
+export type ToolGatewayApprovalResponse = {
+  operationId: string;
+  catalogDigest: string;
+  identity: ToolGatewayIdentity;
+  approvalToken: string;
+  expiresAt: string;
+};
+
+export type ToolGatewayCallResponse = {
+  operationId: string;
+  catalogDigest: string;
+  result: ToolGatewayResult;
+};
+
+export type ToolGatewayDeclarationsResponse = {
+  catalogDigest: string;
+  moduleSpecifier: string;
+  source: string;
+};
+
 export type ActivateCodexRealtimeConnectionRequest = {
   operationId: string;
   browserInstanceId: string;
@@ -1264,6 +1338,7 @@ export type Session = {
   accountId: string;
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
+  hasSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1531,6 +1606,7 @@ export type LineageNode = {
 };
 
 export type SessionLineageResponse = {
+  sessionHasSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;
@@ -1753,6 +1829,8 @@ export const SESSION_EVENT_TYPES = [
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -2076,7 +2154,14 @@ export type CodexFleetDecisionEventPayload = {
   actual: {
     outcome: "selected" | "waiting" | "none";
     candidateKey: string | null;
-    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+    reason:
+      | "lease_reused"
+      | "pin"
+      | "rotation"
+      | "active"
+      | "all_capped"
+      | "allocator_disabled"
+      | "none";
   };
   comparison: CodexFleetShadowComparison;
   replay: {
@@ -2227,11 +2312,16 @@ export type FsTreeNode = {
   truncated: boolean;
 };
 export type FsEncoding = "utf8" | "base64";
+export type FileSystemRouteIdentity = {
+  epoch: number;
+  root: string;
+};
 export type FsListRequest = {
   path?: string;
   depth?: number;
   maxEntries?: number;
   includeHidden?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsListResponse = {
   root: FsTreeNode;
@@ -2244,6 +2334,7 @@ export type FsReadRequest = {
   path: string;
   encoding?: FsEncoding;
   maxBytes?: number;
+  route?: FileSystemRouteIdentity;
 };
 export type FsReadResponse = {
   path: string;
@@ -2268,26 +2359,36 @@ export type FsWriteRequest = {
   content: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsWriteResponse = {
   path: string;
   sizeBytes: number;
   revision: number;
 };
-export type FsDeleteRequest = { path: string; recursive?: boolean };
+export type FsDeleteRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
   path: string;
   newPath: string;
   overwrite?: boolean;
   createParents?: boolean;
+  route?: FileSystemRouteIdentity;
 };
 export type FsMoveResponse = {
   path: string;
   newPath: string;
   revision: number;
 };
-export type FsMkdirRequest = { path: string; recursive?: boolean };
+export type FsMkdirRequest = {
+  path: string;
+  recursive?: boolean;
+  route?: FileSystemRouteIdentity;
+};
 export type FsMkdirResponse = { path: string; revision: number };
 
 // A2 Git request/response (the Pierre-diff feed).
@@ -2738,6 +2839,8 @@ export type CreateSessionRequest = {
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
   skills?: SessionSkill[] | undefined;
+  /** Installed session-selected Skill identities to freeze onto this session at creation. */
+  installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   model?: string | undefined;
@@ -2852,9 +2955,10 @@ export type FirstPartyMcpToolName =
   | "goal_set"
   | "goal_update"
   | "goal_progress"
-  | "goal_wait"
+  | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
+  | "goal_resume"
   | "memory_search"
   | "memory_save"
   | "memory_correct"
@@ -2892,6 +2996,7 @@ export type FirstPartyMcpToolName =
   | "session_get"
   | "session_events"
   | "session_wait"
+  | "command_wait"
   | "session_create"
   | "session_send_message"
   | "session_pause"
@@ -2984,6 +3089,8 @@ export type FirstPartyMcpToolName =
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"
+  | "artifacts_archive"
+  | "artifacts_restore"
   | "editable_artifact_list"
   | "editable_artifact_create"
   | "editable_artifact_import"
@@ -3039,18 +3146,20 @@ export type ModelCapabilitiesV1 = {
 export type ModelCredentialSourceV1 =
   | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
   | { kind: "connected_subscription"; provider: "codex" | "xai" }
-  | { kind: "workspace_connection"; mechanism: "api_key" };
+  | { kind: "workspace_connection"; mechanism: "api_key" }
+  | { kind: "organization_connection"; mechanism: "api_key" };
 
 export type ModelBillingAttributionV1 = {
-  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  upstreamPayer: "deployment" | "workspace" | "organization" | "connected_subscription";
   metering: "opengeni_credits" | "external";
 };
 
-export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace";
+export type ModelCostClassV1 = "free" | "credits" | "subscription" | "workspace" | "organization";
 
 export type ModelPricingV1 = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
+  cacheWriteMicrosPerMillionTokens?: number | undefined;
   outputMicrosPerMillionTokens: number;
   marginBps?: number | undefined;
 };
@@ -3179,6 +3288,34 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
+export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+
+export type OrganizationModelProviderConnection = {
+  providerKind: OrganizationModelProviderKind;
+  status: "active" | "revoked";
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type UpsertOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion?: number | undefined;
+  apiKey: string;
+};
+
+export type RevokeOrganizationModelProviderConnectionRequest = {
+  operationId: string;
+  expectedVersion: number;
+};
+
+export type OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+export type OrganizationProviderCustomModelsResponse = {
+  models: OrganizationProviderCustomModel[];
+};
+export type CreateOrganizationProviderCustomModelRequest = CreateWorkspaceGatewayCustomModelRequest;
+export type DeleteOrganizationProviderCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
+
 /**
  * The workspace's hard model/provider allowlist. `null` means unrestricted for
  * that dimension; an empty array is an explicit total block.
@@ -3213,6 +3350,12 @@ export type CodexConnectionStatus = {
     label?: string | null;
     chatgptAccountId?: string | null;
   } | null;
+  /** Live model-catalog probe result for the active account only. */
+  activeAccountValid?: boolean;
+  /** Cached readiness of any account in the effective worker pool. */
+  poolReady?: boolean;
+  /** Cached unpinned worker routability; rotation-off remains active-pointer-only. */
+  workerRoutable?: boolean;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
   source?: WorkspaceCodexSubscriptionSource;
@@ -3991,6 +4134,16 @@ export type CreateOrganizationResponse = {
   organization: OrganizationSummary;
   workspaceId: string;
 };
+export type CreateAdditionalOrganizationRequest = {
+  name: string;
+  workspaceName: string;
+  operationId: string;
+};
+export type CreateAdditionalOrganizationResponse = {
+  organization: OrganizationSummary;
+  workspaceId: string;
+  personalWorkspaceId: string;
+};
 export type UpdateOrganizationNameRequest = {
   name: string;
   expectedUpdatedAt: string;
@@ -4535,7 +4688,7 @@ export type SessionGoalContinuation = {
   observedRevision: number;
   nextAttemptAt: string | null;
   lastError: string | null;
-  /** Agent-stated reason for a `held_for_input` hold; null otherwise. */
+  /** Agent-stated reason for a `wait_for_input` hold; null otherwise. */
   holdReason?: string | null | undefined;
 };
 
@@ -4735,6 +4888,8 @@ export type SessionSystemUpdateKind =
   | "goal_continuation"
   | "agent_message"
   | "agent_steer_instruction"
+  | "session_wait_timeout"
+  | "background_command_result"
   | "child_terminal_result"
   | "media_generation_result"
   | "child_requires_action"
@@ -4750,6 +4905,30 @@ export type SessionSystemUpdateState =
   | "superseded"
   | "failed";
 
+export type SessionSystemUpdatePayload =
+  | {
+      type: "session_wait_timeout";
+      waitTurnId: string;
+      deadlineAt: string;
+      reason: string;
+      [key: string]: unknown;
+    }
+  | {
+      type: "background_command_result";
+      commandId: string;
+      state: "exited" | "lost";
+      exitCode: number | null;
+      reason: string;
+      outputLocator: {
+        eventType: "sandbox.command.output.delta";
+        commandId: string;
+      };
+      [key: string]: unknown;
+    }
+  | ({
+      type: Exclude<SessionSystemUpdateKind, "session_wait_timeout" | "background_command_result">;
+    } & Record<string, unknown>);
+
 export type SessionSystemUpdate = {
   id: string;
   sessionId: string;
@@ -4758,7 +4937,7 @@ export type SessionSystemUpdate = {
   sourceId: string;
   dedupeKey: string;
   summary: string;
-  payload: Record<string, unknown>;
+  payload: SessionSystemUpdatePayload;
   lineage: Record<string, unknown>;
   state: SessionSystemUpdateState;
   deliveredTurnId: string | null;
@@ -6012,10 +6191,12 @@ export type CapabilityPackSkillFile = {
 export type CapabilityPackSkill = {
   name: string;
   description?: string | undefined;
+  /** Omitted means workspace-wide; session_selected requires explicit session attachment. */
+  activationMode?: "workspace_managed" | "session_selected" | undefined;
   files: CapabilityPackSkillFile[];
 };
 
-export type SessionSkill = CapabilityPackSkill;
+export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6109,6 +6290,7 @@ export type RegisterCapabilityPackRequest = {
     | {
         name: string;
         description?: string | undefined;
+        activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];
       }[]
     | undefined;
@@ -7183,6 +7365,37 @@ export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
 };
 
+export type VerifyPublicGitHubRepositoryRefRequest = {
+  url: string;
+  ref: string;
+};
+
+export type VerifyPublicGitHubRepositoryRefResponse = {
+  owner: string;
+  name: string;
+  fullName: string;
+  canonicalUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  ref: string;
+  commitSha: string;
+};
+
+export type GitHubRepositoryBranch = {
+  name: string;
+  isDefault: boolean;
+};
+
+export type ListGitHubRepositoryBranchesOptions = {
+  cursor?: number | undefined;
+  limit?: number | undefined;
+};
+
+export type GitHubRepositoryBranchesResponse = {
+  branches: GitHubRepositoryBranch[];
+  nextCursor: number | null;
+};
+
 export type CreateGitHubAppManifestRequest = {
   appName?: string | undefined;
   organization?: string | undefined;
@@ -7288,6 +7501,8 @@ export type InsightsModelUsageRow = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsSeriesPoint = {
@@ -7295,6 +7510,8 @@ export type InsightsSeriesPoint = {
   modelCostUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   warmSeconds: number;
   inputTokens: number;
   outputTokens: number;
@@ -7326,6 +7543,8 @@ export type InsightsSpendDriver = {
   creditUsd: number;
   estimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
   tokens: number;
   cacheHitPct: number;
   pctOfCreditUsd: number;
@@ -7371,6 +7590,8 @@ export type InsightsScheduleRow = {
   creditUsd: number | null;
   estimatedProviderUsd: number | null;
   estimatedProviderCostKnownCalls: number | null;
+  equivalentCreditUsd: number | null;
+  equivalentCreditCostKnownCalls: number | null;
   tokens: number | null;
   cacheHitPct: number | null;
   billing: InsightsBillingPath | null;
@@ -7395,6 +7616,7 @@ export type InsightsModelCallRow = {
   totalTokens: number | null;
   creditUsd: number;
   estimatedProviderUsd: number | null;
+  equivalentCreditUsd: number | null;
   pricingSource: InsightsPricingSource | null;
 };
 
@@ -7455,6 +7677,10 @@ export type WorkspaceInsightsSnapshot = {
   priorEstimatedProviderUsd: number;
   estimatedProviderCostKnownCalls: number;
   priorEstimatedProviderCostKnownCalls: number;
+  equivalentCreditUsd: number;
+  priorEquivalentCreditUsd: number;
+  equivalentCreditCostKnownCalls: number;
+  priorEquivalentCreditCostKnownCalls: number;
   modelCalls: number;
   priorInputTokens: number;
   priorTotalTokens: number;

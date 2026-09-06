@@ -9,15 +9,18 @@ export const ARTIFACT_SKILL_NAMES = [
   "opengeni-documents",
   "opengeni-presentations",
 ] as const;
+export const SITE_SKILL_NAMES = ["opengeni-sites"] as const;
 export const VIDEO_SKILL_NAMES = ["opengeni-video-generation"] as const;
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sourceRoot = join(repoRoot, ".agents", "skills");
 const targetRoot = join(repoRoot, "packages", "runtime", "src", "bundled_artifact_skills");
+const siteTargetRoot = join(repoRoot, "packages", "runtime", "src", "bundled_site_skills");
 const videoTargetRoot = join(repoRoot, "packages", "runtime", "src", "bundled_video_skills");
 
 export async function checkArtifactSkillBundle(): Promise<void> {
   await checkSkillBundle(ARTIFACT_SKILL_NAMES, targetRoot, "artifact");
+  await checkSkillBundle(SITE_SKILL_NAMES, siteTargetRoot, "Site");
   await checkSkillBundle(VIDEO_SKILL_NAMES, videoTargetRoot, "video");
 }
 
@@ -48,6 +51,7 @@ async function checkSkillBundle(
 
 export async function syncArtifactSkillBundle(): Promise<void> {
   await syncSkillBundle(ARTIFACT_SKILL_NAMES, targetRoot);
+  await syncSkillBundle(SITE_SKILL_NAMES, siteTargetRoot);
   await syncSkillBundle(VIDEO_SKILL_NAMES, videoTargetRoot);
   await checkArtifactSkillBundle();
 }

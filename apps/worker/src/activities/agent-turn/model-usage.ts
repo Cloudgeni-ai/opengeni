@@ -125,6 +125,8 @@ export function createCompactionModelUsageEventState(
   return { usageCount: 0, claimedSourceKeys };
 }
 
+export const createSessionTitleModelUsageEventState = createCompactionModelUsageEventState;
+
 export function modelResponseContextSignal(
   state: ModelResponseEventState,
 ): { revision: number; totalTokens: number } | null {
@@ -342,6 +344,7 @@ export async function processModelResponseTerminalEvent(input: {
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
   state: CompactionModelUsageEventState;
+  sourceKind?: "compaction" | "session-title";
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -373,7 +376,7 @@ export async function processCompactionModelUsageEvent(input: {
   const sourceKey = modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `compaction-${usageOrdinal}`,
+    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -454,6 +457,15 @@ export async function processCompactionModelUsageEvent(input: {
     },
   });
   return { status: "processed", sourceKey, authoritative };
+}
+
+export async function processSessionTitleModelUsageEvent(
+  input: Omit<Parameters<typeof processCompactionModelUsageEvent>[0], "sourceKind">,
+): ReturnType<typeof processCompactionModelUsageEvent> {
+  return await processCompactionModelUsageEvent({
+    ...input,
+    sourceKind: "session-title",
+  });
 }
 
 export async function emitModelCallUsage(input: {
@@ -581,6 +593,8 @@ export type ModelUsageBillingRecord = {
   pricedCostMicros: number;
   /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
   estimatedProviderCostMicros: number | null;
+  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
@@ -662,7 +676,7 @@ export async function recordModelUsageAndDebitCredits(
         }
       : calculateGatewayReportedCostBreakdown(
           settings,
-          input.model,
+          configuredPricingModel ?? input.model,
           gatewayBilling.inferenceCostUsd,
           { inputTokens },
         )
@@ -678,6 +692,12 @@ export async function recordModelUsageAndDebitCredits(
     ? (pricingBreakdown?.providerCostMicros ?? null)
     : hasCompleteCoreTokenTelemetry
       ? (pricingBreakdown?.providerCostMicros ?? null)
+      : null;
+  const equivalentCreditCostMicros =
+    pricingBreakdown && !unpinnedWorkspaceGatewayModel
+      ? gatewayBilling || hasCompleteCoreTokenTelemetry
+        ? pricingBreakdown.creditCostMicros
+        : null
       : null;
   const pricingSource = gatewayBilling
     ? ("gateway_reported" as const)
@@ -722,6 +742,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "external",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -733,6 +754,7 @@ export async function recordModelUsageAndDebitCredits(
       billingPath: "opengeni_credits",
       pricedCostMicros: 0,
       estimatedProviderCostMicros,
+      equivalentCreditCostMicros,
       pricingSource,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -786,6 +808,7 @@ export async function recordModelUsageAndDebitCredits(
     billingPath: "opengeni_credits",
     pricedCostMicros: costMicros,
     estimatedProviderCostMicros,
+    equivalentCreditCostMicros,
     pricingSource,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
@@ -823,6 +846,7 @@ export async function recordAuthoritativeModelCallFact(input: {
       billingPath: input.billing.billingPath,
       pricedCostMicros: input.billing.pricedCostMicros,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      equivalentCreditCostMicros: input.billing.equivalentCreditCostMicros,
       pricingSource: input.billing.pricingSource,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
@@ -850,10 +874,15 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
       ? { outputTokens: normalized.telemetry.outputTokens }
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null
+    ...(normalized.telemetry.cachedTokens !== null || normalized.telemetry.cacheWriteTokens !== null
       ? {
           inputTokensDetails: {
-            cached_tokens: normalized.telemetry.cachedTokens,
+            ...(normalized.telemetry.cachedTokens === null
+              ? {}
+              : { cached_tokens: normalized.telemetry.cachedTokens }),
+            ...(normalized.telemetry.cacheWriteTokens === null
+              ? {}
+              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
           },
         }
       : {}),

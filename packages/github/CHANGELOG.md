@@ -1,5 +1,69 @@
 # @opengeni/github
 
+## 0.7.3
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/config@1.0.0
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/config@0.23.3
+
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/config@0.23.2
+
+## 0.7.0
+
+### Minor Changes
+
+- 8f81b57: Add authenticated, bounded GitHub branch suggestions for exact workspace App
+  repositories and exact selected personal OAuth repositories, including focused
+  contract and SDK subpaths. Recheck repository authority around provider
+  requests, keep provider credentials server-side, and preserve arbitrary refs at
+  the session resource boundary. Add lazy branch pickers, verified public GitHub
+  URL attachment with immutable commit fencing, explicit anonymous-clone warnings
+  for other HTTPS hosts, render-safe manual drafts, idempotent unlink
+  reconciliation, and debounced live repository refreshes across new and existing
+  sessions.
+
+### Patch Changes
+
+- Updated dependencies [8f81b57]
+  - @opengeni/contracts@2.11.0
+  - @opengeni/config@0.23.1
+
+## 0.6.8
+
+### Patch Changes
+
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+
 ## 0.6.7
 
 ### Patch Changes

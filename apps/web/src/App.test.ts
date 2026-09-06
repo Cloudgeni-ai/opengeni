@@ -1585,9 +1585,31 @@ describe("summarizeSessionFailure", () => {
   test("reports nothing for a clean session", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
+      safetyRefusal: false,
       failedAt: null,
       recoveryCount: 0,
       failedTurnCount: 0,
+    });
+  });
+  test("exposes a legacy safety rejection and clears it on a later unrelated failure", () => {
+    const refusal = event(1, "turn.failed", {
+      error: "Retries exhausted.",
+      lastRetryableError:
+        "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      safetyRefusal: true,
+      reason:
+        "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",
+    });
+    expect(
+      summarizeSessionFailure(
+        [refusal, event(2, "turn.failed", { error: "Connection reset." })],
+        "failed",
+      ),
+    ).toMatchObject({
+      safetyRefusal: false,
+      reason: "Connection reset.",
     });
   });
 });
@@ -2233,6 +2255,39 @@ describe("GitHub repository resources", () => {
     ).toBe(false);
   });
 
+  test("keeps verified manual commits immutable and rejects cleared authenticated refs", () => {
+    const commitSha = "a".repeat(40);
+    expect(
+      buildResources(
+        [
+          {
+            id: 1,
+            url: "https://github.com/acme/public.git",
+            ref: "refs/tags/v1",
+            expectedCommitSha: commitSha,
+            attached: true,
+          },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toEqual([
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/public.git",
+        ref: "refs/tags/v1",
+        expectedCommitSha: commitSha,
+        mountPath: "repos/github.com/acme/public.git",
+      },
+    ]);
+
+    const repository = githubRepository();
+    expect(() =>
+      buildResources([], [repository], new Set([repository.id]), { [repository.id]: " " }),
+    ).toThrow("Repository ref is required.");
+  });
+
   test("keeps installation metadata for private GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: true }), "main")).toEqual({
       kind: "repository",
@@ -2330,6 +2385,7 @@ describe("GitHub repository resources", () => {
         kind: "repository",
         uri: "https://git.example.com/acme/manual.git",
         ref: "main",
+        expectedCommitSha: "b".repeat(40),
       },
     ];
 
@@ -2339,7 +2395,15 @@ describe("GitHub repository resources", () => {
     expect(hydrated).toEqual([privateResource, manualResource]);
     expect(rehydrateRepositoryResources(resources, [], { catalogReady: false })).toEqual(resources);
     expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
-      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      manualRepos: [
+        {
+          id: 1,
+          url: manualResource.uri,
+          ref: "main",
+          expectedCommitSha: "b".repeat(40),
+          attached: true,
+        },
+      ],
       selectedRepoIds: new Set([privateRepo.id]),
       selectedRepoRefs: { [privateRepo.id]: "develop" },
       selectedPersonalRepoIds: new Set(),

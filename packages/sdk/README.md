@@ -84,10 +84,22 @@ session. There is no organization-wide Skill registry or Skill inheritance in
 this integration contract. See the canonical guide for the complete route map,
 security boundary, and delivery checklist.
 
+Installed Pack Skills normally remain workspace-managed. A Pack may instead
+mark guidance as `session_selected`; installation then exposes it to no agent
+until `createSession` names the reviewed immutable component in
+`installedSkillIds`. OpenGeni copies that exact artifact into the new session,
+so omitting the field from customer-facing creates is a real contamination
+boundary rather than a prompt convention.
+The ordered selection is part of keyed-create identity: reusing an
+`idempotencyKey` with a different selection returns a conflict instead of the
+session configured by the earlier request.
+
 For session lists, `deriveSessionDisplayTitle(session)` returns the durable
 agent/user title when available. While the automatic title is still pending, it
-shows a short, sensitive-safe preview of the opening prompt and automatically
-yields to the later `session.title_set` value.
+shows the first short, sensitive-safe line of the opening prompt, skipping an
+unsafe pasted URL or identifier when later safe text exists. If no safe line is
+available, a short session reference keeps rows distinguishable. The display
+automatically yields to the later `session.title_set` value.
 
 Browser consoles that do not need operator-only surfaces can import
 `OpenGeniBrowserClient` from `@opengeni/sdk/browser`. Document authority migration
@@ -410,10 +422,13 @@ assign product types such as app, page, dashboard, or gallery. List pages are
 bounded and expose both `truncated` and an opaque `nextCursor` so callers never
 mistake a partial page for the complete workspace catalog.
 
-The initial web renderer supports semantic HTML, inline CSS, CSS-only
-interactions, and inline SVG. It removes JavaScript, event handlers, forms,
-embeds, external URLs, and other active or navigation-capable markup before
-rendering. Executable artifacts require a later, stronger isolation boundary.
+Each Site version retains one self-contained executable HTML runtime, its
+bounded editable source bundle, and the exact canonical tool identities it
+requested. The web host renders that runtime in an opaque-origin sandboxed
+iframe. Credentials, cookies, API URLs, workspace ids, and parent DOM authority
+never enter the iframe; `@opengeni/sdk/site` uses a single parent-owned
+`MessagePort` that exposes only the retained tool allowlist intersected with the
+current viewer's live workspace catalog.
 
 ```ts
 let cursor: string | undefined;
@@ -432,6 +447,64 @@ same key only to retry the same logical mutation. Agent-authored versions also
 return the exact source session, turn, attempt, and execution generation that
 published them. Version and event history are bounded; inspect
 `versionsTruncated` and `eventsTruncated` on the detail response.
+
+## Workspace tools
+
+The browser-safe SDK exposes the same gateway catalog and executor used by
+model MCP calls and Codemode. Generated declarations augment the lazy namespace
+for exact installed-tool types; canonical `{ serverId, toolName }` identity and
+the server-side catalog remain authoritative.
+
+```ts
+const tools = client.tools.forWorkspace(workspaceId);
+const documents = await tools.docs.search({ query: "launch plan" });
+```
+
+An approval-required call needs a server-issued capability. A trusted host
+shows its approval UI first, then asks for one token bound to the current human,
+workspace, operation id, catalog digest, exact tool identity, and arguments.
+The token expires after five minutes, is stored only as a hash, and is consumed
+once by the matching call.
+
+Connection-backed tools configured for both provider policy and one-shot human
+approval are omitted from this HTTP catalog until their provider adapter can
+preflight credential and resource authorization before consuming the token.
+
+```ts
+const operationId = crypto.randomUUID();
+const identity = { serverId: "linear", toolName: "issues_update" };
+const input = { issueId, state: "Done" };
+const approval = await tools.$approve(identity, input, { operationId });
+
+await tools.$call(identity, input, {
+  operationId,
+  approvalToken: approval.approvalToken,
+});
+```
+
+When a call or approval request receives the typed
+`409 details.code = "catalog_stale"` response, the SDK refreshes the catalog,
+re-resolves the exact identity or generated namespace path, preserves the
+operation id (generating it before the first attempt when omitted), and retries
+once. A call that already carries an approval token cannot reuse that
+single-use capability after the catalog digest changes; instead it throws
+`OpenGeniToolReapprovalRequiredError` with the refreshed identity and digest so
+the trusted host can show approval again for the same operation id.
+
+Reapproval is valid only before the original capability is consumed. Once a
+call crosses that boundary, the server retains a hash-only tombstone for the
+operation id and rejects another approval with
+`409 details.code = "tool_gateway_operation_already_started"` and
+`outcomeUnknown: true`. The host must reconcile the provider outcome; it must
+not turn an ambiguous call into a second approved execution by minting a fresh
+operation id automatically.
+
+Do not request approval capabilities speculatively or expose them to Site iframe
+code. The host projects only the active immutable version's requested identities,
+supplies the Site context on direct calls, and the server revalidates the active
+version and viewer's live authority. The requested set is a maximum allowlist,
+not an authority grant; ordinary gateway approval still applies. Archived Sites
+receive no tool bridge.
 
 Omit `firstPartyMcpTools` for the complete OpenGeni tool catalog. An explicit
 `[]` exposes no broad first-party tools; attached resources and separately
@@ -748,6 +821,7 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `ensureWorkspace`, `getWorkspace`, `updateWorkspace` |
+| Managed organizations | `createOrganization` for first-time compatibility; `createAdditionalOrganization` for an already-onboarded human; `listOrganizationMemberships`, `listOrganizationInvitations`, `acceptOrganizationInvitation` |
 | Sessions + events | `createSession`, `listSessions`, `listSessionPage`, `listAgentTopology`, `getSession`, `getSessionLineage`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `cancelSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
 | Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |

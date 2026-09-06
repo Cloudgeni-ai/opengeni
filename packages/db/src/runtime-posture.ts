@@ -81,6 +81,8 @@ const KNOWLEDGE_SOURCE_SYNC_LOCK_AUTHORITY_TABLES = [
 ] as const;
 const MANAGED_HUMAN_PERSONAL_WORKSPACE_ROUTINE =
   "ensure_managed_human_personal_workspace(uuid, text, uuid)";
+const ADDITIONAL_ORGANIZATION_CREATION_ROUTINE =
+  "create_additional_managed_organization(text, text, text, text, uuid)";
 const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "list_self_organization_memberships(text)",
   "list_self_organization_invitations(text)",
@@ -94,9 +96,11 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "resolve_workspace_codex_subscription_source(uuid, uuid)",
   "list_organization_workspace_ids(uuid)",
   "organization_workspace_command(jsonb)",
+  "authorize_organization_shared_workspace_administration(uuid, uuid, text)",
   "resolve_organization_workspace_removal_subject(uuid, text, uuid)",
   "prepare_organization_workspace_member_removal(jsonb)",
   "record_organization_workspace_member_removal(jsonb, uuid, uuid)",
+  ADDITIONAL_ORGANIZATION_CREATION_ROUTINE,
   "create_managed_organization(text, text, text, uuid)",
   "assert_organization_shared_workspace_administrator(uuid, uuid, text)",
   "open_organization_shared_workspace_administration_capability(uuid, uuid, text)",
@@ -111,7 +115,9 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "complete_self_service_organization_setup(jsonb)",
   "ensure_organization_user_setup_intent(jsonb)",
   "claim_organization_user_setup_delivery(jsonb)",
+  "claim_organization_user_setup_delivery_v2(jsonb)",
   "prepare_organization_user_setup_delivery(jsonb)",
+  "prepare_organization_user_setup_delivery_v2(jsonb)",
   "settle_organization_user_setup_delivery(jsonb)",
   "preview_organization_user_setup(text)",
   "get_organization_invitation_for_administration(uuid, text, uuid)",
@@ -153,6 +159,10 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES = [
   "organization_workspace_lifecycle_events",
   "organization_workspace_operation_receipts",
   "self_service_organization_setup_receipts",
+] as const;
+const ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES = [
+  ...ORGANIZATION_MEMBERSHIP_LIFECYCLE_AUTHORITY_TABLES,
+  "additional_organization_creation_receipts",
 ] as const;
 const PRIVATE_SESSION_CREATE_POLICY_ROUTINE = "get_private_session_create_policy(uuid, uuid, text)";
 const ORGANIZATION_PRIVATE_SESSION_SETTINGS_READ_ROUTINE =
@@ -489,6 +499,8 @@ const TENANCY_BACKFILL_ACTIVATION_EVIDENCE_ROUTINE =
   "check_tenancy_backfill_activation_evidence(uuid)";
 const GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE =
   "activate_greenfield_session_tenancy_from_setup(text)";
+const ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE =
+  "activate_session_tenancy_from_additional_organization(uuid)";
 const SESSION_VISIBILITY_LIFECYCLE_CAPABILITY_ROUTINE =
   "session_visibility_lifecycle_capability_held()";
 const PRIVATE_SESSION_CREATE_CAPABILITY_ROUTINES = [
@@ -597,6 +609,7 @@ const RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINE_SET = new Set<string
 
 /** Owner-internal helpers that must exist but must never be callable by the runtime role. */
 export const RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES = [
+  ADDITIONAL_ORGANIZATION_SESSION_TENANCY_ACTIVATION_ROUTINE,
   AUTOMATIC_SESSION_TITLE_QUARANTINE_FENCE_ROUTINE,
   ORGANIZATION_PRIVATE_SESSIONS_ENABLED_ROUTINE,
   GREENFIELD_SESSION_TENANCY_ACTIVATION_ROUTINE,
@@ -620,6 +633,7 @@ const RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINE_SET = new Set<string>(
  * commit as the migration so startup cannot silently accept an unreviewed gap.
  */
 export const FORCE_RLS_TABLES = [
+  "additional_organization_creation_receipts",
   "agent_run_states",
   "api_keys",
   "attached_browser_devices",
@@ -786,6 +800,9 @@ export const FORCE_RLS_TABLES = [
   "organization_membership_lifecycle_events",
   "organization_membership_operation_receipts",
   "organization_memberships",
+  "organization_model_provider_connection_operations",
+  "organization_model_provider_connections",
+  "organization_model_provider_custom_models",
   "organization_private_session_setting_events",
   "organization_private_session_settings",
   "organization_profile_events",
@@ -856,6 +873,7 @@ export const FORCE_RLS_TABLES = [
   "session_attempt_codemode_calls",
   "session_attempt_connected_machine_authorizations",
   "session_attempt_interruptions",
+  "session_attempt_model_context_snapshots",
   "session_attempt_personal_document_admissions",
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
@@ -883,6 +901,7 @@ export const FORCE_RLS_TABLES = [
   "session_system_update_outbox",
   "session_system_updates",
   "session_tenancy_activations",
+  "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_turn_attempts",
   "session_turn_startup_milestones",
@@ -925,6 +944,7 @@ export const FORCE_RLS_TABLES = [
   "temporal_schedule_cleanup_outbox",
   "tenancy_backfill_receipts",
   "tenancy_backfill_unresolved_rows",
+  "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
@@ -985,6 +1005,11 @@ export const NON_RLS_RUNTIME_TABLES = [
   "deployment_model_catalog",
   "integration_oauth_clients",
   "managed_accounts",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_clients",
+  "mcp_oauth_refresh_tokens",
   "nested_agent_depth_configuration",
   "pr_review_managed_github_routes",
   "stripe_webhook_events",
@@ -1063,12 +1088,20 @@ export const RUNTIME_FULL_DML_TABLES = [
   "machine_metrics_series",
   "machine_removal_operations",
   "managed_accounts",
+  "mcp_oauth_access_tokens",
+  "mcp_oauth_authorization_codes",
+  "mcp_oauth_authorization_requests",
+  "mcp_oauth_clients",
+  "mcp_oauth_refresh_tokens",
   "memory_slack_publication_configurations",
   "memory_slack_publication_receipts",
   "memory_slack_publications",
   "model_call_facts",
   "new_session_drafts",
   "organization_codex_rotation_settings",
+  "organization_model_provider_connection_operations",
+  "organization_model_provider_connections",
+  "organization_model_provider_custom_models",
   "pack_installation_components",
   "pack_installations",
   "pr_review_app_registrations",
@@ -1126,6 +1159,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "social_connections",
   "social_posts",
   "stripe_webhook_events",
+  "tool_gateway_approval_capabilities",
   "transcription_recording_chunks",
   "transcription_recording_objects",
   "transcription_recording_segments",
@@ -1263,6 +1297,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
+  "session_attempt_model_context_snapshots",
   "session_turn_startup_milestones",
   "site_auth_connections",
   "slack_user_link_access_requests",
@@ -1274,6 +1309,7 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
  * The ordinary application role must have no direct table privileges on them.
  */
 export const PROTECTED_NO_DIRECT_DML_TABLES = [
+  "additional_organization_creation_receipts",
   "canonical_human_identities",
   "canonical_human_identity_operations",
   "canonical_human_identity_subjects",
@@ -1363,6 +1399,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "session_attempt_personal_document_snapshots",
   "session_attempt_personal_resource_admissions",
   "session_attempt_personal_resource_snapshots",
+  "session_tenancy_additional_organization_activation_evidence",
   "session_tenancy_greenfield_activation_evidence",
   "session_variable_set_attachments",
   "session_visibility_write_capabilities",
@@ -2286,6 +2323,29 @@ export function evaluateRuntimeDatabasePosture(
         );
       } else {
         const authorityTables = COMPANY_PROFILE_AGENT_ADMIN_AUTHORITY_TABLES.map(
+          (tableName) => tableByName.get(tableName)!,
+        );
+        const authorityOwners = new Set(authorityTables.map((table) => table.owner));
+        if (authorityOwners.size !== 1) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} authority table owners do not match: ${authorityTables.map((table) => `${table.name}=${table.owner}`).join(", ")}`,
+          );
+        } else if (routine.owner !== authorityTables[0]!.owner) {
+          violations.push(
+            `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
+          );
+        }
+      }
+    } else if (routine.name === ADDITIONAL_ORGANIZATION_CREATION_ROUTINE) {
+      const missingAuthorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.filter(
+        (tableName) => !tableByName.has(tableName),
+      );
+      if (missingAuthorityTables.length > 0) {
+        violations.push(
+          `target-schema runtime capability ${routine.name} authority tables are missing: ${missingAuthorityTables.join(", ")}`,
+        );
+      } else {
+        const authorityTables = ADDITIONAL_ORGANIZATION_CREATION_AUTHORITY_TABLES.map(
           (tableName) => tableByName.get(tableName)!,
         );
         const authorityOwners = new Set(authorityTables.map((table) => table.owner));

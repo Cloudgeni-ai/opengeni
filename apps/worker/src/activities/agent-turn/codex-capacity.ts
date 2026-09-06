@@ -1,20 +1,20 @@
 import {
   getSessionGoal,
   acquireCodexCredentialLease,
-  armCodexCapacityWait,
+  CodexCredentialLeaseAttemptFencedError,
+  CodexCredentialFailoverExhaustedError,
   CODEX_CREDENTIAL_LEASE_TTL_MS,
-  getCodexRotationSettings,
-  listCodexAccountStatuses,
-  getSessionCodexState,
   recordSessionActiveCodexCredential,
   setSessionCodexPinInTransaction,
-  setActiveCodexCredential,
+  settleCodexCredentialFailover,
   withSessionCodexCapacityMutation,
   type CodexCredentialLeaseResult,
+  type CodexCredentialLeaseSessionState,
   type CodexCredentialLeaseSelectionContext,
 } from "@opengeni/db";
-import { publishDurableSessionEvents } from "@opengeni/events";
 import { type Settings } from "@opengeni/config";
+import { CodexReloginRequired } from "@opengeni/codex";
+import { publishDurableSessionEvents } from "@opengeni/events";
 import {
   authoritativeCodexCapacityResetAt,
   classifyCodexPin,
@@ -22,14 +22,17 @@ import {
   isCodexCredentialEligible,
   selectCodexCredentialLeaseForTurn,
   type CodexRotationStrategy,
-  type RotationDecision,
+  type CodexTurnLeaseDecision,
 } from "../codex-rotation";
 import {
   codexFleetShadowDecisionMetricLabelsV1,
   codexFleetShadowErrorMetricLabelsV1,
   publishCodexFleetShadowDecisionV1,
 } from "../codex-fleet-shadow";
-import { signalCodexCapacityWakeTargets } from "../codex-capacity";
+import {
+  armAndReconcileCodexCapacityWait,
+  signalCodexCapacityWakeTargets,
+} from "../codex-capacity";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -37,6 +40,7 @@ import type {
 } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
+import { deliverFailedChildTurnToParent } from "../parent-wake";
 import { randomUUID } from "node:crypto";
 
 import { refreshCappedCodexUsageRows } from "./codex";
@@ -94,6 +98,7 @@ export async function selectCodexTurnCapacity(
     observability,
     wakeSessionWorkflow,
     signalCodexCapacityWorkflow,
+    dispatchId,
     control,
     attempt,
     billingState,
@@ -101,6 +106,7 @@ export async function selectCodexTurnCapacity(
     providerTurn,
     leases,
     claimedResult,
+    acknowledgeLostAttemptOwnership,
     turn,
     codexWorkspaceKey,
   } = deps;
@@ -117,129 +123,69 @@ export async function selectCodexTurnCapacity(
     const credentialSelectionStartedAt = performance.now();
     let credentialSelectionOutcome: "completed" | "failed" = "completed";
     try {
-      const sessionCodex = await getSessionCodexState(db, input.workspaceId, input.sessionId);
-      const sessionPin = sessionCodex?.pinnedCredentialId ?? null;
-      const sessionPinSource = sessionCodex?.pinSource ?? null;
-      const selectForTurn = (context: CodexCredentialLeaseSelectionContext) =>
+      const selectForTurn = (
+        context: CodexCredentialLeaseSelectionContext,
+        lockedSessionCodexState: CodexCredentialLeaseSessionState,
+      ) =>
         selectCodexCredentialLeaseForTurn({
           context,
-          leasingEnabled: settings.codexCredentialLeasingEnabled,
           sessionId: input.sessionId,
-          sessionPinnedCredentialId: sessionPin,
-          sessionPinSource,
-          sessionLastCredentialId: sessionCodex?.lastCredentialId ?? null,
+          sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
+          sessionPinSource: lockedSessionCodexState.pinSource,
+          sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
           now: new Date(),
         });
 
-      // Rollout/rollback path is intentionally table-inert. With the flag off,
-      // old and new workers both use legacy pin > active-pointer selection and
-      // neither reads nor writes the additive lease/cursor schema.
-      let leased: CodexCredentialLeaseResult<RotationDecision>;
-      let leaseAcquisitionStartedAtMs: number | null = null;
-      if (settings.codexCredentialLeasingEnabled) {
-        leaseAcquisitionStartedAtMs = performance.now();
-        leased = await acquireCodexCredentialLease(
+      let leaseAcquisitionStartedAtMs = performance.now();
+      let leased: CodexCredentialLeaseResult<CodexTurnLeaseDecision> =
+        await acquireCodexCredentialLease(
           db,
           {
             accountId: input.accountId,
             workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
             turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            dispatchId,
+            expectedRedispatches: attempt.redispatchesAtDispatch,
             holderId,
-            advanceActivePointer: sessionPin === null,
+            advanceActivePointer: true,
           },
           selectForTurn,
         );
-      } else {
-        const [rotation, accounts] = await Promise.all([
-          getCodexRotationSettings(db, input.workspaceId),
-          listCodexAccountStatuses(db, input.workspaceId),
-        ]);
-        const leaseAccounts = accounts.map((account) => ({
-          ...account,
-          activeLeaseCount: 0,
-          selectionCount: 0,
-          lastSelectedAt: null,
-        }));
-        const activeCredentialId = rotation?.activeCredentialId ?? null;
-        const selected = selectForTurn({
-          accounts: leaseAccounts,
-          activeCredentialId,
-          rotationEnabled: rotation?.rotationEnabled ?? false,
-          leaseRotationEnabled: false,
-          rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-          existingCredentialId: null,
-          policyScope: null,
-          unavailableDiagnostics: [],
-        });
-        leased = {
-          ...selected,
-          accounts: leaseAccounts,
-          activeCredentialId,
-          rotationEnabled: rotation?.rotationEnabled ?? false,
-          rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-          reused: false,
-          holderId: null,
-          generation: null,
-          leasedUntil: null,
-          unavailableDiagnostics: [],
-          advanceActivePointer: selected.advanceActivePointer !== false,
-        };
-      }
       if (leased.decision.kind === "allCapped") {
         // Bounded self-heal of stale usage cache, then ONE new atomic selection.
         await refreshCappedCodexUsageRows(db, settings, input.workspaceId, leased.accounts, {
           signalCodexCapacityWorkflow,
           wakeSessionWorkflow,
         });
-        if (settings.codexCredentialLeasingEnabled) {
-          leaseAcquisitionStartedAtMs = performance.now();
-          leased = await acquireCodexCredentialLease(
-            db,
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              turnId,
-              holderId,
-              advanceActivePointer: sessionPin === null,
-            },
-            selectForTurn,
-          );
-        } else {
-          const [rotation, accounts] = await Promise.all([
-            getCodexRotationSettings(db, input.workspaceId),
-            listCodexAccountStatuses(db, input.workspaceId),
-          ]);
-          const leaseAccounts = accounts.map((account) => ({
-            ...account,
-            activeLeaseCount: 0,
-            selectionCount: 0,
-            lastSelectedAt: null,
-          }));
-          const selected = selectForTurn({
-            accounts: leaseAccounts,
-            activeCredentialId: rotation?.activeCredentialId ?? null,
-            rotationEnabled: rotation?.rotationEnabled ?? false,
-            leaseRotationEnabled: false,
-            rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-            existingCredentialId: null,
-            policyScope: null,
-            unavailableDiagnostics: [],
-          });
-          leased = {
-            ...selected,
-            accounts: leaseAccounts,
-            activeCredentialId: rotation?.activeCredentialId ?? null,
-            rotationEnabled: rotation?.rotationEnabled ?? false,
-            rotationStrategy: rotation?.rotationStrategy ?? "most_remaining",
-            reused: false,
-            holderId: null,
-            generation: null,
-            leasedUntil: null,
-            unavailableDiagnostics: [],
-            advanceActivePointer: selected.advanceActivePointer !== false,
-          };
-        }
+        leaseAcquisitionStartedAtMs = performance.now();
+        leased = await acquireCodexCredentialLease(
+          db,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration: attempt.executionGeneration,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            dispatchId,
+            expectedRedispatches: attempt.redispatchesAtDispatch,
+            holderId,
+            advanceActivePointer: true,
+          },
+          selectForTurn,
+        );
       }
+      const lockedSessionCodexState = leased.sessionCodexState;
+      providerTurn.codexPolicySnapshot = leased.codexPolicySnapshot;
+      const sessionPin = lockedSessionCodexState.pinnedCredentialId;
+      const sessionPinSource = lockedSessionCodexState.pinSource;
       const rotationDecision = leased.decision;
       const selectedPinDisposition = classifyCodexPin({
         pinnedCredentialId: sessionPin,
@@ -252,6 +198,7 @@ export async function selectCodexTurnCapacity(
       // movement for manual/policy homes; this write only records the NEXT turn's
       // policy home (or clears a policy pin whose strategy is no longer active).
       if (
+        !leased.codexPolicySnapshotReused &&
         selectedPinDisposition === "sharded" &&
         leased.credentialId !== null &&
         (sessionPinSource !== "policy" || sessionPin !== leased.credentialId)
@@ -312,16 +259,8 @@ export async function selectCodexTurnCapacity(
           pinMutation.wakeTargets,
         );
       }
-      if (
-        !settings.codexCredentialLeasingEnabled &&
-        leased.advanceActivePointer &&
-        sessionPin === null &&
-        rotationDecision.kind === "active" &&
-        rotationDecision.moved
-      ) {
-        await setActiveCodexCredential(db, input.workspaceId, rotationDecision.credentialId);
-      }
       providerTurn.effectiveCodexCredentialId = leased.credentialId;
+      providerTurn.codexCredentialFailoverLimit = leased.failoverLimit;
       leases.codex.generation = leased.generation;
       leases.codex.confirmedUntilMs =
         leased.leasedUntil && leaseAcquisitionStartedAtMs !== null
@@ -336,7 +275,7 @@ export async function selectCodexTurnCapacity(
 
       const actualOutcome = providerTurn.effectiveCodexCredentialId
         ? "selected"
-        : rotationDecision.kind === "allCapped"
+        : rotationDecision.kind === "allCapped" || rotationDecision.kind === "allocatorDisabled"
           ? "waiting"
           : "none";
       const actualReason = providerTurn.effectiveCodexCredentialId
@@ -349,7 +288,9 @@ export async function selectCodexTurnCapacity(
               : "active"
         : rotationDecision.kind === "allCapped"
           ? "all_capped"
-          : "none";
+          : rotationDecision.kind === "allocatorDisabled"
+            ? "allocator_disabled"
+            : "none";
       const fencedInFlight = leased.reused;
       const shadowResult = await publishCodexFleetShadowDecisionV1({
         enabled: settings.codexFleetPolicyShadowEnabled,
@@ -360,7 +301,7 @@ export async function selectCodexTurnCapacity(
           actualReason,
           affinityCredentialId: fencedInFlight
             ? providerTurn.effectiveCodexCredentialId
-            : (sessionPin ?? sessionCodex?.lastCredentialId ?? null),
+            : (sessionPin ?? lockedSessionCodexState.lastCredentialId ?? null),
           fencedInFlight,
           nearExhaustionPct: settings.codexRotationNearExhaustionPct,
           now: new Date(),
@@ -432,7 +373,8 @@ export async function selectCodexTurnCapacity(
       if (
         providerTurn.effectiveCodexCredentialId === null &&
         leased.accounts.length > 0 &&
-        leased.accounts.every((account) => !account.allocatorEnabled) &&
+        (rotationDecision.kind === "allocatorDisabled" ||
+          leased.accounts.every((account) => !account.allocatorEnabled)) &&
         turnId
       ) {
         if (turn.source === "compaction") {
@@ -463,68 +405,175 @@ export async function selectCodexTurnCapacity(
           control.activityStatus = "idle";
           return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
         }
-        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
         const activeGoal = goal?.status === "active" ? goal : null;
-        const armed = await armCodexCapacityWait(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          attemptId: input.attemptId,
-          workflowId: input.workflowId,
-          goalId: activeGoal?.id ?? null,
-          goalVersion: activeGoal?.version ?? null,
-          earliestResetAt: null,
-          resetKind: "bounded_refresh",
-          failurePayload: {
-            error: "All connected Codex subscriptions are disabled for new allocations.",
-            code: "codex_allocator_disabled",
-            detail: "waiting for a credential to be re-enabled, reconnected, or added",
+        const evaluated = await armAndReconcileCodexCapacityWait(
+          { db, bus },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: null,
+            resetKind: "mutation_only",
+            failurePayload: {
+              error:
+                rotationDecision.kind === "allocatorDisabled"
+                  ? "The policy-selected Codex subscription is disabled for new allocations."
+                  : "All connected Codex subscriptions are disabled for new allocations.",
+              code: "codex_allocator_disabled",
+              detail:
+                rotationDecision.kind === "allocatorDisabled"
+                  ? "waiting for the selected credential to be re-enabled under the accepted source policy"
+                  : "waiting for a credential in the accepted source pool to be re-enabled, reconnected, or added",
+            },
           },
-        });
-        if (armed.action === "waiting") {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+        );
+        if (evaluated.action === "resumed") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "recovering";
+          return { exit: claimedResult({ status: "recovering" }) };
+        }
+        if (evaluated.action === "waiting") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "waiting_capacity";
           return {
             exit: claimedResult({
               status: "waiting_capacity",
               capacityWait: {
-                waiterId: armed.waiter.id,
-                generation: armed.waiter.generation,
-                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                wakeRevision: armed.waiter.wakeRevision,
+                waiterId: evaluated.waiter.id,
+                generation: evaluated.waiter.generation,
+                nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+                wakeRevision: evaluated.waiter.wakeRevision,
               },
             }),
           };
         }
+        acknowledgeLostAttemptOwnership();
+        control.turnMetricOutcome = "cancelled";
+        control.activityStatus = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
+
+      if (rotationDecision.kind === "none") {
         if (
-          !(await eventing.settle!({
-            events: [
-              {
-                type: "turn.failed",
-                payload: {
-                  error: "All connected Codex subscriptions are disabled for new allocations.",
-                  code: "codex_allocator_disabled",
-                  retryable: false,
-                  recovery: "user_message",
-                },
-              },
-              {
-                type: "session.status.changed",
-                payload: { status: "idle" },
-              },
-            ],
-            turnStatus: "failed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-          }))
+          leased.poolAccountCount === 0 &&
+          !leased.codexPolicySnapshotReused &&
+          leased.codexPolicySnapshot?.source !== "disabled"
         ) {
-          return { exit: claimedResult({ status: "cancelled" }) };
+          // Preserve the established no-account behavior. The empty-string
+          // token resolver used by the later model path raises this same typed
+          // reconnect outcome, but capacity must not report success and defer
+          // the failure to an unguarded provider setup.
+          throw new CodexReloginRequired("No Codex subscription is connected for this workspace.");
         }
-        control.turnMetricOutcome = "failed";
-        control.activityStatus = "idle";
-        return { exit: claimedResult({ status: "idle" }) };
+        const noneReason =
+          sessionPinSource === "manual" && sessionPin !== null
+            ? {
+                code: "codex_manual_pin_unavailable",
+                error: "The pinned Codex subscription is unavailable for this turn.",
+                detail:
+                  "waiting for the pinned account to reconnect or become allocatable under the accepted source policy",
+              }
+            : !leased.rotationEnabled && leased.activeCredentialId === null
+              ? {
+                  code: "codex_active_pointer_unavailable",
+                  error: "The Codex active subscription pointer is unavailable for this turn.",
+                  detail:
+                    "waiting for the accepted active account to be restored or become allocatable",
+                }
+              : leased.poolAccountCount > leased.accounts.length
+                ? {
+                    code: "codex_policy_pool_unavailable",
+                    error: "No Codex subscription matches the accepted account-selection policy.",
+                    detail:
+                      "waiting for a matching credential to reconnect or become allocatable under the accepted source policy",
+                  }
+                : {
+                    code: "codex_credential_unavailable",
+                    error:
+                      "No Codex subscription is currently available under the accepted policy.",
+                    detail:
+                      "waiting for a matching credential to reconnect or become allocatable under the accepted source policy",
+                  };
+        if (turn.source === "compaction") {
+          if (
+            !(await eventing.settle!({
+              events: [
+                {
+                  type: "turn.cancelled",
+                  payload: {
+                    maintenance: "context_compaction",
+                    reason: noneReason.code,
+                    requestPreserved: true,
+                  },
+                },
+                {
+                  type: "session.status.changed",
+                  payload: { status: "idle" },
+                },
+              ],
+              turnStatus: "cancelled",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return { exit: claimedResult({ status: "cancelled" }) };
+          }
+          control.turnMetricOutcome = "cancelled";
+          control.activityStatus = "idle";
+          return { exit: claimedResult({ status: "idle", deferredUntilWake: true }) };
+        }
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
+        const activeGoal = goal?.status === "active" ? goal : null;
+        const evaluated = await armAndReconcileCodexCapacityWait(
+          { db, bus },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: activeGoal?.id ?? null,
+            goalVersion: activeGoal?.version ?? null,
+            earliestResetAt: null,
+            resetKind: "mutation_only",
+            failurePayload: {
+              error: noneReason.error,
+              code: noneReason.code,
+              detail: noneReason.detail,
+            },
+          },
+        );
+        if (evaluated.action === "resumed") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "recovering";
+          return { exit: claimedResult({ status: "recovering" }) };
+        }
+        if (evaluated.action === "waiting") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "waiting_capacity";
+          return {
+            exit: claimedResult({
+              status: "waiting_capacity",
+              capacityWait: {
+                waiterId: evaluated.waiter.id,
+                generation: evaluated.waiter.generation,
+                nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+                wakeRevision: evaluated.waiter.wakeRevision,
+              },
+            }),
+          };
+        }
+        acknowledgeLostAttemptOwnership();
+        control.turnMetricOutcome = "cancelled";
+        control.activityStatus = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
       }
 
       if (rotationDecision.kind === "allCapped" && turnId) {
@@ -561,7 +610,7 @@ export async function selectCodexTurnCapacity(
         // build) until the EARLIEST reset across all accounts — the multi-account
         // generalization of #143's single-account idle-until-reset. No saveRunState:
         // no model ran, nothing to freeze.
-        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
+        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId);
         const goalActive = Boolean(goal && goal.status === "active");
         // BOUNDED + POSITIVE: clamp to [MIN_IDLE_MS, max] so a null/elapsed/unknown
         // reset can never yield a 0 (which session.ts would treat as "continue now",
@@ -571,87 +620,62 @@ export async function selectCodexTurnCapacity(
           new Date(),
           CODEX_USAGE_LIMIT_MAX_RESUME_MS,
         );
+        const allConnectedAccountsWereConsidered =
+          leased.rotationEnabled && selectedPinDisposition !== "manual";
+        const capacityDetail = allConnectedAccountsWereConsidered
+          ? "all connected Codex subscriptions are rate-limited"
+          : selectedPinDisposition === "manual"
+            ? "the pinned Codex subscription is rate-limited"
+            : "the active Codex subscription is rate-limited";
         const failurePayload = codexUsageLimitFailurePayload(
           { resetsInSeconds: Math.ceil(resumeMs / 1000) },
-          "all connected Codex subscriptions are rate-limited",
-          { allAccounts: true },
+          capacityDetail,
+          { allAccounts: allConnectedAccountsWereConsidered },
         );
         const authoritativeResetAt = authoritativeCodexCapacityResetAt(leased.accounts, new Date());
-        const armed = await armCodexCapacityWait(db, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          attemptId: input.attemptId,
-          workflowId: input.workflowId,
-          goalId: goalActive && goal ? goal.id : null,
-          goalVersion: goalActive && goal ? goal.version : null,
-          earliestResetAt: authoritativeResetAt,
-          resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
-          failurePayload,
-        });
-        if (armed.action === "waiting") {
-          await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, armed.events);
+        const evaluated = await armAndReconcileCodexCapacityWait(
+          { db, bus },
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            goalId: goalActive && goal ? goal.id : null,
+            goalVersion: goalActive && goal ? goal.version : null,
+            earliestResetAt: authoritativeResetAt,
+            resetKind: authoritativeResetAt ? "authoritative" : "bounded_refresh",
+            failurePayload,
+          },
+        );
+        if (evaluated.action === "resumed") {
+          control.turnMetricOutcome = "recovering";
+          control.activityStatus = "recovering";
+          return { exit: claimedResult({ status: "recovering" }) };
+        }
+        if (evaluated.action === "waiting") {
           control.turnMetricOutcome = "recovering";
           control.activityStatus = "waiting_capacity";
           return {
             exit: claimedResult({
               status: "waiting_capacity",
               capacityWait: {
-                waiterId: armed.waiter.id,
-                generation: armed.waiter.generation,
-                nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
-                wakeRevision: armed.waiter.wakeRevision,
+                waiterId: evaluated.waiter.id,
+                generation: evaluated.waiter.generation,
+                nextCheckAt: evaluated.waiter.nextCheckAt.toISOString(),
+                wakeRevision: evaluated.waiter.wakeRevision,
               },
             }),
           };
         }
-        if (
-          !(await eventing.settle!({
-            events: [
-              // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
-              // rotation-wait state as the reactive all-capped path, so it must freeze
-              // autoContinuations identically (evaluateGoalContinuation reads this marker)
-              // — a goal waiting out a long reset must not burn its continuation budget on
-              // the proactive path while the reactive path spares it.
-              {
-                type: "turn.failed",
-                payload: {
-                  ...failurePayload,
-                  recovery: goalActive ? "goal_continuation" : "user_message",
-                  rotated: true,
-                },
-              },
-              {
-                type: "session.status.changed",
-                payload: { status: "idle" },
-              },
-            ],
-            turnStatus: "failed",
-            sessionStatus: "idle",
-            activeTurnId: null,
-          }))
-        ) {
-          return { exit: claimedResult({ status: "cancelled" }) };
-        }
-        control.turnMetricOutcome = "failed";
-        control.activityStatus = "idle";
-        // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
-        // resumeMs even if a future change made it 0 — never a tight re-dispatch.
-        return {
-          exit: claimedResult(
-            goalActive
-              ? {
-                  status: "idle",
-                  continueDelayMs: resumeMs,
-                  idleUntilReset: true,
-                }
-              : { status: "idle" },
-          ),
-        };
+        acknowledgeLostAttemptOwnership();
+        control.turnMetricOutcome = "cancelled";
+        control.activityStatus = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
       }
       if (providerTurn.effectiveCodexCredentialId) {
-        const priorAccountId = sessionCodex?.lastCredentialId ?? null;
+        const priorAccountId = lockedSessionCodexState.lastCredentialId;
         if (priorAccountId !== providerTurn.effectiveCodexCredentialId) {
           await recordSessionActiveCodexCredential(
             db,
@@ -704,6 +728,59 @@ export async function selectCodexTurnCapacity(
       }
     } catch (error) {
       credentialSelectionOutcome = "failed";
+      if (error instanceof CodexCredentialLeaseAttemptFencedError) {
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
+      if (error instanceof CodexCredentialFailoverExhaustedError) {
+        const settlement = await settleCodexCredentialFailover(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          holderId: null,
+          generation: null,
+          expectedRedispatches: attempt.redispatchesAtDispatch,
+          maxFailovers: error.maxFailovers,
+          recoveryPayload: {
+            triggerEventId: attempt.triggerEventId!,
+            reason: "codex_credential_failover_exhausted",
+          },
+          failedPayload: {
+            error:
+              "Automatic Codex credential failover stopped after every bounded account attempt was consumed. Send a new message after checking account health or capacity.",
+            code: "codex_credential_failover_exhausted",
+            retryable: false,
+            recovery: "user_message",
+            failoverCount: error.failoverCount,
+            maxFailovers: error.maxFailovers,
+          },
+        });
+        if (settlement.action === "limit_exceeded") {
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            settlement.events,
+          );
+          control.activityStatus = "idle";
+          control.turnMetricOutcome = "failed";
+          await deliverFailedChildTurnToParent(
+            { db, bus, settings, observability, wakeSessionWorkflow },
+            input.workspaceId,
+            input.sessionId,
+            turnId,
+          );
+          return { exit: claimedResult({ status: "idle" }) };
+        }
+        acknowledgeLostAttemptOwnership();
+        control.activityStatus = "cancelled";
+        control.turnMetricOutcome = "cancelled";
+        return { exit: claimedResult({ status: "cancelled" }) };
+      }
       throw error;
     } finally {
       recordTurnStartupPhase(observability, {

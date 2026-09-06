@@ -413,7 +413,7 @@ describe("migration 0199 workspace learning policy", () => {
     expect(defaultSnapshot).toMatchObject({
       revision: null,
       activationVersion: 0,
-      workspaceMode: "off",
+      workspaceMode: "suggest",
       sourceOverrides: [],
     });
   }, 180_000);

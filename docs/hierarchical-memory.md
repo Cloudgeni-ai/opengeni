@@ -181,9 +181,10 @@ model:
   injected into any agent prompt. An agent reads the store through
   `memory_search` when it needs it, rather than receiving it unbidden;
 - durable agent Memory writes go directly through `memory_save` and
-  `memory_correct` whenever `memoryEnabled` is true. These exact-attempt writes
-  are always autonomous and do not consult the workspace Learning mode;
-  `memory_search` remains the retrieval path.
+  `memory_correct` whenever `memoryEnabled` is not explicitly false. Workspace
+  Memory is enabled by default; an explicit workspace opt-out disables these
+  tools. These exact-attempt writes are always autonomous and do not consult the
+  workspace Learning mode; `memory_search` remains the retrieval path.
   Agent-authored durable text is bounded by the destination it lands in, on every
   surface that reaches it including task-note promotion: 600 characters for a
   mandatory workspace rule (composed verbatim into the prompt of every session it

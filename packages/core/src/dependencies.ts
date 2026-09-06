@@ -194,6 +194,8 @@ export type AppDependencies = {
   codexFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
+  /** Injectable credential-free GitHub transport for public repository verification tests. */
+  githubAnonymousFetch?: typeof fetch;
   /** Injectable xAI OAuth/subscription transport for deterministic API/provider tests. */
   xaiFetch?: typeof fetch;
   /** Injectable Slack Web API transport for deterministic bot-connection tests. */

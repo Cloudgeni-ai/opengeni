@@ -211,6 +211,38 @@ describe("portable Skill persistence", () => {
     });
   }, 60_000);
 
+  test("keeps session-selected Skills out of workspace runtime until explicitly requested", async () => {
+    if (!available || !client) return;
+    const input = {
+      ...skillInput("implementation-only"),
+      activationMode: "session_selected" as const,
+    };
+    const installed = await installPortableSkill(client.db, input);
+
+    expect(
+      (await listInstalledPortableSkills(client.db, first.workspaceId)).some(
+        (skill) => skill.capabilityId === input.capabilityId,
+      ),
+    ).toBe(false);
+    expect(
+      await listInstalledPortableSkills(client.db, first.workspaceId, {
+        includeSessionSelected: true,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        capabilityId: input.capabilityId,
+        activationMode: "session_selected",
+      }),
+    );
+
+    await uninstallPortableSkill(client.db, {
+      accountId: first.accountId,
+      workspaceId: first.workspaceId,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: installed.installationVersion,
+    });
+  }, 60_000);
+
   test("removing a direct owner preserves a Skill still owned by a Pack", async () => {
     if (!available || !client || !shared) return;
     const input = skillInput("incident-responder");

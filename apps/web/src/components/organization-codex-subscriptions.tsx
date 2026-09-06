@@ -101,6 +101,7 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
       await client.requestJson(
         "POST",
         `/v1/organizations/${organizationId}/codex/accounts/${accountId}/activate`,
+        {},
       );
       await refresh();
       toast.success("Organization default subscription updated");
@@ -132,6 +133,7 @@ export function OrganizationCodexSubscriptions({ organizationId }: { organizatio
       await client.requestJson(
         "DELETE",
         `/v1/organizations/${organizationId}/codex/accounts/${accountId}`,
+        {},
       );
       await refresh();
       toast.success("Organization subscription disconnected");

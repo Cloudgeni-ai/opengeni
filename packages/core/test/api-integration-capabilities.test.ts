@@ -61,6 +61,7 @@ function runtime(overrides: Partial<ApiIntegrationRuntime> = {}): ApiIntegration
       kind: "api_key",
       subjectScope: "workspace",
     },
+    connectionAuthorityGeneration: 1,
     allowedTools: ["list_items"],
     requireApproval: [],
     revision,

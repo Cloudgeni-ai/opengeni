@@ -87,6 +87,7 @@ describe("generateCodexSubscriptionImage", () => {
   test("refreshes only after a definitive 401", async () => {
     const authorizations: string[] = [];
     let refreshes = 0;
+    let fences = 0;
     const result = await generateCodexSubscriptionImage({
       prompt: "a blue sphere",
       turnId: "turn-1",
@@ -96,6 +97,9 @@ describe("generateCodexSubscriptionImage", () => {
         refresh: async () => {
           refreshes += 1;
           return token("fresh");
+        },
+        beforeProviderDispatch: () => {
+          fences += 1;
         },
       },
       fetch: async (_input, init) => {
@@ -107,6 +111,7 @@ describe("generateCodexSubscriptionImage", () => {
     });
     expect(result.bytes).toEqual(new TextEncoder().encode("image"));
     expect(refreshes).toBe(1);
+    expect(fences).toBe(2);
     expect(authorizations).toEqual(["Bearer stale", "Bearer fresh"]);
   });
 

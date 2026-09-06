@@ -28,7 +28,7 @@ function receipt(operationId: string): CompanyBrainLearningPolicyRouteReceipt {
       policyRevision: null,
       activationVersion: 0,
       snapshotId: "00000000-0000-4000-8000-000000000108",
-      revisionId: "workspace-learning-policy:default-off:v1",
+      revisionId: "workspace-learning-policy:default-suggest:v1",
       snapshotHash: "a".repeat(64),
     },
     decision: "proposal_created",

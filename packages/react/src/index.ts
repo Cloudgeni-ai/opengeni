@@ -600,8 +600,10 @@ export {
   formatClockTime,
   formatRelativeTime,
   humanizeFailureReason,
+  presentFailure,
   isCreditExhaustion,
   stringifyPayload,
   truncate,
   tryParseJson,
 } from "./lib/format";
+export { SessionCommandsPanel } from "./components/session-commands-panel";

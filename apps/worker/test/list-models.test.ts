@@ -95,6 +95,41 @@ describe("list_models", () => {
     });
   });
 
+  test("lists organization custom models only when the inherited connection is ready", () => {
+    const customModels = [
+      { upstreamModelId: "anthropic/claude-sonnet-4.6", label: "Organization Claude" },
+    ];
+    const connected = resolveWorkspaceModelSelection({
+      settings: testSettings(),
+      policy: null,
+      codexSubscriptionActive: false,
+      organizationOpenRouterConnectionActive: true,
+      organizationOpenRouterCustomModels: customModels,
+    });
+    const disconnected = resolveWorkspaceModelSelection({
+      settings: testSettings(),
+      policy: null,
+      codexSubscriptionActive: false,
+      organizationOpenRouterConnectionActive: false,
+      organizationOpenRouterCustomModels: customModels,
+    });
+    const modelId = "organization-openrouter/anthropic/claude-sonnet-4.6";
+
+    expect(connected.find((entry) => entry.model.id === modelId)).toMatchObject({
+      model: {
+        label: "Organization Claude",
+        cost: "organization",
+        billing: { upstreamPayer: "organization", metering: "external" },
+      },
+      credentialReadiness: { status: "ready" },
+      availability: { selectable: true },
+    });
+    expect(disconnected.find((entry) => entry.model.id === modelId)).toMatchObject({
+      credentialReadiness: { status: "not_ready", reason: "needs_reauth" },
+      availability: { selectable: false, reason: "needs_reauth" },
+    });
+  });
+
   test("keeps every rendered field on one unambiguous line", () => {
     const selection = resolveWorkspaceModelSelection({
       settings: testSettings(),

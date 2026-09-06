@@ -357,6 +357,73 @@ export async function rememberNewSessionSelectionInTransaction(
   return Boolean(updated);
 }
 
+async function lockCurrentNewSessionDraft(
+  db: Database,
+  input: { workspaceId: string; subjectId: string },
+): Promise<NewSessionDraftRow | undefined> {
+  await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
+  const [current] = await db
+    .select()
+    .from(schema.newSessionDrafts)
+    .where(
+      and(
+        eq(schema.newSessionDrafts.workspaceId, input.workspaceId),
+        eq(schema.newSessionDrafts.subjectId, input.subjectId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  return current;
+}
+
+async function lockExactNewSessionDraft(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    expectedRevision: number;
+    expectedSnapshot: NewSessionDraftSnapshot;
+  },
+): Promise<NewSessionDraftRow> {
+  const current = await lockCurrentNewSessionDraft(db, input);
+  if (!current || current.revision !== input.expectedRevision) {
+    throw new NewSessionDraftConflictError(current?.revision ?? 0);
+  }
+  if (
+    stableJson({
+      text: current.text,
+      resources: current.resources,
+      tools: newSessionDraftToolsProvided(current) ? current.tools : [],
+      toolsProvided: newSessionDraftToolsProvided(current),
+      model: current.model,
+      reasoningEffort: current.reasoningEffort,
+      latencyMode: current.latencyMode,
+      options: publicNewSessionDraftOptions(current),
+    }) !== stableJson(input.expectedSnapshot)
+  ) {
+    throw new NewSessionDraftConflictError(current.revision);
+  }
+  return current;
+}
+
+/**
+ * Fence a fresh session shell on the exact actor-private draft it represents.
+ * The caller keeps this row lock through its create transaction, so a draft
+ * that was already stale cannot leave a committed, uninitialized session.
+ * The later atomic initializer still performs the authoritative consume.
+ */
+export async function assertExactNewSessionDraftInTransaction(
+  db: Database,
+  input: {
+    workspaceId: string;
+    subjectId: string;
+    expectedRevision: number;
+    expectedSnapshot: NewSessionDraftSnapshot;
+  },
+): Promise<void> {
+  await lockExactNewSessionDraft(db, input);
+}
+
 /**
  * Replace one exact accepted draft with the next-create safe seed. The row is
  * identity-serialized before the revision check so even the absent-row
@@ -374,38 +441,16 @@ export async function seedNewSessionDraftInTransaction(
     acceptedSelection?: AcceptedNewSessionSelection;
   },
 ): Promise<boolean> {
-  await lockNewSessionDraftIdentity(db, input.workspaceId, input.subjectId);
-  const [current] = await db
-    .select()
-    .from(schema.newSessionDrafts)
-    .where(
-      and(
-        eq(schema.newSessionDrafts.workspaceId, input.workspaceId),
-        eq(schema.newSessionDrafts.subjectId, input.subjectId),
-      ),
-    )
-    .for("update")
-    .limit(1);
+  const current = input.expectedSnapshot
+    ? await lockExactNewSessionDraft(db, {
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        expectedRevision: input.expectedRevision,
+        expectedSnapshot: input.expectedSnapshot,
+      })
+    : await lockCurrentNewSessionDraft(db, input);
   if (!current || current.revision !== input.expectedRevision) {
-    if (input.expectedSnapshot) {
-      throw new NewSessionDraftConflictError(current?.revision ?? 0);
-    }
     return false;
-  }
-  if (
-    input.expectedSnapshot &&
-    stableJson({
-      text: current.text,
-      resources: current.resources,
-      tools: newSessionDraftToolsProvided(current) ? current.tools : [],
-      toolsProvided: newSessionDraftToolsProvided(current),
-      model: current.model,
-      reasoningEffort: current.reasoningEffort,
-      latencyMode: current.latencyMode,
-      options: publicNewSessionDraftOptions(current),
-    }) !== stableJson(input.expectedSnapshot)
-  ) {
-    throw new NewSessionDraftConflictError(current.revision);
   }
 
   const parsedOptions = NewSessionDraftOptions.safeParse(publicNewSessionDraftOptions(current));

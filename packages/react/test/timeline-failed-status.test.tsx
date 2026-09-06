@@ -272,23 +272,32 @@ function hasFailedAffordance(container: HTMLElement): boolean {
   return container.querySelector(".text-og-status-failed") !== null;
 }
 
+async function waitForFailedAffordance(container: HTMLElement): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!hasFailedAffordance(container) && Date.now() < deadline) {
+    // SandboxRow is loaded through React.lazy. A busy CI worker can need more
+    // than one event-loop turn to resolve the module and leave Suspense.
+    await flush(10);
+  }
+}
+
 describe("Structural guard — every renderer surfaces failure affordance on failed status", () => {
   for (const c of CASES) {
     test(c.label, async () => {
       if (c.kind === "tool") {
         const Renderer = defaultToolRegistry.resolve(c.item);
         const r = await renderComponent(<Renderer item={c.item} />);
-        await flush();
+        await waitForFailedAffordance(r.container);
         expect(hasFailedAffordance(r.container)).toBe(true);
         await r.unmount();
       } else if (c.kind === "rail-worker") {
         const r = await renderComponent(<ActivityRail items={[c.item]} />);
-        await flush();
+        await waitForFailedAffordance(r.container);
         expect(hasFailedAffordance(r.container)).toBe(true);
         await r.unmount();
       } else {
         const r = await renderComponent(<ActivityRail items={[c.item]} />);
-        await flush();
+        await waitForFailedAffordance(r.container);
         expect(hasFailedAffordance(r.container)).toBe(true);
         await r.unmount();
       }

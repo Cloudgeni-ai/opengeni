@@ -305,6 +305,8 @@ export async function getWorkspaceInsights(
       creditUsd: microsToUsd(row.pricedCostMicros),
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: row.equivalentCreditCostKnownCalls,
     }))
     .sort((a, b) => b.totalTokens - a.totalTokens);
 
@@ -326,6 +328,22 @@ export async function getWorkspaceInsights(
     (sum, row) => sum + row.estimatedProviderCostKnownCalls,
     0,
   );
+  const equivalentCreditCostMicros = modelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostMicros,
+    0,
+  );
+  const priorEquivalentCreditCostMicros = priorModelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostMicros,
+    0,
+  );
+  const equivalentCreditCostKnownCalls = modelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostKnownCalls,
+    0,
+  );
+  const priorEquivalentCreditCostKnownCalls = priorModelRows.reduce(
+    (sum, row) => sum + row.equivalentCreditCostKnownCalls,
+    0,
+  );
   const modelCalls = modelRows.reduce((sum, row) => sum + row.calls, 0);
   const priorInputTokens = priorModelRows.reduce((sum, row) => sum + row.inputTokens, 0);
   const priorTotalTokens = priorModelRows.reduce((sum, row) => sum + row.totalTokens, 0);
@@ -342,6 +360,8 @@ export async function getWorkspaceInsights(
       costMicros: 0,
       estimatedProviderCostMicros: 0,
       estimatedProviderCostKnownCalls: 0,
+      equivalentCreditCostMicros: 0,
+      equivalentCreditCostKnownCalls: 0,
       inputTokens: 0,
       outputTokens: 0,
       cachedTokens: 0,
@@ -361,6 +381,8 @@ export async function getWorkspaceInsights(
       modelCostUsd: microsToUsd(modelCostMicros),
       estimatedProviderUsd: microsToUsd(facts.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: facts.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(facts.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: facts.equivalentCreditCostKnownCalls,
       warmSeconds: usageBuckets.get(bucket)?.warmSeconds ?? 0,
       inputTokens: facts.inputTokens,
       outputTokens: facts.outputTokens,
@@ -393,6 +415,8 @@ export async function getWorkspaceInsights(
       creditUsd,
       estimatedProviderUsd: microsToUsd(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: row.estimatedProviderCostKnownCalls,
+      equivalentCreditUsd: microsToUsd(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: row.equivalentCreditCostKnownCalls,
       tokens: row.totalTokens,
       cacheHitPct: cacheHitPct(row.cachedTokens, row.cacheInputTokens),
       pctOfCreditUsd:
@@ -414,6 +438,8 @@ export async function getWorkspaceInsights(
       creditUsd: fact ? microsToUsd(fact.pricedCostMicros) : null,
       estimatedProviderUsd: fact ? microsToUsd(fact.estimatedProviderCostMicros) : null,
       estimatedProviderCostKnownCalls: fact ? fact.estimatedProviderCostKnownCalls : null,
+      equivalentCreditUsd: fact ? microsToUsd(fact.equivalentCreditCostMicros) : null,
+      equivalentCreditCostKnownCalls: fact ? fact.equivalentCreditCostKnownCalls : null,
       tokens: fact ? fact.totalTokens : null,
       cacheHitPct: fact ? cacheHitPct(fact.cachedTokens, fact.cacheInputTokens) : null,
       billing: fact ? billingPathOf(fact.billingPath) : null,
@@ -489,6 +515,8 @@ export async function getWorkspaceInsights(
         row.estimatedProviderCostMicros == null
           ? null
           : microsToUsd(row.estimatedProviderCostMicros),
+      equivalentCreditUsd:
+        row.equivalentCreditCostMicros == null ? null : microsToUsd(row.equivalentCreditCostMicros),
       pricingSource: pricingSourceOf(row.pricingSource),
     })),
     promptContributions,
@@ -522,6 +550,10 @@ export async function getWorkspaceInsights(
     priorEstimatedProviderUsd: microsToUsd(priorEstimatedProviderCostMicros),
     estimatedProviderCostKnownCalls,
     priorEstimatedProviderCostKnownCalls,
+    equivalentCreditUsd: microsToUsd(equivalentCreditCostMicros),
+    priorEquivalentCreditUsd: microsToUsd(priorEquivalentCreditCostMicros),
+    equivalentCreditCostKnownCalls,
+    priorEquivalentCreditCostKnownCalls,
     modelCalls,
     priorInputTokens,
     priorTotalTokens,

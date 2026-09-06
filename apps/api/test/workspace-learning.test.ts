@@ -128,7 +128,7 @@ describe("workspace learning API", () => {
       body: {
         expectedCurrentRevisionId: null,
         expectedActivationVersion: 0,
-        reason: "Enable review-first learning",
+        reason: "Require approval for learned changes",
       },
     });
     expect(firstActivation.status).toBe(200);
@@ -175,7 +175,7 @@ describe("workspace learning API", () => {
         targetRevisionId: first.id,
         expectedCurrentRevisionId: second.id,
         expectedActivationVersion: 2,
-        reason: "Restore review-first learning",
+        reason: "Restore approval-required learning",
       },
     });
     expect(rollback.status).toBe(200);

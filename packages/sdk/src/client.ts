@@ -4,11 +4,13 @@ import {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
+import type { OpenGeniToolsFacade, OpenGeniToolTransport, OpenGeniWorkspaceTools } from "./tools";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
   type StreamSessionEventsOptions,
 } from "./stream";
+import type { SessionModelContextResponse } from "./model-context";
 import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
@@ -178,6 +180,14 @@ import type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  OrganizationModelProviderKind,
+  OrganizationModelProviderConnection,
+  UpsertOrganizationModelProviderConnectionRequest,
+  RevokeOrganizationModelProviderConnectionRequest,
+  OrganizationProviderCustomModel,
+  OrganizationProviderCustomModelsResponse,
+  CreateOrganizationProviderCustomModelRequest,
+  DeleteOrganizationProviderCustomModelRequest,
   WorkspaceRealtimeModelCatalogResponse,
   ClientSessionEventInput,
   UserMessageEventInput,
@@ -270,6 +280,8 @@ import type {
   AcceptOrganizationRecoveryCustodyRequest,
   ConfigureOrganizationRecoveryPolicyRequest,
   CreateOrganizationInvitationRequest,
+  CreateAdditionalOrganizationRequest,
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationRequest,
   CreateOrganizationResponse,
   CreateOrganizationWorkspaceRequest,
@@ -572,7 +584,22 @@ function sessionListQuery(options: {
   };
 }
 
-export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+/**
+ * Web-standard fetch response accepted by the SDK.
+ *
+ * The project global `Response` type includes Bun's non-standard `textStream()`
+ * method and the newer `bytes()` method. Fetch implementations such as Expo do
+ * not necessarily provide either member, and the SDK does not use them, so
+ * they must not be part of the adapter boundary.
+ */
+export type FetchResponse = Omit<Response, "bytes" | "clone" | "textStream"> & {
+  clone(): FetchResponse;
+};
+
+export type FetchLike = (
+  input: string | URL | Request,
+  init?: RequestInit,
+) => Promise<FetchResponse>;
 
 export type WorkspaceControlEventPage = {
   events: WorkspaceControlEvent[];
@@ -749,6 +776,46 @@ function normalizeScheduledTaskMachineTarget<
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
  * edge runtimes.
  */
+function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsFacade {
+  return {
+    forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {
+      const normalizedWorkspaceId = workspaceId.trim();
+      if (!normalizedWorkspaceId) throw new TypeError("workspaceId is required");
+      let workspaceTools: Promise<OpenGeniWorkspaceTools> | undefined;
+      const load = (): Promise<OpenGeniWorkspaceTools> =>
+        (workspaceTools ??= import("./tools").then(({ OpenGeniToolsClient }) =>
+          new OpenGeniToolsClient(transport).forWorkspace(normalizedWorkspaceId),
+        ));
+      const node = (path: readonly string[]): OpenGeniWorkspaceTools =>
+        new Proxy(
+          (async (...args: unknown[]) => {
+            let target: unknown = await load();
+            for (const segment of path) {
+              target = (target as Record<string, unknown>)[segment];
+            }
+            if (typeof target !== "function")
+              throw new TypeError("OpenGeni tool path is not callable");
+            return await Reflect.apply(target, undefined, args);
+          }) as unknown as OpenGeniWorkspaceTools,
+          {
+            get: (_target, property) => {
+              if (property === "then") return undefined;
+              if (typeof property !== "string") return undefined;
+              return node([...path, property]);
+            },
+          },
+        );
+      return new Proxy(Object.create(null) as OpenGeniWorkspaceTools, {
+        get: (_target, property) => {
+          if (property === "then") return undefined;
+          if (typeof property !== "string") return undefined;
+          return node([property]);
+        },
+      });
+    },
+  };
+}
+
 export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
@@ -759,6 +826,8 @@ export class OpenGeniClient {
   private readonly queued = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
+  /** Dynamic typed tool facade backed by the canonical workspace gateway. */
+  readonly tools: OpenGeniToolsFacade;
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -771,6 +840,7 @@ export class OpenGeniClient {
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.interaction = new OpenGeniInteractionClient(this);
+    this.tools = createLazyToolsFacade(this);
   }
 
   // --- Session lifecycle ---------------------------------------------------
@@ -798,7 +868,7 @@ export class OpenGeniClient {
     if (input.durationSeconds !== undefined) {
       form.append("durationSeconds", String(input.durationSeconds));
     }
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(`/v1/workspaces/${workspaceId}/transcriptions`), {
         method: "POST",
@@ -897,7 +967,7 @@ export class OpenGeniClient {
     input: UploadTranscriptionRecordingChunkInput,
   ): Promise<UploadTranscriptionRecordingChunkResponse> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(
         this.url(
@@ -1039,6 +1109,17 @@ export class OpenGeniClient {
     );
   }
 
+  /** Exact model-visible prefix captured from the latest provider request. */
+  async getSessionModelContext(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionModelContextResponse> {
+    return await this.requestJson<SessionModelContextResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-context`,
+    );
+  }
+
   async updateSession(
     workspaceId: string,
     sessionId: string,
@@ -1157,13 +1238,18 @@ export class OpenGeniClient {
     );
   }
 
+  /** Running and stopping commands only; settled results remain in session history. */
   async listSessionBackgroundCommands(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<SessionBackgroundCommandListResponse> {
     return await this.requestJson<SessionBackgroundCommandListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -1648,7 +1734,11 @@ export class OpenGeniClient {
   async listTurns(
     workspaceId: string,
     sessionId: string,
-    options: { limit?: number; latestStarted?: boolean; signal?: AbortSignal | undefined } = {},
+    options: {
+      limit?: number;
+      latestStarted?: boolean;
+      signal?: AbortSignal | undefined;
+    } = {},
   ): Promise<SessionTurn[]> {
     return await this.requestJson<SessionTurn[]>(
       "GET",
@@ -1854,13 +1944,15 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; offset?: number; sessionId?: string } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks`,
       undefined,
       {
+        ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
@@ -4138,6 +4230,88 @@ export class OpenGeniClient {
     );
   }
 
+  /** Read metadata for one organization-owned model-provider connection. */
+  async getOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+  ): Promise<OrganizationModelProviderConnection | null> {
+    return await this.requestJson<OrganizationModelProviderConnection | null>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+    );
+  }
+
+  /** Connect or rotate one organization-owned provider credential. */
+  async upsertOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: UpsertOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationModelProviderConnection> {
+    return await this.requestJson<OrganizationModelProviderConnection>(
+      "PUT",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** Revoke one organization-owned provider credential. */
+  async revokeOrganizationModelProviderConnection(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: RevokeOrganizationModelProviderConnectionRequest,
+  ): Promise<OrganizationModelProviderConnection> {
+    return await this.requestJson<OrganizationModelProviderConnection>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}`,
+      request,
+    );
+  }
+
+  /** List organization-owned exact upstream model slugs. */
+  async listOrganizationProviderCustomModels(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+  ): Promise<OrganizationProviderCustomModelsResponse> {
+    return await this.requestJson<OrganizationProviderCustomModelsResponse>(
+      "GET",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models`,
+    );
+  }
+
+  /** Add one organization-owned exact upstream model slug. */
+  async createOrganizationProviderCustomModel(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    request: CreateOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "POST",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models`,
+      request,
+    );
+  }
+
+  /** Retire one organization-owned custom model. */
+  async deleteOrganizationProviderCustomModel(
+    organizationId: string,
+    providerKind: OrganizationModelProviderKind,
+    customModelId: string,
+    request: DeleteOrganizationProviderCustomModelRequest,
+  ): Promise<OrganizationProviderCustomModel> {
+    if (
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+        customModelId,
+      )
+    ) {
+      throw new TypeError("customModelId must be a UUID");
+    }
+    return await this.requestJson<OrganizationProviderCustomModel>(
+      "DELETE",
+      `/v1/organizations/${organizationId}/model-providers/${providerKind}/custom-models/${encodeURIComponent(customModelId)}`,
+      request,
+    );
+  }
+
   /** Read the workspace's hard provider/model allowlist. */
   async getWorkspaceModelAccessPolicy(workspaceId: string): Promise<WorkspaceModelAccessPolicy> {
     return await this.requestJson<WorkspaceModelAccessPolicy>(
@@ -4233,6 +4407,17 @@ export class OpenGeniClient {
     return await this.requestJson<CreateOrganizationResponse>("POST", "/v1/organizations", request);
   }
 
+  /** Create another organization owned by the current managed human. */
+  async createAdditionalOrganization(
+    request: CreateAdditionalOrganizationRequest,
+  ): Promise<CreateAdditionalOrganizationResponse> {
+    return await this.requestJson<CreateAdditionalOrganizationResponse>(
+      "POST",
+      "/v1/organizations/additional",
+      request,
+    );
+  }
+
   /** Pending and historical invitations addressed to the current managed human. */
   async listOrganizationInvitations(
     options: { cursor?: string; limit?: number } = {},
@@ -4322,7 +4507,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Create a shared workspace without implicitly granting the actor access. */
+  /** Create a shared workspace and grant its creator explicit workspace-admin access. */
   async createOrganizationWorkspace(
     organizationId: string,
     request: CreateOrganizationWorkspaceRequest,
@@ -4356,6 +4541,14 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/organizations/${organizationId}/workspaces/${workspaceId}/settings`,
       request,
+    );
+  }
+
+  /** Delete a shared workspace through organization-administrator authority. */
+  async deleteOrganizationWorkspace(organizationId: string, workspaceId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/organizations/${organizationId}/workspaces/${workspaceId}`,
     );
   }
 
@@ -4687,11 +4880,13 @@ export class OpenGeniClient {
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyRevision> {
-    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyRevision>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
       request,
+      options,
     );
   }
 
@@ -4751,11 +4946,13 @@ export class OpenGeniClient {
     workspaceId: string,
     revisionId: string,
     request: ActivateWorkspaceInstructionPolicyRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyActivationResponse> {
-    return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyActivationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/${encodeURIComponent(revisionId)}/activate`,
       request,
+      options,
     );
   }
 
@@ -7454,7 +7651,7 @@ export class OpenGeniClient {
     const correlationId = crypto.randomUUID();
     const abort = requestAbortSignal(options);
     try {
-      let response: Response;
+      let response: FetchResponse;
       try {
         response = await awaitWithAbort(
           this.fetchImpl(this.url(path, query), {
@@ -7477,14 +7674,18 @@ export class OpenGeniClient {
         throw error;
       }
       assertApiContractResponse(response);
-      if (!response.ok) {
-        throw await apiErrorFromResponse(response, { method, correlationId });
-      }
-      await assertJsonResponse(response, { method, correlationId });
       try {
-        return (await response.json()) as T;
+        if (!response.ok) {
+          throw await awaitWithAbort(
+            apiErrorFromResponse(response, { method, correlationId }),
+            abort.signal,
+          );
+        }
+        await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
+        return (await awaitWithAbort(response.json(), abort.signal)) as T;
       } catch (error) {
         if (options.signal?.aborted) throw error;
+        if (error instanceof OpenGeniApiError) throw error;
         if (isMutationMethod(method)) {
           throw mutationTransportError(correlationId);
         }
@@ -7501,9 +7702,9 @@ export class OpenGeniClient {
     path: string,
     query: Record<string, string> = {},
     options: OpenGeniRequestOptions = {},
-  ): Promise<Response> {
+  ): Promise<FetchResponse> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path, query), {
         method,
@@ -7527,7 +7728,7 @@ export class OpenGeniClient {
   /** Contract-checked transport shared by opt-in typed SDK clients for 204 responses. */
   async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
-    let response: Response;
+    let response: FetchResponse;
     try {
       response = await this.fetchImpl(this.url(path), {
         method,
@@ -7551,7 +7752,7 @@ export class OpenGeniClient {
   }
 }
 
-function assertApiContractResponse(response: Response): void {
+function assertApiContractResponse(response: FetchResponse): void {
   const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
@@ -7734,7 +7935,7 @@ type ApiErrorRequestContext = {
 };
 
 async function apiErrorFromResponse(
-  response: Response,
+  response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<OpenGeniApiError> {
   return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
@@ -7744,7 +7945,7 @@ async function apiErrorFromResponse(
 }
 
 async function assertJsonResponse(
-  response: Response,
+  response: FetchResponse,
   context: ApiErrorRequestContext,
 ): Promise<void> {
   if (isJsonContentType(response.headers.get("content-type"))) return;
@@ -7758,7 +7959,7 @@ async function assertJsonResponse(
   });
 }
 
-async function readBoundedJsonErrorBody(response: Response): Promise<string> {
+async function readBoundedJsonErrorBody(response: FetchResponse): Promise<string> {
   if (!isJsonContentType(response.headers.get("content-type"))) {
     await cancelResponseBody(response, "discarding API error body");
     return "";
@@ -7858,7 +8059,7 @@ function computerFrameEvidenceMismatchReason(
   return null;
 }
 
-async function cancelResponseBody(response: Response, reason: string): Promise<void> {
+async function cancelResponseBody(response: FetchResponse, reason: string): Promise<void> {
   await response.body?.cancel(reason).catch(() => undefined);
 }
 
@@ -7927,7 +8128,7 @@ function parseBoundedContentLength(value: string | null): number | null {
 }
 
 async function readBoundedResponseBytes(
-  response: Response,
+  response: FetchResponse,
   maxBytes: number,
   expectedBytes: number | null,
 ): Promise<Uint8Array> {

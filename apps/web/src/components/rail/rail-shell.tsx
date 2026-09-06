@@ -24,7 +24,6 @@ import {
 
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SessionHeader } from "@/components/rail/session-header";
-import { scheduledTaskIdOf } from "@/lib/sessions-group";
 import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
@@ -32,7 +31,7 @@ import {
   useRail,
 } from "@/components/rail/rail-context";
 import { CollapsedSessionsButton, SessionList } from "@/components/rail/session-list";
-import { PrimaryNav } from "@/components/rail/primary-nav";
+import { PrimaryNav, WorkspaceShortcutLinks } from "@/components/rail/primary-nav";
 import { SwitcherBlock } from "@/components/rail/switcher-block";
 import {
   SessionSandboxSwitcher,
@@ -77,7 +76,7 @@ function RailBody() {
       {/* Brand */}
       <div
         className={cn(
-          "flex h-12 shrink-0 items-center gap-2",
+          "flex h-10 shrink-0 items-center gap-2",
           rail.collapsed ? "justify-center px-2" : "px-3",
         )}
       >
@@ -106,7 +105,7 @@ function RailBody() {
         ) : null}
       </div>
 
-      <SwitcherBlock />
+      {rail.isMobile ? null : <SwitcherBlock />}
 
       {rail.isMobile ? (
         <>
@@ -180,6 +179,10 @@ function RailBody() {
               aria-labelledby="mobile-nav-tab-workspace"
               className="mt-2 flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border pt-2"
             >
+              <SwitcherBlock />
+              <div className="my-2 border-t border-border" />
+              <WorkspaceShortcutLinks className="px-2" />
+              <div className="my-2 border-t border-border" />
               <WorkspaceNav />
               <RailFooter />
             </div>
@@ -433,7 +436,10 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   if (showSessionActions && context.session) {
     return (
       <SessionRouteHeader
-        session={context.session}
+        session={{
+          ...context.session,
+          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+        }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
         lineageError={lineage.error}
@@ -497,20 +503,17 @@ function SessionRouteHeader({
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
 
-  // A session the scheduler started carries the task id in its metadata; that is
-  // the only link back, since the run -> session mapping lives on the run row.
-  const scheduledTaskId = scheduledTaskIdOf(session);
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
       onOpenSchedule={
-        scheduledTaskId
+        session.hasSchedules
           ? () =>
               void navigate({
                 to: "/workspaces/$workspaceId/schedules",
                 params: { workspaceId: session.workspaceId },
-                search: { taskId: scheduledTaskId },
+                search: { targetSessionId: session.id },
               })
           : null
       }

@@ -3,6 +3,41 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <meta name="referrer" content="no-referrer" />
+    <script id="opengeni-setup-account-bootstrap">
+      // Normalize setup authority in the browser because HTTP servers never
+      // receive URL fragments. This must remain the first executable head
+      // content so query and fragment can be rejected together and scrubbed
+      // before any subresource can inherit a query-bearing Referer. Hand the
+      // singular canonical token to the SPA once through non-enumerable process
+      // memory. Keep this parser in lockstep with src/setup-account-token.ts.
+      (() => {
+        if (window.location.pathname !== "/setup-account") return;
+        const query = new URLSearchParams(window.location.search);
+        const fragment = new URLSearchParams(window.location.hash.slice(1));
+        const candidates = [...fragment.getAll("token"), ...query.getAll("token")];
+        const candidate = candidates.length === 1 ? candidates[0] : null;
+        query.delete("token");
+        fragment.delete("token");
+        const search = query.toString();
+        const hash = fragment.toString();
+        window.history.replaceState(
+          null,
+          "",
+          `/setup-account${search ? `?${search}` : ""}${hash ? `#${hash}` : ""}`,
+        );
+        const robots = document.createElement("meta");
+        robots.name = "robots";
+        robots.content = "noindex,nofollow";
+        document.head.append(robots);
+        if (candidate && /^[A-Za-z0-9_-]{43}$/.test(candidate)) {
+          Object.defineProperty(window, "__OPENGENI_SETUP_ACCOUNT_TOKEN__", {
+            configurable: true,
+            value: candidate,
+          });
+        }
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>OpenGeni</title>
   </head>

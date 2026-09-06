@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { DestinationPolicyError } from "../packages/network/src/index";
 import {
   CATALOG_IMPORT_SEMANTIC_VERSION,
   catalogCapabilityId,
@@ -993,7 +994,238 @@ describe("integrations.sh MCP endpoint probe", () => {
       status: "real",
       reason: "auth_challenge",
       httpStatus: 401,
+      oauthDiscovery: "oauth_discovery_broken",
     });
+  });
+
+  test("classifies OAuth challenges with the shared runtime discovery resolver", async () => {
+    const probe = async (
+      mcpUrl: string,
+      challenge: string,
+      responses: Record<string, { status?: number; body?: Record<string, unknown> }>,
+    ) =>
+      await probeMcpEndpoint(mcpUrl, {
+        fetchImpl: async (input) => {
+          const url = String(input);
+          if (url === mcpUrl) {
+            return new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": challenge },
+            });
+          }
+          const response = responses[url];
+          if (!response) return new Response("not found", { status: 404 });
+          return response.body
+            ? Response.json(response.body, { status: response.status ?? 200 })
+            : new Response("not found", { status: response.status ?? 404 });
+        },
+      });
+
+    await expect(
+      probe("https://modern.example/mcp", 'Bearer resource_metadata="https://modern.example/prm"', {
+        "https://modern.example/prm": {
+          body: {
+            resource: "urn:modern:mcp",
+            authorization_servers: ["https://auth.modern.example/tenant"],
+          },
+        },
+        "https://auth.modern.example/.well-known/oauth-authorization-server/tenant": {
+          body: {
+            issuer: "https://auth.modern.example/tenant",
+            authorization_endpoint: "https://auth.modern.example/authorize",
+            token_endpoint: "https://auth.modern.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_rfc9728" });
+
+    await expect(
+      probe("https://legacy.example/mcp", 'Bearer error="invalid_token"', {
+        "https://legacy.example/.well-known/oauth-authorization-server": {
+          body: {
+            issuer: "https://legacy.example",
+            authorization_endpoint: "https://legacy.example/authorize",
+            token_endpoint: "https://legacy.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_legacy_same_origin_metadata" });
+
+    await expect(probe("https://defaults.example/mcp", "Bearer", {})).resolves.toMatchObject({
+      oauthDiscovery: "oauth_legacy_default_endpoints_unverified",
+    });
+
+    await expect(
+      probe("https://profile.example/mcp", "Bearer", {
+        "https://profile.example/.well-known/oauth-authorization-server": {
+          body: {
+            issuer: "https://auth.profile.example",
+            authorization_endpoint: "https://auth.profile.example/authorize",
+            token_endpoint: "https://auth.profile.example/token",
+            code_challenge_methods_supported: ["S256"],
+          },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_requires_profile" });
+
+    await expect(
+      probe("https://broken.example/mcp", 'Bearer resource_metadata="https://broken.example/prm"', {
+        "https://broken.example/prm": {
+          body: { scopes_supported: ["documents:read"] },
+        },
+      }),
+    ).resolves.toMatchObject({ oauthDiscovery: "oauth_discovery_broken" });
+  });
+
+  test("keeps unsafe metadata blocked and transient metadata failures retryable", async () => {
+    const unsafeCalls: string[] = [];
+    const unsafe = await probeMcpEndpoint("https://unsafe.example/mcp", {
+      fetchImpl: async (input) => {
+        const url = String(input);
+        unsafeCalls.push(url);
+        if (url === "https://unsafe.example/mcp") {
+          return new Response("Unauthorized", {
+            status: 401,
+            headers: {
+              "www-authenticate":
+                'Bearer resource_metadata="http://127.0.0.1/.well-known/oauth-protected-resource"',
+            },
+          });
+        }
+        throw new Error("unsafe metadata URL must not be fetched");
+      },
+    });
+    expect(unsafe).toMatchObject({
+      status: "real",
+      reason: "auth_challenge",
+      oauthDiscovery: "oauth_discovery_broken",
+    });
+    expect(unsafeCalls).toEqual(["https://unsafe.example/mcp"]);
+
+    const unavailable = await probeMcpEndpoint("https://unavailable.example/mcp", {
+      fetchImpl: async (input) =>
+        String(input) === "https://unavailable.example/mcp"
+          ? new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": "Bearer" },
+            })
+          : new Response("unavailable", { status: 503 }),
+    });
+    expect(unavailable).toMatchObject({
+      status: "unverified",
+      reason: "http_status",
+      httpStatus: 503,
+    });
+
+    const timedOut = await probeMcpEndpoint("https://timeout.example/mcp", {
+      timeoutMs: 10,
+      fetchImpl: async (input, init) => {
+        if (String(input) === "https://timeout.example/mcp") {
+          return new Response("Unauthorized", {
+            status: 401,
+            headers: { "www-authenticate": "Bearer" },
+          });
+        }
+        return await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    expect(timedOut).toMatchObject({ status: "unverified", reason: "timeout" });
+
+    const normalized = normalizeCatalogSnapshot(
+      {
+        generatedAt: "2026-09-03T00:00:00.000Z",
+        importRows: [
+          row({ domain: "rate-limited.example", mcpUrl: "https://rate-limited.example/mcp" }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
+    const attempts = new Map<string, number>();
+    const sleeps: number[] = [];
+    const retried = await probeCatalogSnapshot(normalized, {
+      concurrency: 1,
+      transientRetries: 1,
+      transientRetryDelayMs: 10,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      fetchImpl: async (input) => {
+        const url = String(input);
+        const attempt = (attempts.get(url) ?? 0) + 1;
+        attempts.set(url, attempt);
+        if (url === "https://rate-limited.example/mcp") {
+          return new Response("Unauthorized", {
+            status: 401,
+            headers: { "www-authenticate": "Bearer" },
+          });
+        }
+        if (url === "https://rate-limited.example/.well-known/oauth-authorization-server") {
+          return new Response(attempt === 1 ? "rate limited" : "not found", {
+            status: attempt === 1 ? 429 : 404,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    expect(retried.rows.map((candidate) => candidate.domain)).toEqual(["rate-limited.example"]);
+    expect(attempts.get("https://rate-limited.example/mcp")).toBe(2);
+    expect(
+      attempts.get("https://rate-limited.example/.well-known/oauth-authorization-server"),
+    ).toBe(2);
+    expect(sleeps).toEqual([10]);
+
+    for (const dnsReason of ["dns_failed", "dns_empty"] as const) {
+      const domain = dnsReason.replace("_", "-") + ".example";
+      const mcpUrl = `https://${domain}/mcp`;
+      const metadataUrl = `https://${domain}/.well-known/oauth-protected-resource/mcp`;
+      const dnsNormalized = normalizeCatalogSnapshot(
+        {
+          generatedAt: "2026-09-03T00:00:00.000Z",
+          importRows: [row({ domain, mcpUrl })],
+        },
+        { allowUnprobedCandidates: true },
+      );
+      const dnsAttempts = new Map<string, number>();
+      const dnsSleeps: number[] = [];
+      const dnsRetried = await probeCatalogSnapshot(dnsNormalized, {
+        concurrency: 1,
+        transientRetries: 1,
+        transientRetryDelayMs: 10,
+        sleep: async (ms) => {
+          dnsSleeps.push(ms);
+        },
+        fetchImpl: async (input) => {
+          const url = String(input);
+          const attempt = (dnsAttempts.get(url) ?? 0) + 1;
+          dnsAttempts.set(url, attempt);
+          if (url === mcpUrl) {
+            return new Response("Unauthorized", {
+              status: 401,
+              headers: { "www-authenticate": "Bearer" },
+            });
+          }
+          if (url === metadataUrl && attempt === 1) {
+            throw new DestinationPolicyError(
+              dnsReason,
+              `catalog OAuth metadata hostname returned ${dnsReason}`,
+            );
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      expect(dnsRetried.rows.map((candidate) => candidate.domain)).toEqual([domain]);
+      expect(dnsAttempts.get(mcpUrl)).toBe(2);
+      expect(dnsAttempts.get(metadataUrl)).toBe(2);
+      expect(dnsSleeps).toEqual([10]);
+    }
   });
 
   test("classifies 404s, HTML, generic JSON, and DNS failures as junk", async () => {
@@ -1148,7 +1380,7 @@ describe("integrations.sh MCP endpoint probe", () => {
         const url = String(input);
         const attempt = (attempts.get(url) ?? 0) + 1;
         attempts.set(url, attempt);
-        if (url.includes("flaky.example")) {
+        if (url === "https://flaky.example/mcp") {
           if (attempt === 1) {
             throw new Error("getaddrinfo EAI_AGAIN flaky.example");
           }
@@ -1157,7 +1389,7 @@ describe("integrations.sh MCP endpoint probe", () => {
             headers: { "www-authenticate": 'Bearer realm="mcp"' },
           });
         }
-        if (url.includes("dead.example")) {
+        if (url === "https://dead.example/mcp") {
           throw new Error("connect ECONNREFUSED");
         }
         return new Response("not found", { status: 404 });
@@ -1166,6 +1398,7 @@ describe("integrations.sh MCP endpoint probe", () => {
 
     expect(probed.rows.map((candidate) => candidate.domain)).toEqual(["flaky.example"]);
     expect(attempts.get("https://flaky.example/mcp")).toBe(2);
+    expect(attempts.get("https://flaky.example/.well-known/oauth-authorization-server")).toBe(1);
     expect(attempts.get("https://dead.example/mcp")).toBe(3);
     // A definitive 404 is not transient and is never retried.
     expect(attempts.get("https://gone.example/mcp")).toBe(1);

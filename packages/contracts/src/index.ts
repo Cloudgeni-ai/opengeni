@@ -32,11 +32,13 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
@@ -45,6 +47,7 @@ export {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -54,7 +57,11 @@ export {
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactRequestedTools,
   WorkspaceArtifactSlug,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
+  WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
@@ -62,6 +69,9 @@ export {
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_LIST_DEFAULT,
   WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   normalizeWorkspaceArtifactSlug,
 } from "./artifacts";
@@ -760,9 +770,10 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "goal_set",
   "goal_update",
   "goal_progress",
-  "goal_wait",
+  "wait_for_input",
   "goal_complete",
   "goal_pause",
+  "goal_resume",
   "memory_search",
   "memory_save",
   "memory_correct",
@@ -800,6 +811,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_get",
   "session_events",
   "session_wait",
+  "command_wait",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -891,6 +903,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "artifacts_archive",
+  "artifacts_restore",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -2106,7 +2120,7 @@ export const HistoricalMemoryPromptMode = z.enum(["legacy_standing", "retrieval_
 export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMode>;
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled defaults off and the
+// (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
 export const WorkspaceSettingsSchema = z
@@ -2143,10 +2157,12 @@ export const WorkspaceSettingsSchema = z
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
 
-// Resolve the effective memoryEnabled flag from a raw settings bag (default off).
-export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
-  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
-  return parsed.success ? parsed.data.memoryEnabled === true : false;
+// Resolve the effective memoryEnabled flag from a raw settings bag. Omission
+// defaults on; malformed settings still fail closed so invalid state cannot
+// unexpectedly enable durable retention.
+export function resolveWorkspaceMemoryEnabled(settings?: unknown): boolean {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings === undefined ? {} : settings);
+  return parsed.success ? parsed.data.memoryEnabled !== false : false;
 }
 
 /** Explicit defaults for new chats/schedules, or null for deployment defaults. */
@@ -2371,6 +2387,54 @@ export const WorkspaceOpenRouterCustomModelsResponse = z.object({
 });
 export type WorkspaceOpenRouterCustomModelsResponse = z.infer<
   typeof WorkspaceOpenRouterCustomModelsResponse
+>;
+
+export const CreateOrganizationProviderCustomModelRequest =
+  CreateWorkspaceGatewayCustomModelRequest;
+export type CreateOrganizationProviderCustomModelRequest = z.infer<
+  typeof CreateOrganizationProviderCustomModelRequest
+>;
+export const DeleteOrganizationProviderCustomModelRequest =
+  DeleteWorkspaceGatewayCustomModelRequest;
+export type DeleteOrganizationProviderCustomModelRequest = z.infer<
+  typeof DeleteOrganizationProviderCustomModelRequest
+>;
+export const OrganizationProviderCustomModel = WorkspaceGatewayCustomModel;
+export type OrganizationProviderCustomModel = z.infer<typeof OrganizationProviderCustomModel>;
+export const OrganizationProviderCustomModelsResponse = z.object({
+  models: z.array(OrganizationProviderCustomModel),
+});
+export type OrganizationProviderCustomModelsResponse = z.infer<
+  typeof OrganizationProviderCustomModelsResponse
+>;
+
+export const OrganizationModelProviderKind = z.enum(["vercel_gateway", "openrouter"]);
+export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
+export const OrganizationModelProviderConnectionResponse = z.object({
+  providerKind: OrganizationModelProviderKind,
+  status: z.enum(["active", "revoked"]),
+  version: z.number().int().positive(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+});
+export type OrganizationModelProviderConnectionResponse = z.infer<
+  typeof OrganizationModelProviderConnectionResponse
+>;
+export const UpsertOrganizationModelProviderConnectionRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    expectedVersion: z.number().int().nonnegative().optional(),
+    apiKey: z.string().trim().min(1).max(8192),
+  })
+  .strict();
+export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
+  typeof UpsertOrganizationModelProviderConnectionRequest
+>;
+export const RevokeOrganizationModelProviderConnectionRequest = z
+  .object({ operationId: z.string().uuid(), expectedVersion: z.number().int().positive() })
+  .strict();
+export type RevokeOrganizationModelProviderConnectionRequest = z.infer<
+  typeof RevokeOrganizationModelProviderConnectionRequest
 >;
 
 const turnInitiatorIdentityFields = {
@@ -3325,6 +3389,9 @@ export const InsightsModelUsageRow = z.object({
   /** Hypothetical provider-rate USD; never an OpenGeni charge. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** OpenGeni credit price at the captured rate, whether or not credits paid for the call. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
 });
 export type InsightsModelUsageRow = z.infer<typeof InsightsModelUsageRow>;
 
@@ -3335,6 +3402,9 @@ export const InsightsSeriesPoint = z.object({
   /** UTC hour/day-bucketed hypothetical provider-rate USD for calls with captured pricing. */
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** UTC hour/day-bucketed equivalent OpenGeni credit price for calls with captured pricing. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   warmSeconds: z.number().nonnegative(),
   inputTokens: z.number().nonnegative(),
   outputTokens: z.number().nonnegative(),
@@ -3369,6 +3439,8 @@ export const InsightsSpendDriver = z.object({
   creditUsd: z.number().nonnegative(),
   estimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  equivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   tokens: z.number().nonnegative(),
   cacheHitPct: z.number().int().min(0).max(100),
   pctOfCreditUsd: z.number().int().min(0).max(100),
@@ -3421,6 +3493,8 @@ export const InsightsScheduleRow = z.object({
   creditUsd: z.number().nonnegative().nullable(),
   estimatedProviderUsd: z.number().nonnegative().nullable(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative().nullable(),
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative().nullable(),
   tokens: z.number().nonnegative().nullable(),
   cacheHitPct: z.number().int().min(0).max(100).nullable(),
   billing: InsightsBillingPath.nullable(),
@@ -3448,6 +3522,8 @@ export const InsightsModelCallRow = z.object({
   creditUsd: z.number().nonnegative(),
   /** Hypothetical provider-rate USD; null when historical pricing is unavailable. */
   estimatedProviderUsd: z.number().nonnegative().nullable(),
+  /** Equivalent OpenGeni credit price; null when historical pricing is unavailable. */
+  equivalentCreditUsd: z.number().nonnegative().nullable(),
   pricingSource: InsightsPricingSource.nullable(),
 });
 export type InsightsModelCallRow = z.infer<typeof InsightsModelCallRow>;
@@ -3496,6 +3572,11 @@ export const WorkspaceInsightsSnapshot = z.object({
   priorEstimatedProviderUsd: z.number().nonnegative(),
   estimatedProviderCostKnownCalls: z.number().int().nonnegative(),
   priorEstimatedProviderCostKnownCalls: z.number().int().nonnegative(),
+  /** Equivalent OpenGeni credit price across calls whose historical price was captured. */
+  equivalentCreditUsd: z.number().nonnegative(),
+  priorEquivalentCreditUsd: z.number().nonnegative(),
+  equivalentCreditCostKnownCalls: z.number().int().nonnegative(),
+  priorEquivalentCreditCostKnownCalls: z.number().int().nonnegative(),
   modelCalls: z.number().int().nonnegative(),
   priorInputTokens: z.number().nonnegative(),
   priorTotalTokens: z.number().nonnegative(),
@@ -4319,6 +4400,14 @@ export type GitHubUserInstallationAccess = GitHubInstallationSummary & {
   repositories: GitHubUserRepositoryAccess[];
 };
 
+export type GitHubAppRepositoryBranchPage = {
+  installationId: number;
+  repositoryId: number;
+  defaultBranch: string;
+  branches: string[];
+  nextPage: number | null;
+};
+
 export type GitHubAppApiPort = {
   /**
    * Exchange one fresh GitHub user-authorization code and prove current
@@ -4350,6 +4439,18 @@ export type GitHubAppApiPort = {
     installationId: number;
   }) => Promise<GitHubInstallationSummary | null>;
   listRepositories?: (input: { installationIds?: number[] }) => Promise<GitHubRepository[]>;
+  /**
+   * List one bounded page of branch suggestions for one exact repository.
+   * Implementations must keep the provider credential server-side and scope
+   * it to exactly `repositoryId`; the caller separately rechecks the durable
+   * workspace binding immediately before and after this provider request.
+   */
+  listRepositoryBranches?: (input: {
+    installationId: number;
+    repositoryId: number;
+    page: number;
+    limit: number;
+  }) => Promise<GitHubAppRepositoryBranchPage>;
 };
 
 export const BillingBalance = z.object({
@@ -5909,7 +6010,7 @@ export const SessionGoalContinuation = z.object({
   nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
   lastError: z.string().nullable(),
   /**
-   * The agent's stated reason for a `held_for_input` hold (`goal_wait`), so a
+   * The agent's stated reason for a `held_for_input` hold (`wait_for_input`), so a
    * human can see why the goal is waiting and until when (`nextAttemptAt`).
    * Null for every other state; omitted by older servers.
    */
@@ -7406,6 +7507,8 @@ export const SessionSystemUpdateKind = z.enum([
   "goal_continuation",
   "agent_message",
   "agent_steer_instruction",
+  "session_wait_timeout",
+  "background_command_result",
   "child_terminal_result",
   "media_generation_result",
   "child_requires_action",
@@ -7419,7 +7522,7 @@ export type SessionSystemUpdateKind = z.infer<typeof SessionSystemUpdateKind>;
 /**
  * How a newly pending machine input affects an idle receiving session.
  * `immediate` registers a workflow wake in the same commit (the behaviour of
- * every pre-existing kind) and ends a `goal_wait` hold at the next idle
+ * every pre-existing kind) and ends a `wait_for_input` hold at the next idle
  * evaluation; `deferred` only inserts the durable pending row plus its
  * `system.update.pending` event and is delivered coalesced with the next claim.
  */
@@ -7433,6 +7536,8 @@ export const SESSION_SYSTEM_UPDATE_WAKE_CLASS: Record<
   goal_continuation: "immediate",
   agent_message: "immediate",
   agent_steer_instruction: "immediate",
+  session_wait_timeout: "immediate",
+  background_command_result: "immediate",
   child_terminal_result: "immediate",
   media_generation_result: "immediate",
   child_requires_action: "immediate",
@@ -7614,6 +7719,29 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("agent_steer_instruction"),
       instruction: z.string().min(1),
       operationId: z.string().uuid(),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("session_wait_timeout"),
+      waitTurnId: z.string().uuid(),
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: boundedUtf8String(2 * 1024),
+    })
+    .passthrough(),
+  z
+    .object({
+      type: z.literal("background_command_result"),
+      commandId: z.string().uuid(),
+      state: z.enum(["exited", "lost"]),
+      exitCode: z.number().int().nullable(),
+      reason: boundedUtf8String(512),
+      outputLocator: z
+        .object({
+          eventType: z.literal("sandbox.command.output.delta"),
+          commandId: z.string().uuid(),
+        })
+        .strict(),
     })
     .passthrough(),
   z
@@ -9640,6 +9768,12 @@ export const CapabilityPackSkill = z
         message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
       }),
     description: z.string().min(1).max(2048).optional(),
+    // Workspace-managed Skills are available to every session in the
+    // workspace. Session-selected Skills remain installed and inspectable, but
+    // enter model context only when their immutable definition is attached to
+    // a session explicitly. This is the hard contamination boundary for Packs
+    // that guide implementation agents rather than customer-facing agents.
+    activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
     files: z.array(CapabilityPackSkillFile).min(1).max(64),
   })
   .superRefine((skill, ctx) => {
@@ -9667,8 +9801,11 @@ export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
 // Inline skill content fixed onto one session at creation. It intentionally
 // uses the exact same validated directory shape as a pack skill, but has a
 // different semantic owner and lifecycle. Session readers can inspect it; it
-// is configuration, never a secret store.
-export const SessionSkill = CapabilityPackSkill;
+// is configuration, never a secret store. Pack activation policy is consumed
+// at admission and cannot become part of the session-owned artifact.
+export const SessionSkill = CapabilityPackSkill.transform(
+  ({ activationMode: _activationMode, ...skill }) => skill,
+);
 export type SessionSkill = z.infer<typeof SessionSkill>;
 
 export const SessionSkills = z
@@ -11803,6 +11940,8 @@ export const Session = z.object({
   status: SessionStatus,
   /** Additive list projection. Detail reads may omit it. */
   backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
+  /** Current non-deleted schedules targeting this session, including paused schedules. */
+  hasSchedules: z.boolean().optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -12014,6 +12153,8 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
 );
 
 export const SessionLineageResponse = z.object({
+  /** Current schedule relationship for the requested session. */
+  sessionHasSchedules: z.boolean().optional(),
   ancestors: z.array(Session),
   children: z.array(LineageNode),
   truncated: z.boolean().default(false),
@@ -12081,6 +12222,8 @@ export const SessionEventType = z.enum([
   "sandbox.operation.failed",
   "session.command.backgrounded",
   "session.command.finished",
+  "session.wait.started",
+  "session.wait.finished",
   "sandbox.command.output.delta",
   "artifact.created",
   "goal.set",
@@ -12286,6 +12429,8 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.command.backgrounded",
+    "session.wait.started",
+    "session.wait.finished",
     "session.requiresAction",
     "session.humanInput.requested",
     "user.pause",
@@ -12693,6 +12838,16 @@ export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 // --- A2 FileSystem request/response (NOT events; returned inline) ------------
 export const FsNodeType = z.enum(["file", "dir", "symlink", "other"]);
 export type FsNodeType = z.infer<typeof FsNodeType>;
+/** Optional identity copied from one stream-capabilities response. File callers
+ * use it to fail with a retryable route conflict instead of reinterpreting a
+ * canonical path after the selected sandbox or effective root changes. */
+export const FileSystemRouteIdentity = z
+  .object({
+    epoch: z.number().int().nonnegative(),
+    root: z.string().min(1).max(4_096),
+  })
+  .strict();
+export type FileSystemRouteIdentity = z.infer<typeof FileSystemRouteIdentity>;
 // The Pierre-tree node. `children` is present only when the dir was listed with
 // depth>0; the tree lazy-expands via repeated depth-1 lists at deeper paths.
 export interface FsTreeNode {
@@ -12727,6 +12882,7 @@ export const FsListRequest = z.object({
   depth: z.number().int().min(0).max(8).default(1),
   maxEntries: z.number().int().positive().max(20_000).default(2_000),
   includeHidden: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsListRequest = z.infer<typeof FsListRequest>;
 export const FsListResponse = z.object({
@@ -12759,6 +12915,7 @@ export const FsReadRequest = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(5 * 1024 * 1024),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsReadRequest = z.infer<typeof FsReadRequest>;
 export const FsReadResponse = z.object({
@@ -12778,6 +12935,7 @@ export const FsWriteRequest = z.object({
   content: z.string(),
   overwrite: z.boolean().default(true), // false + existing path => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsWriteRequest = z.infer<typeof FsWriteRequest>;
 export const FsWriteResponse = z.object({
@@ -12790,6 +12948,7 @@ export type FsWriteResponse = z.infer<typeof FsWriteResponse>;
 export const FsDeleteRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(false), // required true to delete a non-empty dir
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsDeleteRequest = z.infer<typeof FsDeleteRequest>;
 export const FsDeleteResponse = z.object({
@@ -12802,6 +12961,7 @@ export const FsMoveRequest = z.object({
   newPath: z.string(),
   overwrite: z.boolean().default(false), // false + existing destination => 409
   createParents: z.boolean().default(true),
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMoveRequest = z.infer<typeof FsMoveRequest>;
 export const FsMoveResponse = z.object({
@@ -12814,6 +12974,7 @@ export type FsMoveResponse = z.infer<typeof FsMoveResponse>;
 export const FsMkdirRequest = z.object({
   path: z.string(),
   recursive: z.boolean().default(true), // false + existing path => 400
+  route: FileSystemRouteIdentity.optional(),
 });
 export type FsMkdirRequest = z.infer<typeof FsMkdirRequest>;
 export const FsMkdirResponse = z.object({
@@ -14315,6 +14476,17 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // Inline skills are fixed onto the session. Child omission inherits the
     // trusted parent's selection; an explicit array, including [], wins.
     skills: SessionSkills.default([]),
+    // Immutable workspace Skill identities to copy onto this session at
+    // creation. This is the explicit opt-in path for session-selected Pack
+    // Skills: installation alone never exposes them to model context. Child
+    // omission still inherits the parent's already-materialized session Skills.
+    installedSkillIds: z
+      .array(z.string().min(1).max(512))
+      .max(32)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "installed Skill identities must be unique",
+      })
+      .optional(),
     // The same child omission rule applies to selected MCP tool refs. Top-level
     // omission still applies workspace-default capability MCP tools; explicit []
     // suppresses those defaults (the first-party OpenGeni server remains added).
@@ -15694,6 +15866,12 @@ export const ModelCredentialSourceV1 =
           mechanism: z.literal("api_key"),
         })
         .strict(),
+      z
+        .object({
+          kind: z.literal("organization_connection"),
+          mechanism: z.literal("api_key"),
+        })
+        .strict(),
     ]),
   );
 export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
@@ -15712,7 +15890,12 @@ export const ModelBillingAttributionV1 =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z
       .object({
-        upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+        upstreamPayer: z.enum([
+          "deployment",
+          "workspace",
+          "organization",
+          "connected_subscription",
+        ]),
         metering: z.enum(["opengeni_credits", "external"]),
       })
       .strict(),
@@ -15720,7 +15903,7 @@ export const ModelBillingAttributionV1 =
 export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
 
 export const ModelCostClassV1 = /* @__PURE__ */ defineModelContractSchema(() =>
-  z.enum(["free", "credits", "subscription", "workspace"]),
+  z.enum(["free", "credits", "subscription", "workspace", "organization"]),
 );
 export type ModelCostClassV1 = z.infer<typeof ModelCostClassV1>;
 
@@ -15792,6 +15975,92 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
     }),
 );
 export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
+
+/**
+ * Secret-safe Codex allocator policy accepted with the first durable lease of
+ * a logical turn. Account ids are policy references only; credential material
+ * and provider tokens must never be stored here.
+ */
+export const CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY =
+  "codexCredentialPolicySnapshotV1" as const;
+
+export const CodexCredentialPolicySnapshotV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      activeCredentialId: z.string().min(1).max(256).nullable(),
+      rotationEnabled: z.boolean(),
+      rotationStrategy: z.string().min(1).max(64),
+      /** Effective allocator source; absent only on pre-source snapshots. */
+      source: z.enum(["workspace", "organization", "disabled"]).optional(),
+      pinnedCredentialId: z.string().min(1).max(256).nullable(),
+      pinSource: z.enum(["manual", "policy"]).nullable(),
+      lastCredentialId: z.string().min(1).max(256).nullable(),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if ((policy.pinnedCredentialId === null) !== (policy.pinSource === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["pinSource"],
+          message: "pinnedCredentialId and pinSource must both be null or both be present",
+        });
+      }
+    }),
+);
+export type CodexCredentialPolicySnapshotV1 = z.infer<typeof CodexCredentialPolicySnapshotV1>;
+
+export type CodexCredentialPolicySnapshotReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: CodexCredentialPolicySnapshotV1 };
+
+/**
+ * Read the accepted Codex allocator policy from turn metadata. A present but
+ * malformed snapshot fails closed; only a missing key is legacy metadata.
+ */
+export function readCodexCredentialPolicySnapshotV1(
+  metadata: unknown,
+): CodexCredentialPolicySnapshotReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error(
+      "Malformed Codex credential policy snapshot metadata: turn metadata is not an object",
+    );
+  }
+  const record = metadata as Record<string, unknown>;
+  if (
+    !Object.prototype.hasOwnProperty.call(record, CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY)
+  ) {
+    return { kind: "absent" };
+  }
+  const parsed = CodexCredentialPolicySnapshotV1.safeParse(
+    record[CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY],
+  );
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed Codex credential policy snapshot metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted Codex allocator policy snapshot into turn metadata. */
+export function metadataWithCodexCredentialPolicySnapshotV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: CodexCredentialPolicySnapshotV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY]: CodexCredentialPolicySnapshotV1.parse(policy),
+  };
+}
 
 export type TurnExecutionPolicyReadV1 =
   | { kind: "absent" }
@@ -15874,6 +16143,7 @@ export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     inputMicrosPerMillionTokens: z.number().int().nonnegative(),
     cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    cacheWriteMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
     outputMicrosPerMillionTokens: z.number().int().nonnegative(),
     marginBps: z.number().int().min(0).max(100_000).optional(),
   }),
@@ -16230,6 +16500,7 @@ export * from "./xai-provider-account-authority";
 export * from "./workspace-instruction-policies";
 export * from "./company-profile";
 export * from "./company-brain";
+export * from "./model-context-inspector";
 export * from "./workspace-learning-policy";
 export * from "./workspace-learning-administration";
 export * from "./workspace-state";

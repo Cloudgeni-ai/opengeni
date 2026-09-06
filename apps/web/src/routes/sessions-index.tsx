@@ -108,6 +108,7 @@ import {
 } from "@/lib/model-policy";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
+import { attachManualRepository } from "@/lib/manual-repositories";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
@@ -860,6 +861,9 @@ function SessionsIndexRouteContent({
                   workingDir: submission.options.workingDir,
                   channelId: selectedChannelId,
                   omitWorkspaceResources: submission.omitWorkspaceResources,
+                  installedSkillIds: launch.skillCapabilityId
+                    ? [launch.skillCapabilityId]
+                    : undefined,
                   startMode: "realtime",
                   expectedNewSessionDraftRevision: flushed.revision,
                   visibility: newSessionCreateVisibility(
@@ -911,6 +915,9 @@ function SessionsIndexRouteContent({
                 workingDir: submission.options.workingDir,
                 channelId: selectedChannelId,
                 omitWorkspaceResources: submission.omitWorkspaceResources,
+                installedSkillIds: launch.skillCapabilityId
+                  ? [launch.skillCapabilityId]
+                  : undefined,
                 expectedNewSessionDraftRevision: flushed.revision,
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
@@ -970,6 +977,7 @@ function SessionsIndexRouteContent({
   const launchEffort = launch.effort;
   const launchLatency = launch.latency;
   const launchRealtime = launch.realtime;
+  const launchSkillCapabilityId = launch.skillCapabilityId;
   const launchKey = composerLaunchSearchKey(launch);
   const handledLaunchKeyRef = useRef<string | null>(null);
   useEffect(() => {
@@ -983,7 +991,10 @@ function SessionsIndexRouteContent({
       void navigate({
         to: "/workspaces/$workspaceId/sessions",
         params: { workspaceId },
-        search: launch.channelId ? { channelId: launch.channelId } : {},
+        search: {
+          ...(launch.channelId ? { channelId: launch.channelId } : {}),
+          ...(launchSkillCapabilityId ? { skillCapabilityId: launchSkillCapabilityId } : {}),
+        },
         replace: true,
       });
       return;
@@ -1014,6 +1025,7 @@ function SessionsIndexRouteContent({
     launchLatency,
     launchModel,
     launchRealtime,
+    launchSkillCapabilityId,
     launchKey,
     launch.channelId,
     navigate,
@@ -1121,6 +1133,15 @@ function SessionsIndexRouteContent({
             What should the agent do?
           </h1>
         </section>
+
+        {launchSkillCapabilityId ? (
+          <div className="mt-6">
+            <Notice tone="info" title="Implementation guidance selected">
+              This installed Skill will be frozen onto this session only. Other workspace sessions
+              will not receive it.
+            </Notice>
+          </div>
+        ) : null}
 
         <div ref={composerRegionRef} className="mt-8">
           <ConsoleComposer
@@ -1616,6 +1637,41 @@ function workspaceRepositoryPickerProps(
     onToggleRepo: context.toggleGitHubRepository,
     onRefChange: (repoId: number, ref: string) =>
       context.setSelectedRepoRefs((current) => ({ ...current, [repoId]: ref })),
+    onLoadGitHubBranches: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; refresh and try again.");
+      const { listGitHubRepositoryBranches } = await import("@opengeni/sdk/github-repositories");
+      const response = await listGitHubRepositoryBranches(
+        context.client,
+        workspaceId,
+        repository.installationId,
+        repository.id,
+        { limit: 100 },
+      );
+      if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        throw new Error("The workspace changed; refresh and try again.");
+      }
+      return response.branches;
+    },
+    onLoadPersonalGitHubBranches: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; refresh and try again.");
+      const connectionId = context.personalGitHubStatus?.connection?.id;
+      if (!connectionId) throw new Error("Connect your GitHub identity to load branches.");
+      const { listPersonalGitHubRepositoryBranches } =
+        await import("@opengeni/sdk/github-repositories");
+      const response = await listPersonalGitHubRepositoryBranches(
+        context.client,
+        workspaceId,
+        connectionId,
+        repository.repositoryId,
+        { limit: 100 },
+      );
+      if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+        throw new Error("The workspace changed; refresh and try again.");
+      }
+      return response.branches;
+    },
     onManualOpenChange: context.setManualReposOpen,
     onManualAdd: context.addManualRepository,
     onManualUpdate: (id: number, patch: Partial<RepoDraft>) =>
@@ -1624,6 +1680,91 @@ function workspaceRepositoryPickerProps(
       ),
     onManualRemove: (id: number) =>
       context.setManualRepos((current) => current.filter((repo) => repo.id !== id)),
+    onManualAttach: async (repository) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
+      if (!acceptedTransition) throw new Error("The workspace changed; try again.");
+      const assertCurrent = () => {
+        if (!context.ownsWorkspaceInvocation(workspaceId, acceptedTransition)) {
+          throw new Error("The workspace changed; try again.");
+        }
+      };
+      assertCurrent();
+      return await attachManualRepository({
+        repository,
+        workspaceRepositories: context.githubRepos,
+        personalRepositories: context.personalGitHubRepositories,
+        selectWorkspaceRepository: (matched, ref) => {
+          assertCurrent();
+          context.setSelectedRepoIds((current) => {
+            const next =
+              context.selectedInstallationId !== null &&
+              context.selectedInstallationId !== matched.installationId
+                ? new Set<number>()
+                : new Set(current);
+            next.add(matched.id);
+            return next;
+          });
+          context.setSelectedRepoRefs((current) => ({ ...current, [matched.id]: ref }));
+          context.setSelectedPersonalGitHubRepoIds(
+            (current) =>
+              new Set(
+                [...current].filter(
+                  (id) =>
+                    context.personalGitHubRepositories
+                      .find((candidate) => candidate.repositoryId === id)
+                      ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                ),
+              ),
+          );
+        },
+        selectPersonalRepository: async (matched, ref) => {
+          if (!(await context.ensurePersonalGitHubAuthority(workspaceId))) {
+            throw new Error("Your GitHub identity could not be authorized for this workspace.");
+          }
+          assertCurrent();
+          context.setSelectedRepoIds(
+            (current) =>
+              new Set(
+                [...current].filter(
+                  (id) =>
+                    context.githubRepos
+                      .find((candidate) => candidate.id === id)
+                      ?.fullName.toLowerCase() !== matched.fullName.toLowerCase(),
+                ),
+              ),
+          );
+          context.setSelectedPersonalGitHubRepoIds((current) =>
+            new Set(current).add(matched.repositoryId),
+          );
+          context.setSelectedPersonalGitHubRepoRefs((current) => ({
+            ...current,
+            [matched.repositoryId]: ref,
+          }));
+        },
+        verifyPublicGitHubRepository: async (request) => {
+          const { verifyPublicGitHubRepositoryRef } =
+            await import("@opengeni/sdk/github-repositories");
+          const verified = await verifyPublicGitHubRepositoryRef(
+            context.client,
+            workspaceId,
+            request,
+          );
+          assertCurrent();
+          return verified;
+        },
+        attach: (attached) => {
+          assertCurrent();
+          context.setManualRepos((current) =>
+            current.map((candidate) => (candidate.id === attached.id ? attached : candidate)),
+          );
+        },
+        remove: (id) => {
+          assertCurrent();
+          context.setManualRepos((current) => current.filter((candidate) => candidate.id !== id));
+        },
+      });
+    },
+    validationError: context.repositoryValidationError,
     onGitHubAppOpenChange: context.setGithubAppOpen,
     onOrgChange: context.setGithubOrg,
     onStartGitHubApp: () => void context.startGitHubAppManifestFlow(workspaceId),

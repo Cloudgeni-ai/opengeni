@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
 
+const longTitle =
+  "Now I am testing your workspace rail and this title should use every available pixel";
+
 describe("Session rail row metadata in Chromium", () => {
   let browser: Browser;
   let page: Page;
@@ -89,5 +92,33 @@ describe("Session rail row metadata in Chromium", () => {
     expect(await page.locator('[data-row-case="selected-child"]').getAttribute("class")).toContain(
       "bg-surface-3",
     );
+  });
+
+  test("opens useful session context promptly without a delayed native tooltip", async () => {
+    const row = page.locator('[data-row-case="time-only"]');
+    const link = row.locator("a");
+    expect(await row.getAttribute("title")).toBeNull();
+    expect(await link.getAttribute("title")).toBeNull();
+    expect(await row.locator("[data-creator-monogram]").getAttribute("title")).toBeNull();
+
+    const hoveredAt = Date.now();
+    await link.hover();
+    const hoverCard = page.locator('[data-slot="hover-card-content"]');
+    await hoverCard.waitFor({ state: "visible", timeout: 600 });
+    expect(Date.now() - hoveredAt).toBeLessThan(600);
+
+    const text = await hoverCard.innerText();
+    expect(text).toContain(longTitle);
+    expect(text).toContain("Created by Bendik Nyheim");
+    expect(text).toContain("3 sub-agents");
+    expect(text).not.toContain("Idle");
+    expect(text).not.toContain("Read");
+
+    const rowBox = await row.boundingBox();
+    const cardBox = await hoverCard.boundingBox();
+    expect(rowBox).not.toBeNull();
+    expect(cardBox).not.toBeNull();
+    expect(cardBox!.x).toBeGreaterThan(rowBox!.x + rowBox!.width);
+    expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(900);
   });
 });

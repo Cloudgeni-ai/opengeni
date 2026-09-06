@@ -7,6 +7,7 @@ import {
   recoverSessionDispatch,
   reconcileSessionAttemptQuiescence,
   peekSessionWork as peekSessionWorkDb,
+  settleSessionInputWait as settleSessionInputWaitDb,
   countQueuedTurns,
   getSessionAttemptActivityRef,
   getSessionEvent,
@@ -42,6 +43,8 @@ import type {
   RecoverDispatchResult,
   RecoverEscapedMcpTimeoutInput,
   RecoverEscapedMcpTimeoutResult,
+  SettleSessionInputWaitInput,
+  SettleSessionInputWaitResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
@@ -53,6 +56,7 @@ export type SessionStateActivityOverrides = Partial<{
   recoverSessionDispatch: typeof recoverSessionDispatch;
   reconcileSessionAttemptQuiescence: typeof reconcileSessionAttemptQuiescence;
   peekSessionWork: typeof peekSessionWorkDb;
+  settleSessionInputWait: typeof settleSessionInputWaitDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionAttemptActivityRef: typeof getSessionAttemptActivityRef;
   getSessionEvent: typeof getSessionEvent;
@@ -93,6 +97,7 @@ export function createSessionStateActivities(
   const reconcileSessionAttemptQuiescenceFn =
     overrides.reconcileSessionAttemptQuiescence ?? reconcileSessionAttemptQuiescence;
   const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
+  const settleSessionInputWaitFn = overrides.settleSessionInputWait ?? settleSessionInputWaitDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionAttemptActivityRefFn =
     overrides.getSessionAttemptActivityRef ?? getSessionAttemptActivityRef;
@@ -486,6 +491,17 @@ export function createSessionStateActivities(
     return peek;
   }
 
+  async function settleSessionInputWait(
+    input: SettleSessionInputWaitInput,
+  ): Promise<SettleSessionInputWaitResult> {
+    const { db, bus } = await services();
+    const result = await settleSessionInputWaitFn(db, input);
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return { action: result.action };
+  }
+
   async function expireSessionHumanInput(
     input: ExpireSessionHumanInputInput,
   ): Promise<ExpireSessionHumanInputResult> {
@@ -546,6 +562,7 @@ export function createSessionStateActivities(
     recoverDispatch,
     recoverEscapedMcpTimeout,
     peekSessionWork,
+    settleSessionInputWait,
     expireSessionHumanInput,
     expireSessionInteractionIntervention,
     markSessionIdle,

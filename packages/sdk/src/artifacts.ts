@@ -16,6 +16,7 @@ export type {
 } from "./editable-artifact-resources";
 export type {
   FetchLike,
+  FetchResponse,
   GetSessionOptions,
   OpenGeniClientOptions,
   OpenGeniRequestOptions,

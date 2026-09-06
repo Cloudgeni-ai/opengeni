@@ -34,6 +34,7 @@
  */
 import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
 import {
+  ActivityIcon,
   AudioLinesIcon,
   ArrowDownIcon,
   ArrowUpIcon,
@@ -46,9 +47,11 @@ import {
   PencilIcon,
   PlayIcon,
   Trash2Icon,
+  TerminalIcon,
   TriangleAlertIcon,
   XIcon,
-  ZapIcon,
+  CornerDownRightIcon,
+  TargetIcon,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
@@ -61,7 +64,13 @@ import { formatClockTime } from "../lib/format";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./tooltip";
 
-export type SessionChromeSignalId = "incoming" | "steering" | "queue" | "goal" | "agents";
+export type SessionChromeSignalId =
+  | "incoming"
+  | "steering"
+  | "queue"
+  | "goal"
+  | "agents"
+  | "commands";
 
 export type SessionChromeSignalTone = "neutral" | "accent" | "waiting" | "running";
 
@@ -72,12 +81,16 @@ export type SessionChromeAgentsSignal = {
 };
 
 export type SessionChromeProps = {
+  compact?: boolean;
   queue: UseTurnQueueResult;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
   goal?: UseGoalResult | null | undefined;
   /** Expanded agents body (host supplies tree / list). */
   agentsPanel?: ReactNode;
+  /** Active commands only. The host mounts the body only when opened. */
+  commandsPanel?: ReactNode;
+  commandsCount?: number | undefined;
   /** Chip summary; when `count > 0` the agents segment appears. */
   agentsSignal?: SessionChromeAgentsSignal | undefined;
   /**
@@ -111,7 +124,7 @@ type QueuedTurnPresentation = {
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
   waiting: "Waiting",
-  scheduled: "Scheduled",
+  scheduled: "Waiting",
   blocked: "Blocked",
   held: "Held",
   paused: "Paused",
@@ -159,7 +172,7 @@ export function sessionChromeGoalPillLabel(
 
 /**
  * One human sentence explaining WHY the goal is not pursuing right now: the
- * pause reason, the agent's own `goal_wait` hold (reason + deadline), or the
+ * pause reason, the agent's own `wait_for_input` hold (reason + deadline), or the
  * next idle-backoff check time. Null when the state needs no explanation.
  */
 export function sessionChromeGoalPillExplanation(
@@ -172,17 +185,17 @@ export function sessionChromeGoalPillExplanation(
       ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
       : null;
   }
-  if (state === "scheduled" && continuation?.reason === "backoff_pending") {
-    return continuation.nextAttemptAt
-      ? `Next goal check at ${formatClockTime(continuation.nextAttemptAt)}.`
-      : "Next goal check is scheduled.";
+  if (state === "scheduled") {
+    return continuation?.nextAttemptAt
+      ? `Continues at ${formatClockTime(continuation.nextAttemptAt)}.`
+      : "Waiting to continue automatically.";
   }
   if (state === "held" && continuation?.reason === "held_for_input") {
     const reason = continuation.holdReason?.trim();
     const until = continuation.nextAttemptAt
       ? ` until ${formatClockTime(continuation.nextAttemptAt)}`
       : "";
-    return `Waiting for input${reason ? `: ${reason}` : ""}${until}. A child result, an agent message, or your prompt wakes it sooner.`;
+    return `Waiting for input${reason ? `: ${reason}` : ""}${until}. Relevant session input—including a child result, background-command result, agent message, schedule, or your prompt—wakes it sooner.`;
   }
   return null;
 }
@@ -228,7 +241,7 @@ export function sessionChromeGoalPillState(
   // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    // `held_for_input` is the agent's own goal_wait hold (waiting for child
+    // `held_for_input` is the agent's own wait_for_input hold (waiting for child
     // results / external input until a deadline); it shares the Held pill.
     return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
       ? "held"
@@ -288,6 +301,12 @@ function pendingKindLabel(kind: SessionPendingInputPreview["kind"]): string {
       return "Goal wake";
     case "agent_message":
       return "Update";
+    case "background_command_result":
+      return "Command result";
+    case "session_wait_timeout":
+      return "Wait ended";
+    case "media_generation_result":
+      return "Video result";
     default:
       return "Incoming";
   }
@@ -307,10 +326,13 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
 }
 
 export function SessionChrome({
+  compact = false,
   queue,
   composer,
   goal,
   agentsPanel,
+  commandsPanel,
+  commandsCount = 0,
   agentsSignal,
   onDismissIncoming,
   readOnly = false,
@@ -319,6 +341,9 @@ export function SessionChrome({
   defaultActive = null,
   onActiveChange,
 }: SessionChromeProps) {
+  const [activityRequested, setActivityOpen] = useState(
+    Boolean(compact && defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
+  );
   const reactId = useId();
   const panelId = `og-session-chrome-panel-${reactId}`;
   const reduceMotion = useReducedMotion();
@@ -358,14 +383,24 @@ export function SessionChrome({
   const stopping = stoppingKind !== null;
   const canMutateQueue = !readOnly && composer !== undefined;
 
-  const liveGoal = record?.status === "active";
-  const elapsed = useLiveElapsed(
-    record?.createdAt,
-    Boolean(liveGoal),
-    !liveGoal ? record?.updatedAt : null,
-  );
+  const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
   const goalState = record ? sessionChromeGoalPillState(record.status, record.continuation) : null;
 
+  const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
+    defaultActive,
+  );
+  const active = activeControlled !== undefined ? activeControlled : activeUncontrolled;
+  const activityOpen =
+    activityRequested ||
+    Boolean(compact && active && ["incoming", "agents", "commands"].includes(active));
+  const activityVisibleRef = useRef(activityOpen);
+  activityVisibleRef.current = activityOpen;
+  const setActive = (next: SessionChromeSignalId | null) => {
+    if (activeControlled === undefined) setActiveUncontrolled(next);
+    onActiveChange?.(next);
+  };
+
+  const hasCommandsPanel = commandsPanel != null;
   const signals = useMemo(() => {
     const rows: Array<{
       id: SessionChromeSignalId;
@@ -450,16 +485,7 @@ export function SessionChrome({
           : goalState === "pursuing" || goalState === "scheduled"
             ? "accent"
             : "neutral",
-        icon:
-          goalState === "blocked" || goalState === "invariant_broken" ? (
-            <TriangleAlertIcon className="size-3" />
-          ) : goalState === "waiting" ? (
-            <Loader2Icon className="size-3 animate-og-spin" />
-          ) : goalState === "paused" || goalState === "held" ? (
-            <PauseIcon className="size-3" />
-          ) : (
-            <ZapIcon className="size-3" />
-          ),
+        icon: <TargetIcon className="size-3" />,
       });
     }
     if (agentsSignal && agentsSignal.count > 0) {
@@ -472,8 +498,22 @@ export function SessionChrome({
         icon: <BotIcon className="size-3" />,
       });
     }
+    if (commandsCount > 0 || (active === "commands" && hasCommandsPanel)) {
+      rows.push({
+        id: "commands",
+        label:
+          commandsCount > 0
+            ? `${commandsCount} command${commandsCount === 1 ? "" : "s"}`
+            : "Commands",
+        tone: commandsCount > 0 ? "running" : "neutral",
+        icon: <TerminalIcon className="size-3" />,
+      });
+    }
     return rows;
   }, [
+    commandsCount,
+    hasCommandsPanel,
+    active,
     agentsSignal,
     elapsed,
     goalState,
@@ -485,14 +525,6 @@ export function SessionChrome({
     record,
   ]);
 
-  const [activeUncontrolled, setActiveUncontrolled] = useState<SessionChromeSignalId | null>(
-    defaultActive,
-  );
-  const active = activeControlled !== undefined ? activeControlled : activeUncontrolled;
-  const setActive = (next: SessionChromeSignalId | null) => {
-    if (activeControlled === undefined) setActiveUncontrolled(next);
-    onActiveChange?.(next);
-  };
   const optimisticQueueKeys = optimisticQueued.map((message) => message.clientEventId).join(",");
   const previousOptimisticQueueKeys = useRef(optimisticQueueKeys);
   const [queueArrivalNonce, setQueueArrivalNonce] = useState(0);
@@ -513,6 +545,13 @@ export function SessionChrome({
   const [pill, setPill] = useState({ left: 0, top: 0, width: 0, height: 0, opacity: 0 });
 
   const signalIds = signals.map((signal) => signal.id).join(",");
+  useEffect(() => {
+    if (
+      compact &&
+      !signals.some((signal) => ["incoming", "agents", "commands"].includes(signal.id))
+    )
+      setActivityOpen(false);
+  }, [compact, signals]);
   useEffect(() => {
     if (active && !signalIds.split(",").includes(active)) {
       if (activeControlled === undefined) setActiveUncontrolled(null);
@@ -535,7 +574,10 @@ export function SessionChrome({
         return;
       }
       const chip = chipRefs.current[active];
-      if (!chip) return;
+      if (!chip) {
+        setPill((prev) => ({ ...prev, opacity: 0 }));
+        return;
+      }
       // Measure against the chip's own box so a wrapped multi-row rail never
       // stretches the highlight into a tall stripe across every signal.
       const railBox = rail.getBoundingClientRect();
@@ -645,6 +687,8 @@ export function SessionChrome({
       />
     ) : active === "goal" && record && goalState && goal ? (
       <GoalPanel goal={goal} state={goalState} elapsed={elapsed} readOnly={readOnly} />
+    ) : active === "commands" ? (
+      <div data-og-session-chrome-panel="commands">{commandsPanel}</div>
     ) : active === "agents" ? (
       <div data-og-session-chrome-panel="agents">
         {agentsPanel ?? <p className="text-og-xs text-og-fg-muted">No agent details.</p>}
@@ -666,15 +710,21 @@ export function SessionChrome({
           )}
           style={{
             borderRadius: "var(--_og-session-chrome-radius)",
-            background: open
-              ? "var(--_og-session-chrome-surface-open)"
-              : "var(--_og-session-chrome-surface)",
-            borderColor: open
-              ? "var(--_og-session-chrome-border-open)"
-              : "var(--_og-session-chrome-border)",
-            boxShadow: open
-              ? "var(--og-session-chrome-shadow-open)"
-              : "var(--og-session-chrome-shadow)",
+            background: compact
+              ? "transparent"
+              : open
+                ? "var(--_og-session-chrome-surface-open)"
+                : "var(--_og-session-chrome-surface)",
+            borderColor: compact
+              ? "transparent"
+              : open
+                ? "var(--_og-session-chrome-border-open)"
+                : "var(--_og-session-chrome-border)",
+            boxShadow: compact
+              ? "none"
+              : open
+                ? "var(--og-session-chrome-shadow-open)"
+                : "var(--og-session-chrome-shadow)",
             transitionDuration: "var(--og-session-chrome-duration)",
             transitionTimingFunction: "var(--_og-session-chrome-ease)",
           }}
@@ -690,9 +740,9 @@ export function SessionChrome({
           >
             <div
               ref={railRef}
-              className="relative flex flex-wrap items-center"
+              className={cn("relative flex items-center", compact ? "flex-nowrap" : "flex-wrap")}
               style={{
-                gap: "var(--og-session-chrome-chip-gap)",
+                gap: compact ? "10px" : "var(--og-session-chrome-chip-gap)",
               }}
             >
               <motion.div
@@ -712,71 +762,192 @@ export function SessionChrome({
                 }}
                 transition={{ duration: shellDuration, ease }}
               />
-              {signals.map((signal) => {
-                const selected = active === signal.id;
-                return (
-                  <button
-                    key={signal.id}
-                    type="button"
-                    ref={(node) => {
-                      chipRefs.current[signal.id] = node;
-                    }}
-                    aria-expanded={selected}
-                    aria-controls={panelId}
-                    aria-label={selected ? `Close ${signal.label}` : undefined}
-                    data-testid={`session-chrome-${signal.id}`}
-                    data-og-session-chrome-signal={signal.id}
-                    title={signal.title}
-                    onClick={() => setActive(selected ? null : signal.id)}
-                    className={cn(
-                      "group relative z-[1] inline-flex min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-hidden",
-                      // Coarse pointers keep a 44px target (session-pins acceptance).
-                      "pointer-coarse:min-h-11",
-                      "transition-colors duration-150 motion-reduce:transition-none",
-                      "hover:text-og-fg focus-visible:bg-og-surface-3/50",
-                      selected ? "text-og-fg" : "text-og-fg-muted",
-                    )}
-                    style={{
-                      paddingInline: "var(--og-session-chrome-chip-pad-x)",
-                    }}
-                  >
-                    {signal.id === "queue" && queueArrivalNonce > 0 && !reduceMotion ? (
-                      <motion.span
-                        key={queueArrivalNonce}
-                        aria-hidden="true"
-                        data-testid="session-chrome-queue-arrival"
-                        className="pointer-events-none absolute inset-0 rounded-og-md bg-og-accent-soft"
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: [0, 0.38, 0] }}
-                        transition={{ duration: 0.72, times: [0, 0.18, 1], ease }}
-                      />
-                    ) : null}
-                    <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
-                      {signal.icon}
-                    </span>
-                    <span className="shrink-0 font-medium text-og-fg">{signal.label}</span>
-                    {signal.detail ? (
-                      <>
-                        <span aria-hidden className="shrink-0 text-og-fg-subtle/60">
-                          ·
-                        </span>
-                        <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg sm:max-w-[12rem]">
-                          {signal.detail}
-                        </span>
-                      </>
-                    ) : null}
-                    {selected ? (
-                      <span
-                        data-testid="session-chrome-close"
-                        className="ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors group-hover:text-og-fg pointer-coarse:size-5"
-                        aria-hidden
+              {signals
+                .filter(
+                  (signal) => !compact || !["incoming", "agents", "commands"].includes(signal.id),
+                )
+                .map((signal) => {
+                  const selected = active === signal.id;
+                  return (
+                    <div
+                      key={signal.id}
+                      role="group"
+                      aria-label={
+                        signal.id === "queue"
+                          ? "Queued messages and actions"
+                          : signal.id === "goal"
+                            ? "Goal and actions"
+                            : signal.label
+                      }
+                      className={cn(
+                        "group/signal relative z-[1] inline-flex min-w-0 max-w-full items-center rounded-og-md",
+                        compact && "bg-og-surface-2/60 px-0.5",
+                        compact && selected && "bg-og-surface-3",
+                      )}
+                    >
+                      <button
+                        type="button"
+                        ref={(node) => {
+                          chipRefs.current[signal.id] = node;
+                        }}
+                        aria-expanded={selected}
+                        aria-controls={panelId}
+                        aria-label={
+                          compact && signal.id === "goal"
+                            ? `Goal · ${goalState === "pursuing" ? "Running" : signal.label}`
+                            : selected
+                              ? `Close ${signal.label}`
+                              : undefined
+                        }
+                        data-testid={`session-chrome-${signal.id}`}
+                        data-og-session-chrome-signal={signal.id}
+                        title={signal.title ?? (compact ? signal.label : undefined)}
+                        onClick={() => {
+                          if (compact) setActivityOpen(false);
+                          setActive(selected ? null : signal.id);
+                        }}
+                        className={cn(
+                          "group relative z-[1] inline-flex min-w-0 min-h-[var(--og-session-chrome-chip-min-height)] max-w-full items-center gap-1 rounded-og-md py-1 text-left text-og-xs outline-hidden",
+                          // Coarse pointers keep a 44px target (session-pins acceptance).
+                          "pointer-coarse:min-h-11",
+                          "transition-colors duration-150 motion-reduce:transition-none",
+                          "hover:text-og-fg focus-visible:bg-og-surface-3/50",
+                          selected ? "text-og-fg" : "text-og-fg-muted",
+                        )}
+                        style={{
+                          paddingInline: "var(--og-session-chrome-chip-pad-x)",
+                        }}
                       >
-                        <XIcon className="size-3" />
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
+                        {signal.id === "queue" && queueArrivalNonce > 0 && !reduceMotion ? (
+                          <motion.span
+                            key={queueArrivalNonce}
+                            aria-hidden="true"
+                            data-testid="session-chrome-queue-arrival"
+                            className="pointer-events-none absolute inset-0 rounded-og-md bg-og-accent-soft"
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: [0, 0.38, 0] }}
+                            transition={{ duration: 0.72, times: [0, 0.18, 1], ease }}
+                          />
+                        ) : null}
+                        <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
+                          {signal.icon}
+                        </span>
+                        <span
+                          className={cn(
+                            "font-medium text-og-fg",
+                            compact ? "min-w-0 truncate" : "shrink-0",
+                          )}
+                        >
+                          {compact && signal.id === "goal"
+                            ? goalState === "pursuing"
+                              ? "Running"
+                              : signal.label
+                            : compact && signal.id === "queue"
+                              ? `${queuedTurns.length + optimisticQueued.length} queued`
+                              : signal.label}
+                        </span>
+                        {signal.detail && !compact ? (
+                          <>
+                            <span aria-hidden className="shrink-0 text-og-fg-subtle/60">
+                              ·
+                            </span>
+                            <span className="min-w-0 max-w-[8.5rem] truncate text-og-fg sm:max-w-[12rem]">
+                              {signal.detail}
+                            </span>
+                          </>
+                        ) : null}
+                        {selected && !compact ? (
+                          <span
+                            data-testid="session-chrome-close"
+                            className="ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-og-sm text-og-fg-subtle transition-colors group-hover:text-og-fg pointer-coarse:size-5"
+                            aria-hidden
+                          >
+                            <XIcon className="size-3" />
+                          </span>
+                        ) : null}
+                      </button>
+                      {signal.id === "goal" && goal && record && !readOnly ? (
+                        <div className={cn("flex shrink-0 items-center pr-1", compact && "pl-0.5")}>
+                          {record.status === "active" || record.status === "paused" ? (
+                            <IconAction
+                              label={record.status === "paused" ? "Resume goal" : "Pause goal"}
+                              tip={record.status === "paused" ? "Resume goal" : "Pause goal"}
+                              disabled={goal.updating}
+                              onClick={() =>
+                                void (record.status === "paused"
+                                  ? goal.resume()
+                                  : goal.pause("Paused from session chrome"))
+                              }
+                            >
+                              {goal.updating ? (
+                                <Loader2Icon className="size-3 animate-og-spin" />
+                              ) : record.status === "paused" ? (
+                                <PlayIcon className="size-3" />
+                              ) : (
+                                <PauseIcon className="size-3" />
+                              )}
+                            </IconAction>
+                          ) : null}
+                          <IconAction
+                            label="Clear goal"
+                            tip="Clear goal"
+                            danger
+                            disabled={goal.updating}
+                            onClick={() => void goal.deleteGoal()}
+                          >
+                            <Trash2Icon className="size-3" />
+                          </IconAction>
+                        </div>
+                      ) : signal.id === "queue" && canMutateQueue && queuedTurns[0] ? (
+                        <div className={cn("flex shrink-0 items-center pr-1", compact && "pl-0.5")}>
+                          <IconAction
+                            label="Steer first queued message"
+                            text="Steer"
+                            tip={QUEUE_STEER_TIP}
+                            disabled={
+                              queue.mutating || Boolean(queue.mutationFor(queuedTurns[0].id))
+                            }
+                            onClick={() => void queue.steerTurn(queuedTurns[0]!.id)}
+                          >
+                            <CornerDownRightIcon className="size-3" />
+                          </IconAction>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              {compact &&
+              signals.some((signal) => ["incoming", "agents", "commands"].includes(signal.id)) ? (
+                <button
+                  type="button"
+                  aria-label="Session activity"
+                  title={activityOpen ? "Close activity" : "Inbox, agents and commands"}
+                  aria-controls={panelId}
+                  aria-expanded={activityOpen}
+                  onClick={() => {
+                    setActivityOpen(!activityOpen);
+                    setActive(
+                      activityOpen
+                        ? null
+                        : (signals.find((signal) =>
+                            ["incoming", "agents", "commands"].includes(signal.id),
+                          )?.id ?? null),
+                    );
+                  }}
+                  className={cn(
+                    "ml-auto inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
+                    activityOpen
+                      ? "bg-og-surface-3 text-og-fg"
+                      : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
+                  )}
+                >
+                  <ActivityIcon className="size-3.5" />
+                  <span className="sr-only">Activity</span>
+                  {incoming.length > 0 ? (
+                    <span className="size-1.5 rounded-full bg-og-accent" />
+                  ) : null}
+                </button>
+              ) : null}
               {stopping ? (
                 <span
                   role="status"
@@ -794,6 +965,47 @@ export function SessionChrome({
             </div>
           </div>
 
+          <AnimatePresence initial={false}>
+            {compact && activityOpen ? (
+              <motion.div
+                key="activity-tabs"
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                transition={{ duration: shellDuration, ease }}
+                style={{ overflow: "hidden" }}
+              >
+                <div className="mt-1 flex items-center gap-1 rounded-t-og-lg bg-og-surface-2/50 px-2 py-1">
+                  {signals
+                    .filter((signal) => ["incoming", "agents", "commands"].includes(signal.id))
+                    .map((signal) => (
+                      <button
+                        key={signal.id}
+                        type="button"
+                        aria-expanded={active === signal.id}
+                        onClick={() => {
+                          if (activityVisibleRef.current) setActive(signal.id);
+                        }}
+                        className={cn(
+                          "inline-flex min-h-9 items-center gap-1.5 rounded-og-md px-2 text-og-xs pointer-coarse:min-h-11",
+                          active === signal.id
+                            ? "bg-og-surface-3 text-og-fg"
+                            : "text-og-fg-muted hover:text-og-fg",
+                        )}
+                      >
+                        {signal.icon}
+                        {signal.id === "incoming" ? `${incoming.length} incoming` : signal.label}
+                      </button>
+                    ))}
+                </div>
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+          {goal?.mutationError ? (
+            <p role="alert" className="px-3 pb-2 text-og-xs text-og-danger">
+              Goal action not confirmed. {goal.mutationError.message}
+            </p>
+          ) : null}
           <div
             id={panelId}
             data-og-session-chrome-panel-shell=""
@@ -811,7 +1023,14 @@ export function SessionChrome({
           >
             <div className="min-h-0 overflow-hidden">
               <div
-                className="relative overflow-y-auto overscroll-contain border-t border-og-border/50"
+                className={cn(
+                  "relative overflow-y-auto overscroll-contain",
+                  compact
+                    ? activityOpen
+                      ? "rounded-b-og-lg bg-og-surface-2/50"
+                      : "mt-1 rounded-og-lg bg-og-surface-2/50"
+                    : "border-t border-og-border/50",
+                )}
                 style={{
                   maxHeight: "var(--og-session-chrome-panel-max-height)",
                   paddingInline: "var(--og-session-chrome-panel-pad-x)",
@@ -819,7 +1038,7 @@ export function SessionChrome({
                 }}
               >
                 <AnimatePresence initial={false}>
-                  {active && panelBody ? (
+                  {active && active !== "commands" && panelBody ? (
                     <motion.div
                       key={active}
                       data-og-session-chrome-panel-frame={active}
@@ -842,6 +1061,16 @@ export function SessionChrome({
                     </motion.div>
                   ) : null}
                 </AnimatePresence>
+                {active === "commands" ? (
+                  <motion.div
+                    key="commands"
+                    initial={reduceMotion ? false : { opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    transition={{ duration: crossfadeDuration, ease }}
+                  >
+                    {panelBody}
+                  </motion.div>
+                ) : null}
               </div>
             </div>
           </div>
@@ -1017,6 +1246,7 @@ function QueuePanel({
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
+                      text="Steer"
                       tip={QUEUE_STEER_TIP}
                       disabled={settling || pending !== null}
                       onClick={() => onSteer(turn.id)}
@@ -1024,7 +1254,7 @@ function QueuePanel({
                       {pending === "steer" ? (
                         <Loader2Icon className="size-3 animate-og-spin" />
                       ) : (
-                        <ZapIcon className="size-3" />
+                        <CornerDownRightIcon className="size-3" />
                       )}
                     </IconAction>
                   ) : null}
@@ -1206,7 +1436,7 @@ function GoalPanel({
         <span>{sessionChromeGoalPillLabel(state, record)}</span>
         {elapsed ? (
           <span className="tabular-nums normal-case tracking-normal text-og-fg-muted">
-            · {elapsed}
+            · Created {elapsed} ago
           </span>
         ) : null}
         <span className="normal-case tracking-normal text-og-fg-muted">· v{record.version}</span>
@@ -1288,6 +1518,7 @@ const QUEUE_EDIT_TIP = "Edit in composer";
 const QUEUE_DELETE_TIP = "Delete this queued prompt";
 
 function IconAction({
+  text,
   label,
   tip,
   onClick,
@@ -1296,6 +1527,7 @@ function IconAction({
   children,
 }: {
   label: string;
+  text?: string;
   tip: ReactNode;
   onClick: () => void;
   disabled?: boolean;
@@ -1311,13 +1543,16 @@ function IconAction({
           disabled={disabled}
           onClick={onClick}
           className={cn(
-            "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors",
+            "inline-flex size-6 items-center justify-center rounded-og-sm outline-hidden transition-colors",
             "hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40",
             "disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-9",
+            text ? "text-og-fg" : "text-og-fg-subtle",
+            text && "w-auto gap-1 px-1.5 text-og-xs pointer-coarse:w-auto",
             danger && "hover:text-og-danger",
           )}
         >
           {children}
+          {text}
         </button>
       </TooltipTrigger>
       <TooltipContent side="top">{tip}</TooltipContent>

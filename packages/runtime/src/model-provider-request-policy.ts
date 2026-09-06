@@ -251,7 +251,8 @@ export function modelRequestPolicyForProvider(
     }
     if (
       provider.kind === "vercel-gateway-managed" ||
-      provider.kind === "vercel-gateway-workspace"
+      provider.kind === "vercel-gateway-workspace" ||
+      provider.kind === "vercel-gateway-organization"
     ) {
       const projectedBody: Record<string, unknown> = {
         ...body,

@@ -6,9 +6,6 @@ import {
   setXaiSessionAccountPin,
   getWorkspaceVideoGenerationPolicy,
   loadWorkspaceVercelAiGatewayCredentialLease,
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
-  prepareConnectorActionApproval,
 } from "@opengeni/db";
 import {
   type AttemptConnectorActionBinding,
@@ -128,15 +125,8 @@ export type BuildTurnAgentDeps = {
   sandboxCodemodeToken: string | undefined;
   fileResourceDownloads: SandboxFileDownload[];
   attemptConnectorActionBindings: readonly AttemptConnectorActionBinding[];
-  connectorActionIdentity: {
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    turnId: string;
-    attemptId: string;
-    executionGeneration: number;
-    initiator: Pick<ClaimTurnOk["turn"]["initiator"], "kind" | "subjectId">;
-  };
+  connectorActionPolicy: ConnectorActionPolicyHooks;
+  trigger: ClaimTurnOk["trigger"];
   preparationIndependentToolNames: readonly string[];
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
@@ -194,7 +184,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     sandboxCodemodeToken,
     fileResourceDownloads,
     attemptConnectorActionBindings,
-    connectorActionIdentity,
+    connectorActionPolicy,
+    trigger,
     preparationIndependentToolNames,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
@@ -567,19 +558,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.providerId,
     turnExecutionPolicy.latencyMode,
   );
-  const connectorActionPolicy: ConnectorActionPolicyHooks = {
-    prepare: async (call) =>
-      await prepareConnectorActionApproval(db, connectorActionIdentity, call),
-    begin: async (call) => await beginConnectorActionExecution(db, connectorActionIdentity, call),
-    complete: async ({ requestId, outcome }) =>
-      await completeConnectorActionExecution(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        requestId,
-        attemptId: input.attemptId,
-        outcome,
-      }),
-  };
+  const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const runtimeSkillActivations = [
     ...installedSkillRuntime.activations,
     ...packRuntime.skillActivations,
@@ -669,6 +648,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         resolvedMcpConnectionIds: preparedTools.resolvedMcpConnectionIds,
         connectorActionPolicy,
         attemptConnectorActionBindings,
+        ...(approvedToolCallId ? { approvedToolCallId } : {}),
         // LIVE by-reference connector namespaces (fills during this turn's
         // codex_apps tools/list): the codex tool_search description reads it per
         // model call so the model sees the account's real connected sources.
@@ -794,6 +774,20 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     modelVisibleRuntimeSkillActivations,
     postAgentPreparationStartedAt,
   };
+}
+
+function approvedConnectorActionCallId(trigger: ClaimTurnOk["trigger"]): string | null {
+  if (trigger.type !== "user.approvalDecision") {
+    return null;
+  }
+
+  const payload = trigger.payload as {
+    approvalId?: unknown;
+    decision?: unknown;
+  };
+  return payload.decision === "approve" && typeof payload.approvalId === "string"
+    ? payload.approvalId
+    : null;
 }
 
 export type BuildTurnAgentOk = Awaited<ReturnType<typeof buildTurnAgent>>;

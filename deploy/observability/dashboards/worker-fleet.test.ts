@@ -102,6 +102,32 @@ describe("worker fleet dashboard scope", () => {
     ).toBe(false);
   });
 
+  test("shows durable compaction starts beside successful completions", async () => {
+    const dashboard = JSON.parse(
+      await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),
+    );
+    const panels = dashboard.panels as Array<{
+      title?: string;
+      targets?: Array<{ refId?: string; expr?: string; legendFormat?: string }>;
+    }>;
+    const panel = panels.find(
+      (candidate) => candidate.title === "Compaction starts and completions by trigger (per 15m)",
+    );
+
+    expect(panel?.targets).toEqual([
+      expect.objectContaining({
+        refId: "A",
+        expr: 'sum by (trigger) (increase(opengeni_context_compactions_total{namespace="$namespace",environment="$environment",release="$release"}[15m]))',
+        legendFormat: "{{trigger}} completed",
+      }),
+      expect.objectContaining({
+        refId: "B",
+        expr: 'sum by (trigger) (increase(opengeni_context_compaction_starts_total{namespace="$namespace",environment="$environment",release="$release"}[15m]))',
+        legendFormat: "{{trigger}} started",
+      }),
+    ]);
+  });
+
   test("gates backlog panels with freshness from the same scrape instance", async () => {
     const dashboard = JSON.parse(
       await readFile(new URL("./worker-fleet.json", import.meta.url), "utf8"),

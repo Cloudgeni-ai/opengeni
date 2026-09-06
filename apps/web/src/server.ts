@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { extname, resolve, sep } from "node:path";
 
+import { SETUP_ACCOUNT_PATH, SETUP_ACCOUNT_RESPONSE_HEADERS } from "./setup-account-token";
+
 const DEFAULT_PORT = 3000;
 const DEFAULT_HOST = "0.0.0.0";
 const IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable";
@@ -71,6 +73,9 @@ export function createWebHandler(
     }
     if (pathname.startsWith("/assets/") || pathname.startsWith("/react-demo/")) {
       return new Response("Not Found", { status: 404 });
+    }
+    if (pathname === SETUP_ACCOUNT_PATH) {
+      return serveFile(request, indexPath, "no-store", SETUP_ACCOUNT_RESPONSE_HEADERS);
     }
     return serveFile(request, indexPath, REVALIDATE_CACHE_CONTROL);
   };
@@ -224,7 +229,12 @@ function cacheControlFor(pathname: string): string {
   return SHORT_CACHE_CONTROL;
 }
 
-async function serveFile(request: Request, path: string, cacheControl: string): Promise<Response> {
+async function serveFile(
+  request: Request,
+  path: string,
+  cacheControl: string,
+  extraHeaders?: HeadersInit,
+): Promise<Response> {
   const source = Bun.file(path);
   if (!(await source.exists())) {
     return new Response("Not Found", { status: 404 });
@@ -236,6 +246,7 @@ async function serveFile(request: Request, path: string, cacheControl: string): 
   const encoded = acceptsGzip && (await gzip.exists()) ? gzip : null;
   const body = encoded ?? source;
   const headers = new Headers({
+    ...Object.fromEntries(new Headers(extraHeaders)),
     "cache-control": cacheControl,
     "content-type": source.type || "application/octet-stream",
     vary: "Accept-Encoding",

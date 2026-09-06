@@ -7,14 +7,11 @@ import {
   createRoute,
   createRouter,
   RouterProvider,
+  useRouterState,
 } from "@tanstack/react-router";
 
-import {
-  OrganizationSwitcherLine,
-  WORKSPACE_SWITCHER_GRID_CLASS,
-  WorkspaceMenu,
-  WorkspaceSwitcherTrigger,
-} from "../src/components/rail/switcher-block";
+import { WORKSPACE_SWITCHER_GRID_CLASS } from "../src/components/rail/switcher-block";
+import { WorkspaceMenu, WorkspaceSwitcherTrigger } from "../src/components/rail/workspace-switcher";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import type { ManagedSelfContext } from "../src/lib/managed-self-context";
 import type { Workspace } from "../src/types";
@@ -54,7 +51,9 @@ const workspaces = [
   workspace("workspace-default", "Default workspace"),
   workspace("workspace-product", "Product Testing"),
   workspace("workspace-personal", "Personal workspace", { kind: "personal" }),
-  workspace("workspace-research", "Research Sandbox", { accountId: secondAccountId }),
+  workspace("workspace-research", "Research Sandbox", {
+    accountId: secondAccountId,
+  }),
 ];
 
 const organizations = [
@@ -88,6 +87,9 @@ const selfContext: ManagedSelfContext = {
 
 function WorkspaceSwitcherFixture() {
   const collapsed = new URLSearchParams(window.location.search).get("mode") === "collapsed";
+  const routePath = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const [activeWorkspaceId, setActiveWorkspaceId] = useState("workspace-personal");
   const [lastAction, setLastAction] = useState("None");
   const activeWorkspace =
@@ -119,11 +121,9 @@ function WorkspaceSwitcherFixture() {
                 canCreate
                 onSelect={setActiveWorkspaceId}
                 onCreate={() => setLastAction("New workspace")}
-                activeWorkspace={activeWorkspace}
+                onCreateOrganization={() => setLastAction("New organization")}
+                workspaceId={activeWorkspaceId}
                 managedSelfContext={selfContext}
-                canControl={false}
-                controlBusy={false}
-                onToggleControl={() => {}}
                 align="start"
               >
                 <WorkspaceSwitcherTrigger
@@ -135,13 +135,6 @@ function WorkspaceSwitcherFixture() {
               </WorkspaceMenu>
             ) : (
               <div className={WORKSPACE_SWITCHER_GRID_CLASS}>
-                <OrganizationSwitcherLine
-                  orgs={organizations}
-                  currentLabel="CloudGeni Product Engineering and Reliability"
-                  activeAccountId={accountId}
-                  onSelect={() => {}}
-                  workspaceId={null}
-                />
                 <WorkspaceMenu
                   collapsed={false}
                   orgs={organizations}
@@ -154,11 +147,9 @@ function WorkspaceSwitcherFixture() {
                     setLastAction(`Opened ${selected.name}`);
                   }}
                   onCreate={() => setLastAction("New workspace")}
-                  activeWorkspace={activeWorkspace}
+                  onCreateOrganization={() => setLastAction("New organization")}
+                  workspaceId={activeWorkspaceId}
                   managedSelfContext={selfContext}
-                  canControl={false}
-                  controlBusy={false}
-                  onToggleControl={() => {}}
                   align="start"
                 >
                   <WorkspaceSwitcherTrigger
@@ -190,6 +181,9 @@ function WorkspaceSwitcherFixture() {
 
           <output data-testid="last-action" className="sr-only">
             {lastAction}
+          </output>
+          <output data-testid="route-path" className="sr-only">
+            {routePath}
           </output>
         </aside>
         {collapsed ? (
@@ -223,12 +217,12 @@ function WorkspaceSwitcherFixture() {
 
 const rootRoute = createRootRoute({ component: WorkspaceSwitcherFixture });
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/" });
-const settingsRoute = createRoute({
+const organizationRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/workspaces/$workspaceId/settings",
+  path: "/workspaces/$workspaceId/organization",
 });
 const router = createRouter({
-  routeTree: rootRoute.addChildren([indexRoute, settingsRoute]),
+  routeTree: rootRoute.addChildren([indexRoute, organizationRoute]),
   history: createMemoryHistory({ initialEntries: ["/"] }),
 });
 

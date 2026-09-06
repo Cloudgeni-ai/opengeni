@@ -74,10 +74,10 @@ export type UseSessionEventsResult = {
   error: Error | null;
 };
 
-const INITIAL_TAIL_PAGE_SIZE = 1000;
-const OLDER_PAGE_SIZE = 5000;
-const NEWER_PAGE_SIZE = 5000;
-const OLDEST_PAGE_SIZE = 1000;
+// Keep every browser history read inside one database batch, including the
+// server's one-row continuation lookahead. A large total session must never
+// turn one lazy page into dozens of sequential database round trips.
+const SESSION_HISTORY_PAGE_SIZE = 255;
 const INITIAL_FETCH_CAP = 1;
 const OLDER_GROUP_TARGET = 32;
 const OLDER_FETCH_CAP = 2;
@@ -85,7 +85,19 @@ const NEWER_GROUP_TARGET = 32;
 const NEWER_FETCH_CAP = 2;
 const OLDEST_GROUP_TARGET = 32;
 const OLDEST_FETCH_CAP = 2;
-const BOUNDARY_PAGE_CAP = 4;
+// A tail page may land inside one unusually dense turn. Permit exactly one
+// additional bounded page to find its user/session boundary without turning a
+// fresh open into an unbounded history walk.
+const BOUNDARY_PAGE_CAP = 1;
+// Foreground reconciliation is intentionally semantic, not merely time-based:
+// tiny raw gaps can stay on SSE; medium raw gaps get one compact probe so a
+// token-heavy single answer is not mistaken for hundreds of visible messages;
+// only a large/complex missed window reloads the latest tail.
+const FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES = 16;
+const FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES = SESSION_HISTORY_PAGE_SIZE;
+const FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS = 128;
+const FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS = 16;
+const FOREGROUND_COMPACT_CATCHUP_MAX_BYTES = 512 * 1024;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -177,9 +189,11 @@ export function useSessionEvents(
   const loadingLatestRef = useRef(false);
   const viewModeRef = useRef<"live" | "history">("live");
   const initialWindowLoadedRef = useRef(false);
+  const reconcileAfterPageResumeRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  const navigationGenerationRef = useRef(0);
   const eventWindowRef = useRef<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   const sessionStatusRef = useRef<{
     sequence: number;
@@ -191,6 +205,21 @@ export function useSessionEvents(
   // Effects reset state after commit. Tag the state so the first render for a
   // new stream identity cannot expose the previous session's event log.
   const [stateStreamKey, setStateStreamKey] = useState(streamKey);
+
+  // Reopening SSE after a prepend must not cancel the next history page.
+  // Navigation belongs to the session/client lifetime, not the transport.
+  useEffect(() => {
+    navigationGenerationRef.current += 1;
+    loadingOlderRef.current = false;
+    loadingNewerRef.current = false;
+    loadingOldestRef.current = false;
+    setLoadingOlder(false);
+    setLoadingNewer(false);
+    setLoadingOldest(false);
+    return () => {
+      navigationGenerationRef.current += 1;
+    };
+  }, [client, workspaceId, sessionId, after, enabled, fullReplay]);
 
   useEffect(() => {
     // Reset the accumulated log only when the stream identity changes —
@@ -223,27 +252,43 @@ export function useSessionEvents(
       viewModeRef.current = "live";
       setViewMode("live");
       initialWindowLoadedRef.current = false;
+      reconcileAfterPageResumeRef.current = false;
     }
     // AbortController is advisory: custom SDK clients and async iterators may
     // ignore it and resolve/yield after cleanup. Fence every effect instance so
     // only the newest dependency generation can mutate refs or React state.
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    if (loadingOlderRef.current) {
-      loadingOlderRef.current = false;
-      setLoadingOlder(false);
-    }
     if (!sessionId || !streamEnabled) {
+      // A page that stayed hidden beyond the live-activity grace deliberately
+      // closed its SSE connection. Replaying from the old cursor on return can
+      // drip a large background backlog through React in many fast batches and
+      // leave the pinned camera catching up long after the user is foregrounded.
+      // Remember that suspension so the next live effect replaces the browser
+      // window with one compact durable tail instead.
+      if (
+        sessionId &&
+        enabled &&
+        !pageLive &&
+        !fullReplay &&
+        viewModeRef.current === "live" &&
+        initialWindowLoadedRef.current
+      ) {
+        reconcileAfterPageResumeRef.current = true;
+      }
       setConnectionState("idle");
       return;
     }
     // History view owns a non-tip window; do not open SSE (it would replay the
     // entire gap into the browser). jumpToLatest / catching loadNewer resume live.
     if (viewMode === "history") {
+      reconcileAfterPageResumeRef.current = false;
       setConnectionState("idle");
       setInitialLoading(false);
       return;
     }
+    const reconcileForegroundResume = reconcileAfterPageResumeRef.current && !fullReplay;
+    reconcileAfterPageResumeRef.current = false;
     const controller = new AbortController();
     const isCurrent = () => generationRef.current === generation && !controller.signal.aborted;
     streamAbortRef.current = controller;
@@ -314,6 +359,56 @@ export function useSessionEvents(
 
     void (async () => {
       try {
+        if (reconcileForegroundResume) {
+          setConnectionState("connecting");
+          const cursor = streamResumeSequenceRef.current;
+          let plan: ForegroundCatchupPlan = { kind: "resume" };
+          try {
+            plan = await planForegroundCatchup(client, workspaceId, sessionId, cursor, {
+              signal: controller.signal,
+            });
+          } catch {
+            if (controller.signal.aborted) return;
+            // This read is an optimization gate, not a new availability
+            // dependency. If it fails, preserve the SDK's exact cursor replay
+            // rather than blanking a usable timeline or failing the stream.
+            plan = { kind: "resume" };
+          }
+          if (!isCurrent()) return;
+          if (plan.kind === "append") {
+            const current = eventWindowRef.current;
+            assertAppendOrder(current.events, plan.events);
+            const status = observeSessionStatus(plan.events, sessionStatusRef);
+            const next = boundBrowserSessionEventWindow([...current.events, ...plan.events]);
+            const retained = {
+              ...next,
+              truncated: current.truncated || next.truncated,
+            };
+            eventWindowRef.current = retained;
+            oldestSequenceRef.current = retained.events[0]?.sequence ?? null;
+            newestSequenceRef.current = maxResumeSequenceOrNull(retained.events);
+            lastSequenceRef.current = Math.max(lastSequenceRef.current, plan.resumeSequence);
+            streamResumeSequenceRef.current = Math.max(
+              streamResumeSequenceRef.current,
+              plan.resumeSequence,
+            );
+            if (status !== undefined) {
+              setSessionStatusProjection(status);
+            }
+            setEventWindow(retained);
+            if (retained.truncated) {
+              hasOlderRef.current = true;
+              setHasOlder(true);
+            }
+          } else if (plan.kind === "reload") {
+            // A large/complex missed window would make the foreground timeline
+            // and pinned camera chase many rapid commits. Keep the last known
+            // complete window visible until the bounded latest replacement is
+            // ready, then install that replacement atomically below.
+            initialWindowLoadedRef.current = false;
+            setError(null);
+          }
+        }
         if (!fullReplay && !initialWindowLoadedRef.current) {
           setConnectionState("connecting");
           // First paint is ONE compact fetch — the newest window, revealed at
@@ -321,9 +416,10 @@ export function useSessionEvents(
           // reader actually scrolls up (the sentinel drives loadOlder).
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before: Number.MAX_SAFE_INTEGER,
-            pageSize: INITIAL_TAIL_PAGE_SIZE,
+            pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: Number.POSITIVE_INFINITY,
             maxFetches: INITIAL_FETCH_CAP,
+            boundaryPageCap: BOUNDARY_PAGE_CAP,
             signal: controller.signal,
           });
           if (!isCurrent()) {
@@ -331,6 +427,16 @@ export function useSessionEvents(
           }
           const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = boundBrowserSessionEventWindow(window.events);
+          // A replacement tail retires requests against the discarded window.
+          // Ordinary SSE reconnects preserve navigation, but splicing an old
+          // page into this new tail could leave an inaccessible history gap.
+          navigationGenerationRef.current += 1;
+          loadingOlderRef.current = false;
+          loadingNewerRef.current = false;
+          loadingOldestRef.current = false;
+          setLoadingOlder(false);
+          setLoadingNewer(false);
+          setLoadingOldest(false);
           eventWindowRef.current = retained;
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
           newestSequenceRef.current =
@@ -430,6 +536,8 @@ export function useSessionEvents(
     workspaceId,
     sessionId,
     after,
+    enabled,
+    pageLive,
     streamEnabled,
     fullReplay,
     streamKey,
@@ -457,18 +565,18 @@ export function useSessionEvents(
           setHasOlder(false);
           return false;
         }
-        const generation = generationRef.current;
+        const generation = navigationGenerationRef.current;
         loadingOlderRef.current = true;
         setLoadingOlder(true);
         let published = false;
         try {
           const window = await loadEventWindow(client, workspaceId, sessionId, {
             before,
-            pageSize: OLDER_PAGE_SIZE,
+            pageSize: SESSION_HISTORY_PAGE_SIZE,
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
           });
-          if (generationRef.current !== generation) {
+          if (navigationGenerationRef.current !== generation) {
             return false;
           }
           if (window.events.length === 0) {
@@ -549,7 +657,7 @@ export function useSessionEvents(
           published = true;
           return olderStillAvailable;
         } finally {
-          if (!published) {
+          if (!published && navigationGenerationRef.current === generation) {
             loadingOlderRef.current = false;
             setLoadingOlder(false);
           }
@@ -562,18 +670,18 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
-    const generation = generationRef.current;
+    const generation = navigationGenerationRef.current;
     loadingOldestRef.current = true;
     setLoadingOldest(true);
     let published = false;
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: 0,
-        pageSize: OLDEST_PAGE_SIZE,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
       });
-      if (generationRef.current !== generation) {
+      if (navigationGenerationRef.current !== generation) {
         return false;
       }
       if (window.events.length === 0) {
@@ -614,7 +722,7 @@ export function useSessionEvents(
       published = true;
       return newer;
     } finally {
-      if (!published) {
+      if (!published && navigationGenerationRef.current === generation) {
         loadingOldestRef.current = false;
         setLoadingOldest(false);
       }
@@ -631,18 +739,18 @@ export function useSessionEvents(
       setHasNewer(false);
       return false;
     }
-    const generation = generationRef.current;
+    const generation = navigationGenerationRef.current;
     loadingNewerRef.current = true;
     setLoadingNewer(true);
     let published = false;
     try {
       const window = await loadForwardEventWindow(client, workspaceId, sessionId, {
         after: afterSequence,
-        pageSize: NEWER_PAGE_SIZE,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
       });
-      if (generationRef.current !== generation) {
+      if (navigationGenerationRef.current !== generation) {
         return false;
       }
       if (window.events.length === 0) {
@@ -714,7 +822,7 @@ export function useSessionEvents(
       published = true;
       return newer;
     } finally {
-      if (!published) {
+      if (!published && navigationGenerationRef.current === generation) {
         loadingNewerRef.current = false;
         setLoadingNewer(false);
       }
@@ -1088,6 +1196,70 @@ function observeSessionStatus(
   return latest.status;
 }
 
+type ForegroundCatchupPlan =
+  | { kind: "resume" }
+  | { kind: "append"; events: SessionEvent[]; resumeSequence: number }
+  | { kind: "reload" };
+
+/**
+ * Decide how a sustained hidden-tab suspension rejoins the durable event log.
+ *
+ * `lastSequence - cursor` is the exact raw durable work missed, but it is not
+ * the number of visible messages: one streaming answer can own thousands of
+ * adjacent delta rows. Small raw gaps therefore resume directly; medium gaps
+ * get one forward compact page and are judged by the browser-visible result;
+ * a page that cannot prove complete bounded coverage, or that would add too
+ * many rows/groups/bytes, reloads the latest tail instead.
+ */
+async function planForegroundCatchup(
+  client: EmbeddedSessionClientLike,
+  workspaceId: string,
+  sessionId: string,
+  cursor: number,
+  options: { signal?: AbortSignal } = {},
+): Promise<ForegroundCatchupPlan> {
+  if (options.signal?.aborted) throw abortError();
+  const session = await client.getSession(workspaceId, sessionId, {
+    fresh: true,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  if (options.signal?.aborted) throw abortError();
+  const durableHead = Math.max(cursor, session.lastSequence);
+  const rawGap = durableHead - cursor;
+  if (rawGap <= FOREGROUND_DIRECT_REPLAY_MAX_SEQUENCES) {
+    return { kind: "resume" };
+  }
+  if (rawGap > FOREGROUND_COMPACT_PROBE_MAX_SEQUENCES) {
+    return { kind: "reload" };
+  }
+
+  const page = await loadNextPage(client, workspaceId, sessionId, cursor, {
+    pageSize: rawGap,
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
+  const events = page
+    .filter((event) => eventResumeSequence(event) > cursor)
+    .map(boundBrowserLegacyEvent);
+  if (events.length === 0) {
+    return { kind: "reload" };
+  }
+  assertAscending(events);
+  const resumeSequence = maxResumeSequence(events);
+  if (resumeSequence < durableHead) {
+    // Byte/count truncation or an incomplete projection means this page cannot
+    // prove that one append reaches the head observed above.
+    return { kind: "reload" };
+  }
+  if (
+    events.length > FOREGROUND_COMPACT_CATCHUP_MAX_EVENTS ||
+    groupCount(events) > FOREGROUND_COMPACT_CATCHUP_MAX_GROUPS ||
+    browserJsonBytes(events) > FOREGROUND_COMPACT_CATCHUP_MAX_BYTES
+  ) {
+    return { kind: "reload" };
+  }
+  return { kind: "append", events, resumeSequence };
+}
+
 type LoadedEventWindow = {
   events: SessionEvent[];
   oldestSequence: number | null;
@@ -1111,6 +1283,7 @@ async function loadEventWindow(
     pageSize: number;
     targetGroups: number;
     maxFetches: number;
+    boundaryPageCap?: number;
     signal?: AbortSignal;
   },
 ): Promise<LoadedEventWindow> {
@@ -1145,14 +1318,13 @@ async function loadEventWindow(
   // turn boundary already in the buffer — the dropped fragment is refetched by
   // the next loadOlder (everything below the new oldest sequence), whose own
   // window snaps the same way, so every seam lands on a turn start. Extra
-  // pages are fetched only when the buffer holds no boundary at all (one
-  // monster turn); past the cap a mid-turn top is accepted.
+  // page is fetched only when the buffer holds no boundary at all (one dense
+  // turn); past the cap the existing truncation/hasOlder signal remains true.
   let snapPages = 0;
   while (
     !reachedStart &&
     findBoundaryIndex(buffer) === -1 &&
-    snapPages < BOUNDARY_PAGE_CAP &&
-    fetches < options.maxFetches
+    snapPages < (options.boundaryPageCap ?? 0)
   ) {
     const page = await loadPreviousPage(client, workspaceId, sessionId, cursor, {
       pageSize: options.pageSize,

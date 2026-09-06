@@ -29,6 +29,8 @@ export type ModelCallFactAggregateRow = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
 };
 
 export type InsightsDayBucket = {
@@ -60,6 +62,8 @@ export type RootSessionDriverRow = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   totalTokens: number;
   cachedTokens: number;
   cacheInputTokens: number;
@@ -70,6 +74,8 @@ export type ScheduleFactAggregate = {
   pricedCostMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   totalTokens: number;
   cachedTokens: number;
   cacheInputTokens: number;
@@ -134,6 +140,7 @@ export type RecentModelCallRow = {
   totalTokens: number | null;
   pricedCostMicros: number;
   estimatedProviderCostMicros: number | null;
+  equivalentCreditCostMicros: number | null;
   pricingSource: string | null;
 };
 
@@ -360,6 +367,8 @@ export async function aggregateModelCallFacts(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
       })
       .from(source)
       .where(and(...clauses))
@@ -381,6 +390,8 @@ export async function aggregateModelCallFacts(
       pricedCostMicros: Number(row.pricedCostMicros),
       estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+      equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
     }));
   });
 }
@@ -389,6 +400,8 @@ export type ModelCallFactSeriesAggregate = {
   costMicros: number;
   estimatedProviderCostMicros: number;
   estimatedProviderCostKnownCalls: number;
+  equivalentCreditCostMicros: number;
+  equivalentCreditCostKnownCalls: number;
   inputTokens: number;
   outputTokens: number;
   cachedTokens: number;
@@ -436,6 +449,8 @@ async function aggregateModelCallFactsByBucket(
         costMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         inputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}), 0)`,
         outputTokens: sql<number>`coalesce(sum(${modelCallFacts.outputTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
@@ -457,6 +472,8 @@ async function aggregateModelCallFactsByBucket(
           costMicros: Number(row.costMicros),
           estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
           estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+          equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+          equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
           inputTokens: Number(row.inputTokens),
           outputTokens: Number(row.outputTokens),
           cachedTokens: Number(row.cachedTokens),
@@ -630,6 +647,8 @@ export async function aggregateRootSessionDrivers(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
         cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
@@ -659,6 +678,8 @@ export async function aggregateRootSessionDrivers(
       pricedCostMicros: Number(row.pricedCostMicros),
       estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
       estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+      equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+      equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
       totalTokens: Number(row.totalTokens),
       cachedTokens: Number(row.cachedTokens),
       cacheInputTokens: Number(row.cacheInputTokens),
@@ -735,6 +756,9 @@ export async function listRecentModelCalls(
         estimatedProviderCostMicros: sql<
           number | null
         >`${modelCallFacts.estimatedProviderCostMicros}`,
+        equivalentCreditCostMicros: sql<
+          number | null
+        >`${modelCallFacts.equivalentCreditCostMicros}`,
         pricingSource: sql<string | null>`${modelCallFacts.pricingSource}`,
       })
       .from(source)
@@ -762,6 +786,10 @@ export async function listRecentModelCalls(
       estimatedProviderCostMicros: insightsNullableNumber(
         row.estimatedProviderCostMicros,
         "estimated provider cost",
+      ),
+      equivalentCreditCostMicros: insightsNullableNumber(
+        row.equivalentCreditCostMicros,
+        "equivalent credit cost",
       ),
     }));
   });
@@ -886,6 +914,8 @@ export async function aggregateScheduleFacts(
         pricedCostMicros: sql<number>`coalesce(sum(${modelCallFacts.pricedCostMicros}) filter (where ${modelCallFacts.billingPath} = 'opengeni_credits'), 0)`,
         estimatedProviderCostMicros: sql<number>`coalesce(sum(${modelCallFacts.estimatedProviderCostMicros}), 0)`,
         estimatedProviderCostKnownCalls: sql<number>`count(${modelCallFacts.estimatedProviderCostMicros})::int`,
+        equivalentCreditCostMicros: sql<number>`coalesce(sum(${modelCallFacts.equivalentCreditCostMicros}), 0)`,
+        equivalentCreditCostKnownCalls: sql<number>`count(${modelCallFacts.equivalentCreditCostMicros})::int`,
         totalTokens: sql<number>`coalesce(sum(${modelCallFacts.totalTokens}), 0)`,
         cachedTokens: sql<number>`coalesce(sum(${modelCallFacts.cachedTokens}), 0)`,
         cacheInputTokens: sql<number>`coalesce(sum(${modelCallFacts.inputTokens}) filter (where ${modelCallFacts.cachedTokens} is not null and ${modelCallFacts.inputTokens} is not null), 0)`,
@@ -906,6 +936,8 @@ export async function aggregateScheduleFacts(
         pricedCostMicros: Number(row.pricedCostMicros),
         estimatedProviderCostMicros: Number(row.estimatedProviderCostMicros),
         estimatedProviderCostKnownCalls: Number(row.estimatedProviderCostKnownCalls),
+        equivalentCreditCostMicros: Number(row.equivalentCreditCostMicros),
+        equivalentCreditCostKnownCalls: Number(row.equivalentCreditCostKnownCalls),
         totalTokens: Number(row.totalTokens),
         cachedTokens: Number(row.cachedTokens),
         cacheInputTokens: Number(row.cacheInputTokens),

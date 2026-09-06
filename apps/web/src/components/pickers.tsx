@@ -256,17 +256,17 @@ export function SessionToolPicker(props: {
           size="sm"
           disabled={props.disabled}
           aria-label={props.saving ? "Saving tools" : "Session tools"}
-          className={pillClass(selected > 0, props.triggerClassName)}
+          className={cn(pillClass(selected > 0, props.triggerClassName), "session-tools-trigger")}
         >
           <PlugIcon className="size-3.5" />
-          <span className="truncate">
+          <span className="session-tools-label truncate">
             {props.saving
               ? "Saving tools"
               : selected === total
                 ? "Tools · All"
                 : `Tools · ${selectedCapabilities}`}
           </span>
-          <ChevronDownIcon className="size-3 shrink-0" />
+          <ChevronDownIcon className="session-tools-chevron size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

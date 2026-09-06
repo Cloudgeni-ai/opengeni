@@ -193,3 +193,37 @@ describe("useSession", () => {
     await hook.unmount();
   });
 });
+
+test("shared reconciliation preserves a command update preceding the latest title", async () => {
+  let reads = 0;
+  let value = serverSession;
+  const client = fakeClient({
+    getSession: async () => {
+      reads += 1;
+      return value;
+    },
+  });
+  const hook = await renderHook(
+    (events: SessionEvent[]) =>
+      useSession(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+    [] as SessionEvent[],
+  );
+  await flush();
+  const commandEvent = { ...titleEvent("", 1), type: "session.command.started", payload: {} };
+  value = {
+    ...serverSession,
+    title: "Renamed",
+    titleSource: "user",
+    lastSequence: 2,
+    backgroundCommandActivity: { state: "running", count: 1 },
+  };
+  await hook.rerender([commandEvent, titleEvent("Renamed", 2)]);
+  await flush();
+  expect(hook.result.current.session?.backgroundCommandActivity).toEqual({
+    state: "running",
+    count: 1,
+  });
+  expect(hook.result.current.session?.title).toBe("Renamed");
+  expect(reads).toBe(2);
+  await hook.unmount();
+});

@@ -16,10 +16,10 @@ notes plus governed Knowledge and Ways-of-working proposals.
 | Destination               | Purpose                                                         | Authority                                                                | Model access                                                                                                                     | Current status                                                                                                                                |
 | ------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Workspace Memory          | Agent-retained facts, decisions, incidents, fixes, and outcomes | Canonical workspace Memory gate                                           | `memory_search`; never standing prompt context                                                                                    | `memory_save` and `memory_correct` write active Memory autonomously whenever workspace Memory is enabled                                      |
-| Organization identity     | Two stable statements: who the organization is and why it exists | Company-profile head plus separate organization-owner agent policy         | Always composed in root-session governance context                                                                                | Direct owner administration, or explicit owner-initiated agent administration in Off, Review first, or Autonomous mode                         |
+| Organization identity     | Two stable statements: who the organization is and why it exists | Company-profile head plus separate organization-owner agent policy         | Always composed in root-session governance context                                                                                | Direct owner administration, or explicit owner-initiated agent administration in Off, Require approval, or Autonomous mode                     |
 | Scoped Knowledge evidence | Inferred or sourced facts and normalized claims                 | Documents/scoped-knowledge authority                                     | Permission-first Document retrieval where surfaced; normalized claims are governance evidence, not a standalone retrieval corpus | Workspace-local claim proposal/correction and rooted Task-note promotion use the append-only review/relation lifecycle                        |
-| Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Review first keeps drafts inactive, Off blocks |
-| Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Review first keeps drafts inactive, Off blocks |
+| Workspace instructions    | Minimal, always-on workspace rules                              | Existing instruction-policy heads                                        | Bounded body is always composed                                                                                                  | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Require approval keeps drafts inactive, Off blocks |
+| Skills                    | Reusable conditional how-to guidance                            | Existing preference-registry heads                                       | Bounded descriptors by default; full bodies on demand                                                                            | Workspace-local proposals and rooted Task-note promotion; Autonomous may activate eligible changes, Require approval keeps drafts inactive, Off blocks |
 | Task notes                | Short-lived technical coordination inside one root session tree | Exact accepted turn/attempt plus root-session visibility                 | Explicit `task_notes_list`; never prompt-injected                                                                                | Create/list/archive implemented by migration 0239; atomic correction/revert lineage by migration 0260                                         |
 | Reviewed Knowledge        | User-requested reviewed facts when autonomous Memory is unavailable | Reviewed scoped-Knowledge claim plus confirmation-to-Memory materialization | `memory_search` after confirmation                                                                                              | `remember lane=knowledge` remains a human-confirmed fallback and preserves claim/evidence provenance                                           |
 
@@ -132,8 +132,8 @@ activation controller, which revalidates current authority and applies the
 change only through the destination-owned lifecycle; the receipt then reports
 `decision: "activated"` with the activation receipt id, destination revision,
 and effective boundary, and the change is undoable through the `/learning`
-API/SDK undo operation (the Learning & autonomy web view exposes only the
-learning mode). Review first records the proposal and decision but keeps the
+API/SDK undo operation (the Workspace instruction & Skill autonomy web view exposes only the
+learning mode). Require approval records the proposal and decision but keeps the
 draft inactive for a human; Off creates no derived change. Knowledge
 destinations create no change proposal and are never evaluated; the human
 Knowledge review lifecycle owns them. Evaluator or controller failures never
@@ -179,7 +179,7 @@ confidence, and the receipt is one of:
 - `activated` - an eligible Skill or workspace instruction under `automatic` was activated by the governed
   controller and is undoable through the `/learning` API/SDK undo operation;
 - `confirmation_required` - the proposal is durable but the policy will not
-  activate it (Review-first mode or an ineligible decision). The receipt carries the exact
+  activate it (Require approval mode or an ineligible decision). The receipt carries the exact
   `request_human_input` payload: one `single_select` question whose id is
   `remember:<proposalId>` with options `save` / `skip`. The agent asks the human
   through the built-in tool, then calls `remember_confirm` with the proposal id,
@@ -279,7 +279,7 @@ the same outer transaction as approval. Its immutable
 from substituting for the content the human approved. A failed Memory write
 therefore rolls back approval rather than leaving a write-only claim. The
 returned activation names the resulting `memoryId`;
-correction or archival uses the Memory lifecycle, not Learning & autonomy
+correction or archival uses the Memory lifecycle, not Workspace instruction & Skill autonomy
 history. Reviewed Knowledge is never approved or materialized automatically,
 even under the `automatic` learning mode. This does not apply to agent-only
 Workspace Memory writes, which are governed solely by the workspace Memory

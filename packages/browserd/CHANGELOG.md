@@ -1,5 +1,53 @@
 # @opengeni/browserd
 
+## 0.1.34
+
+### Patch Changes
+
+- Updated dependencies [6b65383]
+  - @opengeni/contracts@2.13.0
+  - @opengeni/interaction@0.4.26
+
+## 0.1.33
+
+### Patch Changes
+
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/interaction@0.4.25
+
+## 0.1.32
+
+### Patch Changes
+
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/interaction@0.4.24
+
+## 0.1.31
+
+### Patch Changes
+
+- Updated dependencies [8f81b57]
+  - @opengeni/contracts@2.11.0
+  - @opengeni/interaction@0.4.23
+
+## 0.1.30
+
+### Patch Changes
+
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [9af1666]
+  - @opengeni/contracts@2.10.0
+  - @opengeni/interaction@0.4.22
+
 ## 0.1.29
 
 ### Patch Changes

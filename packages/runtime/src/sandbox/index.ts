@@ -392,6 +392,7 @@ export {
   ChannelAValidationError,
   ChannelAUnavailableError,
   ChannelAConflictError,
+  ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   stripExecBanner,
@@ -489,9 +490,12 @@ export {
   type SelfhostedOpStreamDeps,
 } from "./selfhosted/session";
 export {
+  connectedMachinePathWithinRoot,
   connectedMachineWorkspaceRootsEqual,
+  isConnectedMachineAbsolutePath,
   isWindowsConnectedMachinePath,
   normalizeConnectedMachineWorkspaceRoot,
+  relativeConnectedMachinePath,
   resolveConnectedMachinePath,
   resolveConnectedMachineWorkspaceRoot,
   type ConnectedMachineOs,
@@ -557,6 +561,7 @@ export {
   RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingWorkspaceRootChangedError,
+  RoutingActiveRouteChangedError,
   RoutingUnsupportedError,
   type ActivePointer,
   type DefaultBackendLossResult,

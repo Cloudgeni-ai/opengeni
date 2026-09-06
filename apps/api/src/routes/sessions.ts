@@ -1,3 +1,4 @@
+import { scheduledSessionIds } from "@opengeni/db";
 import {
   AcknowledgeStreamRequest,
   ApplySessionGoalRevisionRequest,
@@ -108,10 +109,12 @@ import {
   getRetainedProcess,
   getSandbox,
   getSession,
+  readActiveSandbox,
   deleteSessionTreeIfQuiescent,
   getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
+  getLatestSessionModelContext,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
   getSessionGoalRevision,
@@ -218,6 +221,7 @@ import {
   NatsControlRpc,
   negotiateCapabilities,
   negotiateSelfhostedCapabilities,
+  resolveConnectedMachineWorkspaceRoot,
   selectBackend,
   SelfhostedSession,
 } from "@opengeni/runtime/sandbox";
@@ -695,10 +699,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       workspaceId,
       sessionIds: [...page.pinned, ...page.sessions].map((session) => session.id),
     });
+    const scheduleTargets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(
+            db,
+            workspaceId,
+            [...page.pinned, ...page.sessions].map((session) => session.id),
+          )
+        : new Set<string>();
     const decorate = (session: Session): Session => {
       const activity = commandActivity.get(session.id);
       return sessionWithEffectiveToolPolicy(
-        { ...session, ...(activity ? { backgroundCommandActivity: activity } : {}) },
+        {
+          ...session,
+          hasSchedules: scheduleTargets.has(session.id),
+          ...(activity ? { backgroundCommandActivity: activity } : {}),
+        },
         policy.workspaceServerIds,
         policy.workspaceDefaultServerIds,
       );
@@ -885,7 +902,49 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    const activity = await backgroundCommandActivityForSessions(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionIds: [sessionId],
+    });
+    const scheduleTargets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(db, workspaceId, [sessionId])
+        : new Set<string>();
+    return c.json(
+      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
+        ...session,
+        hasSchedules: scheduleTargets.has(sessionId),
+        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
+      }),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return c.json(
+      await getLatestSessionModelContext(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/background-commands", async (c) => {
@@ -896,6 +955,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+      activeOnly: true,
     });
     return c.json({ commands });
   });
@@ -1774,17 +1834,40 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const lineage = await readSessionLineage(deps, grant, c.req.param("sessionId"));
+    const sessionIds = [
+      c.req.param("sessionId"),
+      ...lineage.ancestors.map((session) => session.id),
+    ];
+    const collect = (nodes: LineageNode[]) => {
+      for (const node of nodes) {
+        sessionIds.push(node.session.id);
+        collect(node.children);
+      }
+    };
+    collect(lineage.children);
+    const targets =
+      hasPermission(grant.permissions, "scheduled_tasks:run") &&
+      hasPermission(grant.permissions, "sessions:control")
+        ? await scheduledSessionIds(db, workspaceId, sessionIds)
+        : new Set<string>();
+    const decorateNodes = (nodes: LineageNode[]): LineageNode[] =>
+      nodes.map((node) => ({
+        ...node,
+        session: { ...node.session, hasSchedules: targets.has(node.session.id) },
+        children: decorateNodes(node.children),
+      }));
     const policy = await loadEffectivePolicyContext(deps, workspaceId, grant.subjectId);
     return c.json({
       ...lineage,
+      sessionHasSchedules: targets.has(c.req.param("sessionId")),
       ancestors: lineage.ancestors.map((session) =>
         sessionWithEffectiveToolPolicy(
-          session,
+          { ...session, hasSchedules: targets.has(session.id) },
           policy.workspaceServerIds,
           policy.workspaceDefaultServerIds,
         ),
       ),
-      children: mapLineageNodes(lineage.children, policy),
+      children: decorateNodes(mapLineageNodes(lineage.children, policy)),
     });
   });
 
@@ -3254,6 +3337,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         getEnrollment(db, grant, activeSandbox.enrollmentId),
         getLiveEnrollmentConnection(db, grant, activeSandbox.enrollmentId),
       ]);
+      const reportedWorkspaceRoot = liveConnection?.workspaceRoot ?? enrollment?.workspaceRoot;
+      const effectiveWorkspaceRoot = reportedWorkspaceRoot
+        ? resolveConnectedMachineWorkspaceRoot(reportedWorkspaceRoot, session.workingDir)
+        : null;
       let probeResponded = false;
       if (liveConnection?.connectionInstanceId) {
         const machine = new SelfhostedSession({
@@ -3262,7 +3349,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           connectionInstanceId: liveConnection.connectionInstanceId,
           // Capability negotiation only pings, so a pre-root agent may still
           // report upgrade guidance without exposing a false filesystem root.
-          workspaceRoot: liveConnection.workspaceRoot ?? "/",
+          workspaceRoot: effectiveWorkspaceRoot ?? liveConnection.workspaceRoot ?? "/",
           controlRpc: new NatsControlRpc(async () => bus.getRequestConnection()),
           relay: relayConfigFromSettings(settings),
           epoch: session.activeEpoch,
@@ -3278,7 +3365,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...commonNegotiation,
         os: enrollment?.os ?? session.sandboxOs,
         leaseEpoch: session.activeEpoch,
-        enrollment,
+        enrollment:
+          enrollment && effectiveWorkspaceRoot
+            ? { ...enrollment, workspaceRoot: effectiveWorkspaceRoot }
+            : enrollment,
         probeResponded,
       });
     } else {
@@ -3327,17 +3417,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       ...capabilities,
       FileSystem: {
         ...capabilities.FileSystem,
-        root: selectBackend(
-          (selfhostedActive
-            ? "selfhosted"
-            : activeSandbox?.kind === "modal"
-              ? "modal"
-              : session.sandboxBackend === "selfhosted" &&
-                  settings.sandboxBackend !== "selfhosted" &&
-                  settings.sandboxBackend !== "none"
-                ? settings.sandboxBackend
-                : session.sandboxBackend) as SandboxBackend,
-        ).workspaceRoot,
+        root: selfhostedActive
+          ? capabilities.FileSystem.root
+          : selectBackend(
+              (activeSandbox?.kind === "modal"
+                ? "modal"
+                : session.sandboxBackend === "selfhosted" &&
+                    settings.sandboxBackend !== "selfhosted" &&
+                    settings.sandboxBackend !== "none"
+                  ? settings.sandboxBackend
+                  : session.sandboxBackend) as SandboxBackend,
+            ).workspaceRoot,
       },
       Git: {
         ...capabilities.Git,
@@ -3353,6 +3443,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...responseCapabilities,
         DesktopStream: { ...capabilities.DesktopStream, ...wire },
       };
+    }
+    if (selfhostedActive) {
+      const currentPointer = await readActiveSandbox(db, workspaceId, sessionId);
+      if (
+        !currentPointer ||
+        currentPointer.activeSandboxId !== session.activeSandboxId ||
+        currentPointer.activeEpoch !== session.activeEpoch ||
+        currentPointer.workingDir !== session.workingDir
+      ) {
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "sandbox route changed while capabilities were being negotiated; retry",
+          retryable: true,
+        });
+      }
     }
     return c.json(responseCapabilities);
   });
@@ -4326,6 +4431,7 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (suffix === "/model-context" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {
     return "session.control";
   }

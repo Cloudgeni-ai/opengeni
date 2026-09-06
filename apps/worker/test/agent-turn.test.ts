@@ -22,6 +22,7 @@ import {
   XaiSubscriptionReloginRequired,
   XaiSubscriptionStreamIdleTimeoutError,
   XaiSubscriptionStreamingTerminalError,
+  type XaiSubscriptionRequestContext,
 } from "@opengeni/xai-subscription";
 import {
   ActiveSessionHistoryLimitExceededError,
@@ -64,11 +65,13 @@ import {
   credentialSubjectIdForTurnInitiator,
   xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
+  classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
   createCompactionModelUsageEventState,
   createModelResponseEventState,
+  createSessionTitleModelUsageEventState,
   createTurnSandboxProvisioner,
   drainAttemptOwnedSandboxWriters,
   releaseTurnSandboxAfterWriterDrain,
@@ -99,11 +102,14 @@ import {
   PostCompactionContinuationEmptyError,
   processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
+  processSessionTitleModelUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
+  sessionTitleCodexRequestContext,
+  sessionTitleXaiRequestContext,
   providerRetryAfterMs,
   providerRecoveryResult,
   providerRecoveryExhaustedFailure,
@@ -137,6 +143,11 @@ import {
   TurnOperationCancelledError,
   WorkspaceHumanInputDisabledError,
 } from "../src/activities/agent-turn";
+import {
+  CodexCredentialLeaseLostError,
+  CodexTurnLease,
+} from "../src/activities/agent-turn/credential-leases";
+import { preemptSandboxTurnForDeadlineRotation } from "../src/activities/agent-turn/sandbox-runtime";
 import {
   SandboxExecReadinessTimeoutError,
   SandboxProvisionStageError,
@@ -248,6 +259,7 @@ describe("periodic workspace snapshot admission", () => {
     firstProviderRequestStarted: true,
     snapshotInFlight: false,
     turnEndCaptureInProgress: false,
+    deadlineRotationRequested: false,
   };
 
   test("keeps checkpoint maintenance off the first-request critical path", () => {
@@ -262,6 +274,9 @@ describe("periodic workspace snapshot admission", () => {
     expect(shouldStartPeriodicWorkspaceSnapshot({ ...ready, turnEndCaptureInProgress: true })).toBe(
       false,
     );
+    expect(
+      shouldStartPeriodicWorkspaceSnapshot({ ...ready, deadlineRotationRequested: true }),
+    ).toBe(false);
   });
 });
 
@@ -1416,6 +1431,37 @@ describe("model usage source key (re-dispatch charge stability)", () => {
         positionalKey: "aggregate",
       }),
     ).toBe("aggregate");
+  });
+
+  test("keeps title usage distinct from compaction when a provider omits responseId", async () => {
+    const expectedSourceKey = "act-A:session-title-1";
+    const state = createSessionTitleModelUsageEventState(new Set([expectedSourceKey]));
+    const result = await processSessionTitleModelUsageEvent({
+      usage: { usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
+      state,
+      dispatchId: "act-A",
+      settings: testSettings(),
+      db: {} as any,
+      observability: createObservability(testSettings(), { component: "worker" }),
+      publish: null,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      turnAttemptId: "attempt-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5",
+      externallyBilled: true,
+      servingCredentialId: null,
+      priorSessionCredentialId: null,
+      emittedSourceKeys: new Set(),
+      renewLease: async () => undefined,
+      leaseLost: () => false,
+      leaseLostMessage: "lease lost",
+    });
+
+    expect(result).toEqual({ status: "duplicate", sourceKey: expectedSourceKey });
   });
 });
 
@@ -2887,6 +2933,11 @@ describe("lazy sandbox provisioner single-flight", () => {
       runStreamOnceAt,
     );
     const runtimeRunStreamAt = source.indexOf("return await runtime.runStream(", runStreamOnceAt);
+    const codexLeaseAssertionAt = source.indexOf("leases.codex.assertUsable()", runStreamOnceAt);
+    const providerInvocationAt = source.indexOf(
+      "eventing.stream = await withProviderRequestContext(runStreamOnce)",
+      runStreamOnceAt,
+    );
     const genericWireHookAt = source.indexOf(
       "onModelTransportStarted: recordFallbackProviderDispatchAtWire",
       runtimeRunStreamAt,
@@ -2894,6 +2945,8 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(runStreamOnceAt).toBeGreaterThan(-1);
     expect(modelPreparationStartedAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeGreaterThan(runStreamOnceAt);
+    expect(codexLeaseAssertionAt).toBeLessThan(providerInvocationAt);
     expect(runtimeRunStreamAt).toBeGreaterThan(modelPreparationStartedAt);
     expect(genericWireHookAt).toBeGreaterThan(runtimeRunStreamAt);
   });
@@ -3755,6 +3808,64 @@ describe("worker shutdown preemption", () => {
         cancellationRequested: false,
       }),
     ).toBe(true);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: false,
+        deadlineRotationRequested: true,
+      }),
+    ).toBe(false);
+  });
+
+  test("provider-deadline rotation preempts immediately without waiting for a snapshot", async () => {
+    const controller = new AbortController();
+    const sandboxState = { deadlineRotationRequested: false };
+
+    expect(
+      preemptSandboxTurnForDeadlineRotation({
+        controller,
+        sandboxState,
+        sandboxGroupId: "group-deadline",
+        leaseEpoch: 17,
+      }),
+    ).toBe(true);
+    expect(sandboxState.deadlineRotationRequested).toBe(true);
+    expect(controller.signal.aborted).toBe(true);
+    expect(controller.signal.reason).toMatchObject({
+      name: "SandboxDeadlineRotationError",
+      sandboxGroupId: "group-deadline",
+      leaseEpoch: 17,
+    });
+
+    const runtimeSource = await Bun.file(
+      new URL("../src/activities/agent-turn/sandbox-runtime.ts", import.meta.url),
+    ).text();
+    const rotationStart = runtimeSource.indexOf("const beginRotationPreemption");
+    const rotationEnd = runtimeSource.indexOf("const startLeaseHeartbeat", rotationStart);
+    const rotationSource = runtimeSource.slice(rotationStart, rotationEnd);
+    expect(rotationSource).toContain("preemptSandboxTurnForDeadlineRotation");
+    expect(rotationSource.indexOf("stopLeaseHeartbeat();")).toBeLessThan(
+      rotationSource.indexOf("preemptSandboxTurnForDeadlineRotation"),
+    );
+    expect(rotationSource).not.toContain("snapshotInFlight");
+    expect(rotationSource).not.toContain("persistSandboxDeadlineRotationCheckpoint");
+  });
+
+  test("joins a periodic provider capture before every proof-bearing holder release", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/finalization.ts", import.meta.url),
+    ).text();
+    const finalReleaseStart = source.lastIndexOf("} finally {");
+    const finalReleaseSource = source.slice(finalReleaseStart);
+    const stopHeartbeatAt = finalReleaseSource.indexOf("stopLeaseHeartbeat();");
+    const rotationJoinAt = finalReleaseSource.indexOf("rotationPreemptionInFlight.catch");
+    const snapshotJoinAt = finalReleaseSource.indexOf("await drainInFlightWarmSnapshot();");
+    const proofReleaseAt = finalReleaseSource.indexOf("releaseTurnSandboxAfterWriterDrain");
+
+    expect(stopHeartbeatAt).toBeGreaterThan(-1);
+    expect(rotationJoinAt).toBeGreaterThan(stopHeartbeatAt);
+    expect(snapshotJoinAt).toBeGreaterThan(rotationJoinAt);
+    expect(proofReleaseAt).toBeGreaterThan(snapshotJoinAt);
   });
 
   test("turns an unconfirmed physical tool fence into a hard failure", () => {
@@ -4073,6 +4184,18 @@ describe("worker shutdown preemption", () => {
     await Bun.sleep(0);
   });
 
+  test("a completed activity never waits forever for hung finalizer housekeeping", async () => {
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    await expect(waitForTurnFinalizerStep(hung, undefined, 10)).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
   test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
     const controller = new AbortController();
     let rejectFlush: ((error: Error) => void) | undefined;
@@ -4196,6 +4319,28 @@ describe("settled run-credential finalization", () => {
 });
 
 describe("Codex credential lease deadline fence", () => {
+  test("an expired confirmed deadline marks the lease lost before dispatch", () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() - 1;
+
+    expect(() => lease.assertUsable()).toThrow(CodexCredentialLeaseLostError);
+    expect(lease.lost).toBe(true);
+    expect(lease.lossReason).toBe("deadline");
+  });
+
   test("fails closed at the last database-confirmed expiry, including a missing deadline", () => {
     const now = Date.parse("2026-07-10T08:00:00.000Z");
     expect(codexCredentialLeaseDeadlineExpired(null, now)).toBe(true);
@@ -4203,6 +4348,95 @@ describe("Codex credential lease deadline fence", () => {
     expect(codexCredentialLeaseDeadlineExpired(now, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now - 1, now)).toBe(true);
     expect(codexCredentialLeaseDeadlineExpired(now + 1, now)).toBe(false);
+  });
+
+  test("does not accept a successful heartbeat that returns after the prior deadline", async () => {
+    let resolveHeartbeat!: (value: Date | null) => void;
+    const heartbeat = spyOn(opengeniDb, "heartbeatCodexCredentialLeaseUntil").mockImplementation(
+      () =>
+        new Promise<Date | null>((resolve) => {
+          resolveHeartbeat = resolve;
+        }),
+    );
+    try {
+      const lease = new CodexTurnLease({
+        db: {},
+        observability: {
+          incrementCounter: () => undefined,
+          warn: () => undefined,
+        },
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        codexWorkspaceKey: "workspace-key",
+        getTurnId: () => "turn-1",
+      } as never);
+      lease.held = true;
+      lease.holderId = "holder-1";
+      lease.generation = 1;
+      const priorDeadline = performance.now() + 1;
+      lease.confirmedUntilMs = priorDeadline;
+
+      const renewal = lease.renew("timer");
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      resolveHeartbeat(new Date());
+      await renewal;
+
+      expect(lease.lost).toBe(true);
+      expect(lease.lossReason).toBe("deadline");
+      expect(lease.confirmedUntilMs).toBe(priorDeadline);
+    } finally {
+      heartbeat.mockRestore();
+    }
+  });
+
+  test("transport dispatch fence preserves typed lease loss and skips the provider", async () => {
+    const lease = new CodexTurnLease({
+      db: {},
+      observability: {
+        incrementCounter: () => undefined,
+        warn: () => undefined,
+      },
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      codexWorkspaceKey: "workspace-key",
+      getTurnId: () => "turn-1",
+    } as never);
+    lease.held = true;
+    lease.holderId = "holder-1";
+    lease.generation = 1;
+    lease.confirmedUntilMs = performance.now() + 10_000;
+    lease.markLost("not_found");
+
+    let providerCalls = 0;
+    await expect(
+      codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "token",
+            chatgptAccountId: "account-1",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+          beforeProviderDispatch: lease.assertUsable,
+        },
+        () =>
+          codexSubscriptionFetch(async () => {
+            providerCalls += 1;
+            return new Response(null, { status: 200 });
+          })("https://chatgpt.com/backend-api/responses", {
+            method: "POST",
+            body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+          }),
+      ),
+    ).rejects.toBeInstanceOf(CodexCredentialLeaseLostError);
+    expect(providerCalls).toBe(0);
   });
 });
 
@@ -5045,6 +5279,42 @@ describe("transient provider error classifier", () => {
     expect((error as SessionEventPersistenceError).cause).toBe(source);
   });
 
+  test("safety refusals outrank transient status and do not rotate credentials", () => {
+    const message =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    for (const status of [403, 429, 500, 502, 503]) {
+      const error = Object.assign(new Error(message), {
+        status,
+        headers: new Headers({ "x-opengeni-codex-transport-error": "1" }),
+      });
+      expect(isTransientProviderError(error)).toBe(false);
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(
+        classifyXaiCredentialFailure(
+          Object.assign(new Error(message), {
+            status,
+            headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
+          }),
+        ),
+      ).toBeNull();
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_safety_refusal",
+        retryable: false,
+        detail: message,
+      });
+    }
+    const wrapped = Object.assign(new Error("Service unavailable"), {
+      status: 503,
+      cause: { error: { code: "content_policy_violation" } },
+    });
+    expect(isTransientProviderError(wrapped)).toBe(false);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: "content_policy_violation",
+    });
+  });
+
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
     for (const status of [500, 502, 503, 504, 529]) {
       const err = Object.assign(new Error("Service failure"), { status });
@@ -5412,6 +5682,71 @@ describe("transient provider error classifier", () => {
     expect(providerRecoveryCountAfterModelRequestPhase(4, "completed")).toBe(0);
   });
 
+  test("isolates session-title subscription requests from main-turn lifecycle callbacks", () => {
+    const getCodexToken = mock(async () => ({ accessToken: "codex-token", accountId: "acct" }));
+    const refreshCodexToken = mock(async () => ({
+      accessToken: "codex-token-2",
+      accountId: "acct",
+    }));
+    const beforeProviderDispatch = mock(() => undefined);
+    const codexContext: CodexRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      getToken: getCodexToken,
+      refresh: refreshCodexToken,
+      resolveModel: (model) => model,
+      onUsageHeaders: () => undefined,
+      beforeProviderDispatch,
+      onRequestPreparationDiagnostic: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      onRequestOpaqueArtifacts: () => undefined,
+      nextRequestId: () => "main-request",
+      betaFeatures: ["main-only"],
+      turnMetadata: { request_kind: "agent_turn" },
+    };
+    const titleCodexContext = sessionTitleCodexRequestContext(codexContext, () => "title-request");
+
+    expect(titleCodexContext.getToken).toBe(getCodexToken);
+    expect(titleCodexContext.refresh).toBe(refreshCodexToken);
+    expect(titleCodexContext.nextRequestId?.()).toBe("title-request");
+    expect(titleCodexContext.turnMetadata).toEqual({ request_kind: "session_title" });
+    expect(titleCodexContext.onUsageHeaders).toBe(codexContext.onUsageHeaders);
+    expect(titleCodexContext.beforeProviderDispatch).toBe(beforeProviderDispatch);
+    expect(titleCodexContext.onRequestPreparationDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleCodexContext.onModelRequestEvent).toBeUndefined();
+    expect(titleCodexContext.onRequestOpaqueArtifacts).toBeUndefined();
+    expect(titleCodexContext.betaFeatures).toBeUndefined();
+
+    const getXaiToken = mock(async () => ({ accessToken: "xai-token", userId: "user" }));
+    const refreshXaiToken = mock(async () => ({ accessToken: "xai-token-2", userId: "user" }));
+    const xaiContext: XaiSubscriptionRequestContext = {
+      clientVersion: "test",
+      sessionId: "session-id",
+      turnId: "turn-id",
+      getToken: getXaiToken,
+      refresh: refreshXaiToken,
+      resolveModel: (model) => model,
+      hostedSearch: { webSearch: true, xSearch: true },
+      onFinalContextUsage: () => undefined,
+      onModelRequestDiagnostic: () => undefined,
+      onModelRequestEvent: () => undefined,
+      nextRequestId: () => "main-xai-request",
+      streamIdleTimeoutMs: 30_000,
+    };
+    const titleXaiContext = sessionTitleXaiRequestContext(xaiContext, () => "title-xai-request");
+
+    expect(titleXaiContext.getToken).toBe(getXaiToken);
+    expect(titleXaiContext.refresh).toBe(refreshXaiToken);
+    expect(titleXaiContext.nextRequestId?.()).toBe("title-xai-request");
+    expect(titleXaiContext.streamIdleTimeoutMs).toBe(30_000);
+    expect(titleXaiContext.hostedSearch).toBeUndefined();
+    expect(titleXaiContext.onFinalContextUsage).toBeUndefined();
+    expect(titleXaiContext.onModelRequestDiagnostic).toBeUndefined();
+    expect(titleXaiContext.onModelRequestEvent).toBeUndefined();
+  });
+
   test("classifies only definitive marked SuperGrok account refusals for rotation", () => {
     const marked = (status: number, headers: HeadersInit = {}) =>
       Object.assign(new Error(`xAI request failed (${status})`), {
@@ -5588,8 +5923,26 @@ describe("transient provider error classifier", () => {
 });
 
 describe("structuredToolTransportForTurn", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
-    ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi = "responses",
+    options: {
+      id?: string;
+      wireProfile?: "openai" | "azure-openai";
+      builtin?: boolean;
+      baseUrl?: string;
+    } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        wireProfile: options.wireProfile ?? "openai",
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
   test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
@@ -5603,10 +5956,32 @@ describe("structuredToolTransportForTurn", () => {
     expect(structuredToolTransportForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 
-  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
-    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(true);
-    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+  test("preserves hosted tool types only for native OpenAI/Azure Responses providers", () => {
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { id: "openai", builtin: true }),
+      ),
+    ).toBe(true);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { wireProfile: "azure-openai" }),
+      ),
+    ).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+
+  test("keeps hosted apply_patch off OpenAI-compatible Responses endpoints", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(false);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

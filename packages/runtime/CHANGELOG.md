@@ -1,5 +1,99 @@
 # @opengeni/runtime
 
+## 2.3.0
+
+### Minor Changes
+
+- 6b65383: Replace goal-scoped long waits with self-only session-level `wait_for_input`, add provider-neutral `command_wait`, and deliver terminal background-command proof as exactly-once durable agent input with workflow wakes for nonterminal sessions while preserving event-only audit for terminal sessions.
+
+### Patch Changes
+
+- Updated dependencies [876396d]
+- Updated dependencies [6b65383]
+- Updated dependencies [6f84c02]
+  - @opengeni/network@0.3.0
+  - @opengeni/contracts@2.13.0
+  - @opengeni/sdk@3.7.0
+  - @opengeni/config@1.0.0
+  - @opengeni/capabilities@0.3.2
+  - @opengeni/codex@0.2.21
+  - @opengeni/xai-subscription@0.1.3
+  - @opengeni/codemode@0.4.27
+
+## 2.2.1
+
+### Patch Changes
+
+- 599a64e: Keep model-visible context capture idempotent when an agent is reused across retries or runs.
+
+## 2.2.0
+
+### Minor Changes
+
+- b420912: Show the exact model-visible system instructions, tools, skills, and token counts in the session Debug inspector.
+
+### Patch Changes
+
+- d63ee0f: Keep Connected Machine file links in the target's canonical filesystem namespace, including Windows drive and UNC roots, and reject stale file requests with a retryable route conflict.
+- d8f84ac: Report repository Skill discovery timing without double-counting nested routed sandbox work.
+- Updated dependencies [d63ee0f]
+- Updated dependencies [b420912]
+  - @opengeni/contracts@2.12.0
+  - @opengeni/sdk@3.6.0
+  - @opengeni/codemode@0.4.26
+  - @opengeni/config@0.23.3
+
+## 2.1.2
+
+### Patch Changes
+
+- 0214875: Price model usage with a 5% default markup and dedicated cache-write rates, and show provider estimates, equivalent OpenGeni credit prices, and actual credit-path prices separately in Insights.
+- Updated dependencies [38de50d]
+- Updated dependencies [8b42f58]
+- Updated dependencies [0214875]
+- Updated dependencies [e2a668b]
+- Updated dependencies [9c45eae]
+  - @opengeni/contracts@2.11.1
+  - @opengeni/sdk@3.5.1
+  - @opengeni/config@0.23.2
+  - @opengeni/codemode@0.4.25
+
+## 2.1.1
+
+### Patch Changes
+
+- Updated dependencies [32b9de4]
+- Updated dependencies [8f81b57]
+  - @opengeni/sdk@3.5.0
+  - @opengeni/contracts@2.11.0
+  - @opengeni/codemode@0.4.24
+  - @opengeni/config@0.23.1
+
+## 2.1.0
+
+### Minor Changes
+
+- 2d0fad4: Add deployment-defined model catalogs and cost policy, workspace-managed Gateway and OpenRouter credentials plus custom models, a separate deployment-managed OpenRouter rail, live catalog refresh, the `list_models` agent tool, and model-picker/API/SDK support for the new catalog surfaces.
+- 9fe5c5b: Add organization-scoped Vercel AI Gateway and OpenRouter BYOK/custom models for shared workspaces while preserving independent workspace connections.
+
+### Patch Changes
+
+- 8e2f71d: Contain pre-execution connector authority mismatches as model-visible tool errors instead of failing the whole agent turn.
+- 6934f99: Prevent an active-goal status update from immediately spawning a continuation that repeats the same unchanged external wait. Status turns now establish an available goal hold when progress is genuinely blocked, while continuation turns avoid restating an already-reported wait before calling `goal_wait`.
+- aa19556: Require agents to copy user-facing screenshots and artifacts into the workspace before emitting sandbox file links, preventing inaccessible links to temporary or host paths.
+- 9e21a09: Generate pending semantic session titles in a bounded parallel model request so the main assistant response no longer waits on a title tool round trip, while retaining the serialized compatibility path for custom runtimes.
+- c356468: Add explicit host authority provenance for opaque MCP connection references so embedding hosts can resolve any binding identity, including UUID values, without native delegation, catalog, attachment reauthorization, or reconnect flows reinterpreting it. Preserve the legacy non-UUID host-binding lane during rolling upgrades, retain host provenance after successful credential resolution, make auth-needed events inert in legacy browsers, and gate newly marked refs behind a default-off two-phase fleet activation.
+- Updated dependencies [2d0fad4]
+- Updated dependencies [9fe5c5b]
+- Updated dependencies [c356468]
+- Updated dependencies [dd98677]
+- Updated dependencies [5ef0757]
+- Updated dependencies [9af1666]
+  - @opengeni/config@0.23.0
+  - @opengeni/contracts@2.10.0
+  - @opengeni/sdk@3.4.0
+  - @opengeni/codemode@0.4.23
+
 ## 2.0.1
 
 ### Patch Changes

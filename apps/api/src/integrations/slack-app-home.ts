@@ -1,4 +1,4 @@
-import { AUTOMATIC_SESSION_TITLE_FALLBACK, type Session } from "@opengeni/contracts";
+import { deriveSessionDisplayTitle, type Session } from "@opengeni/contracts";
 import type { SlackHomeBlock } from "./slack-bot";
 
 const ATTENTION_LIMIT = 5;
@@ -186,7 +186,7 @@ function appendSessionGroup(
   );
   for (const session of sessions) {
     const url = sessionUrl(session.id);
-    const title = (session.title?.trim() || AUTOMATIC_SESSION_TITLE_FALLBACK).slice(0, 180);
+    const title = deriveSessionDisplayTitle(session).slice(0, 180);
     blocks.push({
       type: "section",
       block_id: `opengeni_home_session_${session.id}`,

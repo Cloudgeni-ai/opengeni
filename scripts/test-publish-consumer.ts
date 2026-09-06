@@ -151,7 +151,9 @@ async function stageTarball(
   return { manifest, tarball: join(tarballRoot, basename(filename)) };
 }
 
-const tempRoot = await mkdtemp(join(tmpdir(), "opengeni-publish-consumer-"));
+const temporaryBase = process.env.OPENGENI_PUBLISH_CONSUMER_TEMP_ROOT?.trim() || tmpdir();
+await mkdir(temporaryBase, { recursive: true });
+const tempRoot = await mkdtemp(join(temporaryBase, "opengeni-publish-consumer-"));
 let passed = false;
 
 try {
@@ -178,8 +180,12 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifacts-worker.js",
     "package/dist/editable-artifacts-worker.d.ts",
+    "package/dist/github-repositories.js",
+    "package/dist/github-repositories.d.ts",
     "package/dist/interaction.js",
     "package/dist/interaction.d.ts",
+    "package/dist/site.js",
+    "package/dist/site.d.ts",
   ]) {
     if (!sdkTarballContents.split("\n").includes(artifact)) {
       throw new Error(`SDK tarball is missing ${artifact}`);
@@ -193,6 +199,24 @@ try {
     sdkEditableExport.import !== "./dist/editable-artifacts.js"
   ) {
     throw new Error("SDK tarball has an invalid ./editable-artifacts export");
+  }
+  const sdkGitHubRepositoriesExport = sdk.manifest.exports?.["./github-repositories"];
+  if (
+    !sdkGitHubRepositoriesExport ||
+    typeof sdkGitHubRepositoriesExport === "string" ||
+    sdkGitHubRepositoriesExport.types !== "./dist/github-repositories.d.ts" ||
+    sdkGitHubRepositoriesExport.import !== "./dist/github-repositories.js"
+  ) {
+    throw new Error("SDK tarball has an invalid ./github-repositories export");
+  }
+  const sdkSiteExport = sdk.manifest.exports?.["./site"];
+  if (
+    !sdkSiteExport ||
+    typeof sdkSiteExport === "string" ||
+    sdkSiteExport.types !== "./dist/site.d.ts" ||
+    sdkSiteExport.import !== "./dist/site.js"
+  ) {
+    throw new Error("SDK tarball has an invalid ./site export");
   }
   const core = await stageTarball("packages/core", stagingRoot, tarballRoot, versions);
   const coreTarballContents = await run(["tar", "-tzf", core.tarball], consumerRoot, true);
@@ -364,6 +388,7 @@ try {
       "packages/config",
       "packages/contracts",
       "packages/network",
+      "packages/tool-gateway",
       "packages/xai-subscription",
     ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );
@@ -417,6 +442,10 @@ try {
     "package/dist/editable-artifacts.d.ts",
     "package/dist/editable-artifact-live.js",
     "package/dist/editable-artifact-live.d.ts",
+    "package/dist/github-repository.js",
+    "package/dist/github-repository.d.ts",
+    "package/dist/github-repository-contracts.js",
+    "package/dist/github-repository-contracts.d.ts",
     "package/dist/session-titles.js",
     "package/dist/session-titles.d.ts",
   ]) {
@@ -442,6 +471,17 @@ try {
   ) {
     throw new Error("contracts tarball has an invalid ./session-titles export");
   }
+  for (const subpath of ["github-repository", "github-repository-contracts"] as const) {
+    const entry = contracts.manifest.exports?.[`./${subpath}`];
+    if (
+      !entry ||
+      typeof entry === "string" ||
+      entry.types !== `./dist/${subpath}.d.ts` ||
+      entry.import !== `./dist/${subpath}.js`
+    ) {
+      throw new Error(`contracts tarball has an invalid ./${subpath} export`);
+    }
+  }
   const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
   for (const artifact of [
     "package/dist/skill-library.js",
@@ -459,6 +499,12 @@ try {
   const reactSource = JSON.parse(
     await readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
   ) as PackageManifest;
+  // Vite 8.2+ can pull a PostCSS whose declaration.d.ts extends NodeProps without
+  // importing it. Pin the version @opengeni/react already typechecks.
+  const postcssVersion = reactSource.devDependencies?.postcss;
+  if (typeof postcssVersion !== "string" || !/^\d+\.\d+\.\d+$/u.test(postcssVersion)) {
+    throw new Error("React package must pin an exact PostCSS version for clean consumers");
+  }
 
   const sdkFile = `file:${sdk.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
@@ -502,6 +548,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
       ...runtimeLocalDependencyFiles,
+      postcss: postcssVersion,
     },
   };
 
@@ -910,6 +957,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -985,6 +1033,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([
@@ -1048,6 +1097,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      postcss: postcssVersion,
     },
   };
   await Promise.all([

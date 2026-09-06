@@ -20,6 +20,7 @@ type WorkflowControlActivities = Pick<
   | "recoverDispatch"
   | "recoverEscapedMcpTimeout"
   | "settleSessionInterruptions"
+  | "settleSessionInputWait"
 >;
 
 /**

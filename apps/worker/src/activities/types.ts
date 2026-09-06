@@ -343,6 +343,18 @@ export type PeekSessionWorkInput = {
   sessionId: string;
 };
 
+export type SettleSessionInputWaitInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  waitTurnId: string;
+  disposition: "held" | "timeout" | "superseded";
+};
+
+export type SettleSessionInputWaitResult = {
+  action: "held" | "timeout" | "superseded" | "stale";
+};
+
 export type ExpireSessionHumanInputInput = {
   accountId: string;
   workspaceId: string;
@@ -378,14 +390,10 @@ export type MaybeContinueGoalInput = {
 };
 
 export type MaybeContinueGoalResult = {
-  // `held`: an agent-declared `goal_wait` hold is current. No continuation was
-  // materialized and the goal obligation stays armed; the workflow closes like
-  // `none` and the wake outbox (deadline) or any producer's signalWithStart
-  // restarts it.
-  // `deferred`: idle backoff between consecutive no-input continuations. Same
-  // shape as `held`: nothing materialized, obligation armed, a delayed outbox
-  // wake at the pacing deadline (pulled to now by any new input) restarts it.
-  action: "none" | "queue" | "continue" | "paused" | "held" | "deferred";
+  // `deferred`: idle backoff between consecutive no-input continuations.
+  // Nothing was materialized; the obligation remains armed and a delayed
+  // outbox wake at the pacing deadline restarts it.
+  action: "none" | "queue" | "continue" | "paused" | "deferred";
 };
 
 export type DispatchScheduledTaskRunInput = {

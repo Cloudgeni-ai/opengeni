@@ -186,3 +186,35 @@ export function humanizeFailureReason(reason: string | null): string | null {
   }
   return reason;
 }
+
+/** Project failure diagnostics without changing the stored event, including legacy retry wrappers. */
+export function presentFailure(payload: Record<string, unknown>): {
+  reason: string | null;
+  safetyRefusal: boolean;
+} {
+  const text = (key: string): string | null => {
+    const value = payload[key];
+    return typeof value === "string" && value.trim() ? value : null;
+  };
+  const message = text("error") ?? text("message");
+  const detail = text("lastRetryableError") ?? text("detail");
+  const safetyRefusal =
+    payload.code === "provider_safety_refusal" ||
+    [message, detail].some(
+      (value) =>
+        value !== null && /\bthis request was blocked by our safety systems\b/i.test(value),
+    );
+  if (safetyRefusal) {
+    return {
+      reason: `The model provider blocked this request.${detail || message ? ` ${detail ?? message}` : ""}`,
+      safetyRefusal: true,
+    };
+  }
+  return {
+    reason:
+      detail && detail !== message
+        ? [humanizeFailureReason(message), humanizeFailureReason(detail)].filter(Boolean).join(" ")
+        : humanizeFailureReason(message),
+    safetyRefusal: false,
+  };
+}

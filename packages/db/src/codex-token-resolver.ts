@@ -101,7 +101,12 @@ type CodexCredentialStatusTarget = {
 // onto the OLD in-flight refresh and writing stale rotated tokens over the freshly
 // connected credential. Concurrent calls for the SAME credential still coalesce,
 // so the one-time refresh token is never double-spent.
-const inflight = new Map<string, Promise<CodexTokenSnapshot>>();
+export type CodexCredentialTokenSnapshot = CodexTokenSnapshot & {
+  /** Exact credential-row version whose bearer is about to reach the provider. */
+  credentialVersion: number;
+};
+
+const inflight = new Map<string, Promise<CodexCredentialTokenSnapshot>>();
 const CODEX_TOKEN_REFRESH_TIMEOUT_MS = 6_000;
 
 export type CodexTokenDeadlineClock = {
@@ -235,17 +240,21 @@ export function buildCodexTokenResolver(
   // clobber the newly-active account. The single-flight map needs zero change.
   credentialId: string,
   deps: CodexAuthDeps,
-): { getToken: () => Promise<CodexTokenSnapshot>; refresh: () => Promise<CodexTokenSnapshot> } {
-  const snapshot = (cred: CodexCredentialForRun): CodexTokenSnapshot => ({
+): {
+  getToken: () => Promise<CodexCredentialTokenSnapshot>;
+  refresh: () => Promise<CodexCredentialTokenSnapshot>;
+} {
+  const snapshot = (cred: CodexCredentialForRun): CodexCredentialTokenSnapshot => ({
     accessToken: cred.tokens.accessToken,
     chatgptAccountId: cred.chatgptAccountId,
     isFedramp: cred.isFedramp,
+    credentialVersion: cred.version,
   });
 
   const performRefresh = async (
     refreshDb: Database,
     cred: CodexCredentialForRun,
-  ): Promise<CodexTokenSnapshot> => {
+  ): Promise<CodexCredentialTokenSnapshot> => {
     try {
       // Bound even injected/custom refresh implementations that ignore abort
       // signals. The provider client has its own AbortController timeout; this
@@ -287,6 +296,7 @@ export function buildCodexTokenResolver(
         accessToken: tokens.access_token,
         chatgptAccountId: cred.chatgptAccountId,
         isFedramp: cred.isFedramp,
+        credentialVersion: cred.version + 1,
       };
     } catch (error) {
       if (error instanceof CodexReloginRequired) {
@@ -305,7 +315,7 @@ export function buildCodexTokenResolver(
 
   // ALL refreshes — whether proactive or a 401 retry — coalesce locally and then
   // serialize globally before any rotating refresh token reaches the provider.
-  const doRefresh = (cred: CodexCredentialForRun): Promise<CodexTokenSnapshot> => {
+  const doRefresh = (cred: CodexCredentialForRun): Promise<CodexCredentialTokenSnapshot> => {
     const key = `${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
@@ -346,7 +356,7 @@ export function buildCodexTokenResolver(
     return promise;
   };
 
-  const resolve = async (force: boolean): Promise<CodexTokenSnapshot> => {
+  const resolve = async (force: boolean): Promise<CodexCredentialTokenSnapshot> => {
     const cred = await deps.loadCredential(db, settings, workspaceId, credentialId);
     if (!cred) {
       throw new CodexReloginRequired("No Codex subscription is connected for this workspace.");

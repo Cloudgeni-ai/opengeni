@@ -20,6 +20,7 @@ import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { ConnectionPill, CopyableMono, InfoRow, InspectorSection } from "@/components/common";
+import { ModelContextInspectorPane } from "@/components/session/model-context-inspector";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -197,9 +198,12 @@ export function SessionInspector(props: {
 
       <Tabs defaultValue="overview" className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden">
         <div className="min-w-0 border-b border-border px-2 py-2">
-          <TabsList className="grid h-8 w-full min-w-0 grid-cols-4 rounded-md bg-bg p-1">
+          <TabsList className="grid h-8 w-full min-w-0 grid-cols-5 rounded-md bg-bg p-1">
             <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-2xs">
               Overview
+            </TabsTrigger>
+            <TabsTrigger value="context" className="h-6 min-w-0 rounded px-1 text-2xs">
+              Context
             </TabsTrigger>
             <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-2xs">
               Events
@@ -446,6 +450,14 @@ export function SessionInspector(props: {
               </InspectorSection>
             </div>
           </ScrollArea>
+        </TabsContent>
+
+        <TabsContent value="context" className="min-h-0 min-w-0 overflow-hidden">
+          <ModelContextInspectorPane
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+            events={displayEvents}
+          />
         </TabsContent>
 
         <TabsContent value="events" className="min-h-0 min-w-0 overflow-hidden">

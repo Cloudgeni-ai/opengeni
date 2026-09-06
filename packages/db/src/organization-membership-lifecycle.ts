@@ -1,4 +1,5 @@
 import {
+  CreateAdditionalOrganizationResponse,
   CreateOrganizationResponse,
   ListOrganizationAdministrationMembersResponse,
   ListOrganizationInvitationsResponse,
@@ -18,6 +19,7 @@ import {
   OrganizationRetentionPolicy,
   OrganizationSummary,
   RevokeOrganizationWorkspaceMemberResponse,
+  type CreateAdditionalOrganizationResponse as CreateAdditionalOrganizationResponseType,
   type CreateOrganizationResponse as CreateOrganizationResponseType,
   type OrganizationAdministrationMember as OrganizationAdministrationMemberType,
   type OrganizationAdministrationOverview as OrganizationAdministrationOverviewType,
@@ -71,6 +73,32 @@ export async function createManagedOrganization(
       ) as result`,
     );
     return CreateOrganizationResponse.parse(row?.result);
+  });
+}
+
+export async function createAdditionalManagedOrganization(
+  db: Database,
+  input: {
+    subjectId: string;
+    subjectLabel: string;
+    name: string;
+    workspaceName: string;
+    operationId: string;
+  },
+): Promise<CreateAdditionalOrganizationResponseType> {
+  return await db.transaction(async (tx) => {
+    await setSubjectRlsContext(tx as unknown as Database, input.subjectId);
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select create_additional_managed_organization(
+        ${input.subjectId},
+        ${input.subjectLabel},
+        ${input.name},
+        ${input.workspaceName},
+        ${input.operationId}::uuid
+      ) as result`,
+    );
+    return CreateAdditionalOrganizationResponse.parse(row?.result);
   });
 }
 
@@ -208,7 +236,10 @@ async function settleOrganizationMembershipProtocols(
   db: Database,
   settlements: OrganizationMembershipProtocolSettlement[],
 ): Promise<void> {
-  const [prior] = await rawRows<{ subject_id: string; initiating_human_subject_id: string }>(
+  const [prior] = await rawRows<{
+    subject_id: string;
+    initiating_human_subject_id: string;
+  }>(
     db,
     sql`select
       coalesce(current_setting('opengeni.subject_id', true), '') as subject_id,
@@ -436,7 +467,9 @@ async function runOrganizationWorkspaceCommand(
     { accountId: command.organizationId, workspaceId: null },
     async (scopedDb) => {
       await setSubjectRlsContext(scopedDb, command.actorSubjectId);
-      const [row] = await rawRows<{ result: OrganizationWorkspaceCommandResult }>(
+      const [row] = await rawRows<{
+        result: OrganizationWorkspaceCommandResult;
+      }>(
         scopedDb,
         sql`select organization_workspace_command(${JSON.stringify(command)}::jsonb) as result`,
       );
@@ -455,7 +488,10 @@ export async function createOrganizationWorkspace(
     operationId: string;
   },
 ): Promise<OrganizationWorkspaceAccessType> {
-  const command = await runOrganizationWorkspaceCommand(db, { action: "create", ...input });
+  const command = await runOrganizationWorkspaceCommand(db, {
+    action: "create",
+    ...input,
+  });
   const overview = await getOrganizationAdministrationOverview(db, input);
   const workspace = overview.workspaces.find((candidate) => candidate.id === command.workspaceId);
   if (!workspace) throw new Error("Created organization workspace is missing from its overview");
@@ -615,7 +651,9 @@ export async function assertActiveManagedHumanOrganizationMembership(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<number | null> {
-  const [row] = await rawRows<{ authorization_revision: number | string | null }>(
+  const [row] = await rawRows<{
+    authorization_revision: number | string | null;
+  }>(
     db,
     sql`select assert_active_managed_human_organization_membership(
       ${input.accountId}::uuid,
@@ -1098,7 +1136,11 @@ export async function previewOrganizationRetentionDeletions(
 
 export async function claimOrganizationRetentionDeletion(
   db: Database,
-  input: { organizationId: string; operationId: string; excludedMembershipIds?: string[] },
+  input: {
+    organizationId: string;
+    operationId: string;
+    excludedMembershipIds?: string[];
+  },
 ): Promise<OrganizationRetentionDeletionClaimType | null> {
   return await runRetentionCapability(db, input.organizationId, async (scopedDb) => {
     const excludedMembershipIds = input.excludedMembershipIds ?? [];

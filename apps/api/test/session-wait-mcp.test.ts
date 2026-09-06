@@ -1,10 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   addSessionSystemUpdate,
+  adoptConnectedMachineSessionBackgroundCommand,
   appendSessionEvents,
   bootstrapWorkspace,
   createDb,
   createSession,
+  settleConnectedMachineSessionBackgroundCommand,
   type DbClient,
 } from "@opengeni/db";
 import {
@@ -48,6 +50,16 @@ type SessionWaitResult = {
   truncated: boolean;
   bytes: number;
   maxBytes: number;
+};
+type CommandWaitResult = {
+  command: { id: string; state: string; exitCode: number | null };
+  terminal: boolean;
+  waitedMs: number;
+  timedOut: boolean;
+  aborted: boolean;
+  ownPendingUpdates: number;
+  ownPendingUpdateKinds: string[];
+  outputLocator?: { eventType: string; commandId: string };
 };
 
 let shared: SharedTestDatabase;
@@ -111,6 +123,26 @@ async function callSessionWait(
   const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
   if (!text) throw new Error("MCP tool returned no text: session_wait");
   return JSON.parse(text) as SessionWaitResult;
+}
+
+async function callCommandWait(
+  args: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+  server: unknown = mcp,
+): Promise<CommandWaitResult> {
+  const tool = (
+    server as {
+      _registeredTools?: Record<
+        string,
+        { handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown> }
+      >;
+    }
+  )._registeredTools?.["command_wait"];
+  if (!tool) throw new Error("MCP tool not registered: command_wait");
+  const result = await tool.handler(args, extra);
+  const text = (result as { content?: Array<{ text?: string }> }).content?.[0]?.text;
+  if (!text) throw new Error("MCP tool returned no text: command_wait");
+  return JSON.parse(text) as CommandWaitResult;
 }
 
 async function newSession(targetWorkspaceId: string, message: string): Promise<string> {
@@ -199,10 +231,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
+describe("session_wait and command_wait MCP tools (real PostgreSQL, in-memory event bus)", () => {
   test("registers only for session-scoped grants holding sessions:read", () => {
     const sessionScoped = buildOpenGeniMcpServer(fakeDeps(new MemoryEventBus()), grant);
     expect(registeredToolNames(sessionScoped)).toContain("session_wait");
+    expect(registeredToolNames(sessionScoped)).toContain("command_wait");
 
     const { sessionId: _omitted, ...metadataWithoutSession } = (grant.metadata ?? {}) as Record<
       string,
@@ -214,6 +247,7 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     });
     expect(registeredToolNames(noSession)).toContain("session_events");
     expect(registeredToolNames(noSession)).not.toContain("session_wait");
+    expect(registeredToolNames(noSession)).not.toContain("command_wait");
 
     // The bootstrap grant carries admin-equivalent permissions that imply
     // sessions:read, so the denial case uses an explicit unrelated permission.
@@ -222,6 +256,7 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
       permissions: ["sessions:create"],
     });
     expect(registeredToolNames(noRead)).not.toContain("session_wait");
+    expect(registeredToolNames(noRead)).not.toContain("command_wait");
     expect(registeredToolNames(noRead)).not.toContain("session_events");
   });
 
@@ -381,6 +416,7 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
 
   test("reports the caller's own pending machine input", async () => {
     const cursor = await lastSequence(childSessionId);
+
     const update = await addSessionSystemUpdate(client.db, {
       accountId,
       workspaceId,
@@ -662,12 +698,12 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
         turnId: turn!.id,
         attemptId,
         executionGeneration,
-        firstPartyMcpTools: ["session_wait"],
+        firstPartyMcpTools: ["session_wait", "command_wait"],
       },
     };
     const attemptBus = new MemoryEventBus();
     const attemptServer = buildOpenGeniMcpServer(fakeDeps(attemptBus), attemptGrant);
-    expect(registeredToolNames(attemptServer)).toEqual(["session_wait"]);
+    expect(registeredToolNames(attemptServer)).toEqual(["session_wait", "command_wait"]);
 
     const pending = callSessionWait(
       { targets: [{ sessionId: childOfClaim, afterSequence: 0 }], maxWaitSeconds: 20 },
@@ -683,6 +719,115 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
     expect(result.timedOut).toBe(false);
     expect(result.changed[0]!.events.map((event) => event.type)).toEqual(["goal.completed"]);
     expect(result.ownPendingUpdates).toBe(0);
+
+    const commandId = crypto.randomUUID();
+    const enrollmentId = crypto.randomUUID();
+    const connectionInstanceId = "session-wait-command-instance";
+    const opId = "session-wait-command-op";
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId: turn!.id,
+      executionGeneration,
+      attemptId,
+      commandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      command: "printf done",
+    });
+    const commandPending = callCommandWait({ commandId, maxWaitSeconds: 20 }, {}, attemptServer);
+    await Bun.sleep(300);
+    const commandSettlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      commandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_completed",
+    });
+    expect(commandSettlement).not.toBeNull();
+    await attemptBus.publish(workspaceId, claimSessionId, commandSettlement!.events);
+    const commandResult = await commandPending;
+    expect(commandResult).toMatchObject({
+      terminal: true,
+      timedOut: false,
+      ownPendingUpdates: 1,
+      ownPendingUpdateKinds: ["background_command_result"],
+      command: { id: commandId, state: "exited", exitCode: 0 },
+      outputLocator: { eventType: "sandbox.command.output.delta", commandId },
+    });
+    expect(commandResult.waitedMs).toBeGreaterThanOrEqual(200);
+
+    const immediateCommandResult = await callCommandWait(
+      { commandId, maxWaitSeconds: 20 },
+      {},
+      attemptServer,
+    );
+    expect(immediateCommandResult).toMatchObject({
+      terminal: true,
+      timedOut: false,
+      ownPendingUpdates: 1,
+      ownPendingUpdateKinds: ["background_command_result"],
+    });
+    expect(immediateCommandResult.waitedMs).toBe(0);
+
+    let authorizationCalls = 0;
+    const revokingDeps = fakeDeps(attemptBus);
+    revokingDeps.sessionAuthorization = {
+      authorizeSession: async () => {
+        authorizationCalls += 1;
+        return authorizationCalls === 1
+          ? { allowed: true as const, relatedSessionAccess: "target" as const }
+          : { allowed: false as const, reason: "revoked" as const };
+      },
+      resolveListScope: async () => ({ kind: "all" as const }),
+    };
+    const revokingServer = buildOpenGeniMcpServer(revokingDeps, attemptGrant);
+    const revokedCommandId = crypto.randomUUID();
+    const revokedOpId = "session-wait-revoked-command-op";
+    await adoptConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      turnId: turn!.id,
+      executionGeneration,
+      attemptId,
+      commandId: revokedCommandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: revokedOpId,
+      command: "printf revoked",
+    });
+    const revokedExpectation = expect(
+      callCommandWait({ commandId: revokedCommandId, maxWaitSeconds: 20 }, {}, revokingServer),
+    ).rejects.toThrow();
+    await Bun.sleep(300);
+    const revokedSettlement = await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      accountId,
+      workspaceId,
+      sessionId: claimSessionId,
+      commandId: revokedCommandId,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId,
+      opId: revokedOpId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "op_completed",
+    });
+    expect(revokedSettlement).not.toBeNull();
+    await attemptBus.publish(workspaceId, claimSessionId, revokedSettlement!.events);
+    await revokedExpectation;
+    expect(authorizationCalls).toBe(2);
 
     const update = await addSessionSystemUpdate(client.db, {
       accountId,
@@ -704,7 +849,7 @@ describe("session_wait MCP tool (real PostgreSQL, in-memory event bus)", () => {
       {},
       attemptServer,
     );
-    expect(own.ownPendingUpdates).toBe(1);
+    expect(own.ownPendingUpdates).toBe(3);
     expect(own.changed).toEqual([]);
 
     // A Slack-private session outside this attempt's root is refused: the

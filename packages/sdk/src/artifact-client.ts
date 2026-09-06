@@ -1,4 +1,5 @@
 import { OpenGeniDocumentAuthorityClient } from "./document-authority-client";
+import type { FetchResponse } from "./client";
 import type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -16,6 +17,7 @@ import type {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListOptions,
@@ -132,7 +134,7 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
     artifactId: string,
     jobId: string,
     options: ReadEditableArtifactMaterializationOptions,
-  ): Promise<Response> {
+  ): Promise<FetchResponse> {
     return await this.requestResponse(
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/materializations/${encodeURIComponent(jobId)}/download`,
@@ -148,6 +150,7 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
     const query = new URLSearchParams();
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     if (options.cursor) query.set("cursor", options.cursor);
+    if (options.status) query.set("status", options.status);
     const suffix = query.size > 0 ? `?${query.toString()}` : "";
     return await this.requestJson<WorkspaceArtifactListResponse>(
       "GET",
@@ -208,6 +211,18 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
     return await this.requestJson<WorkspaceArtifactMutationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
+      request,
+    );
+  }
+
+  async setWorkspaceArtifactStatus(
+    workspaceId: string,
+    artifactId: string,
+    request: SetWorkspaceArtifactStatusRequest,
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
       request,
     );
   }

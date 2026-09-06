@@ -29,6 +29,7 @@ export type PackInlineSkillRequirement = {
   key: string;
   capabilityId: string;
   name: string;
+  activationMode: "workspace_managed" | "session_selected";
   contentSha256: string;
 };
 
@@ -97,9 +98,14 @@ export async function resolvePackInlineSkillReferences(
       .select({
         facetInstallationId: schema.capabilityFacetInstallations.id,
         name: schema.capabilitySkillFacets.name,
+        activationMode: schema.capabilityFacets.activationMode,
         contentSha256: schema.capabilitySkillFacets.contentSha256,
       })
       .from(schema.capabilitySkillFacets)
+      .innerJoin(
+        schema.capabilityFacets,
+        eq(schema.capabilityFacets.id, schema.capabilitySkillFacets.facetId),
+      )
       .innerJoin(
         schema.capabilityFacetInstallations,
         eq(schema.capabilityFacetInstallations.facetId, schema.capabilitySkillFacets.facetId),
@@ -141,9 +147,16 @@ export async function resolvePackInlineSkillReferences(
         (row) => row.name.toLowerCase() === requirement.name.toLowerCase(),
       );
       const exact = candidates.find(
-        (candidate) => candidate.contentSha256 === requirement.contentSha256,
+        (candidate) =>
+          candidate.contentSha256 === requirement.contentSha256 &&
+          candidate.activationMode === requirement.activationMode,
       );
-      const mismatch = candidates[0] ?? null;
+      const mismatch =
+        candidates.find(
+          (candidate) =>
+            candidate.contentSha256 !== requirement.contentSha256 ||
+            candidate.activationMode !== requirement.activationMode,
+        ) ?? null;
       return {
         key: requirement.key,
         kind: "inline_skill" as const,

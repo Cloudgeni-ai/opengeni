@@ -455,6 +455,42 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
   };
 }
 
+describe("SiteArtifactRenderer", () => {
+  test("renders a direct durable Site link from the structured mutation result", async () => {
+    const item = toolItem({
+      name: "opengeni__artifacts_create",
+      output: {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              artifact: {
+                id: "22222222-2222-4222-8222-222222222222",
+                workspaceId: "11111111-1111-4111-8111-111111111111",
+                title: "Incident board",
+              },
+              version: { revision: 1 },
+              replayed: false,
+            }),
+          },
+        ],
+      },
+      status: "complete",
+    });
+    const Renderer = defaultToolRegistry.resolve(item);
+    const r = await renderComponent(<Renderer item={item} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Published Incident board");
+    const link = r.container.querySelector('a[aria-label="Open Incident board"]');
+    expect(link?.getAttribute("href")).toBe(
+      "/workspaces/11111111-1111-4111-8111-111111111111/artifacts/22222222-2222-4222-8222-222222222222",
+    );
+
+    await r.unmount();
+  });
+});
+
 describe("tool-output truncation disclosure", () => {
   test("shows bounded delivery and non-retention facts only after expansion", async () => {
     const item = toolItem({
@@ -712,6 +748,31 @@ describe("FleetDecisionRow", () => {
     expect(text).not.toContain("secret-input-fingerprint");
     expect(text).not.toContain("secret-decision-fingerprint");
 
+    await r.unmount();
+  });
+
+  test("renders allocator-disabled production waiting as policy-constrained capacity", async () => {
+    resetTimelineEvents();
+    const payload = fleetDecisionEventPayload();
+    Object.assign(payload.actual as Record<string, unknown>, {
+      outcome: "waiting",
+      candidateKey: null,
+      reason: "allocator_disabled",
+    });
+    payload.comparison = "different_outcome";
+    const r = await renderComponent(
+      <MessageTimeline events={[timelineEvent("codex.fleet.decision", payload)]} />,
+    );
+
+    const disclosure = await fleetDecisionDisclosure(r.container);
+    await act(async () => {
+      disclosure.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    const text = r.container.textContent ?? "";
+    expect(text).toContain("The policy-selected subscription was disabled for new allocations");
+    expect(text).not.toContain("credential-secret");
     await r.unmount();
   });
 
@@ -1060,13 +1121,17 @@ describe("MessageTimeline — settled turn folding", () => {
         phase: "commentary",
       }),
       timelineEvent("agent.toolCall.created", {
-        id: "goal-wait-1",
-        name: "goal_wait",
-        arguments: { reason: "child still running", untilSeconds: 900 },
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason: "child still running", timeoutSeconds: 900 },
       }),
-      timelineEvent("goal.held", { actor: "agent", reason: "child still running" }),
-      timelineEvent("agent.toolCall.output", { id: "goal-wait-1", output: { status: "held" } }),
-      timelineEvent("turn.completed", {}),
+      timelineEvent("session.wait.started", { actor: "agent", reason: "child still running" }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: fallback }),
+      timelineEvent("turn.completed", { output: fallback }),
     ];
     const r = await renderComponent(<MessageTimeline events={events} />);
     await flush();
@@ -1074,6 +1139,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const trigger = turnSummaryTrigger(r.container);
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
+    expect(r.container.textContent).toContain("Waiting: child still running");
 
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1082,7 +1148,55 @@ describe("MessageTimeline — settled turn folding", () => {
 
     expect(trigger?.getAttribute("aria-expanded")).toBe("true");
     expect(r.container.textContent?.split(fallback)).toHaveLength(2);
-    expect(r.container.textContent).toContain("Goal wait");
+    expect(r.container.textContent).toContain("Waiting: child still running");
+    expect(r.container.textContent).toContain("Wait for input");
+
+    await r.unmount();
+  });
+
+  test("empty wait turns keep their durable reason outside the collapsed steps", async () => {
+    resetTimelineEvents();
+    const reason = "Two delegated reviews are still running.";
+    const events = [
+      timelineEvent("user.message", { text: "Wait for the reviews" }),
+      timelineEvent("agent.toolCall.created", {
+        id: "input-wait-1",
+        name: "wait_for_input",
+        arguments: { reason, timeoutSeconds: 3600 },
+      }),
+      timelineEvent("session.wait.started", {
+        actor: "agent",
+        waitTurnId: "turn-1",
+        deadlineAt: "2026-06-10T13:00:00.000Z",
+        reason,
+      }),
+      timelineEvent("agent.toolCall.output", {
+        id: "input-wait-1",
+        output: { status: "waiting_for_input" },
+      }),
+      timelineEvent("agent.message.completed", { text: "" }),
+      timelineEvent("turn.completed", { output: "" }),
+    ];
+    const r = await renderComponent(<MessageTimeline events={events} />);
+    await flush();
+
+    const trigger = turnSummaryTrigger(r.container);
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(r.container.textContent).toContain(`Waiting: ${reason}`);
+    expect(r.container.textContent?.split(reason)).toHaveLength(2);
+    const visibleOutcome = Array.from(r.container.querySelectorAll('[role="status"]')).find(
+      (element) => element.textContent?.includes(`Waiting: ${reason}`),
+    );
+    expect(visibleOutcome).not.toBeUndefined();
+
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(visibleOutcome?.isConnected).toBe(true);
+    expect(r.container.textContent).toContain("Wait for input");
 
     await r.unmount();
   });

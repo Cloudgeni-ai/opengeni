@@ -1,3 +1,22 @@
+{{- if and (eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (ne (toString .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED) "true") }}
+{{- fail "config.OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED must be true before enabling setup-account query transport" }}
+{{- end }}
+{{- if and (eq .Values.config.OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT "query") (not .Values.ingress.setupAccountIngress.enabled) }}
+{{- fail "ingress.setupAccountIngress.enabled must be true before enabling setup-account query transport; otherwise /setup-account falls through the primary Ingress logging and tracing policy" }}
+{{- end }}
+{{- $setupAccountHosts := list }}
+{{- range .Values.ingress.hosts }}
+  {{- $host := . }}
+  {{- $hasWebRoute := false }}
+  {{- range .paths }}
+    {{- if eq .service "web" }}
+      {{- $hasWebRoute = true }}
+    {{- end }}
+  {{- end }}
+  {{- if $hasWebRoute }}
+    {{- $setupAccountHosts = append $setupAccountHosts $host }}
+  {{- end }}
+{{- end }}
 {{- if and .Values.ingress.enabled (or .Values.api.enabled .Values.web.enabled) }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -31,6 +50,46 @@ spec:
                 port:
                   name: {{ .portName | default "http" }}
           {{- end }}
+    {{- end }}
+{{- end }}
+{{- if and .Values.ingress.enabled .Values.ingress.setupAccountIngress.enabled .Values.web.enabled (eq .Values.config.OPENGENI_PRODUCT_ACCESS_MODE "managed") (gt (len $setupAccountHosts) 0) }}
+---
+# A dedicated exact setup route suppresses ingress-nginx access logs and request
+# traces. It does not sanitize the controller error_log; query activation is
+# separately gated on an operator-proven controller/edge policy. The protected
+# HTML shell scrubs query/fragment authority in its first inline head script.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "opengeni.fullname" . }}-setup-account
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/enable-access-log: "false"
+    nginx.ingress.kubernetes.io/enable-opentelemetry: "false"
+    {{- with omit (.Values.ingress.setupAccountIngress.annotations | default dict) "nginx.ingress.kubernetes.io/enable-access-log" "nginx.ingress.kubernetes.io/enable-opentelemetry" }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.className }}
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range $setupAccountHosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          - path: /setup-account
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "opengeni.fullname" $ }}-web
+                port:
+                  name: http
     {{- end }}
 {{- end }}
 {{- if and .Values.ingress.enabled .Values.ingress.publicIngress.enabled (or .Values.api.enabled .Values.web.enabled) }}

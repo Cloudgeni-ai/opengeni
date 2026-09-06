@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createWebHandler, demoApiProxyFromEnvironment } from "./server";
 
 const roots: string[] = [];
+const VALID_SETUP_TOKEN = "A".repeat(43);
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -31,6 +32,39 @@ describe("production web handler", () => {
     const route = await handler(new Request("https://example.test/workspaces/ws/sessions/id"));
     expect(route.headers.get("cache-control")).toBe("no-cache");
     expect(await route.text()).toContain("OpenGeni");
+  });
+
+  test("serves the protected setup shell so the head bootstrap can inspect query and fragment", async () => {
+    const root = await fixture();
+    const handler = createWebHandler(root);
+    const shell = await handler(
+      new Request(`https://example.test/setup-account?preview=1&token=${VALID_SETUP_TOKEN}`),
+    );
+    expect(shell.status).toBe(200);
+    expect(shell.headers.get("location")).toBeNull();
+    expect(shell.headers.get("cache-control")).toBe("no-store");
+    expect(shell.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(shell.headers.get("x-robots-tag")).toBe("noindex, nofollow");
+    const html = await shell.text();
+    expect(html).toContain("__OPENGENI_SETUP_ACCOUNT_TOKEN__");
+    expect(html.indexOf('id="opengeni-setup-account-bootstrap"')).toBeLessThan(
+      html.indexOf('<link rel="icon"'),
+    );
+    expect(html.indexOf('id="opengeni-setup-account-bootstrap"')).toBeLessThan(
+      html.indexOf('script type="module"'),
+    );
+
+    const tlsTerminatedShell = await handler(
+      new Request(`http://web-internal:3000/setup-account?token=${VALID_SETUP_TOKEN}`, {
+        headers: {
+          host: "public.example.test",
+          "x-forwarded-host": "public.example.test",
+          "x-forwarded-proto": "https",
+        },
+      }),
+    );
+    expect(tlsTerminatedShell.status).toBe(200);
+    expect(tlsTerminatedShell.headers.get("location")).toBeNull();
   });
 
   test("does not turn missing assets or path traversal into the SPA shell", async () => {
@@ -286,7 +320,10 @@ async function fixture(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "opengeni-web-handler-"));
   roots.push(root);
   await mkdir(join(root, "assets"), { recursive: true });
-  await Bun.write(join(root, "index.html"), "<!doctype html><title>OpenGeni</title>");
+  await Bun.write(
+    join(root, "index.html"),
+    await readFile(new URL("../index.html", import.meta.url), "utf8"),
+  );
   await Bun.write(join(root, "assets/app-abc123.js"), "export const ready = true;\n");
   await Bun.write(
     join(root, "assets/app-abc123.js.gz"),

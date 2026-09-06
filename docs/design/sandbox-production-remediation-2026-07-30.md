@@ -406,22 +406,28 @@ state machine instead of inventing a second overlapping-box allocator:
 1. set `rotation_requested_at`; this fences new mutation admission;
 2. attached viewer and direct API holders remain stable-checkpoint blockers
    until normal release or the existing TTL reaper proves a holder stale;
-3. a live turn captures an exact stable checkpoint and ends as
-   `sandbox_deadline_rotation`;
-4. process reconciliation polls and, after the admission fence, may send
+3. every live turn is immediately preempted as `sandbox_deadline_rotation`;
+   its finalizer drains all attempt-owned writers before releasing the holder;
+4. BrowserSession and ComputerSession controllers are marked `lost` and release
+   their persistent placement holders at the lead-time rotation boundary, not at
+   the provider's destruction instant;
+5. process reconciliation polls and, after the admission fence, may send
    Ctrl-C to that exact retained provider session;
-5. once holders reach zero, the reaper captures/publishes once more, terminates
-   the old box, and commits the lease cold;
-6. the fenced attempt uses at most five seconds of workflow-visible anti-churn
+6. once holders reach zero, the reaper takes over any replay-safe in-flight
+   capture, captures/publishes the exact generation, terminates the old box, and
+   commits the lease cold;
+7. the fenced attempt uses at most five seconds of workflow-visible anti-churn
    pacing; admission itself waits on the exact durable teardown claim and can
    restore a successor immediately after the cold commit;
-7. successor creation publishes a new instance, epoch, and deadline.
+8. successor creation publishes a new instance, epoch, and deadline.
 
 Only one box is routable. No unowned successor exists between provider creation
 and lease publication. If capture fails, the old box is not intentionally
-terminated; the overdue alert fires while the reaper retries. The provider's
-hard deadline remains the final failure boundary, which is why rotation begins
-with an hour of headroom.
+terminated; the overdue alert fires while the reaper retries. Preempting writers
+and persistent controllers at the rotation request removes the prior circular
+dependency where capture success was required before cancelling the operation
+that blocked capture. The provider's hard deadline remains the final external
+failure boundary, which is why rotation begins with an hour of headroom.
 
 A solo image or rig change uses this same handoff with
 `rotation_reason='operator'`. It preserves the old provider identity and

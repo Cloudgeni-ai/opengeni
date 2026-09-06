@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS } from "@opengeni/contracts";
 import {
   ARTIFACT_SKILL_NAMES,
+  SITE_SKILL_NAMES,
   VIDEO_SKILL_NAMES,
   checkArtifactSkillBundle,
 } from "./sync-artifact-skills";
@@ -99,6 +100,21 @@ describe("bundled editable-artifact skills", () => {
       expect(skill).not.toContain("Seedance");
       expect(skill).not.toContain("apiKey");
       expect(skill).not.toContain("opengeni-artifact-runtime");
+    }
+  });
+
+  test("teaches Sites as approval-free exact-version tool clients", async () => {
+    for (const name of SITE_SKILL_NAMES) {
+      const skill = await readFile(join(repoRoot, ".agents", "skills", name, "SKILL.md"), "utf8");
+      expect(skill).toStartWith("---\nname:");
+      expect(skill).toContain('from "@opengeni/sdk/site"');
+      expect(skill).toContain("opengeni__artifacts_create");
+      expect(skill).toContain("opengeni__artifacts_get_source");
+      expect(skill).toContain("opengeni__artifacts_publish");
+      expect(skill).toContain("do not open\n   per-call approval dialogs");
+      expect(skill).toContain("viewer's\n   live workspace, permission, and connection authority");
+      expect(skill).not.toContain("declined approvals");
+      expect(skill).not.toContain("one-shot approval dialog");
     }
   });
 });

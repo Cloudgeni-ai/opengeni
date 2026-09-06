@@ -29,6 +29,7 @@ const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
   byok: "Workspace providers",
+  organization_byok: "Organization providers",
 };
 
 const AVAILABILITY_REASON_LABELS: Record<string, string> = {
@@ -42,6 +43,9 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
+  if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
+    return "organization_byok";
+  }
   if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
     return "byok";
   }

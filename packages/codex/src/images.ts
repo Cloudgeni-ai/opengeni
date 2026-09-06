@@ -61,7 +61,10 @@ export async function generateCodexSubscriptionImage(input: {
   prompt: string;
   references?: readonly CodexImageReferenceInput[];
   turnId: string;
-  context: Pick<CodexRequestContext, "clientVersion" | "getToken" | "refresh">;
+  context: Pick<
+    CodexRequestContext,
+    "clientVersion" | "getToken" | "refresh" | "beforeProviderDispatch"
+  >;
   abortSignal?: AbortSignal;
   fetch?: FetchLike;
   /** Internal test/host override; one absolute budget covers auth retry and body streaming. */
@@ -91,6 +94,7 @@ export async function generateCodexSubscriptionImage(input: {
     : deadline.signal;
   const request = async (auth: CodexTokenSnapshot): Promise<Response> => {
     const headers = codexImageHeaders(auth, input.context.clientVersion, input.turnId);
+    await input.context.beforeProviderDispatch?.();
     return await fetchImpl(
       `${CODEX_RESPONSES_BASE}/${references.length > 0 ? "images/edits" : "images/generations"}`,
       {

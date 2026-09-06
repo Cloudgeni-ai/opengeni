@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  canCreateAdditionalOrganization,
   isPersonalWorkspace,
   loadCurrentManagedSelfContext,
   managedSelfContextIdentity,
@@ -29,6 +30,43 @@ function deferred<Value>() {
 }
 
 describe("managed self context", () => {
+  test("permits additional organization creation only for the verified onboarded identity", () => {
+    const identity = managedSelfContextIdentity({
+      credentialGeneration: 4,
+      managedUserId: "user-id",
+    });
+    const selfContext = { identity, memberships: [membership] };
+
+    expect(
+      canCreateAdditionalOrganization({
+        managedUserId: "user-id",
+        emailVerified: true,
+        selfContext,
+      }),
+    ).toBe(true);
+    expect(
+      canCreateAdditionalOrganization({
+        managedUserId: "user-id",
+        emailVerified: false,
+        selfContext,
+      }),
+    ).toBe(false);
+    expect(
+      canCreateAdditionalOrganization({
+        managedUserId: "user-id",
+        emailVerified: true,
+        selfContext: { identity, memberships: [] },
+      }),
+    ).toBe(false);
+    expect(
+      canCreateAdditionalOrganization({
+        managedUserId: "different-user",
+        emailVerified: true,
+        selfContext,
+      }),
+    ).toBe(false);
+  });
+
   test("uses canonical workspace kind for display while owner linkage uses the exact tuple", () => {
     const identity = managedSelfContextIdentity({
       credentialGeneration: 4,

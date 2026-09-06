@@ -102,6 +102,12 @@ function isWorkbenchSurface(value: string): value is SandboxWorkspaceSurface {
   return (WORKBENCH_SURFACES as readonly string[]).includes(value);
 }
 
+function isCanonicalAbsoluteSandboxPath(value: string | null | undefined): boolean {
+  if (!value) return false;
+  const portable = value.replaceAll("\\", "/");
+  return portable.startsWith("/") || /^[A-Za-z]:\//u.test(portable);
+}
+
 function sourceDrivenDefaultTab(
   hasChanges: boolean,
   changesEnabled: boolean,
@@ -424,6 +430,11 @@ export function useSandboxWorkspaceTabs(
   const warmIntents =
     storedWarmIntents.sessionId === sessionId ? storedWarmIntents : emptyWarmIntents(sessionId);
   const { warmTerminal, warmFiles } = warmIntents;
+  // A host-requested file is itself explicit live-file intent. Derive the wake
+  // directly from the request instead of relying on a follow-up effect to copy
+  // it into local state; otherwise a missing or delayed effect leaves the file
+  // waiting for a sandbox that this hook never asks to start.
+  const filesWarmRequested = warmFiles || Boolean(requestedFilePath);
   const requestWarmIntent = useCallback(
     (intent: Exclude<keyof SessionWarmIntents, "sessionId">) => {
       setStoredWarmIntents((previous) => {
@@ -433,10 +444,6 @@ export function useSandboxWorkspaceTabs(
     },
     [sessionId],
   );
-  useEffect(() => {
-    if (requestedFilePath) requestWarmIntent("warmFiles");
-  }, [requestWarmIntent, requestedFilePath, requestedFileRequestId]);
-
   // The session's machine fleet + the active-sandbox pointer. Drives the header
   // chip (which machine + its connection state). Shares the session list poll.
   const machines = useMachines({
@@ -457,7 +464,7 @@ export function useSandboxWorkspaceTabs(
     attachTerminal: terminalEnabled && warmTerminal,
     // Explicit live-file intent only — NOT "the Files tab is open". A cold edit
     // or guarded-file open wakes the box; a glance at the tree/diff does not.
-    attachFiles: workspaceDataEnabled && warmFiles,
+    attachFiles: workspaceDataEnabled && filesWarmRequested,
   });
   const capabilities = caps.capabilities;
   const liveness = capabilities?.liveness;
@@ -467,6 +474,9 @@ export function useSandboxWorkspaceTabs(
   // is still pending.
   const liveIoLiveness = liveness ?? null;
   const fileSystemOn = capabilities?.FileSystem.available ?? false;
+  const fileSystemRoute = capabilities
+    ? { epoch: capabilities.leaseEpoch, root: capabilities.FileSystem.root }
+    : undefined;
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
   // must not offer create/rename/delete/edit affordances — you cannot mutate a
@@ -574,9 +584,10 @@ export function useSandboxWorkspaceTabs(
     active: filesActive && !turnInFlight,
     // A deliberate canonical absolute-path open browses in the selected target's
     // advertised namespace, so the authoritative tree and link share exact paths.
-    ...(requestedFilePath?.startsWith("/") && capabilities?.FileSystem.root
+    ...(isCanonicalAbsoluteSandboxPath(requestedFilePath) && capabilities?.FileSystem.root
       ? { rootPath: capabilities.FileSystem.root }
       : {}),
+    ...(fileSystemRoute ? { route: fileSystemRoute } : {}),
     repoPaths,
     liveness: liveIoLiveness,
     capture: captureState.capture,
@@ -665,7 +676,7 @@ export function useSandboxWorkspaceTabs(
     capabilitiesState: caps.state,
     activeMachineState: activeMachine?.state ?? null,
     activeIsSelfhosted: activeMachine?.kind === "selfhosted",
-    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && warmFiles),
+    wantsWarm: (terminalEnabled && warmTerminal) || (workspaceDataEnabled && filesWarmRequested),
     capturedAt: captureState.capturedAt,
   });
   const workspaceWaking = chip.state === "waking";

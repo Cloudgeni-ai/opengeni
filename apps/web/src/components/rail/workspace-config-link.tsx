@@ -5,7 +5,6 @@ import {
   BoxIcon,
   BrainCircuitIcon,
   CalendarClockIcon,
-  FileSearchIcon,
   GaugeIcon,
   LaptopIcon,
   MapIcon,
@@ -27,7 +26,6 @@ const WORKSPACE_CONFIG_ICONS = {
   box: BoxIcon,
   "server-cog": ServerCogIcon,
   laptop: LaptopIcon,
-  "file-search": FileSearchIcon,
   "brain-circuit": BrainCircuitIcon,
   map: MapIcon,
   plug: PlugIcon,
@@ -53,7 +51,7 @@ export function WorkspaceConfigLink(props: {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
 
   if (variant === "rail") {
-    return (
+    const link = (
       <Link
         to={item.to}
         params={{ workspaceId }}
@@ -77,6 +75,7 @@ export function WorkspaceConfigLink(props: {
         {!collapsed ? <span className="min-w-0 truncate">{item.label}</span> : null}
       </Link>
     );
+    return link;
   }
 
   if (variant === "menu") {

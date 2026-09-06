@@ -24,7 +24,7 @@ import {
   createDb,
   createSession,
   getSessionSystemUpdateOutboxByDedupeKey,
-  holdSessionGoalContinuationWithEvent,
+  waitForSessionInputWithEvent,
   initializeSessionStartAtomically,
   listOutstandingSessionSystemUpdates,
   listSessionEvents,
@@ -687,34 +687,41 @@ describe("child lifecycle notices", () => {
     ).toBeNull();
   });
 
-  test("a current goal_wait hold is ended only by immediate-class pending input", async () => {
+  test("a no-goal session wait is ended only by immediate-class child input", async () => {
     const grant = await workspace();
-    const parent = await startSession(grant, { goal: true, message: "orchestrate" });
+    const parent = await startSession(grant, { goal: false, message: "orchestrate" });
     const child = await startSession(grant, {
       parent,
       message: "work",
       goal: true,
     });
-    await holdSessionGoalContinuationWithEvent(client.db, grant.workspaceId, parent.session.id, {
-      reason: "waiting for the worker",
-      untilSeconds: 600,
-      command: {
-        accountId: grant.accountId,
-        actor: {
-          type: "agent_attempt",
-          attemptId: parent.attemptId,
-          sessionId: parent.session.id,
-          turnId: parent.turn.id,
-          executionGeneration: parent.turn.executionGeneration,
+    const waiting = await waitForSessionInputWithEvent(
+      client.db,
+      grant.workspaceId,
+      parent.session.id,
+      {
+        reason: "waiting for the worker",
+        timeoutSeconds: 600,
+        command: {
+          accountId: grant.accountId,
+          actor: {
+            type: "agent_attempt",
+            attemptId: parent.attemptId,
+            sessionId: parent.session.id,
+            turnId: parent.turn.id,
+            executionGeneration: parent.turn.executionGeneration,
+          },
+          operationKey: crypto.randomUUID(),
         },
-        operationKey: crypto.randomUUID(),
       },
-    });
+    );
     await settleIdle(grant, parent);
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
-      kind: "idle",
+      kind: "input-wait",
+      disposition: "held",
+      waitTurnId: parent.turn.id,
+      deadlineAt: waiting.deadlineAt,
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("held");
 
     // A deferred child_progress leaves the hold in place.
     const progress = await recordSessionGoalProgressWithEvent(
@@ -746,9 +753,11 @@ describe("child lifecycle notices", () => {
       ))!,
     );
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
-      kind: "idle",
+      kind: "input-wait",
+      disposition: "held",
+      waitTurnId: parent.turn.id,
+      deadlineAt: waiting.deadlineAt,
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("held");
 
     // An immediate child_requires_action ends it: the parent becomes runnable.
     await freezeChild(grant, child);
@@ -767,7 +776,6 @@ describe("child lifecycle notices", () => {
     expect(await peekSessionWork(client.db, grant.workspaceId, parent.session.id)).toEqual({
       kind: "runnable",
     });
-    expect((await materialize(grant, parent.session.id)).action).toBe("queue");
     const events = await listSessionEvents(client.db, grant.workspaceId, parent.session.id);
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
   });

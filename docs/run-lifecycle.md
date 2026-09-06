@@ -30,14 +30,28 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+A resumed attempt may attach another atomic internal-update batch to the same
+logical turn after its resolved open suffix. Each delivered update retains its
+own batch's durable history-item receipt; a turn-wide update query can therefore
+span multiple batches. Model input reads those batches from canonical history
+in position order, never reconstructs them from update rows, and never requires
+one shared history-item id across the whole turn.
+
+Provider safety refusals terminate the turn with `provider_safety_refusal` and
+the original diagnostic. They are neither temporary provider unavailability
+nor credential failures, even when carried by a 5xx response. Same-turn recovery
+and account rotation must not replay them.
+
 Session display titles are durable session metadata, not a truncation of model
-history. Creation and migration use `New conversation` as the durable marker
-that semantic naming is still pending. Human-facing clients may render a short,
-sensitive-safe opening-prompt preview while that marker (or a legacy null title)
-remains; the preview is display-only, never persisted or searched as title
-metadata, and obvious credential-, URL-, or identifier-shaped prefixes retain
-the generic marker. When the durable title changes, the client naturally yields
-to it.
+history. Creation and migration use `New conversation` only as the durable
+marker that semantic naming is still pending. Human-facing clients render a
+short, sensitive-safe opening-prompt preview while that marker (or a legacy null
+title) remains. Unsafe leading lines are skipped, so a pasted URL followed by a
+normal request still gets a useful immediate label; if no safe prompt line
+exists, a short session reference keeps rows distinguishable without exposing
+prompt bytes. The preview/reference is display-only, never persisted or searched
+as title metadata, and the client naturally yields when `session.title_set`
+arrives.
 
 The first-party `session_create` tool is the bounded exception for an
 agent-created child: the manager may provide a concise semantic title, and an
@@ -50,19 +64,26 @@ candidate is rejected as sensitive or unsuitable, the ordinary pending marker
 and first-turn self-heal path remain.
 
 While a session still has the pending marker, and its exact selected first-party
-tool and permission policy permits `set_session_title`, the worker projects only
-that exact operation through the attempt-local tool server and removes it from
-the broader remote first-party catalog for the attempt. The request-local
-one-shot instruction can therefore call `set_session_title` on the first model
-request without waiting for the remaining first-party `tools/list`; all other
-selected first-party schemas stay deferred and searchable. This does not grant
-or attach any new tool authority. The attempt-local operation uses the canonical
-title mutation, which updates the session row and appends `session.title_set`; a
-human title remains protected from later agent writes. The hint is based on
-durable title state rather than history length: turn claim persists the accepted
-user item before agent construction, so history count cannot identify a first
-turn. Historical fallback sessions therefore self-heal on their next eligible
-model turn.
+tool and permission policy permits `set_session_title`, the production runtime
+removes that operation from the model-visible catalog for the attempt and starts
+one bounded, tool-less title request beside the ordinary response stream. The
+sidecar uses the same resolved provider and credential authority, receives only
+a bounded conversation opener, and is metered as its own model call. The main
+agent does not wait for a title tool result or make a title follow-up model call.
+When the main stream reaches normal settlement, the worker waits for the
+already-running bounded sidecar and joins it without cancelling. Exceptional or
+cancelled exits abort and join any still-pending sidecar. A completed candidate
+then uses the canonical title mutation, which updates the session row and
+appends `session.title_set`. Generation or persistence failure leaves the safe
+pending marker in place, and a human title remains protected from every later
+automatic write. Historical fallback sessions therefore self-heal on their
+next eligible model turn.
+
+`OpenGeniRuntime.generateSessionTitle` is a rolling-compatible optional seam.
+Older or custom runtimes that do not implement it retain the prior attempt-local
+`set_session_title` tool plus one-shot model instruction, so an embedding host
+does not silently lose automatic naming during an upgrade. That compatibility
+path remains serialized; the production runtime takes the parallel path.
 
 Ordinary Send acknowledges locally before transport completion. The composer
 freezes the exact text, annotations, resources, settings, and one
@@ -507,13 +528,38 @@ terminal model response does not join that background work. Every actual local
 function call does join the one exact preparation promise before Runner can
 dispatch it, including always-visible base tools such as `exec_command` and
 `load_skill`; their stable first-request schemas remain eager, but their
-execution does not bypass catalog persistence. Search disclosure, deferred
+execution does not bypass catalog persistence. An in-process model-tool server
+is never bound to a provisional local-only catalog: its first invocation waits
+for and uses the final environment containing every admitted local and MCP
+definition, which is the same environment exposed to Codemode. Search
+disclosure, deferred
 invocation, Codemode activation, catalog persistence, and cleanup join that same
 promise, so no partial catalog grants authority. An exact preparation failure is
 therefore observed at the first tool-call boundary and the tool body never runs.
 Approval/human-interaction resumes and editable-artifact turns retain the fully
 prepared catalog path because their continuation depends on exact prior tool or
 catalog identity.
+
+Codemode submission compares the caller's catalog digest with the exact active
+catalog before creating its durable operation. A mismatch returns the stable
+`codemode_catalog_stale` code; the client may then refresh once, re-resolve the
+identity/path, and retry with the same operation id. It never performs that
+recovery after an operation exists or after an ambiguous transport failure.
+Worker dispatch performs catalog, identity, approval, input-schema,
+authorization, and argument-sensitive connector-policy prepare before writing
+the execution-start marker. Ask, Block, unavailable policy, and rejected frozen
+connector authority therefore settle before the provider executor can run.
+After the marker, the prepared gateway call performs durable connector begin at
+the executor boundary and completes the same request as `completed`,
+`not_executed`, or `uncertain`. Model MCP and Codemode use this same canonical
+gateway lifecycle; the model SDK wrapper only projects Ask into the ordinary
+human-approval interruption and carries the exact approved call id into a
+host-only invocation context on resume. The gateway rejects a direct model call
+to an `approval: human` entry when that context is absent or belongs to another
+tool/subject. A client
+`AbortSignal` is observer-only: it stops HTTP/polling waits but creates no server
+cancellation authority. Attempt/turn interruption remains the sole cancellation
+boundary and still drains or closes journaled work under the existing lifecycle.
 
 Retryable provider connectivity and 5xx failures recover the same accepted turn
 after a durable 2 s, 5 s, 15 s, 30 s, then 60 s capped delay, indexed by that
@@ -543,14 +589,23 @@ it to an ordinary queue signal, so the workflow interrupts the hold and processe
 the new direction immediately.
 
 Codex-subscription turns add one explicit recovery boundary before the model
-run. With workspace-local leasing enabled, the worker atomically selects and
-leases a credential under the workspace rotation-row lock; concurrent replicas
+run. The worker always selects and leases a credential atomically under the
+workspace rotation-row lock; concurrent replicas
 therefore observe earlier reservations. A second 401, 403, explicit quota, or
 429 can quarantine that credential and requeue the same durable turn after a
 conversation-truth checkpoint. Network/5xx/invalid-content/partial-stream
-failures never rotate or blindly replay. The allocator, strict workspace scope,
+failures never rotate or blindly replay. The first accepted failover freezes its
+enabled-alternate ceiling in turn metadata, so later pool changes neither strand
+an originally permitted account nor extend the same-turn retry budget. The allocator, strict workspace scope,
 five-hour reset semantics, and rollout fence are canonical in
 [`codex-subscription-rotation.md`](codex-subscription-rotation.md).
+The first successful lease also stores a bounded accepted Codex allocator-policy
+snapshot in turn metadata. Re-acquisition and definitive-failure settlement use
+that snapshot for active-pointer, rotation, strategy, and pin constraints while
+using current account health/cooldowns; mutable policy changes affect later
+logical turns. Immediately before provider dispatch, a missing or expired
+last-confirmed lease deadline is treated as lease loss and follows lease-loss
+settlement instead of reaching the provider.
 
 SuperGrok/xAI uses the same provider-tagged durable same-turn wait protocol but
 with its explicit workspace-or-user authority pool. A definitive typed or
@@ -562,9 +617,10 @@ sentence "The model is currently at capacity due to high demand..."; isolated
 streams, and unrelated errors never walk the pool. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 
-When every allocator-enabled Codex credential is unavailable, this recovery
-boundary becomes a durable capacity wait for the current logical turn, whether
-or not the session has an active goal. The worker atomically closes the exact
+When the policy-selected credential is allocator-disabled, or every
+allocator-enabled Codex credential is unavailable, this recovery boundary
+becomes a durable capacity wait for the current logical turn, whether or not the
+session has an active goal. The worker atomically closes the exact
 attempt with outcome `waiting_capacity`, leaves the turn and session
 nonterminal with the same active-turn pointer, and stores one session-scoped
 waiter fenced by blocked turn generation, accepted policy hash, and the
@@ -591,9 +647,11 @@ waiter plus workflow-wake outbox.
 Ordinary prompts queued during the wait remain behind the current turn. Pause
 leaves the waiter intact and lets the workflow close; Resume's revisioned
 `signalWithStart` wake reconstructs it. Steer, cancellation, and changes to the
-optional goal, accepted credential policy, active pointer, or blocked-turn
-generation supersede the waiter/turn under their durable fences, so no stale
-timer or signal can produce double inference.
+optional goal, downstream accepted credential-policy hash, or blocked-turn
+generation supersede the waiter/turn under their durable fences. Mutable Codex
+rotation or pin settings do not replace the accepted snapshot for this turn, so
+no stale timer or signal can produce double inference or silently change its
+policy.
 
 Provider context-window overflow is also handled inside the activity, not by a
 Temporal retry. When an OpenAI/Azure context overflow is classified,
@@ -1208,7 +1266,23 @@ their recorded `snapshot_filesystem` or tar mode and remain recoverable. Warm
 checkpoint attempts use the configured interval as a hard minimum even after a
 new mutation generation; an already-complete generation never calls the
 provider again. The zero-holder drain/rotation capture bypasses that interval so
-the exact latest generation is durable before teardown.
+the exact latest generation is durable before teardown. It may also use the
+separate `OPENGENI_SANDBOX_DRAIN_SNAPSHOT_TIMEOUT_MS` provider budget so a large
+workspace can receive extended recovery headroom without lengthening ordinary
+periodic or turn-end finalization. Unset preserves the shared snapshot timeout;
+Boot validation requires the larger configured capture budget and one reaper
+period to fit strictly inside provider-deadline rotation headroom even when the
+default backend is no longer Modal, because historical Modal leases remain
+durable across that rollout. The explicit drain budget is independently
+rejected unless reaper dispatch, the full durable capture, and retry handoff fit
+inside the caller/DB transition wait ceiling. Process-local configuration is
+only the initial observational budget. Once an opted-in acquisition or mutation
+waiter sees the durable capture claim, it follows PostgreSQL's authoritative
+remaining `archive_capture_deadline_at` plus retry-handoff grace, still capped by
+the one-hour lifecycle ceiling. This keeps a timeout reduction and mixed-config
+rolling activation aligned with the older child's frozen input without turning
+the wait into capture-takeover authority or an unbounded request. Explicit
+zero-wait probes preserve their immediate fenced result.
 
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
@@ -1247,23 +1321,32 @@ before its output is accepted. Only a turn admission can use authoritative
 `session_turn_attempts.quiesced_at` for its exact attempt; direct and process
 authority remain capture blockers until settled.
 
-A yielded managed process promotes its parent admission to retained state and
-creates the non-TTL process holder in the same transaction before any caller
-receives a live locator. The holder keeps the exact temporary sandbox alive after
-the turn ends. A yielded Connected Machine exec instead creates a session-owned
-background-command row before returning; that row freezes the physical control
-workspace, enrollment, connection instance, and op ID. The exact parent
-admission/process UUID/provider locator or Connected Machine locator remains
-pinned across active-pointer movement.
-Both provider paths serialize adoption with Steer, Pause, terminal Cancel, and
-session-tree deletion through the canonical workspace-control, workspace,
-session, turn, and exact-attempt fence. Managed promotion and command insertion
-are one transaction. For Connected Machines, the op-stream yield path takes
-exact failure-cancellation authority before the adoption transaction begins;
-if the fence rejects, that path exact-cancels the frozen op, while a committed
-row transfers cancellation to session control and reconciliation. This closes
-the post-commit/pre-unwind window in which attempt cancellation could otherwise
-send `OpCancel` after durable adoption.
+A yielded managed process first promotes its parent admission to retained state
+and creates the non-TTL process holder before the internal provider locator can
+leave the routing layer. The holder preserves exact cleanup authority while the
+same shell tool continues its foreground wait. A command that proves terminal
+during that wait returns inline and never becomes session background state.
+Only providers whose process locator is controllable from another worker may
+end that wait with a second, exact-attempt-fenced adoption transaction that
+inserts its session-owned command row immediately before the model receives the
+live locator. The SDK Local and Docker locators index an in-memory table on one
+worker session object, so those providers remain turn-owned until terminal or
+turn cancellation instead of publishing a false background locator. A yielded
+Connected Machine exec likewise creates its session-owned background-command
+row before returning; that row freezes the physical control workspace,
+enrollment, connection instance, and op ID. The exact parent admission,
+process UUID, and provider locator or Connected Machine locator remain pinned
+across active-pointer movement.
+Both provider paths serialize session adoption with Steer, Pause, terminal
+Cancel, and session-tree deletion through the canonical workspace-control,
+workspace, session, turn, and exact-attempt fence. Managed retention and session
+adoption are deliberately separate so a provider's short yield is not mistaken
+for a model-visible background command. For Connected Machines, the op-stream
+yield path takes exact failure-cancellation authority before the adoption
+transaction begins; if the fence rejects, that path exact-cancels the frozen op,
+while a committed row transfers cancellation to session control and
+reconciliation. This closes the post-commit/pre-unwind window in which attempt
+cancellation could otherwise send `OpCancel` after durable adoption.
 Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
 cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
@@ -1309,6 +1392,22 @@ zero, and checkpoints the typed terminal provider observation before changing
 the lifecycle row. Running, offline, timed-out, malformed, and successor-only
 states remain active/deferred; connection retirement or elapsed time is not
 physical proof and cannot license replay or rebinding.
+The exact terminal transition is also the agent-input boundary: changing the
+command to `exited|lost` and appending `session.command.finished` commit
+together. For a nonterminal session, one dedupe-keyed
+`background_command_result`, `system.update.pending`, and any idle workflow
+wake join that transaction. A failed or cancelled session remains terminal and
+keeps event-only command audit rather than reopening pending model input. A
+failed transaction leaves the command unsettled so the same already-checkpointed
+proof can retry; a duplicate proof cannot create a second result.
+For a managed retained process, its process row, parent admission, process
+holder, lease counts, linked command transition, event, model input, and wake
+are one transaction. A notification failure therefore rolls the process back
+to active with its provider proof intact; the reaper defers that exact proof and
+never repeats provider execution.
+`command_wait` uses the terminal event only as a short live hint and re-reads
+the durable command row. A longer wait uses session-level `wait_for_input`,
+whose timeout never cancels the command.
 
 Teardown preserves that authority. Session-tree deletion locks and refuses any
 `running` or `stopping` command before cascading session-owned rows. Workspace
@@ -1389,10 +1488,22 @@ reinterpretation, or blind replay of an ambiguous operation.
 Approval-gated MCP execution has an additional provider-side-effect fence.
 Connection-backed actions and legacy per-session MCP servers configured with
 `requireApproval` both create a durable action request keyed by the logical turn
-and approval id before invocation. The approved transition admits the provider
-once; a replay after execution started is recorded as outcome-unknown, and a
-replay after completion is rejected as already executed. Recovery may therefore
-re-enter the SDK approval step without issuing the MCP request again.
+and approval id before invocation. Argument-sensitive prepare, begin, and
+completion for both classes are owned by the canonical attempt gateway used by
+model MCP and Codemode; an approval-wrapped MCP adapter without that exact
+attempt gateway fails before provider execution. Dedicated GitHub and Google Drive adapters classify
+provider outcomes but do not register a second policy lifecycle. The approved
+transition admits the provider once; a replay after execution started is recorded
+as outcome-unknown, and a replay after completion is rejected as already executed.
+Recovery may therefore re-enter the SDK approval step without issuing the MCP
+request again.
+
+The Codemode dispatcher renews its operation claim during gateway preparation,
+not only after the execution marker. Its visible `agent.toolCall.created` event
+uses a deterministic per-operation client event id, so reclaiming an expired
+pre-execution claim reuses one durable timeline entry before the replacement
+claimant crosses the execution boundary. During a rolling upgrade it also
+recognizes the exact unkeyed event written by a predecessor worker.
 
 Root-task-tree note tools follow that same no-ambiguous-replay boundary. Their
 operation receipts bind the exact accepted turn, attempt, execution generation,

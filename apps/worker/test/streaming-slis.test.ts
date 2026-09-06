@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
+  initializeContextCompactionMetrics,
   ModelRequestLifecycleMetrics,
   recordBatchFlush,
   recordContextCompaction,
+  recordContextCompactionStarted,
   recordCompanyBrainContributions,
   recordModelInputTokens,
   recordModelRequestPhase,
@@ -480,19 +482,47 @@ describe("context-pressure signals", () => {
     expect(metrics).toMatch(/opengeni_model_input_tokens_count\{[^}]*provider="openai"[^}]*\} 1\b/);
   });
 
-  test("compaction counter increments by trigger", async () => {
+  test("publishes every closed compaction trigger at zero before the first event", async () => {
     const observability = worker();
+    initializeContextCompactionMetrics(observability);
+
+    const metrics = await observability.prometheusMetrics();
+    for (const trigger of ["auto", "operator", "proactive", "overflow"]) {
+      expect(metrics).toMatch(
+        new RegExp(
+          `opengeni_context_compaction_starts_total\\{[^}]*trigger="${trigger}"[^}]*\\} 0\\b`,
+        ),
+      );
+      expect(metrics).toMatch(
+        new RegExp(`opengeni_context_compactions_total\\{[^}]*trigger="${trigger}"[^}]*\\} 0\\b`),
+      );
+    }
+  });
+
+  test("compaction lifecycle metrics update by trigger", async () => {
+    const observability = worker();
+    initializeContextCompactionMetrics(observability);
+    recordContextCompactionStarted(observability, "auto");
+    initializeContextCompactionMetrics(observability);
+    recordContextCompactionStarted(observability, "operator");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "overflow");
     recordContextCompaction(observability, "operator");
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="auto"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_context_compaction_starts_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
+    );
+    expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="overflow"[^}]*\} 2\b/,
     );
     expect(metrics).toMatch(
       /opengeni_context_compactions_total\{[^}]*trigger="operator"[^}]*\} 1\b/,
     );
+    expect(metrics).not.toContain("opengeni_context_compaction_last_event_timestamp_seconds");
   });
 
   test("Company Brain exposure metrics use only bounded classification labels", async () => {

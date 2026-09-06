@@ -28,6 +28,7 @@ const FLEET_ACTUAL_REASON_LABEL: Record<FleetDecisionItem["actualReason"], strin
   rotation: "Rotated for capacity",
   active: "Used the active subscription",
   all_capped: "All observed subscriptions were capped",
+  allocator_disabled: "The policy-selected subscription was disabled for new allocations",
   none: "No production candidate was selected",
 };
 

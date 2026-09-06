@@ -14,6 +14,8 @@ export type ComposerLaunchSearch = {
   realtime?: SessionRealtimeModel;
   /** File a newly created session in this workspace folder. */
   channelId?: string;
+  /** One installed session-selected Skill to freeze onto the new session. */
+  skillCapabilityId?: string;
 };
 
 /** Stable empty search — safe default prop (no per-render object literal). */
@@ -39,22 +41,39 @@ export function parseComposerLaunchSearch(search: Record<string, unknown>): Comp
   ) {
     out.channelId = search.channelId;
   }
+  if (typeof search.skillCapabilityId === "string") {
+    const skillCapabilityId = search.skillCapabilityId.trim();
+    if (skillCapabilityId.length > 0 && skillCapabilityId.length <= 512) {
+      out.skillCapabilityId = skillCapabilityId;
+    }
+  }
   return out;
 }
 
 export function composerLaunchSearchKey(launch: ComposerLaunchSearch): string | null {
-  if (!launch.model && !launch.effort && !launch.latency && !launch.realtime) return null;
+  if (
+    !launch.model &&
+    !launch.effort &&
+    !launch.latency &&
+    !launch.realtime &&
+    !launch.skillCapabilityId
+  )
+    return null;
   return JSON.stringify({
     model: launch.model ?? null,
     effort: launch.effort ?? null,
     latency: launch.latency ?? null,
     realtime: launch.realtime ?? null,
+    skillCapabilityId: launch.skillCapabilityId ?? null,
   });
 }
 
-/** Keep only realtime after model/effort/latency have been applied locally. */
+/** Keep durable launch attachments after model/effort/latency are applied locally. */
 export function composerLaunchSearchAfterPolicyApply(
   launch: ComposerLaunchSearch,
 ): ComposerLaunchSearch {
-  return launch.realtime ? { realtime: launch.realtime } : {};
+  return {
+    ...(launch.realtime ? { realtime: launch.realtime } : {}),
+    ...(launch.skillCapabilityId ? { skillCapabilityId: launch.skillCapabilityId } : {}),
+  };
 }

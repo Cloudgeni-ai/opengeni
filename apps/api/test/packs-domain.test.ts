@@ -18,5 +18,8 @@ describe("built-in capability packs", () => {
     expect(getCapabilityPack("pr-review")?.skills.map((skill) => skill.name)).toEqual([
       "pr-review",
     ]);
+    expect(
+      getCapabilityPack("opengeni-product-integration")?.skills.map((skill) => skill.name),
+    ).toEqual(["opengeni-product-integration"]);
   });
 });

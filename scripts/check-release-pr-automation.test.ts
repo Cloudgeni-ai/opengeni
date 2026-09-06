@@ -27,6 +27,7 @@ const releasePublicationAdmissionPath = join(
   ".github/workflows/release-publication-admission.yml",
 );
 const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
+const sourceAdmissionHelperPath = join(root, "scripts/check-source-admission.mjs");
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
@@ -34,6 +35,10 @@ const controllerSha = baseSha;
 const currentMainSha = "9".repeat(40);
 const baseTreeSha = "e".repeat(40);
 const headTreeSha = "f".repeat(40);
+const movingMainParentSha = "01".repeat(20);
+const movingMainParentTreeSha = "23".repeat(20);
+const movingMainSourceTreeSha = "45".repeat(20);
+const movingMainOnlyBlobSha = "67".repeat(20);
 const staleEventBaseSha = "8".repeat(40);
 const staleMergeBaseSha = "7".repeat(40);
 const staleEventBaseTreeSha = "6".repeat(40);
@@ -2256,7 +2261,7 @@ function approvalEnv(overrides: Record<string, string> = {}) {
 
 function approvalFixture(
   options: {
-    mergeMethod?: "merge" | "squash" | "rebase" | "single";
+    mergeMethod?: "merge" | "squash" | "rebase" | "single" | "moving-main-squash";
     associatedPullCount?: number;
     authorId?: number;
     pullState?: string;
@@ -2297,6 +2302,10 @@ function approvalFixture(
     reviewedBaseSha?: string;
     discontinuousCompare?: boolean;
     mergeEvent?: Record<string, unknown> | null;
+    movingMainOverlap?: boolean;
+    movingMainSourceExtra?: boolean;
+    movingMainTreeTruncated?: "parent" | "source";
+    movingMainParentRetainsBase?: boolean;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -2305,13 +2314,15 @@ function approvalFixture(
   const pullHeadSha = options.pullHeadSha ?? headSha;
   const reviewedBaseSha = options.reviewedBaseSha ?? baseSha;
   const retainedControllerSha = options.controllerSha ?? controllerSha;
-  const pullCommitCount = mergeMethod === "single" ? 1 : 2;
+  const pullCommitCount = mergeMethod === "single" || mergeMethod === "moving-main-squash" ? 1 : 2;
   const sourceParents =
     mergeMethod === "merge"
       ? [{ sha: baseSha }, { sha: pullHeadSha }]
       : mergeMethod === "rebase"
         ? [{ sha: rebasedFirstSha }]
-        : [{ sha: baseSha }];
+        : mergeMethod === "moving-main-squash"
+          ? [{ sha: movingMainParentSha }]
+          : [{ sha: baseSha }];
   const author =
     options.author ??
     (options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
@@ -2393,7 +2404,11 @@ function approvalFixture(
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
       return response({
         sha: mergeSha,
-        tree: { sha: options.sourceTreeSha ?? headTreeSha },
+        tree: {
+          sha:
+            options.sourceTreeSha ??
+            (mergeMethod === "moving-main-squash" ? movingMainSourceTreeSha : headTreeSha),
+        },
         parents: sourceParents,
       });
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${baseSha}`)
@@ -2412,6 +2427,12 @@ function approvalFixture(
       return response({
         sha: pullHeadSha,
         tree: { sha: headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${movingMainParentSha}`)
+      return response({
+        sha: movingMainParentSha,
+        tree: { sha: movingMainParentTreeSha },
         parents: [{ sha: baseSha }],
       });
     if (method === "GET" && url.pathname === `${prefix}/commits/${mergeSha}/pulls`)
@@ -2459,6 +2480,31 @@ function approvalFixture(
         total_commits: pullCommitCount,
         commits: [{ sha: pullHeadSha }],
       });
+    if (
+      method === "GET" &&
+      url.pathname === `${prefix}/compare/${baseSha}...${movingMainParentSha}`
+    )
+      return response(
+        options.movingMainParentRetainsBase === false
+          ? {
+              status: "diverged",
+              base_commit: { sha: baseSha },
+              merge_base_commit: { sha: "8".repeat(40) },
+              ahead_by: 1,
+              behind_by: 1,
+              total_commits: 1,
+              commits: [{ sha: movingMainParentSha }],
+            }
+          : {
+              status: "ahead",
+              base_commit: { sha: baseSha },
+              merge_base_commit: { sha: baseSha },
+              ahead_by: 1,
+              behind_by: 0,
+              total_commits: 1,
+              commits: [{ sha: movingMainParentSha, parents: [{ sha: baseSha }] }],
+            },
+      );
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/files`)
       return response([{ filename: "package.json", status: "modified" }]);
     if (method === "GET" && url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
@@ -2485,6 +2531,54 @@ function approvalFixture(
             type: "blob",
             sha: "2".repeat(40),
           },
+        ],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${movingMainParentTreeSha}`)
+      return response({
+        sha: movingMainParentTreeSha,
+        truncated: options.movingMainTreeTruncated === "parent",
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: options.movingMainOverlap ? "8".repeat(40) : "1".repeat(40),
+          },
+          {
+            path: "main.txt",
+            mode: "100644",
+            type: "blob",
+            sha: movingMainOnlyBlobSha,
+          },
+        ],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/trees/${movingMainSourceTreeSha}`)
+      return response({
+        sha: movingMainSourceTreeSha,
+        truncated: options.movingMainTreeTruncated === "source",
+        tree: [
+          {
+            path: "package.json",
+            mode: "100644",
+            type: "blob",
+            sha: "2".repeat(40),
+          },
+          {
+            path: "main.txt",
+            mode: "100644",
+            type: "blob",
+            sha: movingMainOnlyBlobSha,
+          },
+          ...(options.movingMainSourceExtra
+            ? [
+                {
+                  path: "unreviewed.txt",
+                  mode: "100644",
+                  type: "blob",
+                  sha: "9".repeat(40),
+                },
+              ]
+            : []),
         ],
       });
     if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
@@ -2870,6 +2964,88 @@ describe("release approval provenance", () => {
       ...RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
     ]);
     expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("accepts the exact reviewed tree delta squashed onto disjoint moving main", async () => {
+    const retainedControllerSha = "89".repeat(20);
+    const initialMainSha = "ab".repeat(20);
+    const terminalMainSha = "cd".repeat(20);
+    const fixture = approvalFixture({
+      mergeMethod: "moving-main-squash",
+      controllerSha: retainedControllerSha,
+      controllerTreeSha: "ef".repeat(20),
+      initialMainSha,
+      terminalMainSha,
+      sourceAncestorMainShas: [retainedControllerSha, initialMainSha, terminalMainSha],
+      controllerAncestorMainShas: [initialMainSha, terminalMainSha],
+    });
+
+    const result = await verifyApprovedMerge({
+      env: approvalEnv({
+        GITHUB_REF:
+          `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}` + retainedControllerSha,
+        GITHUB_SHA: retainedControllerSha,
+        GITHUB_WORKFLOW_SHA: retainedControllerSha,
+        RELEASE_CONTROLLER_SHA: retainedControllerSha,
+      }),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+    });
+
+    expect(result).toMatchObject({
+      sourceSha: mergeSha,
+      sourceTreeSha: movingMainSourceTreeSha,
+      mergeMethod: "provider-verified-moving-main-squash",
+      sourceComposition: {
+        type: "exact-reviewed-delta-on-moving-main",
+        integrationBaseSha: movingMainParentSha,
+        integrationBaseTreeSha: movingMainParentTreeSha,
+        manifestSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        pathCount: 1,
+      },
+    });
+  });
+
+  test.each([
+    ["overlapping integration change", { movingMainOverlap: true }],
+    ["extra source path", { movingMainSourceExtra: true }],
+  ] as const)("rejects moving-main composition with %s", async (_label, options) => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          mergeMethod: "moving-main-squash",
+          ...options,
+        }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("differs from the exact reviewed moving-main composition");
+  });
+
+  test("rejects a moving-main source whose integration parent does not retain the reviewed base", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          mergeMethod: "moving-main-squash",
+          movingMainParentRetainsBase: false,
+        }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("moving-main integration base is not ahead of the reviewed base");
+  });
+
+  test("rejects truncated moving-main tree evidence", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          mergeMethod: "moving-main-squash",
+          movingMainTreeTruncated: "source",
+        }).fetchImpl,
+        logger: { log() {} },
+      }),
+    ).rejects.toThrow("moving-main release source tree is truncated");
   });
 
   test("accepts an exact release source retained as a strict ancestor across both main fences", async () => {
@@ -3478,6 +3654,7 @@ describe("workflow contracts", () => {
   const releaseSourceAdmissionText = readFileSync(releaseSourceAdmissionPath, "utf8");
   const releasePublicationAdmissionText = readFileSync(releasePublicationAdmissionPath, "utf8");
   const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
+  const sourceAdmissionHelperText = readFileSync(sourceAdmissionHelperPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
   const seal = Bun.YAML.parse(sealText) as any;
@@ -4197,6 +4374,11 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseAutomationText).toContain("releaseHeadTagPrefix");
     expect(releaseSourceAdmissionText).toContain("verify-approved-merge");
+  });
+
+  test("keeps moving-main tree normalization out of the base-owned hotfix helper", () => {
+    expect(releaseAutomationText).toContain("function canonicalReleaseLeafMap");
+    expect(sourceAdmissionHelperText).not.toContain("export function canonicalLeafMap");
   });
 
   test("runs final publication behind the historical retained-controller gate", () => {

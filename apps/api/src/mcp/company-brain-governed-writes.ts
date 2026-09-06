@@ -141,7 +141,7 @@ export function registerCompanyBrainGovernedWriteTools(
       description:
         "Atomically promote one still-active note from this exact root task tree into a workspace instruction-policy proposal. The note bytes remain exact evidence and draft content. " +
         `Use this only for a universal always-on rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, those bytes are composed verbatim into the prompt of every session the target applies to, so a note over ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters is rejected here rather than truncated: write a fresh minimal imperative note instead of promoting a long working note. ` +
-        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt. This never widens scope.",
+        "Off creates nothing; Require approval keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt. This never widens scope.",
       inputSchema: {
         ...taskNotePromotion,
         target: WorkspaceInstructionPolicyTarget,
@@ -202,7 +202,7 @@ export function registerCompanyBrainGovernedWriteTools(
       description:
         "Materialize an evidence-backed workspace instruction-policy proposal. " +
         `Use this only for a minimal universal rule, never for an incident, fact, decision, outcome, or conditional procedure. Once active, this content is composed verbatim into the prompt of every session the target applies to (every session in this workspace for a global charter or policy, every session bound to the role for a role policy), so keep it under ${AGENT_AUTHORED_INSTRUCTION_POLICY_CONTENT_MAX_CHARS} characters. ${AGENT_AUTHORED_INSTRUCTION_POLICY_STYLE} ` +
-        "Off creates nothing; Review first keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt.",
+        "Off creates nothing; Require approval keeps the proposal inactive; Autonomous may activate an eligible proposal through the governed instruction lifecycle with an undoable receipt.",
       inputSchema: {
         ...evidence,
         target: WorkspaceInstructionPolicyTarget,

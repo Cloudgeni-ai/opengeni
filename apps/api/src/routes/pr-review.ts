@@ -14,6 +14,7 @@ import {
   defaultPrReviewProviderBaseUrl,
   getCapabilityPack,
   workspaceCustomModelReference,
+  lockActiveCustomModelForAdmission,
   prReviewWebhookAuthKind,
   normalizePrReviewProviderBaseUrl,
   prReviewPackConnectorId,
@@ -34,8 +35,6 @@ import {
   getPackInstallation,
   listPrReviewAppRegistrations,
   listPrReviewRepositoryBindings,
-  lockActiveWorkspaceGatewayCustomModelForAdmission,
-  lockActiveWorkspaceOpenRouterCustomModelForAdmission,
   nestedPostgresSqlState,
   recordAuditEvent,
   updatePrReviewAppRegistration,
@@ -557,18 +556,11 @@ function prReviewCustomModelCommitGuard(input: {
   const reference = workspaceCustomModelReference(input.settings, input.modelId);
   if (!reference) return undefined;
   return async (tx): Promise<void> => {
-    const active =
-      reference.providerKind === "openrouter"
-        ? await lockActiveWorkspaceOpenRouterCustomModelForAdmission(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            upstreamModelId: reference.upstreamModelId,
-          })
-        : await lockActiveWorkspaceGatewayCustomModelForAdmission(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            upstreamModelId: reference.upstreamModelId,
-          });
+    const active = await lockActiveCustomModelForAdmission(tx, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      reference,
+    });
     if (!active) {
       throw new HTTPException(422, {
         message: `model is not available: ${input.modelId}`,

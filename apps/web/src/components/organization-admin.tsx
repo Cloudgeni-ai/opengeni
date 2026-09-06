@@ -1071,18 +1071,16 @@ export function OrganizationOverviewSection(props: {
                     </span>
                   </summary>
                   <div className="grid gap-3 border-t border-border/70 px-3 py-3">
-                    {props.accessibleWorkspaceIds.has(workspace.id) ? (
-                      <div className="flex justify-end">
-                        <a
-                          href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
-                          aria-label={`Open ${workspace.name} workspace settings`}
-                          className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
-                        >
-                          Open settings
-                          <ArrowUpRightIcon className="size-3.5" />
-                        </a>
-                      </div>
-                    ) : null}
+                    <div className="flex justify-end">
+                      <a
+                        href={`/workspaces/${encodeURIComponent(workspace.id)}/settings?section=general`}
+                        aria-label={`Manage ${workspace.name} workspace settings`}
+                        className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg"
+                      >
+                        Manage settings
+                        <ArrowUpRightIcon className="size-3.5" />
+                      </a>
+                    </div>
                     <form
                       className="flex flex-wrap items-end gap-2"
                       onSubmit={(event) => {
@@ -1335,7 +1333,8 @@ export function OrganizationOverviewSection(props: {
                 autoFocus
               />
               <p className="text-xs text-fg-muted">
-                You can invite organization members after it is created.
+                You will be added as a workspace administrator. You can add other organization
+                members after it is created.
               </p>
             </div>
             <DialogFooter>

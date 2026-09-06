@@ -27,6 +27,7 @@ import {
 import { OpenGeniProvider } from "../src/provider";
 import { OpenGeniContext, type OpenGeniContextValue } from "../src/session-context";
 import type { MachinesResponse } from "../src/types/machines";
+import { DOCK_STATES, DockStateMockClient } from "../demo/workbench-dock-states";
 import {
   useSandboxWorkspaceTabs,
   initialWorkspaceTab,
@@ -187,9 +188,12 @@ function coldClient(
     listMachines?: () => Promise<MachinesResponse>;
   } = {},
 ) {
-  const spy = { attachCalls: 0 };
+  const spy = { attachCalls: 0, capabilityCalls: 0 };
   const client = fakeClient({
-    getStreamCapabilities: async () => fakeColdCapabilities(),
+    getStreamCapabilities: async () => {
+      spy.capabilityCalls += 1;
+      return fakeColdCapabilities();
+    },
     getWorkspaceCapture: async () => captureAvailable(fakeManifest(1)),
     listMachines: async () => EMPTY_MACHINES,
     attachViewer: async () => {
@@ -354,6 +358,15 @@ describe("workbench surface allowlist", () => {
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 
 describe("workbench prewarm gating (Refinement 1)", () => {
+  test("the dock fixture keeps viewer and capability lease epochs aligned", async () => {
+    const client = new DockStateMockClient(DOCK_STATES["warm-live"]!);
+    const capabilities = await client.getStreamCapabilities();
+    const holder = await client.attachViewer();
+
+    expect(holder.leaseEpoch).toBe(capabilities.leaseEpoch);
+    expect(holder.liveness).toBe(capabilities.liveness);
+  });
+
   test("workspace interaction lifecycle changes refresh the truthful machine liveness", async () => {
     let warm = false;
     let capabilityReads = 0;
@@ -988,6 +1001,72 @@ describe("capture-driven default tab (Refinement 2)", () => {
     await hook.unmount();
   });
 
+  test("a Connected Machine canonical link lists its exact capability root with a route fence", async () => {
+    const requests: Array<{ path?: string; route?: { epoch: number; root: string } }> = [];
+    const root = "C:/work/repo";
+    const capabilities = fakeCapabilities({
+      backend: "selfhosted",
+      os: "windows",
+      leaseEpoch: 12,
+      FileSystem: {
+        available: true,
+        readOnly: false,
+        root,
+        pathSep: "\\",
+        treeMode: "lazy",
+        reason: null,
+      },
+      Git: { available: true, repos: [], reason: null },
+    });
+    const { client } = coldClient({
+      getStreamCapabilities: async () => capabilities,
+      getWorkspaceCapture: async () => ({ available: false }),
+      attachViewer: async () => fakeAttachResponse({ leaseEpoch: 12 }),
+      fsList: async (_workspaceId, _sessionId, request) => {
+        requests.push(request ?? {});
+        return {
+          root: {
+            name: "repo",
+            path: request?.path ?? "",
+            type: "dir",
+            sizeBytes: null,
+            mtimeMs: null,
+            mode: null,
+            truncated: false,
+            children: [],
+          },
+          revision: 1,
+          truncated: false,
+        };
+      },
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+    });
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      initialTab: WORKBENCH_TAB_FILES,
+      requestedFilePath: "C:/work/repo/src/app.ts",
+      requestedFileRequestId: 73,
+    });
+    await flush(60);
+
+    expect(requests[0]).toMatchObject({
+      path: root,
+      route: { epoch: 12, root },
+    });
+    expect(requests.some((request) => request.path === "/")).toBe(false);
+    await hook.unmount();
+  });
+
   test("a cold-start turn defers automatic Files reads until the turn settles", async () => {
     let fileReads = 0;
     const { client } = coldClient({
@@ -1342,6 +1421,21 @@ describe("SandboxWorkspace capture-driven default renders with no content switch
     expect(selectedPaths).toHaveLength(pathNotificationCount);
     expect(spy.attachCalls).toBe(1);
     await rendered.unmount();
+  });
+
+  test("an initial host file request reaches the first cold-workspace negotiation", async () => {
+    const { client, spy } = coldClient();
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      requestedFilePath: "/workspace/reports/generated.pdf",
+      requestedFileRequestId: 42,
+    });
+    await flush(60);
+
+    expect(spy.capabilityCalls).toBe(1);
+    expect(spy.attachCalls).toBe(1);
+    await hook.unmount();
   });
 
   test("pure embedder, changes present: Changes is the selected tab before AND after resolve", async () => {

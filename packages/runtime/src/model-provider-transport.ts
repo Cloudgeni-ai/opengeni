@@ -16,7 +16,7 @@ import {
 export function vercelGatewayRoutingFetch(
   kind: Extract<
     ResolvedModelProvider["kind"],
-    "vercel-gateway-managed" | "vercel-gateway-workspace"
+    "vercel-gateway-managed" | "vercel-gateway-workspace" | "vercel-gateway-organization"
   >,
   inner: typeof fetch,
   configuredPolicies?: GatewayRequestPolicyLookup,
@@ -53,10 +53,13 @@ export function vercelGatewayRoutingFetch(
     // The public error below replaces the upstream response. Cancel its unread
     // body now so buffered bytes and the connection are not retained until GC.
     await response.body?.cancel().catch(() => undefined);
+    const authenticationFailure = response.status === 401 || response.status === 403;
     const message =
-      kind === "vercel-gateway-workspace" && (response.status === 401 || response.status === 403)
-        ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
-        : "The selected model is temporarily unavailable.";
+      kind === "vercel-gateway-organization" && authenticationFailure
+        ? "The organization Gateway connection needs attention. Ask an organization admin to reconnect it in Organization settings."
+        : kind === "vercel-gateway-workspace" && authenticationFailure
+          ? "Your Gateway connection needs attention. Reconnect it in workspace Settings."
+          : "The selected model is temporarily unavailable.";
     return new Response(JSON.stringify({ error: { type: "model_unavailable", message } }), {
       status: response.status,
       statusText: response.statusText,

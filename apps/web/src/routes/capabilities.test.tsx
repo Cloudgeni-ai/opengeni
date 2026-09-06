@@ -202,9 +202,8 @@ describe("integration row quick-connect guard", () => {
 
 describe("?section=packs deep link", () => {
   test("waits for the catalog, then scrolls exactly once", () => {
-    // The first commit renders a Browse skeleton; resolving a 1000+ item
-    // catalog then inserts thousands of pixels above the Bundles section, so
-    // scrolling now lands the reader in the middle of the Browse grid.
+    // The first commit renders a Browse skeleton; resolving and rendering the first
+    // client-side 48-item window inserts the grid above the Bundles section, so scrolling must wait.
     expect(shouldScrollToDeepLinkedBundles("packs", true, false)).toBe(false);
     expect(shouldScrollToDeepLinkedBundles("packs", false, false)).toBe(true);
     // Once is once: a later refresh must not yank the page back.
