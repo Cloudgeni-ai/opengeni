@@ -1569,7 +1569,7 @@ export type ConnectorActionToolCall = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  approvalMode?: "session_mcp";
+  approvalMode?: "session_mcp" | "connector_write";
 };
 
 export type ConnectorActionPolicyPreparation =
