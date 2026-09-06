@@ -1658,6 +1658,7 @@ async function projectManagedOrganizationAccess(
       accountId: organizationMembership.organizationId,
       workspaceId: null,
     });
+    // These authority tables are non-RLS, so the account GUC does not scope this query.
     const persistedMemberships = await db
       .select({
         membership: schema.workspaceMemberships,
@@ -1666,9 +1667,18 @@ async function projectManagedOrganizationAccess(
       .from(schema.workspaceMemberships)
       .innerJoin(
         schema.workspaces,
-        eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+        and(
+          eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
+          eq(schema.workspaceMemberships.accountId, schema.workspaces.accountId),
+        ),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, input.subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+          eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
+          eq(schema.workspaces.accountId, organizationMembership.organizationId),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     workspaceGrants.push(
       ...persistedMemberships.map((row) => ({
@@ -2032,7 +2042,13 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         schema.workspaces,
         eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, subjectId),
+          eq(schema.workspaceMemberships.accountId, account.id),
+          eq(schema.workspaces.accountId, account.id),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     const workspaceGrants: AccessGrant[] = memberships.map((row) => ({
       workspaceId: row.workspace.id,
@@ -2088,7 +2104,13 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           schema.workspaces,
           eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
         )
-        .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+        .where(
+          and(
+            eq(schema.workspaceMemberships.subjectId, subjectId),
+            eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
+            eq(schema.workspaces.accountId, organizationMembership.organizationId),
+          ),
+        )
         .orderBy(desc(schema.workspaces.createdAt));
       for (const row of persistedOrganizationMemberships) {
         if (workspaceGrants.some((grant) => grant.workspaceId === row.workspace.id)) continue;
