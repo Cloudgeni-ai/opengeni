@@ -4039,3 +4039,51 @@ describe("buildTimeline — memory writes", () => {
     expect((items[0] as WorkerItem).workerSessionId).toBe(worker.id);
   });
 });
+
+describe("delivered-input landmarks", () => {
+  for (const kind of [
+    "background_command_result",
+    "session_wait_timeout",
+    "agent_message",
+    "child_terminal_result",
+    "child_progress",
+  ] as const) {
+    test(`${kind} stays visible between steps of the same completed turn`, () => {
+      const groups = groupTimeline(
+        buildTimeline([
+          event("agent.toolCall.created", {
+            id: "before",
+            name: "exec_command",
+            arguments: { cmd: "bun run check" },
+          }),
+          event("agent.toolCall.output", { id: "before", output: "ok" }),
+          event("system.update.delivered", {
+            members: [
+              {
+                id: "update",
+                kind,
+                sourceId: "source",
+                summary: "Result received",
+                classification: "info",
+              },
+            ],
+          }),
+          event("agent.toolCall.created", {
+            id: "after",
+            name: "exec_command",
+            arguments: { cmd: "bun run check" },
+          }),
+          event("agent.toolCall.output", { id: "after", output: "ok" }),
+          event("agent.message.completed", { text: "Checked the result." }),
+          event("turn.completed", {}),
+        ]),
+      );
+      const boundary = groups.findIndex(
+        (group) => group.kind === "item" && group.item.kind === "machine-input-batch",
+      );
+      expect(boundary).toBeGreaterThan(0);
+      expect(groups.slice(boundary + 1).some((group) => group.kind === "turn")).toBe(true);
+      expect(groups.filter((group) => group.kind === "turn")).toHaveLength(1);
+    });
+  }
+});

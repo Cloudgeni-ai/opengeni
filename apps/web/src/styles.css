@@ -3,6 +3,7 @@
 @import "@fontsource-variable/inter/wght-italic.css";
 @import "@fontsource-variable/jetbrains-mono/wght.css";
 @import "@opengeni/react/styles.css";
+@import "@opengeni/react/responsive.css";
 
 @source "../node_modules/streamdown/dist/*.js";
 @source "../../../packages/react/src";
@@ -290,4 +291,14 @@ body {
 /* Workspace Insights — tabular figures for meter columns */
 [data-insights] {
   font-feature-settings: "cv11", "ss01", "ss03", "tnum";
+}
+
+/* Keep the tools entry point compact in narrow composers. */
+@media (max-width: 639px) {
+  .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
+  .session-tools-label, .session-tools-chevron { display: none; }
+}
+@container og-composer (max-width: 39.999rem) {
+  .session-tools-trigger { width: 2rem; padding-inline: 0; gap: 0; }
+  .session-tools-label, .session-tools-chevron { display: none; }
 }

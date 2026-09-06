@@ -71724,12 +71724,13 @@ function backgroundCommandTerminalMutation(input: {
       }
       const classification: SystemUpdateClassification =
         command.state === "exited" && command.exitCode === 0 ? "success" : "failure";
+      const commandLabel = command.commandPreview || "Background command";
       const summary =
         command.state === "lost"
-          ? "A background command was lost before its exit status could be confirmed."
+          ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
           : command.exitCode === 0
-            ? "A background command completed successfully."
-            : `A background command exited with code ${command.exitCode ?? "unknown"}.`;
+            ? `${commandLabel}: completed successfully.`
+            : `${commandLabel}: exited with code ${command.exitCode ?? "unknown"}.`;
       const payload = {
         type: "background_command_result" as const,
         commandId: command.id,

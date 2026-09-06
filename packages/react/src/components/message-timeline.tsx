@@ -3378,7 +3378,11 @@ function MachineInputBatchRow({
 
   return (
     <div className={cn(enter && "animate-og-enter", "flex flex-col items-center gap-1.5")}>
-      <details className="group w-full max-w-full" data-og-machine-input-batch="">
+      <details
+        className="group w-full max-w-full"
+        data-og-machine-input-batch=""
+        title={`Received ${formatClockTime(item.occurredAt)}`}
+      >
         <summary className="flex cursor-pointer list-none justify-center [&::-webkit-details-marker]:hidden">
           <span
             className={cn(
@@ -3394,6 +3398,9 @@ function MachineInputBatchRow({
           </span>
         </summary>
         <div className="mx-auto mt-2 w-full max-w-lg space-y-2 border-t border-og-border/50 pt-2">
+          <p className="text-og-xs text-og-fg-subtle">
+            Received <time dateTime={item.occurredAt}>{formatClockTime(item.occurredAt)}</time>
+          </p>
           {item.members.map((member) => (
             <MachineInputRow
               key={member.id}
