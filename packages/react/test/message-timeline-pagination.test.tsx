@@ -2148,9 +2148,9 @@ describe("MessageTimeline pagination affordances", () => {
           scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
         } else {
           const touchEvent = (name: string, y: number) => {
-            const event = new Event(name, { bubbles: true });
-            Object.defineProperty(event, "touches", { value: [{ clientX: 200, clientY: y }] });
-            scroller.dispatchEvent(event);
+            const gesture = new Event(name, { bubbles: true });
+            Object.defineProperty(gesture, "touches", { value: [{ clientX: 200, clientY: y }] });
+            scroller.dispatchEvent(gesture);
           };
           touchEvent("touchstart", 200);
           touchEvent("touchmove", 240);
