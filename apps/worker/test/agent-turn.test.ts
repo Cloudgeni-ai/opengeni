@@ -799,6 +799,24 @@ describe("turn exact-content boundaries", () => {
     const streamCompletionAuthority = source.indexOf(
       "await assertSuccessfulAgentStreamCompletion({",
     );
+    expect(source).toContain(
+      "const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();",
+    );
+    const closedStreamAdmission = source.indexOf("closeStreamWaitAdmission?.();");
+    const streamFailureCatch = source.lastIndexOf("} catch (error) {", closedStreamAdmission);
+    expect(streamFailureCatch).toBeGreaterThan(-1);
+    expect(source.slice(streamFailureCatch, closedStreamAdmission)).not.toContain("await ");
+    const streamFailurePublication = source.indexOf(
+      "await eventing.publish!([",
+      closedStreamAdmission,
+    );
+    expect(closedStreamAdmission).toBeGreaterThan(-1);
+    expect(streamFailurePublication).toBeGreaterThan(closedStreamAdmission);
+    expect(streamCompletionAuthority).toBeGreaterThan(streamFailurePublication);
+    const sealedWaitAdmission = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -821,12 +839,29 @@ describe("turn exact-content boundaries", () => {
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
-    expect(postCompactionRecovery).toBeGreaterThan(streamCompletionAuthority);
+    expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
+    expect(source).toContain(
+      "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
+    );
+    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const runSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const closedFailureAdmission = runSource.indexOf(
+      "eventing.preparedTools?.inputWaitYield?.closeAdmission();",
+    );
+    expect(closedFailureAdmission).toBeGreaterThan(-1);
+    expect(runSource.indexOf("return await settleTurnFailure({")).toBeGreaterThan(
+      closedFailureAdmission,
+    );
 
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),

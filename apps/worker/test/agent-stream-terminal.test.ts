@@ -101,4 +101,14 @@ describe("agent stream terminal authority", () => {
       IncompleteAgentStreamError,
     );
   });
+
+  test("accepted wait without an actual runner yield preserves the completed answer", () => {
+    const acceptedOnly = { requested: true, yielded: false };
+    expect(requireAgentStreamFinalOutput("Completed answer", acceptedOnly.yielded)).toBe(
+      "Completed answer",
+    );
+    expect(() => requireAgentStreamFinalOutput(undefined, acceptedOnly.yielded)).toThrow(
+      IncompleteAgentStreamError,
+    );
+  });
 });
