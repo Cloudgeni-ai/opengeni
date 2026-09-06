@@ -1268,7 +1268,9 @@ become a hidden source of domain semantics.
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE
 reconnects. The web route supplies source events alongside projected rows;
-retained event identity determines window overlap because partial-message row
+it keys the timeline by session so pagination ownership and reading state cannot
+survive navigation to another session.
+Retained event identity determines window overlap because partial-message row
 IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
 immediately before React mutates the DOM; `message-timeline.tsx` applies only
 the residual correction after browser anchoring. Corrections cannot resume

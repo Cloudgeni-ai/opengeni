@@ -1278,7 +1278,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const chrome = desktopPage.getByTestId("session-chrome");
       const queueChip = desktopPage.getByTestId("session-chrome-queue");
       const goalChip = desktopPage.getByTestId("session-chrome-goal");
-      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
+      const activityButton = desktopPage.getByRole("button", {
+        name: "Session activity",
+        exact: true,
+      });
       const composer = desktopPage.getByLabel("Message the agent");
       const timeline = desktopPage.getByTestId("session-timeline");
       await timeline
@@ -1286,10 +1289,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .waitFor();
       expect(await queueChip.count()).toBe(0);
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
+      await activityButton.click();
+      await chrome.getByRole("button", { name: /^\d+ agents?$/ }).waitFor();
+      await activityButton.click();
       await composer.waitFor();
       expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
-      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
+      expect(
+        await desktopPage.getByRole("button", { name: "Session activity", exact: true }).count(),
+      ).toBe(1);
       const [chromeBounds, composerBounds] = await Promise.all([
         chrome.boundingBox(),
         composer.locator("xpath=ancestor::*[@data-og-composer-id][1]").boundingBox(),
@@ -1508,13 +1516,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // must not require one to block the other, so await both independently
       // owned chips before asserting the settled control stack.
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
 
       const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
       expect(await goalChip.count()).toBe(1);
-      expect(await agentsChip.count()).toBe(1);
+      expect(await activityButton.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
@@ -1547,10 +1555,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await mobilePage.goto(managerUrl);
       await mobilePage.getByTestId("session-chrome").waitFor();
       await mobilePage.getByTestId("session-chrome-goal").waitFor();
-      await mobilePage.getByTestId("session-chrome-agents").waitFor();
+      await mobilePage.getByRole("button", { name: "Session activity", exact: true }).waitFor();
       await expectNoPageOverflow(mobilePage);
       await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
-      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
+      await expectTouchTarget(
+        mobilePage.getByRole("button", { name: "Session activity", exact: true }),
+      );
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,

@@ -2128,7 +2128,7 @@ describe("MessageTimeline pagination affordances", () => {
           return [];
         }
       };
-      const pending = [deferred<boolean>(), deferred<boolean>()];
+      const pending = [deferred<boolean>(), deferred<boolean>(), deferred<boolean>()];
       const receipts = pending.map((load) => controlledOlderReceipt(load.promise));
       let calls = 0;
       const loadOlder: OlderHistoryLoader = () => receipts[calls++]!.receipt;
@@ -2171,7 +2171,22 @@ describe("MessageTimeline pagination affordances", () => {
       expect(calls).toBe(2);
       await actRun(() => intersect());
       expect(calls).toBe(2);
+      // The web route keys this component by session ID. A pending old page
+      // must neither block the new session nor publish its retry UI there.
+      await view.rerender(
+        <PublicMessageTimeline
+          key="next-session"
+          events={events}
+          hasOlder
+          onLoadOlder={loadOlder}
+        />,
+      );
+      await armOlderPrefetch(view.container);
+      await actRun(() => intersect());
+      expect(calls).toBe(3);
       await actRun(() => pending[1]!.resolve(false));
+      expect(view.container.querySelector("[data-og-retry]")).toBeNull();
+      await actRun(() => pending[2]!.resolve(true));
       layout.restore();
       await view.unmount();
     },
