@@ -1806,7 +1806,7 @@ export function MessageTimeline({
                     onScrollEnd={onScrollEnd}
                     onWheel={onWheel}
                     onTouchStart={(event) => {
-                      const touch = event.touches[0];
+                      const touch = event.touches.length === 1 ? event.touches[0] : undefined;
                       touchPositionRef.current = touch
                         ? { x: touch.clientX, y: touch.clientY }
                         : null;
@@ -1814,7 +1814,10 @@ export function MessageTimeline({
                     onTouchMove={(event) => {
                       const touch = event.touches[0];
                       const previous = touchPositionRef.current;
-                      if (!touch || !previous) return;
+                      if (!touch || !previous || event.touches.length !== 1) {
+                        touchPositionRef.current = null;
+                        return;
+                      }
                       const deltaX = previous.x - touch.clientX;
                       const deltaY = previous.y - touch.clientY;
                       if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
