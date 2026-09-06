@@ -32,7 +32,6 @@ import {
   GITHUB_REST_API_ORIGIN,
   GITHUB_REST_MCP_APP_SERVER_ID,
   GITHUB_REST_MCP_PERSONAL_SERVER_ID,
-  GITHUB_REST_READ_TOOL_NAMES,
   GITHUB_REST_TOOL_NAMES,
   GitHubRestAuthorityError,
   githubRestConnectorActionOutcome,
@@ -553,11 +552,6 @@ function githubConnectorBindings(
           serverId,
           toolName,
           arguments: arguments_,
-          ...(GITHUB_REST_READ_TOOL_NAMES.includes(
-            toolName as (typeof GITHUB_REST_READ_TOOL_NAMES)[number],
-          )
-            ? {}
-            : { approvalMode: "connector_write" as const }),
         };
       },
     }),

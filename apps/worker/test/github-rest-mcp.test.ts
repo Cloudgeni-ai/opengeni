@@ -52,8 +52,12 @@ describe("buildGitHubRestMcpForTurn", () => {
     });
     expect(write?.call("write-call", { repository: "Cloudgeni-ai/opengeni" })).toMatchObject({
       connectionId: "github-app:71",
-      approvalMode: "connector_write",
+      serverId: GITHUB_REST_MCP_APP_SERVER_ID,
+      toolName: "issue_create",
     });
+    expect(write?.call("write-call", { repository: "Cloudgeni-ai/opengeni" })).not.toHaveProperty(
+      "approvalMode",
+    );
     expect(
       result.connectorBindings.some(
         (binding) =>
@@ -142,8 +146,12 @@ describe("buildGitHubRestMcpForTurn", () => {
     );
     expect(write?.call("write-call", { repository: "Cloudgeni-ai/opengeni" })).toMatchObject({
       connectionId,
-      approvalMode: "connector_write",
+      serverId: GITHUB_REST_MCP_PERSONAL_SERVER_ID,
+      toolName: "pull_request_create",
     });
+    expect(write?.call("write-call", { repository: "Cloudgeni-ai/opengeni" })).not.toHaveProperty(
+      "approvalMode",
+    );
   });
 });
 
