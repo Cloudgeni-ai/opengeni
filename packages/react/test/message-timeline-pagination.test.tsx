@@ -2106,6 +2106,77 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test.each(["keyboard", "touch"] as const)(
+    "%s demand continues through a short committed page",
+    async (input) => {
+      let intersect: () => void = () => {
+        throw new Error("sentinel not observed");
+      };
+      globalThis.IntersectionObserver = class implements IntersectionObserver {
+        readonly root = null;
+        readonly rootMargin = "400px";
+        readonly scrollMargin = "0px";
+        readonly thresholds = [0];
+        constructor(private callback: IntersectionObserverCallback) {}
+        observe(target: Element) {
+          intersect = () =>
+            this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this);
+        }
+        unobserve() {}
+        disconnect() {}
+        takeRecords(): IntersectionObserverEntry[] {
+          return [];
+        }
+      };
+      const pending = [deferred<boolean>(), deferred<boolean>()];
+      const receipts = pending.map((load) => controlledOlderReceipt(load.promise));
+      let calls = 0;
+      const loadOlder: OlderHistoryLoader = () => receipts[calls++]!.receipt;
+      const events = Array.from({ length: 20 }, (_, i) => event(i + 2));
+      const view = await renderComponent(
+        <PublicMessageTimeline events={events} hasOlder onLoadOlder={loadOlder} />,
+      );
+      const scroller = view.container.querySelector<HTMLElement>("[data-og-timeline-scroller]")!;
+      const layout = mockScrollerLayout(scroller, {
+        clientHeight: 400,
+        contentHeight: 500,
+        tipHeight: 80,
+        paddingBottom: 24,
+      });
+      await actRun(() => {
+        if (input === "keyboard") {
+          scroller.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }));
+        } else {
+          const touchEvent = (name: string, y: number) => {
+            const event = new Event(name, { bubbles: true });
+            Object.defineProperty(event, "touches", { value: [{ clientX: 200, clientY: y }] });
+            scroller.dispatchEvent(event);
+          };
+          touchEvent("touchstart", 200);
+          touchEvent("touchmove", 240);
+        }
+        scroller.scrollTop = 0;
+        scroller.dispatchEvent(new Event("scroll"));
+      });
+      await actRun(() => intersect());
+      expect(calls).toBe(1);
+      receipts[0]!.commit();
+      await view.rerender(
+        <PublicMessageTimeline events={[event(1), ...events]} hasOlder onLoadOlder={loadOlder} />,
+      );
+      await actRun(() => pending[0]!.resolve(true));
+      // No leave/re-enter gesture and no new scroll range: next accepted page
+      // must still be reachable for both inputs, just as for wheel input.
+      await actRun(() => intersect());
+      expect(calls).toBe(2);
+      await actRun(() => intersect());
+      expect(calls).toBe(2);
+      await actRun(() => pending[1]!.resolve(false));
+      layout.restore();
+      await view.unmount();
+    },
+  );
+
   test("a reconstructed first display item does not turn retained events into a replacement", async () => {
     let intersectionCallback: IntersectionObserverCallback = () => undefined;
     let intersectionObserver: IntersectionObserver | null = null;

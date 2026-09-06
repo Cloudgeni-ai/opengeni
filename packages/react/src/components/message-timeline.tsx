@@ -718,6 +718,19 @@ export function MessageTimeline({
     });
   }, [cancelLeaveFallback, releasePinAfterScrollSettled]);
 
+  const requestEarlierFromReader = () => {
+    releasePinFromReader();
+    wantPinRef.current = false;
+    // A stationary upward gesture is still demand. Successful short/folded
+    // pages may never create enough range to leave the prefetch band.
+    olderPageBudgetRef.current = 8;
+    if (olderLoadAttemptRef.current?.[1] === 2) {
+      olderLoadAttemptRef.current = null;
+      setOlderDemand((value) => value + 1);
+    }
+  };
+  const touchPositionRef = useRef<{ x: number; y: number } | null>(null);
+
   const onWheel = (event: {
     deltaY: number;
     deltaX: number;
@@ -739,15 +752,7 @@ export function MessageTimeline({
     if (event.deltaY >= 0) {
       return;
     }
-    releasePinFromReader();
-    wantPinRef.current = false;
-    // A stationary upward gesture is still demand. Successful short/folded
-    // pages may never create enough range to leave the prefetch band.
-    olderPageBudgetRef.current = 8;
-    if (olderLoadAttemptRef.current?.[1] === 2) {
-      olderLoadAttemptRef.current = null;
-      setOlderDemand((value) => value + 1);
-    }
+    requestEarlierFromReader();
   };
 
   /** Touch / stylus / mouse drag on the scroller — explicit leave (not layout). */
@@ -792,7 +797,8 @@ export function MessageTimeline({
     if (event.key !== "ArrowUp" && event.key !== "PageUp" && event.key !== "Home") {
       return;
     }
-    releasePinFromReader();
+    programmaticScrollRef.current = 0;
+    requestEarlierFromReader();
   };
 
   const snapToBottom = useCallback(
@@ -1687,7 +1693,7 @@ export function MessageTimeline({
       // Pointer-dragged scroll-up away from tip. Layout churn never arms this.
       if (readerArmed && cumulativeReaderUp > TIP_FOLLOW_READER_UP_EPS_PX && !nearBottomPinned) {
         clearReaderIntent();
-        releasePinFromReader();
+        requestEarlierFromReader();
         rearmOlderPrefetchAfterLeavingTop(node);
         return;
       }
@@ -1799,6 +1805,33 @@ export function MessageTimeline({
                     onScroll={onScroll}
                     onScrollEnd={onScrollEnd}
                     onWheel={onWheel}
+                    onTouchStart={(event) => {
+                      const touch = event.touches[0];
+                      touchPositionRef.current = touch
+                        ? { x: touch.clientX, y: touch.clientY }
+                        : null;
+                    }}
+                    onTouchMove={(event) => {
+                      const touch = event.touches[0];
+                      const previous = touchPositionRef.current;
+                      if (!touch || !previous) return;
+                      const deltaX = previous.x - touch.clientX;
+                      const deltaY = previous.y - touch.clientY;
+                      if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) < 4) return;
+                      touchPositionRef.current = { x: touch.clientX, y: touch.clientY };
+                      onWheel({
+                        deltaX,
+                        deltaY,
+                        target: event.target,
+                        currentTarget: event.currentTarget,
+                      });
+                    }}
+                    onTouchEnd={() => {
+                      touchPositionRef.current = null;
+                    }}
+                    onTouchCancel={() => {
+                      touchPositionRef.current = null;
+                    }}
                     onClickCapture={(event) => {
                       const target =
                         event.target instanceof Element
