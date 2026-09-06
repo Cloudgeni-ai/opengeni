@@ -46,8 +46,11 @@ async function seed() {
     pubkey: `ed25519:${id}`,
   });
   await shared.admin`update enrollments set connection_instance_id='launch',connection_lease_expires_at=now()+interval '1 hour' where id=${enrollment.id}`;
-  await shared.admin`insert into session_background_commands(account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id)
- select ${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${enrollment.id},'launch',gen_random_uuid()::text from generate_series(1,25)`;
+  // The sweep freezes a JavaScript millisecond due frontier. The database's
+  // clock_timestamp() default is evaluated per row at finer precision, so a
+  // fresh batch can straddle that frontier. Seed every fixture row as due.
+  await shared.admin`insert into session_background_commands(account_id,workspace_id,session_id,provider,state,control_workspace_id,enrollment_id,connection_instance_id,op_id,reconcile_after)
+ select ${accountId},${workspaceId!},${session.id},'connected_machine','running',${workspaceId!},${enrollment.id},'launch',gen_random_uuid()::text,'2000-01-01T00:00:00Z'::timestamptz from generate_series(1,25)`;
   return session.id;
 }
 const settings = {
@@ -128,7 +131,8 @@ test("offline commands remain tracked while one sweep shares failed connection o
   expect(queries).toBeGreaterThan(0);
   expect(queries).toBe(1);
   const [row] =
-    await shared.admin`select count(*)::int n,min(reconcile_attempts)::int attempts from session_background_commands where session_id=${sessionId} and state='running'`;
+    await shared.admin`select count(*)::int n,min(reconcile_attempts)::int attempts,max(reconcile_attempts)::int max_attempts from session_background_commands where session_id=${sessionId} and state='running'`;
   expect(row!.n).toBe(25);
   expect(row!.attempts).toBe(1);
+  expect(row!.max_attempts).toBe(1);
 });
