@@ -387,7 +387,7 @@ describe("migration 0219 managed-human organization provisioning", () => {
 
       expect(projected.accountGrants.map((grant) => grant.accountId)).toEqual([activeAccountId]);
       expect(projected.workspaceGrants).toHaveLength(2);
-      expect(projected.workspaceGrants[0]?.workspaceId).toBe(projected.defaultWorkspaceId);
+      expect(projected.workspaceGrants[0]?.workspaceId).toBe(projected.defaultWorkspaceId!);
       expect(
         projected.workspaceGrants.some((grant) => grant.workspaceId === orphanedWorkspaceId),
       ).toBe(false);
