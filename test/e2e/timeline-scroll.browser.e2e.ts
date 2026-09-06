@@ -636,7 +636,7 @@ describe("timeline scroll ownership browser regression", () => {
       node.dispatchEvent(new Event("scroll"));
     });
     await page.waitForFunction(
-      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop > 400,
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop > 500,
     );
     await scroller.hover();
     await page.mouse.wheel(0, -8_000);
@@ -1351,6 +1351,15 @@ describe("timeline scroll ownership browser regression", () => {
       { timeout: 5_000 },
     );
 
+    // Expansion now preserves the reader near the top. Move outside prefetch
+    // range so this test isolates collapse-triggered underfill navigation.
+    await page.evaluate(() => {
+      const node = window.timelineCollapsedHistoryHarness!.scroller();
+      node.scrollTop = node.scrollHeight;
+    });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop > 500,
+    );
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.armOlder());
     await page.waitForTimeout(100);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(0);
@@ -1358,7 +1367,7 @@ describe("timeline scroll ownership browser regression", () => {
 
     // Collapsing the window makes it underfilled while newer pagination owns
     // the first-party navigation lock. loadOlder declines with exact `false`.
-    await step.click();
+    await step.evaluate((node: HTMLButtonElement) => node.click());
     await page.waitForFunction(() => window.timelineCollapsedHistoryHarness!.loadCalls() === 1);
     const retry = page.getByRole("button", { name: "Retry earlier activity" });
     await retry.waitFor({ timeout: 5_000 });
@@ -1402,11 +1411,20 @@ describe("timeline scroll ownership browser regression", () => {
       { timeout: 5_000 },
     );
 
+    // Expansion now preserves the reader near the top. Move outside prefetch
+    // range so this test isolates collapse-triggered underfill navigation.
+    await page.evaluate(() => {
+      const node = window.timelineCollapsedHistoryHarness!.scroller();
+      node.scrollTop = node.scrollHeight;
+    });
+    await page.waitForFunction(
+      () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop > 500,
+    );
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.armOlder());
     await page.waitForTimeout(100);
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(0);
 
-    await step.click();
+    await step.evaluate((node: HTMLButtonElement) => node.click());
     await page.locator('[data-conversation-message="user-1"]').waitFor({ timeout: 5_000 });
     expect(await page.evaluate(() => window.timelineCollapsedHistoryHarness!.loadCalls())).toBe(1);
     expect(await page.locator('[data-conversation-message^="user-"]').count()).toBe(9);

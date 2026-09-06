@@ -553,6 +553,9 @@
 :where(.og-root).-top-11,:where(.og-root) .-top-11 {
     top: calc(var(--spacing) * -11);
   }
+:where(.og-root).-top-16,:where(.og-root) .-top-16 {
+    top: calc(var(--spacing) * -16);
+  }
 :where(.og-root).top-0,:where(.og-root) .top-0 {
     top: calc(var(--spacing) * 0);
   }
@@ -1294,6 +1297,10 @@
   }
 :where(.og-root).-translate-y-1\/2,:where(.og-root) .-translate-y-1\/2 {
     --tw-translate-y: calc(calc(1 / 2 * 100%) * -1);
+    translate: var(--tw-translate-x) var(--tw-translate-y);
+  }
+:where(.og-root).-translate-y-full,:where(.og-root) .-translate-y-full {
+    --tw-translate-y: -100%;
     translate: var(--tw-translate-x) var(--tw-translate-y);
   }
 :where(.og-root).translate-y-\[2px\],:where(.og-root) .translate-y-\[2px\] {

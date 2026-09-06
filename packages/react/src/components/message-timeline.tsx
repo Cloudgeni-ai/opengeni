@@ -1960,12 +1960,14 @@ export function MessageTimeline({
                         {hasOlder && olderPrefetchArmed ? (
                           // Overlaid, not a layout row: mounting/unmounting the sentinel
                           // must never shift content (that shift was itself a wobble).
+                          // End at the scroll origin above the pt-16 gutter so the
+                          // observer and scrollTop cooldown share the same 400px band.
                           <div
                             ref={topSentinelRef}
                             data-og-top-sentinel=""
                             data-og-timeline-chrome=""
                             aria-hidden="true"
-                            className="pointer-events-none absolute inset-x-0 top-0 h-px"
+                            className="pointer-events-none absolute inset-x-0 -top-16 h-px -translate-y-full"
                           />
                         ) : null}
                         {groups.map(({ group, key, entranceEnabled }, index) => {
