@@ -289,3 +289,5 @@ states, crowded and read-only layouts, and supports local goal/queue actions.
 Its command-result simulator changes fixture state only; no model calls or real
 processes are needed. Actual command filtering and settlement are covered by the
 real-PostgreSQL session-control algebra tests.
+
+The web session uses compact chrome: queue and goal actions remain visible, while inbox, agents, and active commands share an Activity disclosure. Goal state stays visible; goal age is labelled as time since creation, not execution time. The development gallery includes a synthetic high-volume activity scenario.

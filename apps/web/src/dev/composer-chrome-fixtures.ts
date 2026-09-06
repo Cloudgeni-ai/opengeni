@@ -418,6 +418,7 @@ export type ChromeScenarioId =
   | "commands-stop-error"
   | "commands-many"
   | "activity-mixed"
+  | "activity-load"
   | "activity-readonly"
   | "goal-action-error"
   | "queue-action-error"
@@ -556,6 +557,36 @@ export function chromeScenarios(): ChromeScenario[] {
     agentNodes: twoAgents,
   };
   return [
+    {
+      ...mixed,
+      id: "activity-load",
+      title: "Activity under load",
+      description:
+        "250 incoming notifications, 150 agents, and 200 active commands. Synthetic data only; no work is executed.",
+      defaultActive: "incoming",
+      queue: galleryQueue({
+        queue: mixed.queue.queue,
+        pendingInputs: Array.from({ length: 250 }, (_, i) =>
+          galleryPendingInput(i, {
+            kind: "background_command_result",
+            summary:
+              i % 7 === 0
+                ? `Validation batch ${i + 1} needs attention: a long diagnostic message to test wrapping and readable rows on small screens.`
+                : `Validation batch ${i + 1} finished successfully.`,
+            classification: i % 7 === 0 ? "failure" : "success",
+          }),
+        ),
+      }),
+      agentNodes: Array.from({ length: 150 }, (_, i) =>
+        galleryAgentNode(i, {
+          title: `Worker ${i + 1} · ${i % 3 === 0 ? "Accessibility and keyboard navigation review" : "Validation"}`,
+          status: i % 3 === 0 ? "running" : "idle",
+        }),
+      ),
+      commands: Array.from({ length: 200 }, (_, i) =>
+        command(i, i % 5 === 0 ? "stopping" : "running"),
+      ),
+    },
     {
       ...mixed,
       id: "activity-mixed",

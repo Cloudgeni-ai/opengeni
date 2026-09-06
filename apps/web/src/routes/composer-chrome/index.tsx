@@ -15,8 +15,8 @@ export function ComposerChromeGalleryRoute() {
   const composer = useMemo(() => idleComposer(), []);
   const scenarios = useGalleryScenarios();
   const [mode, setMode] = useState<ViewMode>("gallery");
-  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("activity-mixed");
-  const [galleryFilter, setGalleryFilter] = useState<"all" | ChromeScenarioId>("activity-mixed");
+  const [phoneScenarioId, setPhoneScenarioId] = useState<ChromeScenarioId>("activity-load");
+  const [galleryFilter, setGalleryFilter] = useState<"all" | ChromeScenarioId>("activity-load");
 
   const phoneScenario = scenarios.find((row) => row.id === phoneScenarioId) ?? scenarios[0] ?? null;
   const galleryVisible =

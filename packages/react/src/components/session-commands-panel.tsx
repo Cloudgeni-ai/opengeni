@@ -1,4 +1,4 @@
-import { Loader2Icon, SquareIcon } from "lucide-react";
+import { ChevronRightIcon, Loader2Icon, SquareIcon } from "lucide-react";
 import { useState } from "react";
 import type { UseSessionBackgroundCommandsResult } from "../hooks/use-session-background-commands";
 import { formatClockTime } from "../lib/format";
@@ -56,18 +56,31 @@ export function SessionCommandsPanel({
           {active.map((command) => (
             <li key={command.id} className="flex items-start gap-3 py-2 first:pt-0 last:pb-0">
               <div className="min-w-0 flex-1">
-                <p className="break-all font-mono text-og-fg">
-                  {command.commandPreview || "Background command"}
-                </p>
-                <p className="mt-1 text-og-fg-muted">
-                  <span>{command.state === "stopping" ? "Stopping…" : "Running"}</span>
-                  <span className="mx-1.5">·</span>
-                  <time
-                    dateTime={command.startedAt}
-                    title={new Date(command.startedAt).toLocaleString()}
+                <details className="group/command">
+                  <summary
+                    className="flex cursor-pointer list-none items-center gap-1.5 rounded-og-sm font-mono text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40"
+                    title="Expand command"
                   >
-                    Started {formatClockTime(command.startedAt)}
-                  </time>
+                    <ChevronRightIcon className="size-3 shrink-0 text-og-fg-subtle transition-transform group-open/command:rotate-90" />
+                    <span className="truncate">
+                      {command.commandPreview || "Background command"}
+                    </span>
+                  </summary>
+                  <div className="mt-2 space-y-1">
+                    <p className="whitespace-pre-wrap break-all font-mono text-og-fg-muted">
+                      {command.commandPreview || "Background command"}
+                    </p>
+                    <time
+                      className="block text-og-fg-subtle"
+                      dateTime={command.startedAt}
+                      title={new Date(command.startedAt).toLocaleString()}
+                    >
+                      Started {formatClockTime(command.startedAt)}
+                    </time>
+                  </div>
+                </details>
+                <p className="mt-1 text-og-fg-subtle">
+                  {command.state === "stopping" ? "Stopping…" : "Running"}
                 </p>
               </div>
               {!readOnly ? (

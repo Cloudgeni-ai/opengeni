@@ -1963,6 +1963,7 @@ function SessionChatPane(props: {
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            compact
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}

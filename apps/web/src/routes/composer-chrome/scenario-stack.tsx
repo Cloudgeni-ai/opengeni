@@ -221,6 +221,7 @@ export function ScenarioStack({
 
   const chrome = (
     <SessionChrome
+      compact
       key={`${scenario.id}-${scenario.defaultActive ?? "none"}`}
       queue={queue}
       composer={composer}
@@ -260,6 +261,7 @@ export function ScenarioStack({
 
   const composerBlock = (
     <ChatComposer
+      responsiveBasis="container"
       composer={composer}
       effectiveControl={scenario.session.effectiveControl}
       queuedAheadCount={queue.queue.length}

@@ -936,9 +936,9 @@ describe("SessionChrome goal pill reasons", () => {
         lastError: null,
       },
     }).goal;
-    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Scheduled");
+    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Waiting");
     expect(sessionChromeGoalPillExplanation("scheduled", record)).toBe(
-      `Next goal check at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
+      `Continues at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
     );
   });
 
@@ -1072,4 +1072,70 @@ describe("SessionChrome compact actions", () => {
     );
     expect(mounted.container.textContent).not.toContain("Active command details");
   });
+});
+
+describe("compact activity navigation", () => {
+  test("activity opens content, selected tab stays open, and queue hides activity navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [fakeTurn()] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    await act(async () => activity.click());
+    expect(activity.getAttribute("aria-expanded")).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+    const tab = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("1 command"),
+    )!;
+    await act(async () => tab.click());
+    expect(tab.getAttribute("aria-expanded")).toBe("true");
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-queue"]')!
+        .click(),
+    );
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(mounted.container.textContent).not.toContain("Command body");
+  });
+  test("default command panel includes its navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        defaultActive="commands"
+        queue={queue({ queue: [] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    expect(
+      mounted.container
+        .querySelector('[aria-label="Session activity"]')
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+  });
+});
+
+test("controlled compact command selection exposes activity navigation", async () => {
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      active="commands"
+      queue={queue({ queue: [] })}
+      commandsCount={1}
+      commandsPanel={<div>Controlled command body</div>}
+    />,
+  );
+  expect(
+    mounted.container
+      .querySelector('[aria-label="Session activity"]')
+      ?.getAttribute("aria-expanded"),
+  ).toBe("true");
+  expect(mounted.container.textContent).toContain("Controlled command body");
 });
