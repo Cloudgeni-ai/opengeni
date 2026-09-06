@@ -59237,10 +59237,10 @@ export type SetSessionGoalStatusEvent =
       reason: string;
       rationale?: string;
     }
-  // The operator PATCH resume. A system resume of a `max_auto_continuations`
+  // Operator PATCH or agent tool resume. A system resume of a `max_auto_continuations`
   // pause is a separate path (`autoResumeGoalPausedByCapInTransaction`) that
   // commits with the external input that caused it.
-  | { type: "goal.resumed"; actor: "api" };
+  | { type: "goal.resumed"; actor: "api" | "agent" };
 
 /** Status mutation and its timeline fact share the same session-first commit. */
 export async function setSessionGoalStatusWithEvent(

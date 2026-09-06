@@ -92,6 +92,10 @@ A goal is `active`, `paused`, or `completed`.
   completed goal.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
+- `goal_resume {}` reactivates any paused goal regardless of pause actor or
+  reason, preserves its objective, resets continuation counters, and arms its
+  durable wake. Already-active calls succeed unchanged. Existing sessions with
+  `goal_pause` also receive `goal_resume` within the deployment tool ceiling.
 
 Long waits are session-level rather than goal mutations. `wait_for_input {
 reason, timeoutSeconds, idempotencyKey? }` is self-only, requires no goal, and

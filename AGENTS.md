@@ -378,3 +378,5 @@ Migration 0351 owns invited-user email delivery. Persist the stable bearer and p
 Keep provider resource inventories, cleanup notes, cloud account identifiers, private endpoints, generated credentials, kubeconfigs, Terraform state, plans, local tfvars, service-account keys, and access keys in private operator-controlled storage outside the repository.
 
 Use official upstream charts/operators or managed services for production platform services. OpenGeni's chart should own OpenGeni API, web, worker, migrations, and integration resources. Built-in Postgres, Temporal, NATS, and Garage/MinIO templates are disposable conformance fixtures for local, CI, and smoke verification only; do not present them as lightweight production alternatives.
+
+Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.

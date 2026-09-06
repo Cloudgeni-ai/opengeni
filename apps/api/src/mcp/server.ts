@@ -169,7 +169,7 @@ import {
   searchCapabilityCatalogItems,
   type ResolvedSessionAuthorization,
 } from "@opengeni/core";
-import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
+import { recordWorkspaceUsage, requireLimit, workflowIdForSession } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
@@ -447,6 +447,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   wait_for_input: { sessionRequired: true, allOf: ["sessions:control"] },
   goal_complete: { sessionRequired: true, allOf: ["goals:manage"] },
   goal_pause: { sessionRequired: true, allOf: ["goals:manage"] },
+  goal_resume: { sessionRequired: true, allOf: ["goals:manage"] },
   memory_search: { sessionRequired: true, allOf: ["documents:search"] },
   memory_save: { sessionRequired: true, allOf: ["documents:search"] },
   memory_correct: { sessionRequired: true, allOf: ["documents:search"] },
@@ -2901,6 +2902,61 @@ function registerGoalTools(
       return json(
         mcpMutationReceipt({
           operation: "goal_pause",
+          committed: true,
+          outcome: changed ? "updated" : "unchanged",
+          changed,
+          resource: {
+            type: "session_goal",
+            id: goal.id,
+            version: goal.version,
+            state: goal.status,
+          },
+          timestamp: goal.updatedAt,
+          idempotency: { status: "not_supported" },
+          nextAction: { tool: "session_get", arguments: { sessionId } },
+        }),
+      );
+    },
+  );
+  server.registerTool(
+    "goal_resume",
+    {
+      description:
+        "Resume this session's paused goal regardless of who paused it or why. Already active is a successful no-op. Preserves the objective and resets continuation counters.",
+      inputSchema: {},
+    },
+    async () => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      await requireSession(deps.db, grant.workspaceId, sessionId);
+      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
+      if (!existing) {
+        throw new Error("this session has no goal; use goal_set first");
+      }
+      const { goal, events, workflowWakeRevision } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "active",
+          event: { type: "goal.resumed", actor: "agent" },
+        },
+      );
+      const changed = events.length > 0;
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
+      if (workflowWakeRevision !== null) {
+        await deps.workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+          wakeRevision: workflowWakeRevision,
+        });
+      }
+      return json(
+        mcpMutationReceipt({
+          operation: "goal_resume",
           committed: true,
           outcome: changed ? "updated" : "unchanged",
           changed,

@@ -2956,6 +2956,7 @@ export type FirstPartyMcpToolName =
   | "wait_for_input"
   | "goal_complete"
   | "goal_pause"
+  | "goal_resume"
   | "memory_search"
   | "memory_save"
   | "memory_correct"

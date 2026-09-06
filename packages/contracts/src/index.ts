@@ -773,6 +773,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "wait_for_input",
   "goal_complete",
   "goal_pause",
+  "goal_resume",
   "memory_search",
   "memory_save",
   "memory_correct",
