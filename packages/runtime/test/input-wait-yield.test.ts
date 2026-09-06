@@ -138,6 +138,155 @@ async function consumeStream(stream: Awaited<ReturnType<typeof runAgentStream>>)
 
 describe("trusted input wait runtime yield", () => {
   for (const owned of [false, true]) {
+    test(`repeated same-agent recovery keeps one capture per model call and stable wrapper (owned=${owned})`, async () => {
+      const f = await fixture();
+      f.settings.lazyToolSearchEnabled = false;
+      if (owned) f.settings.sandboxBackend = "local";
+      try {
+        const compaction = new CompactionNeededError({
+          signalTokens: 10,
+          thresholdTokens: 5,
+          signalSource: "provider",
+        });
+        const model = new ScriptedModel([
+          { error: compaction },
+          { error: compaction },
+          { outputText: "recovered answer" },
+        ]);
+        const agent = buildOpenGeniAgent(f.settings, [], {
+          model,
+          inputWaitYield: f.prepared.inputWaitYield,
+        });
+        let captures = 0;
+        let wrappedModel: typeof agent.model | undefined;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const stream = await runAgentStream(agent, "recover", f.settings, {
+            onModelVisibleContext: () => {
+              captures++;
+            },
+            ...(owned ? { ownedSandbox: ownedSandboxFor(agent) } : {}),
+          });
+          if (attempt < 2) {
+            await expect(consumeStream(stream)).rejects.toBeInstanceOf(CompactionNeededError);
+          } else {
+            await consumeStream(stream);
+            expect(stream.finalOutput).toBe("recovered answer");
+          }
+          if (attempt === 0) wrappedModel = agent.model;
+          expect(agent.model).toBe(wrappedModel);
+          expect(captures).toBe(attempt + 1);
+          expect(model.calls).toBe(attempt + 1);
+          expect(f.prepared.inputWaitYield!.yielded).toBe(false);
+        }
+      } finally {
+        await f.prepared.close();
+      }
+    });
+  }
+
+  for (const owned of [false, true]) {
+    for (const accepted of [false, true]) {
+      test(`pre-aborted runner preserves cancellation and accepted-wait barrier (owned=${owned}, accepted=${accepted})`, async () => {
+        const f = await fixture();
+        if (owned) f.settings.sandboxBackend = "local";
+        try {
+          if (accepted) await gatewayWait(f);
+          const cancellation = new AbortController();
+          cancellation.abort(new Error("synthetic cancelled continuation"));
+          const model = new ScriptedModel([
+            { outputText: "cancelled response must not become a final answer" },
+            { error: new Error("cancelled SDK must not request another response") },
+          ]);
+          const gate = f.prepared.inputWaitYield!;
+          const agent = buildOpenGeniAgent(f.settings, [], { model, inputWaitYield: gate });
+          const stream = await runAgentStream(agent, "continue", f.settings, {
+            signal: cancellation.signal,
+            ...(owned ? { ownedSandbox: ownedSandboxFor(agent) } : {}),
+          });
+          if (accepted) {
+            await expect(consumeStream(stream)).rejects.toBe(cancellation.signal.reason);
+            expect(stream.error).toBe(cancellation.signal.reason);
+            expect(model.calls).toBe(0);
+          } else {
+            await consumeStream(stream);
+            expect(stream.error).toBeNull();
+            // Only the no-wait path retains the SDK's native aborted adapter.
+            expect(model.calls).toBe(1);
+            expect(model.requests[0]?.signal?.aborted).toBe(true);
+          }
+          expect(stream.cancelled).toBe(true);
+          expect(stream.finalOutput).toBeUndefined();
+          expect(gate.requested).toBe(accepted);
+          expect(gate.yielded).toBe(false);
+          await expect(gatewayWait(f)).rejects.toThrow("sealed");
+        } finally {
+          await f.prepared.close();
+        }
+      });
+    }
+
+    test(`abort during pending dispatch drain cannot dispatch before late wait success (owned=${owned})`, async () => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const atGate = Promise.withResolvers<void>();
+      const cancellation = new AbortController();
+      const f = await fixture({
+        beforeWaitResult: async () => {
+          entered.resolve();
+          await release.promise;
+        },
+      });
+      if (owned) f.settings.sandboxBackend = "local";
+      const gate = f.prepared.inputWaitYield!;
+      const begin = gate.beginStream.bind(gate);
+      const observed = spyOn(gate, "beginStream").mockImplementation((signal) => {
+        const binding = begin(signal);
+        const dispatch = binding.modelDispatchFilter;
+        binding.modelDispatchFilter = (args) => {
+          const result = dispatch(args);
+          atGate.resolve();
+          return result;
+        };
+        return binding;
+      });
+      const pending = gatewayWait(f);
+      try {
+        await entered.promise;
+        const model = new ScriptedModel([
+          { outputText: "cancelled response must not become a final answer" },
+          { error: new Error("cancelled SDK must not request another response") },
+        ]);
+        const agent = buildOpenGeniAgent(f.settings, [], { model, inputWaitYield: gate });
+        const stream = await runAgentStream(agent, "continue", f.settings, {
+          signal: cancellation.signal,
+          ...(owned ? { ownedSandbox: ownedSandboxFor(agent) } : {}),
+        });
+        const consumed = consumeStream(stream);
+        await atGate.promise;
+        cancellation.abort(new Error("cancelled while draining wait"));
+        await expect(consumed).rejects.toBe(cancellation.signal.reason);
+        expect(stream.cancelled).toBe(true);
+        expect(stream.error).toBe(cancellation.signal.reason);
+        expect(stream.finalOutput).toBeUndefined();
+        expect(model.calls).toBe(0);
+        expect(gate.requested).toBe(false);
+        expect(gate.yielded).toBe(false);
+        await expect(gatewayWait(f)).rejects.toThrow("sealed");
+        release.resolve();
+        await pending;
+        expect(gate.requested).toBe(true);
+        expect(gate.yielded).toBe(false);
+        expect(model.calls).toBe(0);
+      } finally {
+        observed.mockRestore();
+        release.resolve();
+        await pending;
+        await f.prepared.close();
+      }
+    });
+  }
+
+  for (const owned of [false, true]) {
     test(`consumer failure closes admission while real SDK tool execution is stalled (owned=${owned})`, async () => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();

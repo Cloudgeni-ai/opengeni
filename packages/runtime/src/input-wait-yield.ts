@@ -169,18 +169,48 @@ export class InputWaitYield {
   }
 
   private filterInput(scope: StreamScope, { modelData }: Parameters<CallModelInputFilter>[0]) {
+    if (scope.signal?.aborted) {
+      this.closeCancelledDispatch(scope);
+      return modelData;
+    }
     this.assertCurrent(scope);
     if (this.accepted) throw this.boundaryExit;
     return modelData;
   }
 
   private async dispatch(scope: StreamScope, { modelData }: Parameters<CallModelInputFilter>[0]) {
+    if (scope.signal?.aborted) {
+      this.closeCancelledDispatch(scope);
+      return modelData;
+    }
     this.assertCurrent(scope);
     scope.phase = "dispatch";
-    await this.drain(scope);
+    try {
+      await this.drain(scope);
+    } catch (error) {
+      // Filter exceptions become SDK stream failures, not cancelled EOF. Keep
+      // admission sealed. Native initial-adapter cancellation is safe only if
+      // no wait has committed and no reserved mutation can still commit.
+      if (!scope.signal?.aborted) throw error;
+      this.closeCancelledDispatch(scope);
+      return modelData;
+    }
     this.assertCurrent(scope);
     if (this.accepted) throw this.boundaryExit;
     return modelData;
+  }
+
+  private closeCancelledDispatch(scope: StreamScope): void {
+    this.endStream(scope);
+    if (this.accepted || this.pending.size > 0) {
+      // Never permit even an aborted adapter dispatch after wait acceptance,
+      // or race a pending mutation that may accept before the adapter starts.
+      // Preserve cancellation authority without claiming a successful yield.
+      throw scope.signal?.reason ?? new DOMException("The operation was aborted", "AbortError");
+    }
+    // SDK 0.14.3 deliberately enters its initial adapter with an aborted signal.
+    // With no accepted/pending wait, preserve that native cancelled-EOF path;
+    // physical cancellation remains the transport's responsibility.
   }
 
   private async finishTools(scope: StreamScope) {

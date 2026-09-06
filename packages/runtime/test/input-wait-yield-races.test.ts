@@ -7,6 +7,23 @@ const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false 
 const emptyParameters = { type: "object" as const, properties: {}, additionalProperties: false };
 
 describe("accepted input wait terminal authority", () => {
+  for (const acceptFirst of [false, true]) {
+    test(`wait success concurrent with dispatch-drain abort retains cancellation barrier (acceptFirst=${acceptFirst})`, async () => {
+      const gate = new InputWaitYield();
+      const cancellation = new AbortController();
+      const binding = gate.beginStream(cancellation.signal);
+      const complete = gate.beginWait();
+      const dispatch = binding.modelDispatchFilter({ modelData: {} } as never);
+      if (acceptFirst) complete(true);
+      cancellation.abort(new Error("attempt cancelled"));
+      if (!acceptFirst) complete(true);
+      await expect(Promise.resolve(dispatch)).rejects.toBe(cancellation.signal.reason);
+      expect(gate.requested).toBe(true);
+      expect(gate.yielded).toBe(false);
+      expect(() => gate.beginWait()).toThrow("sealed");
+    });
+  }
+
   test("stale stream callbacks cannot close or reopen a recovery successor", async () => {
     const gate = new InputWaitYield();
     const first = gate.beginStream();
