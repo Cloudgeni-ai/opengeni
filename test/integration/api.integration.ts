@@ -1060,6 +1060,22 @@ describe("API component integration", () => {
       outcome: "applied",
     });
 
+    const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
+    const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(alreadyActive).toMatchObject({ changed: false, resource: { state: "active" } });
+
+    for (const pausedReason of ["user_pause", "api", "agent", "limits", "max_auto_continuations"]) {
+      await setSessionGoalStatus(dbClient.db, baseGrant.workspaceId, session.id, {
+        status: "paused",
+        pausedReason,
+      });
+      const resumed = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+      expect(resumed).toMatchObject({ changed: true, resource: { state: "active" } });
+      const goal = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+      expect(goal).toMatchObject({ autoContinuations: 0, noProgressStreak: 0, pausedReason: null });
+    }
+
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
       evidence: "CI green for 3 consecutive runs",
     });
@@ -1097,6 +1113,7 @@ describe("API component integration", () => {
       "goal.progress",
       "goal.paused",
       "goal.updated",
+      ...Array(6).fill("goal.resumed"),
       "goal.completed",
       "goal.set",
     ]);

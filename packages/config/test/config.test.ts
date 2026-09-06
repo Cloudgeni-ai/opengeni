@@ -2619,3 +2619,16 @@ function withEnv<T>(env: NodeJS.ProcessEnv, fn: () => T): T {
     process.env = original;
   }
 }
+
+test("existing pause-enabled sessions gain resume without changing unrelated selections", async () => {
+  const { allowedFirstPartyMcpToolsForSession } = await import("../src/index");
+  expect(allowedFirstPartyMcpToolsForSession({}, ["goal_pause"])).toEqual([
+    "goal_pause",
+    "goal_resume",
+  ]);
+  expect(allowedFirstPartyMcpToolsForSession({}, ["session_get"])).toEqual(["session_get"]);
+  expect(allowedFirstPartyMcpToolsForSession({}, ["goal_pause", "goal_resume"])).toEqual([
+    "goal_pause",
+    "goal_resume",
+  ]);
+});
