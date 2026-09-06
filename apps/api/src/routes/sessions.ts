@@ -888,7 +888,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session));
+    const activity = await backgroundCommandActivityForSessions(db, {
+      accountId: grant.accountId,
+      workspaceId,
+      sessionIds: [sessionId],
+    });
+    return c.json(
+      await withEffectivePolicy(deps, workspaceId, grant.subjectId, {
+        ...session,
+        ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
+      }),
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -925,6 +935,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       sessionId,
+      activeOnly: true,
     });
     return c.json({ commands });
   });

@@ -132,7 +132,7 @@ export async function backgroundCommandActivityForSessions(
 
 export async function listSessionBackgroundCommands(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: { accountId: string; workspaceId: string; sessionId: string; activeOnly?: boolean },
 ): Promise<SessionBackgroundCommand[]> {
   return await withRlsContext(
     db,
@@ -145,6 +145,9 @@ export async function listSessionBackgroundCommands(
           and(
             eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
             eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            ...(input.activeOnly
+              ? [inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"])]
+              : []),
           ),
         )
         .orderBy(
