@@ -468,12 +468,16 @@ describe("timeline scroll ownership browser regression", () => {
     expect(beforeWheel.gap).toBeLessThan(2);
 
     await scroller.hover();
-    for (let index = 0; index < 8; index += 1) {
-      await page.mouse.wheel(0, -120);
-      if ((await scroller.evaluate((node) => node.scrollTop)) < 2) {
-        break;
-      }
-    }
+    // Finish native wheel momentum before measuring a stationary prepend.
+    await Promise.all([
+      scroller.evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("scrollend", () => resolve(), { once: true }),
+          ),
+      ),
+      page.mouse.wheel(0, -120),
+    ]);
     await page.waitForFunction(
       () => {
         const node = document.querySelector<HTMLElement>(
@@ -569,15 +573,15 @@ describe("timeline scroll ownership browser regression", () => {
     expect(beforeScroll.maxScroll).toBeGreaterThan(0);
 
     await scroller.hover();
-    for (let index = 0; index < 12; index += 1) {
-      await page.mouse.wheel(0, -1_200);
-      if (
-        (await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics().scrollTop)) <
-        100
-      ) {
-        break;
-      }
-    }
+    await Promise.all([
+      scroller.evaluate(
+        (node) =>
+          new Promise<void>((resolve) =>
+            node.addEventListener("scrollend", () => resolve(), { once: true }),
+          ),
+      ),
+      page.mouse.wheel(0, -8_000),
+    ]);
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,
       undefined,
@@ -590,8 +594,10 @@ describe("timeline scroll ownership browser regression", () => {
     // remove surrounding chat rows nor destroy the usable scroll range.
     const step = page.getByRole("button", { name: /steps/ }).nth(4);
     const anchor = page.locator('[data-conversation-message="user-201"]');
-    await anchor.evaluate((node) => node.scrollIntoView({ block: "center" }));
-    const anchorTop = await anchor.evaluate((node) => node.getBoundingClientRect().top);
+    // The clicked disclosure owns position; another row can move as it folds.
+    await step.evaluate((node) => node.scrollIntoView({ block: "center" }));
+    await page.waitForTimeout(100);
+    const anchorTop = await step.evaluate((node) => node.getBoundingClientRect().top);
     await step.click();
     await page.waitForTimeout(180);
     await step.click();
@@ -602,7 +608,7 @@ describe("timeline scroll ownership browser regression", () => {
     expect(
       (await page.evaluate(() => window.timelineCollapsedHistoryHarness!.metrics())).maxScroll,
     ).toBeGreaterThan(0);
-    expect(await anchor.evaluate((node) => node.getBoundingClientRect().top)).toBeCloseTo(
+    expect(await step.evaluate((node) => node.getBoundingClientRect().top)).toBeCloseTo(
       anchorTop,
       0,
     );
@@ -984,11 +990,14 @@ describe("timeline scroll ownership browser regression", () => {
     // the reader leaves the seam and approaches the top again, exactly one new
     // sentinel request owns the replacement window.
     await page.evaluate(() => window.timelineCollapsedHistoryHarness!.settleLoad(1, "success"));
+    await scroller.hover();
     await page.mouse.wheel(0, 8_000);
     await page.waitForFunction(() => {
       const metrics = window.timelineCollapsedHistoryHarness!.metrics();
       return metrics.maxScroll - metrics.scrollTop < 2;
     });
+    await scroller.hover();
+    await page.waitForTimeout(100);
     await page.mouse.wheel(0, -8_000);
     await page.waitForFunction(
       () => window.timelineCollapsedHistoryHarness!.metrics().scrollTop < 100,

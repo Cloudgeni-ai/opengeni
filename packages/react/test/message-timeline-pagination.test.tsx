@@ -650,6 +650,15 @@ describe("MessageTimeline pagination affordances", () => {
     expect(scroller.scrollTop).toBe(2_000);
     expect(distanceFromBottom(scroller)).toBe(40);
 
+    // Browsers may emit more than one scroll event for the same restoration.
+    await actRun(() => {
+      scroller.dispatchEvent(new Event("scroll"));
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flush();
+    expect(scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+    expect(scroller.scrollTop).toBe(2_000);
+
     // An actual reader move toward the now-distant live tip still re-pins.
     await actRun(() => {
       scroller.scrollTop = 2_040;

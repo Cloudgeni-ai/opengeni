@@ -1731,8 +1731,7 @@ export function MessageTimeline({
     // inside PIN_THRESHOLD once the window is tall) and snapped them back.
     const inserted = Math.max(0, nextMaxScroll - previousMaxScroll);
     const towardTip = nextTop - previousTop - inserted;
-    const nextPinned =
-      !hasNewer && nearBottom && towardTip >= -TIP_FOLLOW_READER_UP_EPS_PX && inserted <= 1;
+    const nextPinned = !hasNewer && nearBottom && towardTip > 0.5 && inserted <= 1;
     if (!nextPinned) {
       stopFollow();
     }
