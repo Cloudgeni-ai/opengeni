@@ -69,8 +69,9 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
   request revalidates the current installation/Connection and repository row.
   Reads cover repositories, branches/refs, files, issues, pull requests,
   checks/status, and bounded code search. Reviewed writes cover branch/ref,
-  issue, pull-request, comment, and review-request creation/update only. Missing
-  write policy defaults to Ask; explicit Allow/Ask/Block remains attempt-frozen
-  for model and Codemode calls. Mutations are never replayed after an ambiguous
-  provider outcome. Merge, force-push, ref deletion, releases, workflows,
-  administration, and other unreviewed mutations are absent.
+  issue, pull-request, comment, and review-request creation/update only. Writes
+  are capability-first when no explicit policy matches; explicit
+  Allow/Ask/Block remains attempt-frozen for model and Codemode calls. Mutations
+  are never replayed after an ambiguous provider outcome. Merge, force-push, ref
+  deletion, releases, workflows, administration, and other unreviewed mutations
+  are absent.

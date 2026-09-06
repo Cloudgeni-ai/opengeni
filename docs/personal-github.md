@@ -180,14 +180,15 @@ repository identity, and current read/write permission before each provider
 request. `github_personal__*` tools are always attributed to the connected user;
 the separate `github_app__*` namespace acts as the OpenGeni bot. Tool arguments
 cannot choose either actor or a repository outside the accepted resource set.
-Writes use the attempt-frozen connector Allow/Ask/Block policy, default to Ask
-when no explicit policy exists, and are never replayed after an ambiguous
-outcome. The reviewed surface covers repository, branch, ref, file, issue,
-pull-request, review, check, and code-search reads plus ref creation, issue
-creation/update/comment, pull-request creation/update/comment/reviewer request,
-review submission (`COMMENT`, `APPROVE`, or `REQUEST_CHANGES`), and merge
-(`merge`, `squash`, or `rebase`). Merge is marked destructive and all writes
-remain subject to the configured confirmation policy.
+Writes use the attempt-frozen connector Allow/Ask/Block policy. When no explicit
+policy exists, the accepted repository write capability is authoritative and
+the action proceeds without manufacturing an approval requirement. Mutations
+are never replayed after an ambiguous outcome. The reviewed surface covers
+repository, branch, ref, file, issue, pull-request, review, check, and code-search
+reads plus ref creation, issue creation/update/comment, pull-request
+creation/update/comment/reviewer request, review submission (`COMMENT`, `APPROVE`,
+or `REQUEST_CHANGES`), and merge (`merge`, `squash`, or `rebase`). Merge is marked
+destructive and all writes remain subject to the configured confirmation policy.
 
 ## Durable propagation
 

@@ -29355,7 +29355,7 @@ export type ConnectorActionInvocation = {
   serverId: string;
   toolName: string;
   arguments: unknown;
-  /** Explicit per-session MCP approval, rather than a connector-policy decision. */
+  /** Explicit per-session approval or capability-authorized mutation ledger mode. */
   approvalMode?: "session_mcp" | "connector_write";
 };
 
@@ -29466,7 +29466,7 @@ type ResolvedConnectorActionPolicy =
       managed: true;
       source: "explicit";
       entry: null;
-      decision: "ask";
+      decision: "allow" | "ask";
       actionName: string;
     }
   | {
@@ -29642,13 +29642,19 @@ function resolvedSessionMcpApproval(
   };
 }
 
-function resolvedConnectorWriteApproval(
+function resolvedConnectorWritePolicy(
   resolved: ResolvedConnectorActionPolicy,
   approvalMode: "connector" | "connector_write",
   actionName: string,
 ): ResolvedConnectorActionPolicy {
   return approvalMode === "connector_write" && !resolved.managed
-    ? resolvedSessionMcpApproval(actionName)
+    ? {
+        managed: true,
+        source: "explicit",
+        entry: null,
+        decision: "allow",
+        actionName,
+      }
     : resolved;
 }
 
@@ -30100,7 +30106,7 @@ export async function prepareConnectorActionApproval(
         const resolved =
           normalized.approvalMode === "session_mcp"
             ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-            : resolvedConnectorWriteApproval(
+            : resolvedConnectorWritePolicy(
                 resolveConnectorActionPolicy(snapshot, {
                   connectionId: normalized.connectionId!,
                   serverId: normalized.serverId,
@@ -30169,7 +30175,7 @@ export async function previewConnectorActionApproval(
       const resolved =
         normalized.approvalMode === "session_mcp"
           ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-          : resolvedConnectorWriteApproval(
+          : resolvedConnectorWritePolicy(
               resolveConnectorActionPolicy(snapshot, {
                 connectionId: normalized.connectionId!,
                 serverId: normalized.serverId,
@@ -30231,7 +30237,7 @@ export async function beginConnectorActionExecution(
           const resolved =
             normalized.approvalMode === "session_mcp"
               ? resolvedSessionMcpApproval(normalized.policyActionSelector)
-              : resolvedConnectorWriteApproval(
+              : resolvedConnectorWritePolicy(
                   resolveConnectorActionPolicy(snapshot, {
                     connectionId: normalized.connectionId!,
                     serverId: normalized.serverId,
