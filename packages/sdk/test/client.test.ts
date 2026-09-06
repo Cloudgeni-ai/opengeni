@@ -2290,8 +2290,9 @@ describe("OpenGeniClient", () => {
 test("filters schedules by session on the server", async () => {
   const { fetch, requests } = recordingFetch(() => Response.json([]));
   const client = new OpenGeniClient({ baseUrl: "https://example.com", fetch });
-  await client.listScheduledTasks(WORKSPACE_ID, { sessionId: SESSION_ID, limit: 10 });
+  await client.listScheduledTasks(WORKSPACE_ID, { sessionId: SESSION_ID, limit: 10, offset: 20 });
   const url = new URL(requests[0]!.url);
   expect(url.searchParams.get("sessionId")).toBe(SESSION_ID);
   expect(url.searchParams.get("limit")).toBe("10");
+  expect(url.searchParams.get("offset")).toBe("20");
 });

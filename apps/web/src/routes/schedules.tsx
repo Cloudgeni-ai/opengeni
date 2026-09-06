@@ -1,3 +1,4 @@
+import { loadSessionSchedules } from "@/lib/scheduled-tasks";
 // Shared schedules for agent turns and deterministic knowledge-source syncs,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
@@ -277,7 +278,9 @@ export function SchedulesRoute({
     setLoading(true);
     try {
       const [next, targetSessions, exactSourceSession] = await Promise.all([
-        client.listScheduledTasks(workspaceId, { sessionId: targetSessionId }),
+        targetSessionId
+          ? loadSessionSchedules(client, workspaceId, targetSessionId)
+          : client.listScheduledTasks(workspaceId),
         canTargetSessions
           ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
           : Promise.resolve([]),

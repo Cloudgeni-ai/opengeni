@@ -74,6 +74,10 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
     const sessionId = c.req.query("sessionId");
+    const offset = Number(c.req.query("offset") ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new HTTPException(400, { message: "invalid offset" });
+    }
     if (sessionId !== undefined) {
       if (!z.string().uuid().safeParse(sessionId).success) {
         throw new HTTPException(400, { message: "invalid sessionId" });
@@ -84,7 +88,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       db,
       workspaceId,
       boundedLimit(c.req.query("limit")),
-      0,
+      offset,
       sessionId,
     );
     return c.json(tasks.map((task) => scheduledTaskForGrant(task, grant)));

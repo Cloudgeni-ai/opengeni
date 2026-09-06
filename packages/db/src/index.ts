@@ -16504,7 +16504,7 @@ export async function listScheduledTasks(
             : []),
         ),
       )
-      .orderBy(desc(schema.scheduledTasks.createdAt))
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
       .limit(limit)
       .offset(offset);
     return rows.map(mapScheduledTask);
