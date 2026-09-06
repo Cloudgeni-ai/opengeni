@@ -815,7 +815,7 @@ export function SessionChrome({
                       ) : null}
                     </button>
                     {signal.id === "goal" && goal && record && !readOnly ? (
-                      <div className="flex shrink-0 items-center pr-1 opacity-0 transition-opacity group-hover/signal:opacity-100 group-focus-within/signal:opacity-100 pointer-coarse:opacity-100">
+                      <div className="flex shrink-0 items-center pr-1">
                         {record.status === "active" || record.status === "paused" ? (
                           <IconAction
                             label={record.status === "paused" ? "Resume goal" : "Pause goal"}
@@ -847,7 +847,7 @@ export function SessionChrome({
                         </IconAction>
                       </div>
                     ) : signal.id === "queue" && canMutateQueue && queuedTurns[0] ? (
-                      <div className="flex shrink-0 items-center pr-1 opacity-0 transition-opacity group-hover/signal:opacity-100 group-focus-within/signal:opacity-100 pointer-coarse:opacity-100">
+                      <div className="flex shrink-0 items-center pr-1">
                         <IconAction
                           label="Steer first queued message"
                           tip={QUEUE_STEER_TIP}

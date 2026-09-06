@@ -278,9 +278,9 @@ partway through the same turn. A delivered input does not necessarily start a ne
 turn. Command-result summaries include the bounded command preview; an unavailable
 exit result is described as unavailable rather than asserting that execution failed.
 
-The Goal segment exposes pause/resume and clear on hover or keyboard focus. The
-Queue segment exposes Steer for its first authoritative queued message. Touch
-pointers keep these shortcuts visible; read-only views omit mutation controls.
+The Goal segment keeps pause/resume and clear visible beside its label. The
+Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation
+controls.
 
 For deterministic local review, run `bun run dev` and open
 `/dev/composer-chrome`. The gallery uses the production controls and timeline

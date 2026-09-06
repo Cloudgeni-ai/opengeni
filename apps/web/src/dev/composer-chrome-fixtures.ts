@@ -561,7 +561,7 @@ export function chromeScenarios(): ChromeScenario[] {
       id: "activity-mixed",
       title: "Commands, goal, queue and inbox",
       description:
-        "Hover the goal or queue for shortcuts. Stop a command, then simulate its result. No finished-command list.",
+        "Goal and queue shortcuts stay visible. Stop a command, then simulate its result. No finished-command list.",
       defaultActive: null,
     },
     {
