@@ -245,6 +245,8 @@ import {
   sandboxCommandStdout,
 } from "./sandbox/command-result";
 import { shellCodemodePath } from "./sandbox/codemode-token";
+import { InputWaitYield } from "./input-wait-yield";
+export { InputWaitYield } from "./input-wait-yield";
 import {
   createTurnToolCancellationController,
   TurnSandboxCommandCancelledError,
@@ -1636,8 +1638,11 @@ type ModelToolInvocation = {
 };
 
 const modelToolInvocation = new AsyncLocalStorage<ModelToolInvocation>();
+const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Trusted attempt-local wait receipt shared with prepared tools. */
+  inputWaitYield?: InputWaitYield;
   model?: Model;
   /** Attach the built-in structured human-input tool. Default: enabled. */
   humanInputEnabled?: boolean;
@@ -2472,6 +2477,7 @@ export function buildOpenGeniAgent(
     // `new SandboxAgent({ ...baseConfig, ... })` path via the shared baseConfig
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
     tools: agentTools,
+    ...(options.inputWaitYield ? { toolUseBehavior: options.inputWaitYield.toolUseBehavior } : {}),
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
     // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
     // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
@@ -2484,6 +2490,7 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
+    if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
       agentsNeedingGenesisTitleDirective.add(agent);
@@ -2569,6 +2576,7 @@ export function buildOpenGeniAgent(
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
+  if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
   agentInstructionInspection.set(agent, instructionInspection);
   if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
@@ -3392,6 +3400,8 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 }
 
 export type PreparedAgentTools = {
+  /** Shared by eager/deferred MCP, Codemode, and this attempt's Agent. */
+  inputWaitYield?: InputWaitYield;
   mcpServers: MCPServer[];
   /** Protocol-neutral catalog for current-human HTTP, MCP, and browser adapters. */
   toolGatewayCatalog: ToolGatewayCatalog | null;
@@ -3777,6 +3787,7 @@ export async function prepareAgentTools(
   tools: ToolRef[],
   options: PrepareToolsOptions = {},
 ): Promise<PreparedAgentTools> {
+  const inputWaitYield = new InputWaitYield();
   // One live Set per prepared tool environment, shared with the codex_apps
   // sanitizing fetch and the current turn's tool_search description.
   const codexConnectorNamespaces = options.deferredCodexConnectorNamespaces ?? new Set<string>();
@@ -3971,6 +3982,11 @@ export async function prepareAgentTools(
           firstParty && !bestEffort,
           buildConnectorAttachmentAuthority(config, options, resolvedMcpToolConnectionIds, url),
           tool.eager !== true,
+          undefined,
+          undefined,
+          firstParty && config.id === "opengeni" && !config.connectionRef && !bridge
+            ? inputWaitYield
+            : undefined,
         );
         return {
           server,
@@ -4145,6 +4161,7 @@ export async function prepareAgentTools(
         toolGateway,
         attemptToolCatalog: attemptToolEnvironment?.catalog ?? null,
         attemptToolEnvironment,
+        inputWaitYield,
         // Keep this by-reference so connector approval can observe an identity
         // resolved while best-effort preparation was running in parallel.
         resolvedMcpConnectionIds,
@@ -4256,6 +4273,7 @@ export async function prepareAgentTools(
     toolGateway: null,
     attemptToolCatalog: null,
     attemptToolEnvironment: null,
+    inputWaitYield,
     resolvedMcpConnectionIds,
     close: async () => {
       let prepared: PreparedAgentTools;
@@ -6256,6 +6274,7 @@ export class PrefixedMcpServer implements MCPServer {
       LocalMcpServerRegistration["preflightCall"]
     >,
     private readonly approvalAuthority?: unknown,
+    private readonly inputWaitYield?: InputWaitYield,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -6587,6 +6606,9 @@ export class PrefixedMcpServer implements MCPServer {
       const result = AttemptToolResult.parse(output);
       boundedMcpToolResult(result);
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
+      if (unprefixed === "wait_for_input" && result.isError !== true) {
+        this.inputWaitYield?.recordSuccess();
+      }
       return result;
     } catch (error) {
       // A brokered tools/call that receives 401 may already have changed provider
@@ -7058,6 +7080,7 @@ export async function runAgentStream(
   settings: Settings,
   overrides: RunAgentStreamOptions = {},
 ) {
+  const inputWaitYield = agentInputWaitYields.get(agent);
   const prepared: PreparedAgentInput =
     typeof input === "string"
       ? { input, persistedHistoryCount: 0 }
@@ -7201,6 +7224,7 @@ export async function runAgentStream(
     );
     const ownedFilter = composeCallModelInputFilters(
       [
+        inputWaitYield?.modelInputFilter,
         measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
         measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
@@ -7234,6 +7258,8 @@ export async function runAgentStream(
               : {}),
           }),
         ),
+        // A Codemode wait can settle while an asynchronous host filter runs.
+        inputWaitYield?.modelInputFilter,
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
@@ -7244,6 +7270,9 @@ export async function runAgentStream(
       toolExecution: { preApprovalInputGuardrails: true },
       ...lazyToolRunBindings(agent),
       callModelInputFilter: ownedFilter,
+      ...(inputWaitYield
+        ? { errorHandlers: inputWaitYield.runErrorHandlers(overrides.signal) }
+        : {}),
       ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
@@ -7350,6 +7379,7 @@ export async function runAgentStream(
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
+      inputWaitYield?.modelInputFilter,
       measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
       measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
@@ -7377,6 +7407,7 @@ export async function runAgentStream(
             : {}),
         }),
       ),
+      inputWaitYield?.modelInputFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -7391,6 +7422,7 @@ export async function runAgentStream(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
+    ...(inputWaitYield ? { errorHandlers: inputWaitYield.runErrorHandlers(overrides.signal) } : {}),
     ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {

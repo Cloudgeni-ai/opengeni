@@ -1652,7 +1652,10 @@ export async function runTurnStreamAttempt(
       return claimedResult({ status: "requires_action" });
     }
 
-    const finalOutput = String(requireAgentStreamFinalOutput(eventing.stream.finalOutput));
+    const inputWaitYielded = eventing.preparedTools?.inputWaitYield?.requested === true;
+    const finalOutput = String(
+      requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
+    );
     await historySink.reconcileConversationTruth({ requireDurable: true });
     // Op-stream durability fence: the tool outputs are now durably in the
     // history store (a redispatch would NOT re-execute them), so this
@@ -1665,10 +1668,9 @@ export async function runTurnStreamAttempt(
     if (
       !(await eventing.settle!({
         events: [
-          {
-            type: "agent.message.completed",
-            payload: { text: finalOutput },
-          },
+          ...(inputWaitYielded
+            ? []
+            : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
           { type: "turn.completed", payload: { output: finalOutput } },
           { type: "session.status.changed", payload: { status: "idle" } },
         ],

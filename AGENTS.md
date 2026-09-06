@@ -244,6 +244,11 @@ turn. A resumed attempt can attach a new batch after its resolved open suffix;
 preserve earlier receipts and canonical history order instead of requiring one
 history-item id for every update delivered to that turn.
 
+Successful first-party `wait_for_input` is an enforced runtime turn boundary,
+not model-visible advice to keep calling tools until a final answer appears.
+Preserve trusted acceptance state, the settled tool batch and canonical history,
+ordinary worker settlement, and the first same-turn deadline across retries.
+
 ## Pull-request delivery across moving `main`
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of

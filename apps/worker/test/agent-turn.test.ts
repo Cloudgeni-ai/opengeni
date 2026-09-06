@@ -812,7 +812,7 @@ describe("turn exact-content boundaries", () => {
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
-      "String(requireAgentStreamFinalOutput(eventing.stream.finalOutput))",
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
       interruptionPath,
     );
     const mandatoryBarrier = source.indexOf(
