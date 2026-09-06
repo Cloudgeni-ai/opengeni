@@ -12,6 +12,8 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  createScheduledTask,
+  deleteScheduledTask,
   createVariableSet,
   deleteVariableSet,
   getActiveSessionHistoryItems,
@@ -1379,7 +1381,12 @@ describe("embedding host session authorization routes", () => {
     });
     const lineage = await app.request(`${base}/lineage`, { headers });
     expect(lineage.status).toBe(200);
-    expect(await lineage.json()).toEqual({ ancestors: [], children: [], truncated: false });
+    expect(await lineage.json()).toEqual({
+      ancestors: [],
+      children: [],
+      truncated: false,
+      sessionHasSchedules: false,
+    });
 
     await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, (scoped) =>
       mutateSessionControlInTransaction(scoped, {
@@ -2341,5 +2348,65 @@ describe("embedding host session authorization routes", () => {
       { headers: { authorization: value.authorization } },
     );
     expect(response.status).toBe(200);
+  });
+});
+
+test("session schedule projections follow current targets and schedule permissions", async () => {
+  if (!available) return;
+  const value = await fixture();
+  const app = fullAppWith({
+    resolveListScope: async () => ({ kind: "all" }),
+    authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+  });
+  const task = await createScheduledTask(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    name: "Paused review",
+    status: "paused",
+    schedule: { type: "manual" },
+    temporalScheduleId: crypto.randomUUID(),
+    runMode: "existing_session",
+    overlapPolicy: "skip",
+    targetSessionId: value.child.id,
+    agentConfig: { prompt: "Review", resources: [], tools: [], metadata: {} },
+    createdBy: { kind: "service", subjectId: "scheduler" },
+    metadata: {},
+  });
+  const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: value.grant.subjectId,
+    permissions: ["sessions:read", "sessions:control", "scheduled_tasks:run"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const base = `/v1/workspaces/${value.grant.workspaceId}`;
+  const read = async (path: string, token = authorization) => {
+    const response = await app.request(`${base}${path}`, { headers: { authorization: token } });
+    expect(response.status).toBe(200);
+    return await response.json();
+  };
+  expect(await read(`/sessions/${value.child.id}`)).toMatchObject({ hasSchedules: true });
+  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
+    sessionHasSchedules: true,
+  });
+  expect(await read(`/sessions/${value.child.id}`, value.authorization)).toMatchObject({
+    hasSchedules: false,
+  });
+  expect(await read(`/scheduled-tasks?sessionId=${value.child.id}`)).toMatchObject([
+    { id: task.id },
+  ]);
+  expect(await read(`/scheduled-tasks?sessionId=${value.hidden.id}`)).toEqual([]);
+  const page = await read("/sessions?view=page");
+  expect(
+    page.sessions.find((session: { id: string }) => session.id === value.child.id),
+  ).toMatchObject({ hasSchedules: true });
+  const denied = await app.request(`${base}/scheduled-tasks?sessionId=${value.child.id}`, {
+    headers: { authorization: value.authorization },
+  });
+  expect(denied.status).toBe(403);
+  await deleteScheduledTask(client.db, value.grant.workspaceId, task.id);
+  expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
+    sessionHasSchedules: false,
   });
 });
