@@ -2106,6 +2106,110 @@ describe("MessageTimeline pagination affordances", () => {
     await r.unmount();
   });
 
+  test("a reconstructed first display item does not turn retained events into a replacement", async () => {
+    let intersectionCallback: IntersectionObserverCallback = () => undefined;
+    let intersectionObserver: IntersectionObserver | null = null;
+    const observed: Element[] = [];
+    globalThis.IntersectionObserver = class implements IntersectionObserver {
+      readonly root: Element | Document | null = null;
+      readonly rootMargin = "400px 0px 0px 0px";
+      readonly scrollMargin = "0px 0px 0px 0px";
+      readonly thresholds = [0];
+      constructor(callback: IntersectionObserverCallback) {
+        intersectionCallback = callback;
+        intersectionObserver = this;
+      }
+      observe(target: Element): void {
+        observed.push(target);
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+      takeRecords(): IntersectionObserverEntry[] {
+        return [];
+      }
+    };
+
+    const load = deferred<boolean>();
+    const controlled = controlledOlderReceipt(load.promise);
+    let calls = 0;
+    const loadOlder: OlderHistoryLoader = () => {
+      calls += 1;
+      return controlled.receipt;
+    };
+    const forwardingLoadOlder: OlderHistoryLoader = () => loadOlder();
+    const source = Array.from({ length: 40 }, (_, i) => event(i + 2));
+    const initialItems = Array.from({ length: 40 }, (_, index) =>
+      userItem(`tail-${index}`, `tail ${index}`),
+    );
+    const replacement = Array.from({ length: 40 }, (_, index) =>
+      userItem(`older-${index}`, `older ${index}`),
+    );
+    const r = await renderComponent(
+      <PublicMessageTimeline
+        items={initialItems}
+        events={source}
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+    const scroller = r.container.querySelector("[data-og-timeline-scroller]");
+    if (!(scroller instanceof HTMLElement)) {
+      throw new Error("expected timeline scroller");
+    }
+    const layout = mockScrollerLayout(scroller, {
+      clientHeight: 400,
+      contentHeight: 1_600,
+      tipHeight: 80,
+      paddingBottom: 24,
+    });
+
+    await r.rerender(
+      <PublicMessageTimeline
+        items={initialItems}
+        events={source}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+    await readerScrollUp(scroller, 80);
+    const target = observed.at(-1);
+    if (!target) {
+      throw new Error("expected observed top sentinel");
+    }
+    await actRun(() =>
+      intersectionCallback(
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        intersectionObserver!,
+      ),
+    );
+    expect(calls).toBe(1);
+    expect(scroller.scrollTop).toBe(80);
+
+    controlled.commit();
+    layout.setContentHeight(2_000);
+    await r.rerender(
+      <PublicMessageTimeline
+        items={replacement}
+        events={[event(1), ...source]}
+        status="idle"
+        hasOlder
+        onLoadOlder={forwardingLoadOlder}
+      />,
+    );
+
+    expect(scroller.scrollTop).toBe(480);
+    await actRun(() => scroller.dispatchEvent(new Event("scroll")));
+    expect(scroller.getAttribute("data-og-bottom-follow")).toBe("false");
+    expect(r.container.textContent).toContain("Jump to latest");
+
+    await actRun(() => load.resolve(true));
+    await flush();
+    expect(calls).toBe(1);
+    layout.restore();
+    await r.unmount();
+  });
+
   test("a declined older load during newer navigation exposes one bounded retry", async () => {
     const frames: FrameRequestCallback[] = [];
     globalThis.requestAnimationFrame = (callback: FrameRequestCallback): number => {

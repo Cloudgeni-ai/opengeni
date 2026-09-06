@@ -96,6 +96,44 @@ function scriptedClient(input: {
 }
 
 describe("useSessionEvents", () => {
+  test("a second older page survives the stream reconnect caused by the first", async () => {
+    const store = Array.from({ length: 4000 }, (_, i) => event(i + 1));
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let holdNext = false;
+    const { client, streamCalls } = scriptedClient({
+      store,
+      listEvents: async (options) => {
+        if (holdNext) await held;
+        return listPage(store, options);
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionEvents(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush(20);
+    const initialStreams = streamCalls.length;
+    let second!: ReturnType<typeof hook.result.current.loadOlder>;
+    await actRun(async () => {
+      await hook.result.current.loadOlder();
+      holdNext = true;
+      second = hook.result.current.loadOlder();
+    });
+    await flush(20);
+    expect(streamCalls.length).toBeGreaterThan(initialStreams);
+    expect(hook.result.current.loadingOlder).toBe(true);
+    const previousOldest = hook.result.current.events[0]!.sequence;
+    release();
+    await actRun(() => second);
+    await flush(20);
+    expect(second.committed).toBe(true);
+    expect(hook.result.current.events[0]!.sequence).toBeLessThan(previousOldest);
+    await hook.unmount();
+  });
+
   test("projects authoritative capacity arm and resume statuses from the live stream", async () => {
     let resume: () => void = () => undefined;
     const resumeGate = new Promise<void>((resolve) => {

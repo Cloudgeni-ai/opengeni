@@ -1825,6 +1825,7 @@ function SessionChatPane(props: {
             <MessageTimeline
               className="h-full"
               items={timelineWithOptimisticSends}
+              events={props.events}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
