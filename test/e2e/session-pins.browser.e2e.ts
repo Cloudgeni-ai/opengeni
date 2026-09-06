@@ -1320,7 +1320,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A first prompt queued from the composer",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor({ timeout: 20_000 });
+      await queueChip.getByText("1 queued", { exact: true }).waitFor({ timeout: 20_000 });
       await composer.fill("A second prompt queued from the composer");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1329,10 +1329,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 20_000 });
-      // A freshly queued prompt intentionally opens the queue for the transfer
-      // animation. Preserve that open state; only click when an older client
-      // or reduced host did not open it.
+      await queueChip.getByText("2 queued", { exact: true }).waitFor({ timeout: 20_000 });
+      // Queue receipts pulse the compact control; open it to inspect the prompts.
       if ((await queueChip.getAttribute("aria-expanded")) !== "true") {
         await queueChip.click();
       }
@@ -1400,7 +1398,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1409,7 +1407,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer (edited)",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
       // it moves that row to the head and resumes the branch. The accepted row
@@ -1434,7 +1432,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
       expect(await chrome.getByText("Changing direction…", { exact: true }).count()).toBe(0);
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await expectRowPrompt(queuedRows, 0, "A first prompt queued from the composer");
 
       // Remove deletes only the selected waiting prompt. Add one final prompt so
@@ -1449,7 +1447,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A replacement prompt after delete",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       expect(
         await timeline
           .getByText("Inspect the full session-control surface", { exact: true })
@@ -1503,7 +1501,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage
         .getByTestId("session-chrome-queue")
-        .getByText("1 queued prompt", { exact: true })
+        .getByText("1 queued", { exact: true })
         .waitFor();
 
       // The manager remains paused: queueing in a descendant is never a hidden
