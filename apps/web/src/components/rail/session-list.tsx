@@ -145,7 +145,6 @@ import {
   mergeSessionForRail,
   normalizeSessionBrowseCreator,
   relativeTimeLabel,
-  scheduledTaskIdOf,
   sessionBrowseResultCount,
   selectedDescendantNode,
   sessionCreatorLabelMap,
@@ -3009,7 +3008,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={Boolean(scheduledTaskIdOf(props.session))}
+          scheduled={props.session.hasSchedules === true}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -3112,7 +3111,7 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={Boolean(scheduledTaskIdOf(props.session))}
+                  scheduled={props.session.hasSchedules === true}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   creator={creator}
                 />

@@ -10630,6 +10630,9 @@ export const scheduledTasks = pgTable(
       table.workspaceId,
       table.temporalScheduleId,
     ),
+    sessionTarget: index("scheduled_tasks_workspace_session_target_idx")
+      .on(table.workspaceId, table.reusableSessionId)
+      .where(sql`${table.deletedAt} is null`),
     status: index("scheduled_tasks_workspace_status_idx").on(table.workspaceId, table.status),
     variableSet: index("scheduled_tasks_variable_set_idx").on(
       table.workspaceId,

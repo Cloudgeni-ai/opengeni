@@ -16458,11 +16458,35 @@ export async function requireScheduledTaskTargetInTransaction(
   }
 }
 
+/** Authoritative current targets, batched after session visibility has been resolved. */
+export async function scheduledSessionIds(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .selectDistinct({ sessionId: schema.scheduledTasks.reusableSessionId })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          isNull(schema.scheduledTasks.deletedAt),
+          inArray(schema.scheduledTasks.runMode, ["existing_session", "reusable_session"]),
+          inArray(schema.scheduledTasks.reusableSessionId, sessionIds),
+        ),
+      );
+    return new Set(rows.flatMap((row) => (row.sessionId ? [row.sessionId] : [])));
+  });
+}
+
 export async function listScheduledTasks(
   db: Database,
   workspaceId: string,
   limit = 100,
   offset = 0,
+  sessionId?: string,
 ): Promise<ScheduledTask[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -16472,9 +16496,15 @@ export async function listScheduledTasks(
         and(
           eq(schema.scheduledTasks.workspaceId, workspaceId),
           isNull(schema.scheduledTasks.deletedAt),
+          ...(sessionId
+            ? [
+                eq(schema.scheduledTasks.reusableSessionId, sessionId),
+                inArray(schema.scheduledTasks.runMode, ["existing_session", "reusable_session"]),
+              ]
+            : []),
         ),
       )
-      .orderBy(desc(schema.scheduledTasks.createdAt))
+      .orderBy(desc(schema.scheduledTasks.createdAt), desc(schema.scheduledTasks.id))
       .limit(limit)
       .offset(offset);
     return rows.map(mapScheduledTask);

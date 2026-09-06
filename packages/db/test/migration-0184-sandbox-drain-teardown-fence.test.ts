@@ -26,6 +26,7 @@ const withheldMigrationNames = [
   "0397_sandbox_deadline_rotation_preemption.sql",
   "0402_session_input_wait_and_background_command_results.sql",
   "0407_connected_command_tracking_retirement.sql",
+  "0408_scheduled_session_target_index.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
@@ -106,7 +107,8 @@ describe("migration 0184 sandbox drain teardown fence", () => {
       // there, 0391 extends that exact 0388 definition, and 0394 patches the
       // resulting provider-deadline branch. The 0402 session-wait cutover also
       // inventories the scheduled accepted-execution columns created by 0275,
-      // so it must remain behind the same withheld boundary.
+      // so it must remain behind the same withheld boundary. The 0408 target
+      // index depends on the deleted_at column introduced by 0275.
       await sql`
         insert into schema_migrations (name)
         select unnest(${withheldMigrationNames}::text[])`;
