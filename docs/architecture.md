@@ -1265,6 +1265,18 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 adds hooks and UI. `apps/web` is a consumer of those packages and should not
 become a hidden source of domain semantics.
 
+Timeline history ownership stays in `packages/react`: `use-session-events.ts`
+fences history navigation by session/client lifetime, independently of SSE
+reconnects. The web route supplies source events alongside projected rows;
+it keys the timeline by session so pagination ownership and reading state cannot
+survive navigation to another session.
+Retained event identity determines window overlap because partial-message row
+IDs can change on prepend. `timeline-anchor.tsx` captures the reading position
+immediately before React mutates the DOM; `message-timeline.tsx` applies only
+the residual correction after browser anchoring. Corrections cannot resume
+tip-follow, and continued upward input permits bounded sequential older-page
+loads even when collapsed content adds no scroll range.
+
 The stock web console imports the browser-focused `@opengeni/sdk/browser`
 entry. Operator-only Document-authority and tenancy-backfill methods live in
 the optional `@opengeni/sdk/document-authority` entry, while the root and

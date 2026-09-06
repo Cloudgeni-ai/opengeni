@@ -441,7 +441,8 @@ function productionTypeScriptFiles(): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (
         entry.isDirectory() &&
-        ["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name)
+        (["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name) ||
+          entry.name.startsWith(".native-closure-"))
       ) {
         continue;
       }

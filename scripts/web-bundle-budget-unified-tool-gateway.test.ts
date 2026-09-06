@@ -14,6 +14,12 @@ describe("unified tool gateway web bundle budget", () => {
     expect(
       UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET - UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
     ).toBe(1_035);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBeGreaterThanOrEqual(
+      UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
+    );
+  });
+  test("fits the measured session-history graph with bounded headroom", () => {
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2260 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_312_535).toBe(1_705);
   });
 });

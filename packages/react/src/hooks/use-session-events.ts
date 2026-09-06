@@ -193,6 +193,7 @@ export function useSessionEvents(
   const streamAbortRef = useRef<AbortController | null>(null);
   const streamKeyRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  const navigationGenerationRef = useRef(0);
   const eventWindowRef = useRef<BrowserSessionEventWindow>(EMPTY_EVENT_WINDOW);
   const sessionStatusRef = useRef<{
     sequence: number;
@@ -204,6 +205,21 @@ export function useSessionEvents(
   // Effects reset state after commit. Tag the state so the first render for a
   // new stream identity cannot expose the previous session's event log.
   const [stateStreamKey, setStateStreamKey] = useState(streamKey);
+
+  // Reopening SSE after a prepend must not cancel the next history page.
+  // Navigation belongs to the session/client lifetime, not the transport.
+  useEffect(() => {
+    navigationGenerationRef.current += 1;
+    loadingOlderRef.current = false;
+    loadingNewerRef.current = false;
+    loadingOldestRef.current = false;
+    setLoadingOlder(false);
+    setLoadingNewer(false);
+    setLoadingOldest(false);
+    return () => {
+      navigationGenerationRef.current += 1;
+    };
+  }, [client, workspaceId, sessionId, after, enabled, fullReplay]);
 
   useEffect(() => {
     // Reset the accumulated log only when the stream identity changes —
@@ -243,10 +259,6 @@ export function useSessionEvents(
     // only the newest dependency generation can mutate refs or React state.
     const generation = generationRef.current + 1;
     generationRef.current = generation;
-    if (loadingOlderRef.current) {
-      loadingOlderRef.current = false;
-      setLoadingOlder(false);
-    }
     if (!sessionId || !streamEnabled) {
       // A page that stayed hidden beyond the live-activity grace deliberately
       // closed its SSE connection. Replaying from the old cursor on return can
@@ -415,6 +427,16 @@ export function useSessionEvents(
           }
           const status = observeSessionStatus(window.events, sessionStatusRef);
           const retained = boundBrowserSessionEventWindow(window.events);
+          // A replacement tail retires requests against the discarded window.
+          // Ordinary SSE reconnects preserve navigation, but splicing an old
+          // page into this new tail could leave an inaccessible history gap.
+          navigationGenerationRef.current += 1;
+          loadingOlderRef.current = false;
+          loadingNewerRef.current = false;
+          loadingOldestRef.current = false;
+          setLoadingOlder(false);
+          setLoadingNewer(false);
+          setLoadingOldest(false);
           eventWindowRef.current = retained;
           oldestSequenceRef.current = retained.events[0]?.sequence ?? window.oldestSequence;
           newestSequenceRef.current =
@@ -543,7 +565,7 @@ export function useSessionEvents(
           setHasOlder(false);
           return false;
         }
-        const generation = generationRef.current;
+        const generation = navigationGenerationRef.current;
         loadingOlderRef.current = true;
         setLoadingOlder(true);
         let published = false;
@@ -554,7 +576,7 @@ export function useSessionEvents(
             targetGroups: OLDER_GROUP_TARGET,
             maxFetches: OLDER_FETCH_CAP,
           });
-          if (generationRef.current !== generation) {
+          if (navigationGenerationRef.current !== generation) {
             return false;
           }
           if (window.events.length === 0) {
@@ -635,7 +657,7 @@ export function useSessionEvents(
           published = true;
           return olderStillAvailable;
         } finally {
-          if (!published) {
+          if (!published && navigationGenerationRef.current === generation) {
             loadingOlderRef.current = false;
             setLoadingOlder(false);
           }
@@ -648,7 +670,7 @@ export function useSessionEvents(
     if (!sessionId || navigationBusy() || !hasOlderRef.current) {
       return false;
     }
-    const generation = generationRef.current;
+    const generation = navigationGenerationRef.current;
     loadingOldestRef.current = true;
     setLoadingOldest(true);
     let published = false;
@@ -659,7 +681,7 @@ export function useSessionEvents(
         targetGroups: OLDEST_GROUP_TARGET,
         maxFetches: OLDEST_FETCH_CAP,
       });
-      if (generationRef.current !== generation) {
+      if (navigationGenerationRef.current !== generation) {
         return false;
       }
       if (window.events.length === 0) {
@@ -700,7 +722,7 @@ export function useSessionEvents(
       published = true;
       return newer;
     } finally {
-      if (!published) {
+      if (!published && navigationGenerationRef.current === generation) {
         loadingOldestRef.current = false;
         setLoadingOldest(false);
       }
@@ -717,7 +739,7 @@ export function useSessionEvents(
       setHasNewer(false);
       return false;
     }
-    const generation = generationRef.current;
+    const generation = navigationGenerationRef.current;
     loadingNewerRef.current = true;
     setLoadingNewer(true);
     let published = false;
@@ -728,7 +750,7 @@ export function useSessionEvents(
         targetGroups: NEWER_GROUP_TARGET,
         maxFetches: NEWER_FETCH_CAP,
       });
-      if (generationRef.current !== generation) {
+      if (navigationGenerationRef.current !== generation) {
         return false;
       }
       if (window.events.length === 0) {
@@ -800,7 +822,7 @@ export function useSessionEvents(
       published = true;
       return newer;
     } finally {
-      if (!published) {
+      if (!published && navigationGenerationRef.current === generation) {
         loadingNewerRef.current = false;
         setLoadingNewer(false);
       }
