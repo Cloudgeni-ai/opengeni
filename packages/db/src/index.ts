@@ -2025,7 +2025,13 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         schema.workspaces,
         eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
       )
-      .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+      .where(
+        and(
+          eq(schema.workspaceMemberships.subjectId, subjectId),
+          eq(schema.workspaceMemberships.accountId, account.id),
+          eq(schema.workspaces.accountId, account.id),
+        ),
+      )
       .orderBy(desc(schema.workspaces.createdAt));
     const workspaceGrants: AccessGrant[] = memberships.map((row) => ({
       workspaceId: row.workspace.id,
@@ -2081,7 +2087,13 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           schema.workspaces,
           eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id),
         )
-        .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+        .where(
+          and(
+            eq(schema.workspaceMemberships.subjectId, subjectId),
+            eq(schema.workspaceMemberships.accountId, organizationMembership.organizationId),
+            eq(schema.workspaces.accountId, organizationMembership.organizationId),
+          ),
+        )
         .orderBy(desc(schema.workspaces.createdAt));
       for (const row of persistedOrganizationMemberships) {
         if (workspaceGrants.some((grant) => grant.workspaceId === row.workspace.id)) continue;
