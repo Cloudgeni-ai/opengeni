@@ -1355,6 +1355,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // where users reorder, edit, steer, or delete a waiting prompt.
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
+        // Keep the hover-revealed actions visible while Axe inspects their text.
+        const steerAction = chrome.getByRole("button", {
+          name: "Steer queued prompt 2",
+          exact: true,
+        });
+        await steerAction.focus();
+        await steerAction.evaluate(async (node) => {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          await Promise.all(
+            node
+              .parentElement!.getAnimations()
+              .map((animation) => animation.finished.catch(() => undefined)),
+          );
+        });
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
@@ -2364,6 +2378,7 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
   let scan = new AxeBuilder({ page });
   for (const include of includes) scan = scan.include(include);
   const results = await scan.analyze();
+
   expect(
     results.violations.map((violation) => ({
       id: violation.id,
