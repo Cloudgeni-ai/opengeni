@@ -1338,6 +1338,7 @@ export type Session = {
   accountId: string;
   status: SessionStatus;
   backgroundCommandActivity?: SessionBackgroundCommandActivity | undefined;
+  hasSchedules?: boolean | undefined;
   initialMessage: string;
   title: string | null;
   titleSource: "user" | "agent" | null;
@@ -1605,6 +1606,7 @@ export type LineageNode = {
 };
 
 export type SessionLineageResponse = {
+  sessionHasSchedules?: boolean | undefined;
   ancestors: SessionSummary[];
   children: LineageNode[];
   truncated: boolean;

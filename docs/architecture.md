@@ -769,6 +769,9 @@ These producers all converge on the ordinary session/turn runtime:
 - a **child session** is a normal session with explicit lineage, depth, compute,
   visibility, and initiating-authority rules.
 
+Session header and sidebar schedule indicators use `Session.hasSchedules`, derived by one batched indexed lookup of non-deleted `scheduled_tasks.reusable_session_id` targets after session authorization. Paused schedules remain linked. Creation metadata is only historical run-grouping provenance. The schedules list accepts a server-side `sessionId` filter; the web route passes `targetSessionId` on navigation.
+The existing lineage refresh also carries `sessionHasSchedules` for the open header and schedule flags for its nodes, so external schedule mutations converge through the existing 30-second header / 15-second sidebar refreshes without a new polling loop or event protocol.
+
 For an existing session, a scheduled turn that omits its turn-level `tools`
 field inherits the durable session tool policy; explicit `tools: []` remains an
 empty override.

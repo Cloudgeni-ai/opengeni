@@ -11940,6 +11940,8 @@ export const Session = z.object({
   status: SessionStatus,
   /** Additive list projection. Detail reads may omit it. */
   backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
+  /** Current non-deleted schedules targeting this session, including paused schedules. */
+  hasSchedules: z.boolean().optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -12151,6 +12153,8 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
 );
 
 export const SessionLineageResponse = z.object({
+  /** Current schedule relationship for the requested session. */
+  sessionHasSchedules: z.boolean().optional(),
   ancestors: z.array(Session),
   children: z.array(LineageNode),
   truncated: z.boolean().default(false),

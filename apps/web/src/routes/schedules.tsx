@@ -147,11 +147,13 @@ export function SchedulesRoute({
   workspaceId,
   sourceSessionId,
   focusTaskId,
+  targetSessionId,
 }: {
   workspaceId: string;
   sourceSessionId?: string;
   /** Arrived from a session this task started: reveal that one task on load. */
   focusTaskId?: string;
+  targetSessionId?: string;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
@@ -173,7 +175,10 @@ export function SchedulesRoute({
   const [expandedTaskIds, setExpandedTaskIds] = useState<ReadonlySet<string>>(
     () => new Set<string>(focusTaskId ? [focusTaskId] : []),
   );
-  const [pausedOpen, setPausedOpen] = useState(false);
+  const [pausedOpen, setPausedOpen] = useState(Boolean(targetSessionId));
+  useEffect(() => {
+    if (targetSessionId) setPausedOpen(true);
+  }, [targetSessionId]);
   const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ScheduledTask | null>(null);
   const [clock, setClock] = useState(() => new Date());
@@ -272,7 +277,7 @@ export function SchedulesRoute({
     setLoading(true);
     try {
       const [next, targetSessions, exactSourceSession] = await Promise.all([
-        client.listScheduledTasks(workspaceId),
+        client.listScheduledTasks(workspaceId, { sessionId: targetSessionId }),
         canTargetSessions
           ? client.listSessions(workspaceId, { limit: 100 }).catch(() => [])
           : Promise.resolve([]),
@@ -335,7 +340,7 @@ export function SchedulesRoute({
     } finally {
       setLoading(false);
     }
-  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, workspaceId]);
+  }, [canTargetSessions, client, loadRunHistory, sourceSessionId, targetSessionId, workspaceId]);
 
   useEffect(() => {
     void refresh();

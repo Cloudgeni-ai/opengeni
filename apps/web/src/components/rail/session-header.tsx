@@ -146,7 +146,7 @@ export function SessionHeader({
       {leading}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
         {/* Child sessions link back to the manager that spawned them, and a
-            scheduled run links back to the schedule that started it. */}
+            session links to its current schedules. */}
         <div className="flex min-w-0 items-center gap-1.5">
           <SessionAncestryBreadcrumb
             workspaceId={session.workspaceId}
@@ -160,7 +160,7 @@ export function SessionHeader({
               type="button"
               onClick={onOpenSchedule}
               className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title="Open the schedule that started this session"
+              title="Open schedules for this session"
             >
               <CalendarClockIcon aria-hidden className="size-3" />
               Schedule

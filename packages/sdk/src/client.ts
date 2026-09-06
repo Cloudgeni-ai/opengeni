@@ -1944,13 +1944,14 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; sessionId?: string } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks`,
       undefined,
       {
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
