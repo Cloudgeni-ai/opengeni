@@ -1824,8 +1824,10 @@ function SessionChatPane(props: {
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
+              key={props.session.id}
               className="h-full"
               items={timelineWithOptimisticSends}
+              events={props.events}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}

@@ -935,7 +935,7 @@ export function SessionChrome({
                     );
                   }}
                   className={cn(
-                    "ml-auto inline-flex min-h-8 shrink-0 items-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 pointer-coarse:min-h-11",
+                    "ml-auto inline-flex min-h-8 shrink-0 items-center justify-center gap-1.5 rounded-og-md px-2 text-og-xs transition-colors outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 pointer-coarse:min-h-11 pointer-coarse:min-w-11",
                     activityOpen
                       ? "bg-og-surface-3 text-og-fg"
                       : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg",
@@ -1543,9 +1543,10 @@ function IconAction({
           disabled={disabled}
           onClick={onClick}
           className={cn(
-            "inline-flex size-6 items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors",
+            "inline-flex size-6 items-center justify-center rounded-og-sm outline-hidden transition-colors",
             "hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40",
             "disabled:pointer-events-none disabled:opacity-40 pointer-coarse:size-9",
+            text ? "text-og-fg" : "text-og-fg-subtle",
             text && "w-auto gap-1 px-1.5 text-og-xs pointer-coarse:w-auto",
             danger && "hover:text-og-danger",
           )}

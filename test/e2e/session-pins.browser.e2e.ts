@@ -1278,7 +1278,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const chrome = desktopPage.getByTestId("session-chrome");
       const queueChip = desktopPage.getByTestId("session-chrome-queue");
       const goalChip = desktopPage.getByTestId("session-chrome-goal");
-      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
+      const activityButton = desktopPage.getByRole("button", {
+        name: "Session activity",
+        exact: true,
+      });
       const composer = desktopPage.getByLabel("Message the agent");
       const timeline = desktopPage.getByTestId("session-timeline");
       await timeline
@@ -1286,10 +1289,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .waitFor();
       expect(await queueChip.count()).toBe(0);
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
+      await activityButton.click();
+      await chrome.getByRole("button", { name: /^\d+ agents?$/ }).waitFor();
+      await activityButton.click();
       await composer.waitFor();
       expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
-      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
+      expect(
+        await desktopPage.getByRole("button", { name: "Session activity", exact: true }).count(),
+      ).toBe(1);
       const [chromeBounds, composerBounds] = await Promise.all([
         chrome.boundingBox(),
         composer.locator("xpath=ancestor::*[@data-og-composer-id][1]").boundingBox(),
@@ -1312,7 +1320,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A first prompt queued from the composer",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor({ timeout: 20_000 });
+      await queueChip.getByText("1 queued", { exact: true }).waitFor({ timeout: 20_000 });
       await composer.fill("A second prompt queued from the composer");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1321,10 +1329,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 20_000 });
-      // A freshly queued prompt intentionally opens the queue for the transfer
-      // animation. Preserve that open state; only click when an older client
-      // or reduced host did not open it.
+      await queueChip.getByText("2 queued", { exact: true }).waitFor({ timeout: 20_000 });
+      // Queue receipts pulse the compact control; open it to inspect the prompts.
       if ((await queueChip.getAttribute("aria-expanded")) !== "true") {
         await queueChip.click();
       }
@@ -1349,6 +1355,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // where users reorder, edit, steer, or delete a waiting prompt.
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
+        // Keep the hover-revealed actions visible while Axe inspects their text.
+        const steerAction = chrome.getByRole("button", {
+          name: "Steer queued prompt 2",
+          exact: true,
+        });
+        await steerAction.focus();
+        await steerAction.evaluate(async (node) => {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          await Promise.all(
+            node
+              .parentElement!.getAnimations()
+              .map((animation) => animation.finished.catch(() => undefined)),
+          );
+        });
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
@@ -1392,7 +1412,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1401,7 +1421,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer (edited)",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
       // it moves that row to the head and resumes the branch. The accepted row
@@ -1426,7 +1446,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
       expect(await chrome.getByText("Changing direction…", { exact: true }).count()).toBe(0);
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await expectRowPrompt(queuedRows, 0, "A first prompt queued from the composer");
 
       // Remove deletes only the selected waiting prompt. Add one final prompt so
@@ -1441,7 +1461,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A replacement prompt after delete",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       expect(
         await timeline
           .getByText("Inspect the full session-control surface", { exact: true })
@@ -1495,7 +1515,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage
         .getByTestId("session-chrome-queue")
-        .getByText("1 queued prompt", { exact: true })
+        .getByText("1 queued", { exact: true })
         .waitFor();
 
       // The manager remains paused: queueing in a descendant is never a hidden
@@ -1508,13 +1528,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // must not require one to block the other, so await both independently
       // owned chips before asserting the settled control stack.
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
 
       const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
       expect(await goalChip.count()).toBe(1);
-      expect(await agentsChip.count()).toBe(1);
+      expect(await activityButton.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
@@ -1547,10 +1567,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await mobilePage.goto(managerUrl);
       await mobilePage.getByTestId("session-chrome").waitFor();
       await mobilePage.getByTestId("session-chrome-goal").waitFor();
-      await mobilePage.getByTestId("session-chrome-agents").waitFor();
+      await mobilePage.getByRole("button", { name: "Session activity", exact: true }).waitFor();
       await expectNoPageOverflow(mobilePage);
       await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
-      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
+      await expectTouchTarget(
+        mobilePage.getByRole("button", { name: "Session activity", exact: true }),
+      );
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,
@@ -2356,6 +2378,7 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
   let scan = new AxeBuilder({ page });
   for (const include of includes) scan = scan.include(include);
   const results = await scan.analyze();
+
   expect(
     results.violations.map((violation) => ({
       id: violation.id,

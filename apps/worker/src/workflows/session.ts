@@ -348,6 +348,7 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
   // PR #2208 changed a typed-cancelled result from a plain re-peek into a
@@ -584,6 +585,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "cancellation-wait") {
+      // The receipt wake can arrive while reconciliation returns an older pending result.
+      const beforeReconciliationSignalVersion = signalVersion;
       if (writerSetQuiescenceRecovery) {
         const reconciliation = await activity.reconcileSessionAttemptQuiescence({
           accountId: input.accountId,
@@ -600,7 +603,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // genuinely slow, close this workflow run rather than consuming a turn
       // slot or churning control activities; the outbox uses signalWithStart to
       // restart this exact workflow after the receipt commits.
-      const seenSignalVersion = signalVersion;
+      const seenSignalVersion = preserveQuiescenceWake
+        ? beforeReconciliationSignalVersion
+        : signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
       // Close only against the same signal snapshot. A proof signal accepted
