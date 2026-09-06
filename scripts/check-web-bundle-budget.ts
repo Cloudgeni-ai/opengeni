@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  wholeKibEnvelope,
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -427,7 +428,9 @@ const budgets = {
   lazyChunkGzip: 240 * kib,
   // Member roster and permission-editor selectors bring the single compiled
   // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
-  cssGzip: 32 * kib,
+  // Main 52ff56a94 is already 33,660 gzip bytes; the scroll-control gutter
+  // adds 14. Preserve the measured whole-KiB envelope and 1-KiB headroom.
+  cssGzip: wholeKibEnvelope(33_674),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -445,6 +448,9 @@ const effectiveBudgets = {
     // configured Linux/x64 acceptance build. Use the established whole-KiB
     // envelope with at least 1 KiB headroom; all other limits stay fixed.
     627 * kib,
+    // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
+    // history anchoring + keyboard/touch demand adds 964, with no new chunk.
+    wholeKibEnvelope(644_833, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
