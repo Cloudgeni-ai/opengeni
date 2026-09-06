@@ -259,20 +259,14 @@ export function SessionToolPicker(props: {
           className={cn(pillClass(selected > 0, props.triggerClassName), "session-tools-trigger")}
         >
           <PlugIcon className="size-3.5" />
-          <span
-            className="session-tools-label truncate"
-            style={{ display: "var(--og-model-policy-label-full-display, inline)" }}
-          >
+          <span className="session-tools-label truncate">
             {props.saving
               ? "Saving tools"
               : selected === total
                 ? "Tools · All"
                 : `Tools · ${selectedCapabilities}`}
           </span>
-          <ChevronDownIcon
-            className="session-tools-chevron size-3 shrink-0"
-            style={{ display: "var(--og-model-policy-label-full-display, inline)" }}
-          />
+          <ChevronDownIcon className="session-tools-chevron size-3 shrink-0" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
