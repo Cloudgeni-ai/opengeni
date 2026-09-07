@@ -92,8 +92,13 @@ export function PriorityAttentionChildren({
             </div>
           ))}
           {loading ? <p role="status">Checking waiting agents…</p> : null}
-          {error ? <p role="alert">Waiting agents could not be loaded. Try refreshing.</p> : null}
-          {!loading && !error && sessions.length === 0 ? (
+          {error ? (
+            <p role="alert">
+              Waiting agents could not be loaded. Try refreshing.{" "}
+              {sessions.length > 0 ? "The listed agents are from the previous check." : ""}
+            </p>
+          ) : null}
+          {!loading && !error && sessions.length === 0 && !cursor ? (
             <p role="status">No waiting agents were found. The parent summary may have changed.</p>
           ) : null}
           <div className="flex gap-3">

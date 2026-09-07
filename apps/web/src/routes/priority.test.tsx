@@ -424,6 +424,35 @@ describe("For you exact waiting agent navigation", () => {
     }
   });
 
+  test("does not call a partial empty page empty and labels results retained after a failed refresh", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 1;
+    listAgentTopology.mockResolvedValueOnce({ sessions: [], nextCursor: "more" });
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "child-one",
+          title: "Previously checked child",
+          status: "requires_action",
+          pause: { state: "active" },
+        },
+      ],
+      nextCursor: null,
+    });
+    listAgentTopology.mockRejectedValueOnce(new Error("refresh unavailable"));
+    const { container, root } = await renderPriorityRoute();
+    try {
+      await act(async () => buttonWithText(container, "Show waiting agents")!.click());
+      expect(container.textContent).not.toContain("No waiting agents were found");
+      await act(async () => buttonWithText(container, "Load more waiting agents")!.click());
+      await act(async () => buttonWithText(container, "Refresh waiting agents")!.click());
+      expect(container.textContent).toContain("Previously checked child");
+      expect(container.textContent).toContain("The listed agents are from the previous check.");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("ignores child discovery from a workspace that has been left", async () => {
     sessions[0]!.treeStats!.attentionDescendants = 1;
     let resolveOld!: (page: { sessions: Array<Record<string, unknown>>; nextCursor: null }) => void;
