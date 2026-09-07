@@ -3,7 +3,6 @@ import AxeBuilder from "@axe-core/playwright";
 import {
   appendSessionEventsAndUpdateSession,
   createDb,
-  appendSessionEventsAndUpdateSession,
   appendSessionEvents,
   createSession,
   grantWorkspaceAccess,
