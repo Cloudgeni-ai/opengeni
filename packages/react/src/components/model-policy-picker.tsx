@@ -324,7 +324,8 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     if (!row.selectable || props.disabled) return;
     if (row.id !== props.model) props.onModelChange(row.id);
     const effort = coerceReasoningEffortForModel(row.catalog, props.effort);
-    if (effort !== props.effort) props.onEffortChange(effort);
+    // Hosts may commit the combined model/effort draft through this callback.
+    props.onEffortChange(effort);
     if (
       props.latencyMode !== "standard" &&
       !runnableLatencyModesForModel(row.catalog).includes(props.latencyMode)

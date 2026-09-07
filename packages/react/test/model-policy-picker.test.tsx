@@ -178,7 +178,7 @@ describe("ModelPolicyPicker", () => {
     ]);
   });
 
-  test("keeps supported effort and locks a model with only one level", async () => {
+  test("commits supported effort after model selection and locks a model with only one level", async () => {
     const calls: string[] = [];
     const lowOnly: ClientModel = {
       ...MODELS[1]!,
@@ -213,7 +213,7 @@ describe("ModelPolicyPicker", () => {
         .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')!
         .click(),
     );
-    expect(calls).toEqual(["codex/gpt-5.6-sol"]);
+    expect(calls).toEqual(["codex/gpt-5.6-sol", "low"]);
   });
 
   test("warns only when the selected model cannot receive images", async () => {
