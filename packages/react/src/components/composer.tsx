@@ -670,6 +670,12 @@ export function useChatComposerController({
     );
     return () => window.clearTimeout(timer);
   }, [notice]);
+  useEffect(() => {
+    if (annotationsIncomplete) return;
+    setNotice((current) =>
+      current?.message === messages.annotationNotesRequired ? null : current,
+    );
+  }, [annotationsIncomplete, messages.annotationNotesRequired]);
 
   const runControlOperation = useCallback(async (operation: () => Promise<void>) => {
     if (controlOperationRef.current) return false;
