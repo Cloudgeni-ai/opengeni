@@ -1253,6 +1253,17 @@ logical terminal outcomes separate from internal safe retries. A typed transport
 category is diagnostic only and never licenses replay of an outcome-unknown
 provider create or operation.
 
+A recovering turn fenced by an active sandbox rotation persists one exact
+`(sandbox group, lease epoch)` lifecycle-wait marker. The session workflow sees
+that marker during its ordinary database work peek and closes after the bounded
+signal race window instead of reserving another turn-worker slot or repeating
+sandbox provisioning. Every authoritative rotation-ending or epoch-advancing transaction enqueues a
+durable workflow wake only for recovering sessions whose active turn carries the
+matching marker. The next claim removes the marker and either rematerializes the
+successor or reports the already-durable restore blocker. Non-rotation capture
+transitions retain their existing short pacing, so healthy starts and unrelated
+recovery paths do not gain a new query, timer, or synchronization boundary.
+
 Lease liveness is not provider or workspace truth. The durable recovery
 projection independently records provider existence, archive availability,
 restore progress, and verified workspace readiness alongside lease liveness and
@@ -2038,3 +2049,8 @@ transport throws the bounded exact provider message. Rate-limit/capacity
 refusals are marked 429 and enter the durable same-turn waiter; other
 terminals persist that diagnostic on `turn.failed`. Lifecycle audit stays
 metadata-only; worker stdout stays sanitized.
+
+An already-paused session can receive Pause with a new idempotency key to re-arm
+its own settled interruption's missing quiescence wake. This preserves control
+revision and paused admission; the existing worker still proves exact activity
+settlement and writer quiescence. Replaying the same key adds no wake revision.

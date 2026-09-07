@@ -839,6 +839,7 @@ export function SessionChrome({
                             compact ? "min-w-0 truncate" : "shrink-0",
                           )}
                         >
+                          {compact && signal.id === "goal" ? "Goal · " : null}
                           {compact && signal.id === "goal"
                             ? goalState === "pursuing"
                               ? "Running"

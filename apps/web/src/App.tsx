@@ -5,7 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
+//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables

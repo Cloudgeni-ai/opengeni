@@ -170,8 +170,8 @@ A recoverable activity shutdown creates a transactional workflow-wake
 obligation in Postgres. Delivery remains unacknowledged until the exact closed
 attempt has durable quiescence, and every attempt-owned retained-process
 settlement advances that same outbox row in its settlement transaction. A
-workflow close or a writer exit racing the final reconciliation check therefore
-cannot orphan a session in recovery.
+workflow close or writer exit racing reconciliation cannot orphan recovery;
+repeated Pause re-arms a missing quiescence wake.
 
 A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
@@ -468,6 +468,8 @@ to the same one-hour ceiling. Lowering the timeout or rolling the setting across
 processes therefore cannot make an opted-in viewer, turn, or mutation caller
 abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
 probes remain immediate.
+
+Rotation recovery: [lifecycle](run-lifecycle.md).
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
@@ -1224,6 +1226,12 @@ GitHub App binding keeps account selection explicit whenever owner-authorized
 installations already exist: the owner may choose one of them or enter GitHub's
 new-installation flow for another personal account or organization. Both paths
 retain the same signed-state and exact owner revalidation boundaries.
+
+GitHub connection policies keep routine writes, reviews, and merges independent.
+Canonical sources: `packages/core/src/domain/github-action-policies.ts` (groups),
+`apps/api/src/routes/github.ts` (authorized API), and
+`apps/web/src/components/capabilities/use-github-integration.tsx` (sheet).
+DB connector-policy rows and accepted-attempt snapshots govern execution.
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
