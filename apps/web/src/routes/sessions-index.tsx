@@ -1228,11 +1228,7 @@ function SessionsIndexRouteContent({
         ) : null}
 
         {selectedPolicyRow?.billingClass === "opengeni_credits" &&
-        hasAccountPermission(
-          context.accessContext,
-          workspace?.accountId ?? "",
-          "billing:read",
-        ) ? (
+        hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:read") ? (
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice

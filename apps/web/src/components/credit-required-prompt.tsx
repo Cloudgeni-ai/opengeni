@@ -85,7 +85,11 @@ export function CreditRequiredPrompt({
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
             >
-              {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CreditCardIcon className="size-4" />}
+              {busy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <CreditCardIcon className="size-4" />
+              )}
               Buy credits
             </Button>
           </div>

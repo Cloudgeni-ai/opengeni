@@ -1,10 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import {
-  CreditCardIcon,
-  KeyRoundIcon,
-  Loader2Icon,
-  SparklesIcon,
-} from "lucide-react";
+import { CreditCardIcon, KeyRoundIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -353,12 +348,12 @@ export function ModelAccessOnboardingPanel({
               value={topupAmount}
               onChange={(event) => setTopupAmount(event.target.value)}
             />
-            <Button
-              type="button"
-              disabled={!client || busy}
-              onClick={() => void buyCredits()}
-            >
-              {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CreditCardIcon className="size-4" />}
+            <Button type="button" disabled={!client || busy} onClick={() => void buyCredits()}>
+              {busy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <CreditCardIcon className="size-4" />
+              )}
               Buy credits
             </Button>
           </div>

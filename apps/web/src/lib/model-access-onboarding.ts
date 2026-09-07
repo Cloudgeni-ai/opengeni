@@ -22,9 +22,7 @@ export function preferredConnectedModelId(
 
 export function isPaymentRequiredError(error: unknown): error is OpenGeniApiError {
   return (
-    error instanceof OpenGeniApiError &&
-    error.status === 402 &&
-    error.code === "payment_required"
+    error instanceof OpenGeniApiError && error.status === 402 && error.code === "payment_required"
   );
 }
 
