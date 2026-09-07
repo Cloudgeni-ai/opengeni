@@ -30,15 +30,10 @@ This document owns five things:
 - the repository map and responsibility boundaries; and
 - a routing index from change area to canonical source.
 
-It intentionally does **not** own exhaustive API, schema, configuration,
-permission, migration, provider, or release inventories. Those facts change
-more frequently than the architecture and already have canonical homes in
-code, package READMEs, focused topic docs, [`../CONTRIBUTING.md`](../CONTRIBUTING.md),
-and [`../AGENTS.md`](../AGENTS.md).
-
-A useful test is: if a paragraph needs a migration number, an exact timeout, a
-complete route list, or a current table count to make sense, it probably
-belongs in a focused topic document rather than here.
+Exact API, schema, configuration, permission, migration, provider, and release
+inventories belong in code, package READMEs, focused topic docs,
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md), or [`../AGENTS.md`](../AGENTS.md).
+Keep migration numbers, timeouts, route lists, and table counts there.
 
 ---
 
@@ -1232,14 +1227,11 @@ installations already exist: the owner may choose one of them or enter GitHub's
 new-installation flow for another personal account or organization. Both paths
 retain the same signed-state and exact owner revalidation boundaries.
 
-GitHub write autonomy is a first-class connection policy, not a workspace-wide
-agent mode. `packages/core/src/domain/github-action-policies.ts` groups the
-runtime's exact GitHub write tools into routine work, review submission, and
-merge without widening one group from another. `apps/api/src/routes/github.ts`
-authorizes and serves the policy, and
-`apps/web/src/components/capabilities/use-github-integration.tsx` renders it in
-the shared GitHub integration sheet. The DB connector-policy rows and accepted
-attempt snapshot remain the execution authority.
+GitHub connection policies keep routine writes, reviews, and merges independent.
+Canonical sources: `packages/core/src/domain/github-action-policies.ts` (groups),
+`apps/api/src/routes/github.ts` (authorized API), and
+`apps/web/src/components/capabilities/use-github-integration.tsx` (sheet).
+DB connector-policy rows and accepted-attempt snapshots govern execution.
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),
