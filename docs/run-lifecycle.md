@@ -2038,3 +2038,8 @@ transport throws the bounded exact provider message. Rate-limit/capacity
 refusals are marked 429 and enter the durable same-turn waiter; other
 terminals persist that diagnostic on `turn.failed`. Lifecycle audit stays
 metadata-only; worker stdout stays sanitized.
+
+An already-paused session can receive Pause with a new idempotency key to re-arm
+its own settled interruption's missing quiescence wake. This preserves control
+revision and paused admission; the existing worker still proves exact activity
+settlement and writer quiescence. Replaying the same key adds no wake revision.

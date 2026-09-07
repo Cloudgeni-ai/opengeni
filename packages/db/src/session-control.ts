@@ -3501,12 +3501,44 @@ export async function mutateSessionControlInTransaction(
             rootSessionId: input.sessionId,
           }));
     if (!changed) {
+      // Repeating Pause may repair a lost reconciliation wake without changing
+      // control authority. The exact closed attempt still needs the existing
+      // worker's Temporal and writer-set proof; this is never new turn work.
+      const [quiescence] =
+        input.action === "pause"
+          ? await db.execute<{ needed: boolean }>(sql`
+            select exists (
+              select 1 from ${schema.sessionTurnAttempts} attempt
+              where attempt.workspace_id = ${input.workspaceId}
+                and attempt.session_id = ${input.sessionId}
+                and attempt.state = 'closed'
+                and attempt.quiesced_at is null
+                and exists (
+                  select 1 from ${schema.sessionAttemptInterruptions} interruption
+                  where interruption.workspace_id = attempt.workspace_id
+                    and interruption.session_id = attempt.session_id
+                    and interruption.attempt_id = attempt.id
+                    and interruption.state in ('settled', 'rejected_stale')
+                )
+            ) as needed
+          `)
+          : [];
+      const wakeCount = quiescence?.needed ? 1 : 0;
+      if (wakeCount > 0) {
+        await registerSessionWorkflowWakeInTransaction(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          temporalWorkflowId: targetSession.temporalWorkflowId ?? `session-${input.sessionId}`,
+          reason: "session_pause_quiescence_reconciliation",
+        });
+      }
       const receipt = await updateSessionCommandReceiptResult(db, reserved.receipt.id, {
         result: {
           outcome: "unchanged",
           interruptionCount: 0,
           backgroundCommandCount: 0,
-          wakeCount: 0,
+          wakeCount,
           cancelledSessionCount: 0,
           cancelledTurnCount: 0,
           affectedSessionEvents: [],
@@ -3519,11 +3551,16 @@ export async function mutateSessionControlInTransaction(
         workspaceControlEventId: null,
         interruptionCount: 0,
         backgroundCommandCount: 0,
-        wakeCount: 0,
+        wakeCount,
         cancelledSessionCount: 0,
         cancelledTurnCount: 0,
         affectedSessionEvents: [],
-        workflowWake: null,
+        workflowWake: await pendingSessionControlWorkflowWake(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          wakeCount,
+        ),
         outcome: "unchanged",
         replay: false,
       };

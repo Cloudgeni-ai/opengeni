@@ -1074,6 +1074,54 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "a paused reconciliation wake settles the exact old attempt without running a turn",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const attemptId = crypto.randomUUID();
+      const reconciled: unknown[] = [];
+      let quiesced = false;
+      let runs = 0;
+      const admission = createTurnAdmission([], async () => {
+        runs += 1;
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        peekSessionWork: async () =>
+          quiesced ? { kind: "idle" as const } : { kind: "cancellation-wait" as const, attemptId },
+        reconcileSessionAttemptQuiescence: async (input) => {
+          reconciled.push(input);
+          quiesced = true;
+          return { action: "quiesced" as const };
+        },
+        markSessionIdle: async () => undefined,
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "queueChanged",
+          signalArgs: [],
+        });
+        await handle.result();
+        expect(reconciled).toEqual([{ ...scope, sessionId, attemptId, workflowId }]);
+        expect(runs).toBe(0);
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "Temporal activity failure closes boundedly and a later wake retries exact quiescence",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
