@@ -132,7 +132,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0419_background_command_launch_authority.sql",
+      "0420_recovery_notification_claim_snapshot.sql",
     );
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
@@ -250,6 +250,9 @@ describe("release schema contract", () => {
     );
     const siteDirectUploads = completeSourceContract.migrations.some(
       (migration) => migration.path === "0418_site_direct_uploads.sql",
+    );
+    const recoveryNotificationClaimSnapshot = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0420_recovery_notification_claim_snapshot.sql",
     );
     const backgroundCommandLaunchAuthority = completeSourceContract.migrations.some(
       (migration) => migration.path === "0419_background_command_launch_authority.sql",
@@ -691,6 +694,7 @@ describe("release schema contract", () => {
       "0417_command_runner_failure_metadata.sql",
       "0418_site_direct_uploads.sql",
       "0419_background_command_launch_authority.sql",
+      "0420_recovery_notification_claim_snapshot.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -747,6 +751,7 @@ describe("release schema contract", () => {
         (commandCompletionObservation ? 1 : 0) +
         (siteDirectUploads ? 1 : 0) +
         (backgroundCommandLaunchAuthority ? 1 : 0) +
+        (recoveryNotificationClaimSnapshot ? 1 : 0) +
         (commandRunnerFailureMetadata ? 1 : 0) +
         (scheduledInheritedToolAdmission ? 1 : 0) +
         (scheduledGeneratedProducerMaterialization ? 1 : 0) +
@@ -993,6 +998,9 @@ describe("release schema contract", () => {
       ...(backgroundCommandLaunchAuthority
         ? { latestMigration: "0419_background_command_launch_authority.sql" }
         : {}),
+      ...(recoveryNotificationClaimSnapshot
+        ? { latestMigration: "0420_recovery_notification_claim_snapshot.sql" }
+        : {}),
       ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -1074,6 +1082,9 @@ describe("release schema contract", () => {
     );
     const siteDirectUploads = completeSourceContract.migrations.some(
       (migration) => migration.path === "0418_site_direct_uploads.sql",
+    );
+    const recoveryNotificationClaimSnapshot = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0420_recovery_notification_claim_snapshot.sql",
     );
     const backgroundCommandLaunchAuthority = completeSourceContract.migrations.some(
       (migration) => migration.path === "0419_background_command_launch_authority.sql",
@@ -1392,6 +1403,7 @@ describe("release schema contract", () => {
       "0417_command_runner_failure_metadata.sql",
       "0418_site_direct_uploads.sql",
       "0419_background_command_launch_authority.sql",
+      "0420_recovery_notification_claim_snapshot.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1682,6 +1694,7 @@ describe("release schema contract", () => {
         (commandCompletionObservation ? 1 : 0) +
         (siteDirectUploads ? 1 : 0) +
         (backgroundCommandLaunchAuthority ? 1 : 0) +
+        (recoveryNotificationClaimSnapshot ? 1 : 0) +
         (commandRunnerFailureMetadata ? 1 : 0) +
         (scheduledGeneratedProducerMaterialization ? 1 : 0) +
         (newSessionDraftProjectProvenanceValidation ? 1 : 0) +
@@ -1930,6 +1943,9 @@ describe("release schema contract", () => {
         : {}),
       ...(backgroundCommandLaunchAuthority
         ? { latestMigration: "0419_background_command_launch_authority.sql" }
+        : {}),
+      ...(recoveryNotificationClaimSnapshot
+        ? { latestMigration: "0420_recovery_notification_claim_snapshot.sql" }
         : {}),
       ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
     });
