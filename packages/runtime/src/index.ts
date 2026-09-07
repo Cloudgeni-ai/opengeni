@@ -5524,6 +5524,7 @@ function inspectMcpTransportError(
   complete: boolean;
   hasConnectionClosed: boolean;
   hasConnectivityCode: boolean;
+  hasSetupSocketCode: boolean;
   hasConnectivityMarker: boolean;
   hasTypedError: boolean;
   hasRequestTimeout: boolean;
@@ -5535,6 +5536,7 @@ function inspectMcpTransportError(
   const statuses: number[] = [];
   let hasConnectionClosed = false;
   let hasConnectivityCode = false;
+  let hasSetupSocketCode = false;
   let hasConnectivityMarker = false;
   let hasTypedError = false;
   let hasRequestTimeout = false;
@@ -5582,6 +5584,7 @@ function inspectMcpTransportError(
         statuses.push(value);
       }
     }
+    if (code === "UND_ERR_SOCKET") hasSetupSocketCode = true;
     if (typeof code === "string" && MCP_CONNECTIVITY_ERROR_CODES.has(code.toUpperCase())) {
       hasConnectivityCode = true;
     }
@@ -5631,6 +5634,7 @@ function inspectMcpTransportError(
     complete,
     hasConnectionClosed,
     hasConnectivityCode,
+    hasSetupSocketCode,
     hasConnectivityMarker,
     hasTypedError,
     hasRequestTimeout,
@@ -5673,7 +5677,12 @@ function isRawMcpTransportConnectivityError(
   if (options.recoverySafeSetup === true && inspection.statuses.includes(404)) {
     return true;
   }
-  if (inspection.hasConnectivityCode) {
+  // Undici's typed socket loss is safe to recover only during the explicit
+  // first-party initialize/tools-list boundary, never after a tool invocation.
+  if (
+    inspection.hasConnectivityCode ||
+    (options.recoverySafeSetup === true && inspection.hasSetupSocketCode)
+  ) {
     return true;
   }
   // The MCP SDK can erase the transport's socket code while wrapping a failed
