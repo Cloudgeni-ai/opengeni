@@ -465,7 +465,13 @@ describe("child read acknowledgment on parent consumption", () => {
     const failedSequence = await lastSequence(parent.session.id);
     const [failureEvent] = await shared.admin<
       Array<{
-        payload: { status: string; code: string; failedSystemUpdateIds?: string[] };
+        payload: {
+          status: string;
+          code: string;
+          error: string;
+          admissionFailure?: { disposition: string; code: string };
+          failedSystemUpdateIds?: string[];
+        };
         turnId: string | null;
       }>
     >`
