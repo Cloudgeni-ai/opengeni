@@ -349,6 +349,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed" | "input";
   text: string;
+  /** A preserved turn-end outcome, not a claim about current session state. */
+  recordedOutcome?: true;
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };

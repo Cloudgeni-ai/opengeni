@@ -1184,10 +1184,18 @@ describe("MessageTimeline — settled turn folding", () => {
     expect(trigger?.getAttribute("aria-expanded")).toBe("false");
     expect(r.container.textContent).toContain(`Waiting: ${reason}`);
     expect(r.container.textContent?.split(reason)).toHaveLength(2);
-    const visibleOutcome = Array.from(r.container.querySelectorAll('[role="status"]')).find(
-      (element) => element.textContent?.includes(`Waiting: ${reason}`),
-    );
+    const visibleOutcome = Array.from(
+      r.container.querySelectorAll('[data-og-recorded-outcome="wait"]'),
+    ).find((element) => element.textContent?.includes(`Waiting: ${reason}`));
     expect(visibleOutcome).not.toBeUndefined();
+    expect(visibleOutcome?.getAttribute("role")).toBe("note");
+    expect(visibleOutcome?.textContent).toContain("Wait recorded");
+    expect(visibleOutcome?.querySelector("time")?.getAttribute("datetime")).toBe(
+      events[2]!.occurredAt,
+    );
+    expect(visibleOutcome?.querySelector("time")?.textContent).toContain(
+      String(new Date(events[2]!.occurredAt).getFullYear()),
+    );
 
     await act(async () => {
       trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
