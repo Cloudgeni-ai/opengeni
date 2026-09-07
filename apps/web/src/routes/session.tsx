@@ -1,3 +1,4 @@
+import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
@@ -1203,7 +1204,7 @@ function SessionChatPane(props: {
       </p>
       <p className="mt-1 text-xs text-fg-muted">
         {props.creditExhausted
-          ? "The conversation is preserved. Add credits in organization settings before continuing."
+          ? "The conversation is preserved. Add organization credits or choose another available model below."
           : "The conversation is preserved. You can keep working in the composer below."}
       </p>
     </div>
@@ -1519,6 +1520,15 @@ function SessionChatPane(props: {
     personalWorkspaceTarget: isPersonalWorkspace(workspace, context.managedSelfContext),
     onReloadSession: props.onReloadSession,
   });
+  const composerSendBlocker = () =>
+    getComposerSendBlocker({
+      uploadPending: attachments.hasUnresolved,
+      repositoryError: repositories.error,
+      policyValid: composerPolicyValidRef.current,
+      variableSetBlocked: variableSetComposerBlocked,
+      personalDecision: personalAttachment.requiresDecision,
+      personalLoading: personalAttachment.loading || personalAttachment.refreshing,
+    });
   const composer = useComposer(props.session.id, {
     events: props.events,
     sendExtras: () => ({
@@ -1533,14 +1543,7 @@ function SessionChatPane(props: {
         ? { personalResourceAttachment: personalAttachment.intent }
         : {}),
     }),
-    sendBlocked: () =>
-      attachments.hasUnresolved ||
-      repositories.error !== null ||
-      !composerPolicyValidRef.current ||
-      variableSetComposerBlocked ||
-      personalAttachment.requiresDecision ||
-      personalAttachment.loading ||
-      personalAttachment.refreshing,
+    sendBlocked: () => composerSendBlocker() !== null,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     sendDestination: () =>
       props.session.activeTurnId !== null || props.queue.queue.length > 0 ? "queue" : "chat",
@@ -1853,28 +1856,25 @@ function SessionChatPane(props: {
                   workspaceId={props.session.workspaceId}
                   actions={{
                     failureId: props.failure.failureEventId,
+                    composerBlocker: composerSendBlocker(),
+                    repositoryError: repositories.error,
                     onContinue: () =>
                       composer.hasDraftContent()
                         ? Promise.resolve(false)
                         : composer.send(FAILURE_CONTINUATION_MESSAGE),
-                    continueBlockedReason:
-                      composer.hasDraftContent() ||
-                      attachments.readyResources.length > 0 ||
-                      repositories.pendingResources.length > 0
-                        ? "Send your draft below to continue."
-                        : failedOptimisticMessageCount > 0
-                          ? "Retry or remove the unsent message below before continuing."
-                          : (optimisticMessages ?? []).some(
-                                (message) => !acceptedClientEventIds.has(message.clientEventId),
-                              )
-                            ? "A message is being delivered below. Check its delivery status."
-                            : props.session.activeTurnId !== null || props.queue.queue.length > 0
-                              ? "Work is already queued or running. Check the activity controls below."
-                              : composer.sending || composer.draftLoading || !hasComposerPolicy
-                                ? "Wait for the composer to finish loading or sending."
-                                : attachments.hasUnresolved
-                                  ? "Wait for the upload below to finish, or remove it."
-                                  : null,
+                    continuationBlocker: composer.hasDraftContent()
+                      ? "draft"
+                      : failedOptimisticMessageCount > 0
+                        ? "unsent"
+                        : (optimisticMessages ?? []).some(
+                              (message) => !acceptedClientEventIds.has(message.clientEventId),
+                            )
+                          ? "delivery"
+                          : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                            ? "queued"
+                            : composer.sending || composer.draftLoading || !hasComposerPolicy
+                              ? "loading"
+                              : null,
                     onChooseModel: () => setModelPickerSession(props.session.id),
                     modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
                   }}

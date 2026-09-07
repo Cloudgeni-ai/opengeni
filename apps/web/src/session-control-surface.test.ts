@@ -235,7 +235,9 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
     expect(establishedRoute).toContain("const variableSetComposerBlocked =");
     expect(establishedRoute).toContain("variableSetPickerState.saving ||");
-    expect(establishedRoute).toContain("variableSetComposerBlocked ||");
+    expect(establishedRoute).toContain("getComposerSendBlocker({");
+    expect(establishedRoute).toContain("variableSetBlocked: variableSetComposerBlocked,");
+    expect(establishedRoute).toContain("sendBlocked: () => composerSendBlocker() !== null,");
     expect(establishedPicker).toContain("props.canControl && props.canAttach");
     expect(
       establishedRoute.match(
