@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { getSettings } from "@opengeni/config";
 import {
   buildCompactionReplacementHistory,
+  compactionProviderFailureDiagnostics,
   estimateTokens,
   prepareCompactionPromptInput,
   sanitizeHistoryItemsForModel,
@@ -208,4 +209,14 @@ async function main() {
   console.log(JSON.stringify(manifest));
 }
 
-if (import.meta.main) await main();
+if (import.meta.main) {
+  try {
+    await main();
+  } catch (error) {
+    // Never let the CLI print SDK causes containing raw provider messages.
+    console.error(
+      JSON.stringify({ verificationFailed: true, ...compactionProviderFailureDiagnostics(error) }),
+    );
+    process.exitCode = 1;
+  }
+}
