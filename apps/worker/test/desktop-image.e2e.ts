@@ -142,6 +142,12 @@ describe("P4.1 desktop image — LOCAL build + stack-up assertions", () => {
       expect(up.code).toBe(0);
       expect(up.out).toContain("OPENGENI_DESKTOP_UP");
 
+      const runtime = await sh(
+        "test -f /opt/opengeni/artifact-runtime/installation.json || test -f /opt/opengeni/artifact-runtime/.unavailable; echo RUNTIME_PATH_OK",
+      );
+      expect(runtime.code).toBe(0);
+      expect(runtime.out).toContain("RUNTIME_PATH_OK");
+
       // both sockets listen inside the box.
       const socks = await sh(
         "(nc -z localhost 5900 && echo VNC_OK); (nc -z localhost 6080 && echo WS_OK)",

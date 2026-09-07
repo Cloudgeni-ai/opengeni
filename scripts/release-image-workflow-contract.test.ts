@@ -410,6 +410,14 @@ describe("release image workflow contract", () => {
     },
   );
 
+  test.each(["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"])(
+    "%s copies and doctors the native artifact runtime after the stable toolchain",
+    async (path) => {
+      const dockerfile = await readFile(resolve(root, path), "utf8");
+      expect(keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile)).toBe(true);
+    },
+  );
+
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
