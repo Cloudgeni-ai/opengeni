@@ -39,7 +39,7 @@ describe("Session rail row metadata in Chromium", () => {
       },
     );
     browser = await chromium.launch({ headless: true });
-    page = await browser.newPage({ viewport: { width: 900, height: 640 } });
+    page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     await page.goto(`${baseUrl}/test/session-rail-row-metadata.html`, { waitUntil: "networkidle" });
   }, 60_000);
 
@@ -119,6 +119,48 @@ describe("Session rail row metadata in Chromium", () => {
     expect(rowBox).not.toBeNull();
     expect(cardBox).not.toBeNull();
     expect(cardBox!.x).toBeGreaterThan(rowBox!.x + rowBox!.width);
-    expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(900);
+    expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(1280);
+  });
+
+  test("reveals direct pin and archive controls on hover and keyboard focus", async () => {
+    const row = page.locator('[data-row-case="time-only"]');
+    const link = row.locator("a");
+    const quickActions = row.locator('[data-session-quick-actions="quick-actions"]');
+
+    await page.mouse.move(1000, 700);
+    await page.waitForFunction(() => {
+      const actions = document.querySelector('[data-session-quick-actions="quick-actions"]');
+      return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "0";
+    });
+    expect(await quickActions.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+
+    await link.hover();
+    await page.waitForFunction(() => {
+      const actions = document.querySelector('[data-session-quick-actions="quick-actions"]');
+      return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "1";
+    });
+    await row.getByRole("button", { name: "Pin session", exact: true }).waitFor();
+    await row.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+    await page.screenshot({
+      path: "/tmp/opengeni-session-row-quick-actions.png",
+      fullPage: true,
+    });
+
+    await page.mouse.move(1000, 700);
+    await page.waitForFunction(() => {
+      const actions = document.querySelector('[data-session-quick-actions="quick-actions"]');
+      return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "0";
+    });
+    const pinButton = row.getByRole("button", { name: "Pin session", exact: true });
+    await pinButton.focus();
+    await page.waitForFunction(() => {
+      const actions = document.querySelector('[data-session-quick-actions="quick-actions"]');
+      return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "1";
+    });
+    await pinButton.press("Enter");
+    await row.getByRole("button", { name: "Unpin session", exact: true }).waitFor();
+    await row.getByRole("button", { name: "Archive session", exact: true }).click();
+    await row.getByRole("button", { name: "Restore session", exact: true }).waitFor();
+    expect(await row.getByRole("button", { name: "Pin session" }).count()).toBe(0);
   });
 });

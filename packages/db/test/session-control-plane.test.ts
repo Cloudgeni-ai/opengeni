@@ -188,6 +188,7 @@ async function controlSession(
   grant: { accountId: string; workspaceId: string; subjectId: string },
   sessionId: string,
   action: "pause" | "resume" | "cancel",
+  operationKey = crypto.randomUUID(),
 ) {
   return await withWorkspaceSessionActivityRls(client.db, grant.workspaceId, (db) =>
     db.transaction((tx) =>
@@ -196,7 +197,7 @@ async function controlSession(
         workspaceId: grant.workspaceId,
         sessionId,
         actor: { type: "human", subjectId: grant.subjectId },
-        operationKey: crypto.randomUUID(),
+        operationKey,
         action,
       }),
     ),
@@ -4975,6 +4976,45 @@ describe("clean session control plane", () => {
       kind: "cancellation-wait",
       attemptId,
     });
+    const beforeNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return {
+        wake: wake!,
+        control: await evaluateSessionControl(db, grant.workspaceId!, session.id),
+      };
+    });
+    const nudgeKey = crypto.randomUUID();
+    const nudge = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(nudge.outcome).toBe("unchanged");
+    expect(nudge.interruptionCount).toBe(0);
+    expect(nudge.wakeCount).toBe(1);
+    expect(nudge.control.controlVersion).toBe(beforeNudge.control.controlVersion);
+    expect(nudge.control.state).toBe("paused");
+    const afterNudge = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(afterNudge.wakeRevision).toBeGreaterThan(beforeNudge.wake.wakeRevision);
+    const replay = await controlSession(grant, session.id, "pause", nudgeKey);
+    expect(replay.outcome).toBe("replayed");
+    const replayWake = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [wake] = await db
+        .select()
+        .from(schema.sessionWorkflowWakeOutbox)
+        .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, session.id));
+      return wake!;
+    });
+    expect(replayWake.wakeRevision).toBe(afterNudge.wakeRevision);
+
+    expect(
+      await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+    ).toBeNull();
     expect(
       await reconcileSessionAttemptQuiescence(client.db, {
         accountId: grant.accountId,

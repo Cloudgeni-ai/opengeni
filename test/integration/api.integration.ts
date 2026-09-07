@@ -257,7 +257,7 @@ describe("API component integration", () => {
         body: JSON.stringify({ initialMessage, model: "scripted-model" }),
         headers: { "content-type": "application/json" },
       });
-      expect(response.status).toBe(202);
+      expect(response.status, await response.clone().text()).toBe(202);
       return (await response.json()) as {
         id: string;
         updatedAt: string;
@@ -363,6 +363,36 @@ describe("API component integration", () => {
       pinned: [{ id: pinnedTarget.id }],
       sessions: [],
     });
+    const currentDateFiltered = await app.request(
+      workspacePath(
+        workspaceId,
+        "/sessions?view=page&updatedFrom=2026-09-04T00%3A00%3A00.000Z&updatedBefore=2026-09-05T00%3A00%3A00.000Z",
+      ),
+    );
+    expect(currentDateFiltered.status).toBe(200);
+    expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
+    for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
+      const response = await app.request(
+        workspacePath(workspaceId, `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("millisecond precision");
+    }
+
+    expect(
+      (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            "/sessions?view=page&updatedFrom=2026-09-05T00%3A00%3A00.000Z&updatedBefore=2026-09-04T00%3A00%3A00.000Z",
+          ),
+        )
+      ).status,
+    ).toBe(400);
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&cursor=not-a-cursor")))
         .status,
@@ -412,6 +442,16 @@ describe("API component integration", () => {
         )
       ).status,
     ).toBe(200);
+    expect(
+      (
+        await app.request(
+          workspacePath(
+            workspaceId,
+            `/sessions?view=page&limit=1&channelId=null&cursor=${encodeURIComponent(firstPage.nextCursor!)}`,
+          ),
+        )
+      ).status,
+    ).toBe(400);
 
     const unpinned = await setPin({ pinned: false, expectedVersion: 1 });
     expect(unpinned.status).toBe(200);
