@@ -1013,7 +1013,7 @@ handlers because its host owns process lifecycle.
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
 | `packages/db` | `@opengeni/db` | Drizzle schema, scoped repositories, migrations, RLS posture, and role provisioning |
-| `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, and sandbox abstraction |
+| `packages/runtime` | `@opengeni/runtime` | Agent construction, model routing, tool execution, history projection, sandbox abstraction, and native tool-bound product Skills |
 | `packages/events` | `@opengeni/events` | NATS event bus, auth callout/JWT support, fanout, and SSE formatting helpers |
 | `packages/storage` | `@opengeni/storage` | Object-storage abstraction for files, recordings, and retained bytes |
 | `packages/documents` | `@opengeni/documents` | Document parsing/indexing and authority-first hybrid retrieval |
@@ -1578,6 +1578,7 @@ This index intentionally routes at subsystem granularity. Use
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |
 | Capabilities, packs, or integration definitions | `packages/capabilities/`, `packages/core/src/domain/capabilities.ts` | [`capabilities.md`](capabilities.md), [`packs.md`](packs.md) |
+| Native tool-bound product Skills | `packages/runtime/src/bundled_artifact_skills`, `packages/runtime/src/bundled_site_skills`, `packages/runtime/src/bundled_video_skills`, `packages/runtime/src/runtime-skills.ts` | [`capabilities.md`](capabilities.md) Skill source precedence |
 | Sandbox backend or provider registry | `packages/runtime/src/sandbox/providers/`, `packages/contracts/src/index.ts` | §3.9 and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes |
 | Lease, snapshot, reaper, or active target | `apps/worker/src/activities/sandbox-lease.ts`, `packages/runtime/src/sandbox/routing/` | §8 and [`connected-machines.md`](connected-machines.md) |
 | Connected Machine agent or protocol | `agent/`, `agent/proto/opengeni_agent.proto`, `packages/runtime/src/sandbox/selfhosted/` | [`connected-machines.md`](connected-machines.md) |

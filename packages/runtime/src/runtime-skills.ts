@@ -323,6 +323,11 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
   return sources;
 }
 
+/**
+ * Native tool-bound Skills are authored in these directories. They are product
+ * runtime content, not repo-agent Skills, and must not be copied into
+ * `.agents/skills`.
+ */
 function packagedSkillDirectory(directoryName: string): string {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   return (

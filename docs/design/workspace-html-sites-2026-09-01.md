@@ -350,11 +350,11 @@ or React session implementation is required.
    requested canonical identities together.
 
 The product runtime packages this guidance as the native tool-bound
-`opengeni-sites` Skill. A create-only Site session admits it when
-`artifacts_create` is present; an edit session admits it only when both
-`artifacts_get_source` and `artifacts_publish` are present. Repository-local
-`.agents/skills` is only the reviewed source copy, not the product activation
-mechanism. Connected Machine attempts keep the same frozen Site tool surface,
+`opengeni-sites` Skill, authored in
+`packages/runtime/src/bundled_site_skills`. A create-only Site session admits
+it when `artifacts_create` is present; an edit session admits it only when both
+`artifacts_get_source` and `artifacts_publish` are present. `.agents/skills` is
+not a product-skill home. Connected Machine attempts keep the same frozen Site tool surface,
 but do not advertise this worker-bundled filesystem Skill until its files have
 an explicit machine-delivery path.
 

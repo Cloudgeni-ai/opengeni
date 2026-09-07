@@ -361,8 +361,6 @@ const ARTIFACT_RUNTIME_SOURCE_WORKSPACES = new Set([
 ]);
 const ARTIFACT_RUNTIME_SCRIPT_PATTERN = /^scripts\/[^/]*artifact[^/]*\.ts$/;
 const ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN = /^scripts\/[^/]*artifact[^/]*\.test\.ts$/;
-const ARTIFACT_SKILL_PATTERN =
-  /^\.agents\/skills\/opengeni-(?:documents|presentations|sites|spreadsheets|video-generation)\//;
 
 type RootPathImpact = Readonly<{
   packages: readonly string[];
@@ -378,13 +376,6 @@ function rootPathImpact(path: string, unitTests: readonly string[]): RootPathImp
         ARTIFACT_RUNTIME_SCRIPT_TEST_PATTERN.test(candidate),
       ),
       reason: "artifact runtime build/verification boundary",
-    };
-  }
-  if (ARTIFACT_SKILL_PATTERN.test(path)) {
-    return {
-      packages: ["@opengeni/runtime"],
-      unitTests: ["scripts/sync-artifact-skills.test.ts"],
-      reason: "bundled artifact skill source boundary",
     };
   }
   return null;
