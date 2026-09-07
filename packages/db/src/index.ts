@@ -19198,7 +19198,16 @@ export async function deleteChannel(
   workspaceId: string,
   channelId: string,
 ): Promise<boolean> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    // Detaching sessions changes project-filter membership. Enroll matching
+    // rows in the activity commit gate while preserving their recency sort so
+    // an already-open filtered cursor remains a frozen membership snapshot.
+    await scopedDb
+      .update(schema.sessions)
+      .set({ channelId: null, updatedAt: sql`${schema.sessions.updatedAt}` })
+      .where(
+        and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.channelId, channelId)),
+      );
     const rows = await scopedDb
       .delete(schema.channels)
       .where(and(eq(schema.channels.workspaceId, workspaceId), eq(schema.channels.id, channelId)))
@@ -19261,9 +19270,9 @@ export async function reorderChannels(
 
 // Re-files one session (rail organization only). Resolves the target channel
 // workspace-scoped so a foreign channel id can never be attached; null moves
-// the session back to the unfiled inbox. Deliberately does not bump
-// updatedAt: filing is organization, not activity, and must not reorder the
-// rail's recency buckets.
+// the session back to the unfiled inbox. Filing advances the activity revision
+// used to freeze filtered cursor membership, while preserving updatedAt so it
+// never reorders the rail's recency buckets.
 export async function setSessionChannel(
   db: Database,
   input: { workspaceId: string; sessionId: string; channelId: string | null },
@@ -19289,7 +19298,9 @@ export async function setSessionChannel(
     try {
       const rows = await scopedDb
         .update(schema.sessions)
-        .set({ channelId: input.channelId })
+        // Naming updatedAt in the SET list enrolls this row in the commit gate;
+        // the self-assignment deliberately preserves the activity sort time.
+        .set({ channelId: input.channelId, updatedAt: sql`${schema.sessions.updatedAt}` })
         .where(
           and(
             eq(schema.sessions.workspaceId, input.workspaceId),
@@ -32427,6 +32438,8 @@ export type SessionListSnapshotCursor = {
   parentSessionFilter: string;
   search: string | null;
   archiveMode: "active" | "archived";
+  /** Additive filter identity; absent on legacy snapshot cursors. */
+  filter?: string;
 };
 
 export type SessionListKeysetCursor = {
@@ -32439,24 +32452,42 @@ export type SessionListKeysetCursor = {
   parentSessionFilter: string;
   search: string | null;
   archiveMode: "active" | "archived";
+  /** Canonical identity for channel, creator, and time-bound filters. */
+  filter?: string;
 };
 
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
-export type ListSessionsForSubjectOptions = ListSessionsOptions & {
-  subjectId: string;
-  cursor?: SessionListCursor | undefined;
-  search?: string | undefined;
-  /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
-  pinsOnly?: boolean | undefined;
-  /** List personally archived chats instead of active chats. */
-  archivedOnly?: boolean | undefined;
-  /** Return a continuation cursor. Disable for legacy one-page array reads. */
-  materializeSnapshot?: boolean | undefined;
-  authorizationScope?: SessionAuthorizationListScope | undefined;
-  /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
-  personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+export type SessionListFilterOptions = {
+  /** Exact workspace project; null selects unfiled sessions. */
+  channelId?: string | null;
+  /** Exact frozen creator identity. */
+  createdBy?: { kind: "subject" | "service"; subjectId: string };
+  /** Inclusive activity lower bound. */
+  updatedFrom?: Date;
+  /** Exclusive activity upper bound. */
+  updatedBefore?: Date;
+  /** Inclusive creation lower bound. */
+  createdFrom?: Date;
+  /** Exclusive creation upper bound. */
+  createdBefore?: Date;
 };
+
+export type ListSessionsForSubjectOptions = ListSessionsOptions &
+  SessionListFilterOptions & {
+    subjectId: string;
+    cursor?: SessionListCursor | undefined;
+    search?: string | undefined;
+    /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
+    pinsOnly?: boolean | undefined;
+    /** List personally archived chats instead of active chats. */
+    archivedOnly?: boolean | undefined;
+    /** Return a continuation cursor. Disable for legacy one-page array reads. */
+    materializeSnapshot?: boolean | undefined;
+    authorizationScope?: SessionAuthorizationListScope | undefined;
+    /** See {@link PersonalWorkspaceOwnerException}. Absent means "no exception". */
+    personalWorkspaceOwnerException?: PersonalWorkspaceOwnerException | undefined;
+  };
 
 /**
  * Whether the caller may use the owner-only managed personal-workspace
@@ -33144,7 +33175,17 @@ function withRequiresActionSince<T extends Pick<Session, "id" | "status" | "requ
 function sessionFilters(
   options: Pick<
     ListSessionsForSubjectOptions,
-    "authorizationScope" | "parentSessionId" | "search" | "subjectId" | "archivedOnly"
+    | "authorizationScope"
+    | "parentSessionId"
+    | "search"
+    | "subjectId"
+    | "archivedOnly"
+    | "channelId"
+    | "createdBy"
+    | "updatedFrom"
+    | "updatedBefore"
+    | "createdFrom"
+    | "createdBefore"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -33191,6 +33232,23 @@ function sessionFilters(
       or(ilike(schema.sessions.title, pattern), ilike(schema.sessions.initialMessage, pattern))!,
     );
   }
+  if (options.channelId !== undefined) {
+    filters.push(
+      options.channelId === null
+        ? isNull(schema.sessions.channelId)
+        : eq(schema.sessions.channelId, options.channelId!),
+    );
+  }
+  if (options.createdBy) {
+    filters.push(
+      eq(schema.sessions.createdByKind, options.createdBy.kind),
+      eq(schema.sessions.createdBySubjectId, options.createdBy.subjectId),
+    );
+  }
+  if (options.updatedFrom) filters.push(gte(schema.sessions.updatedAt, options.updatedFrom));
+  if (options.updatedBefore) filters.push(lt(schema.sessions.updatedAt, options.updatedBefore));
+  if (options.createdFrom) filters.push(gte(schema.sessions.createdAt, options.createdFrom));
+  if (options.createdBefore) filters.push(lt(schema.sessions.createdAt, options.createdBefore));
   return filters;
 }
 
@@ -33304,6 +33362,28 @@ function sessionSearchFilter(search: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function sessionListFilterIdentity(options: SessionListFilterOptions): string {
+  const hasChannel = options.channelId !== undefined;
+  if (
+    !hasChannel &&
+    !options.createdBy &&
+    !options.updatedFrom &&
+    !options.updatedBefore &&
+    !options.createdFrom &&
+    !options.createdBefore
+  ) {
+    return "all";
+  }
+  return JSON.stringify([
+    hasChannel ? ["channel", options.channelId] : null,
+    options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
+    options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
+    options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
+    options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
+    options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
+  ]);
+}
+
 /** Opaque, URL-safe cursor encoding for bounded session-list pagination. */
 export function encodeSessionListCursor(cursor: SessionListCursor): string {
   return Buffer.from(
@@ -33321,6 +33401,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
             parentSessionFilter: cursor.parentSessionFilter,
             search: cursor.search,
             archiveMode: cursor.archiveMode,
+            filter: cursor.filter ?? "all",
           }
         : {
             snapshotId: cursor.snapshotId,
@@ -33328,6 +33409,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
             parentSessionFilter: cursor.parentSessionFilter,
             search: cursor.search,
             archiveMode: cursor.archiveMode,
+            ...(cursor.filter ? { filter: cursor.filter } : {}),
           },
     ),
   ).toString("base64url");
@@ -33346,16 +33428,20 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       parentSessionFilter?: unknown;
       search?: unknown;
       archiveMode?: unknown;
+      filter?: unknown;
     };
     const parentSessionFilter = parsed.parentSessionFilter;
     const search = parsed.search;
     const archiveMode = parsed.archiveMode ?? "active";
+    const filter = parsed.filter ?? "all";
     const filtersAreValid =
       (parentSessionFilter === "all" ||
         parentSessionFilter === "null" ||
         (typeof parentSessionFilter === "string" && UUID_PATTERN.test(parentSessionFilter))) &&
       (search === null || (typeof search === "string" && search.length <= 200)) &&
-      (archiveMode === "active" || archiveMode === "archived");
+      (archiveMode === "active" || archiveMode === "archived") &&
+      typeof filter === "string" &&
+      filter.length <= 2_048;
     if (!filtersAreValid) return null;
 
     if (parsed.version === 2) {
@@ -33379,6 +33465,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
         parentSessionFilter: parentSessionFilter as string,
         search: search as string | null,
         archiveMode,
+        filter,
       };
     }
 
@@ -33399,6 +33486,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       parentSessionFilter: parentSessionFilter as string,
       search: search as string | null,
       archiveMode,
+      filter,
     };
   } catch {
     return null;
@@ -33504,6 +33592,7 @@ export async function listSessionsForSubject(
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
         const archiveMode = options.archivedOnly ? "archived" : "active";
+        const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
         if (options.pinsOnly && options.archivedOnly) {
@@ -33516,6 +33605,15 @@ export async function listSessionsForSubject(
         }
 
         let pageIds: string[];
+        // Keep each selected row in the same MVCC statement as its filters and
+        // keyset boundary. A second READ COMMITTED hydration can observe a move
+        // or activity change and return content that no longer matches the page.
+        let selectedOrdinaryRows:
+          | Array<{
+              session: typeof schema.sessions.$inferSelect;
+              pin: typeof schema.sessionPins.$inferSelect | null;
+            }>
+          | undefined;
         let nextCursor: string | null = null;
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
@@ -33527,7 +33625,9 @@ export async function listSessionsForSubject(
           if (
             cursor.parentSessionFilter !== parentFilter ||
             cursor.search !== searchFilter ||
-            cursor.archiveMode !== archiveMode
+            cursor.archiveMode !== archiveMode ||
+            (cursor.filter ?? "all") !== listFilter ||
+            listFilter !== "all"
           ) {
             throw new SessionListCursorError("session list cursor does not match its filters");
           }
@@ -33607,11 +33707,12 @@ export async function listSessionsForSubject(
               parentSessionFilter: snapshot.parentSessionFilter,
               search: snapshot.search ?? null,
               archiveMode: snapshot.archiveMode,
+              filter: "all",
             });
           }
         } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
-            .select({ id: schema.sessions.id })
+            .select({ id: schema.sessions.id, session: schema.sessions, pin: schema.sessionPins })
             .from(schema.sessions)
             .leftJoin(
               schema.sessionPins,
@@ -33625,13 +33726,15 @@ export async function listSessionsForSubject(
             .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
+          selectedOrdinaryRows = ordinaryIdRows;
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
           if (
             cursor &&
             (cursor.parentSessionFilter !== parentFilter ||
               cursor.search !== searchFilter ||
-              cursor.archiveMode !== archiveMode)
+              cursor.archiveMode !== archiveMode ||
+              (cursor.filter ?? "all") !== listFilter)
           ) {
             throw new SessionListCursorError("session list cursor does not match its filters");
           }
@@ -33650,6 +33753,8 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
+              session: schema.sessions,
+              pin: schema.sessionPins,
               sortAt: sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
             })
             .from(schema.sessions)
@@ -33674,6 +33779,7 @@ export async function listSessionsForSubject(
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
+          selectedOrdinaryRows = page;
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
@@ -33684,6 +33790,7 @@ export async function listSessionsForSubject(
               parentSessionFilter: parentFilter,
               search: searchFilter,
               archiveMode,
+              filter: listFilter,
             });
           }
         }
@@ -33706,7 +33813,8 @@ export async function listSessionsForSubject(
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
-          pageIds.length === 0
+          selectedOrdinaryRows ??
+          (pageIds.length === 0
             ? []
             : await tx
                 .select({ session: schema.sessions, pin: schema.sessionPins })
@@ -33728,7 +33836,7 @@ export async function listSessionsForSubject(
                       : []),
                     ordinaryPinFilter,
                   ),
-                );
+                ));
         const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
         const pageRows = pageIds.flatMap((id) => {
           const row = ordinaryById.get(id);
