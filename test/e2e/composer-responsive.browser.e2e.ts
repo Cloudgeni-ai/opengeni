@@ -75,7 +75,8 @@ describe("container-responsive public composer demo", () => {
       const shortHeight = await textarea.evaluate((node) => node.getBoundingClientRect().height);
       await textarea.fill("A multiline draft remains editable after resizing. ".repeat(30));
       await page.waitForFunction(
-        (height) => (document.querySelector("textarea")?.getBoundingClientRect().height ?? 0) > height,
+        (height) =>
+          (document.querySelector("textarea")?.getBoundingClientRect().height ?? 0) > height,
         shortHeight,
       );
       expect(
@@ -83,7 +84,9 @@ describe("container-responsive public composer demo", () => {
       ).toBeGreaterThan(shortHeight);
       await textarea.fill("Short again");
       await page.waitForFunction(
-        (height) => (document.querySelector("textarea")?.getBoundingClientRect().height ?? Infinity) <= height + 1,
+        (height) =>
+          (document.querySelector("textarea")?.getBoundingClientRect().height ?? Infinity) <=
+          height + 1,
         shortHeight,
       );
       expect(
