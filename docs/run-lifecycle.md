@@ -1041,6 +1041,11 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+A workflow run closing during a current input wait or an active goal is parked,
+not completed work. Idle settlement preserves that projection and durable wake
+without creating a child terminal result. Goal completion, explicit goal pause,
+failed settlement, and finished goalless work retain their existing callbacks.
+
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
 an active goal, which is the durable obligation to keep working. A goal paused
