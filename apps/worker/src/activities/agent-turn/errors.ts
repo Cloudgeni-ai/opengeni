@@ -1,6 +1,8 @@
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   SandboxLeaseTransitionError,
@@ -825,6 +827,26 @@ export function classifyXaiCredentialFailure(error: unknown): XaiCredentialFailu
   return null;
 }
 
+// The generic turn-failure boundary also receives application/provider errors.
+// A five-character code or generic severity alone does not establish a driver error.
+function findPostgresDriverError(error: unknown): Record<string, unknown> | null {
+  const queue: unknown[] = [error];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < queue.length && index < 64; index += 1) {
+    const current = queue[index];
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.name === "PostgresError") return record;
+    for (const key of ["cause", "original", "driverError", "error", "errors"]) {
+      const nested = record[key];
+      if (Array.isArray(nested)) queue.push(...nested.slice(0, 64));
+      else if (nested !== undefined) queue.push(nested);
+    }
+  }
+  return null;
+}
+
 export function agentRunFailurePayload(
   error: unknown,
   options: { isCodexTurn?: boolean } = {},
@@ -1064,6 +1086,18 @@ export function agentRunFailurePayload(
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
+  }
+  const postgresDriverError = findPostgresDriverError(error);
+  if (postgresDriverError) {
+    const database = safeDatabaseErrorFacts(postgresDriverError);
+    const sqlState = nestedPostgresSqlState(postgresDriverError);
+    if (sqlState !== null || Object.keys(database).length > 0) {
+      return {
+        error: message,
+        sqlState,
+        ...(Object.keys(database).length > 0 ? { database } : {}),
+      };
+    }
   }
   return { error: message };
 }

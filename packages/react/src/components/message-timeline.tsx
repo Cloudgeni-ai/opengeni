@@ -2904,7 +2904,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.phase === "started"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <div
@@ -3632,7 +3632,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.tone === "waiting"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div
       className={cn(
