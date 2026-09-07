@@ -63,7 +63,6 @@ export function ModelAccessOnboardingPanel({
   const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
-  const [stripeEnabled, setStripeEnabled] = useState(false);
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
   const codexPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -81,26 +80,6 @@ export function ModelAccessOnboardingPanel({
       if (codexPollTimer.current) clearTimeout(codexPollTimer.current);
     };
   }, []);
-
-  useEffect(() => {
-    if (!client) {
-      setStripeEnabled(false);
-      return;
-    }
-    let active = true;
-    setStripeEnabled(false);
-    void client
-      .getBilling({ accountId: organizationId })
-      .then((billing) => {
-        if (active) setStripeEnabled(billing.mode === "stripe");
-      })
-      .catch(() => {
-        if (active) setStripeEnabled(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [client, organizationId]);
 
   async function finishWithConnectedModel(): Promise<boolean> {
     if (client) {
@@ -396,36 +375,39 @@ export function ModelAccessOnboardingPanel({
           )}
         </div>
 
-        {stripeEnabled ? (
-          <div className="mt-6 grid gap-4 border-t border-border pt-6">
-            <div>
-              <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
-              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-                Pay for hosted models as you go. No provider account needed.
-              </p>
-            </div>
-            <CreditAmountPicker
-              value={topupAmount}
-              onChange={setTopupAmount}
-              disabled={busy || !!pending}
-            />
-            <Button
-              type="button"
-              className="h-10 w-full"
-              disabled={!client || busy || !!pending || !validAmount}
-              onClick={() => void buyCredits()}
-            >
-              {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-              {validAmount
-                ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
-                : "Buy credits"}
-              <ArrowUpRightIcon className="size-4" />
-            </Button>
-            <p className="-mt-2 text-center text-xs text-fg-subtle">
-              You’ll review your payment in Stripe Checkout.
+        {/*
+          Offer checkout here without GET /v1/billing. After org create the
+          grant is not revalidated until onComplete, so billing:read is missing
+          and a 403 is an unexpected browser-acceptance error.
+        */}
+        <div className="mt-6 grid gap-4 border-t border-border pt-6">
+          <div>
+            <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
+            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+              Pay for hosted models as you go. No provider account needed.
             </p>
           </div>
-        ) : null}
+          <CreditAmountPicker
+            value={topupAmount}
+            onChange={setTopupAmount}
+            disabled={busy || !!pending}
+          />
+          <Button
+            type="button"
+            className="h-10 w-full"
+            disabled={!client || busy || !!pending || !validAmount}
+            onClick={() => void buyCredits()}
+          >
+            {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+            {validAmount
+              ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
+              : "Buy credits"}
+            <ArrowUpRightIcon className="size-4" />
+          </Button>
+          <p className="-mt-2 text-center text-xs text-fg-subtle">
+            You’ll review your payment in Stripe Checkout.
+          </p>
+        </div>
         <Button
           type="button"
           variant="ghost"

@@ -379,6 +379,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
       expect(container.textContent).toContain("Use OpenGeni credits");
+      expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
