@@ -67,6 +67,7 @@ export function ModelAccessOnboardingPanel({
   const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
+  const [selectionRetryAvailable, setSelectionRetryAvailable] = useState(false);
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
   const codexPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -90,11 +91,17 @@ export function ModelAccessOnboardingPanel({
       try {
         const modelId = await applyConnectedModelToNewSessionDraft(client, workspaceId);
         if (modelId) {
+          setSelectionRetryAvailable(false);
           toast.success("Connected model selected for your next chat", {
             description: modelId,
           });
+        } else {
+          setSelectionRetryAvailable(true);
+          toast.error("The connection is ready, but its model is not selectable yet");
+          return false;
         }
       } catch (error) {
+        setSelectionRetryAvailable(true);
         toast.error("Model connected, but your new-chat selection could not be saved", {
           description: error instanceof Error ? error.message : String(error),
         });
@@ -103,6 +110,16 @@ export function ModelAccessOnboardingPanel({
     }
     onComplete();
     return true;
+  }
+
+  async function retryConnectedModelSelection(): Promise<void> {
+    if (!client || busy) return;
+    setBusy(true);
+    try {
+      await finishWithConnectedModel();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function connectCodex(): Promise<void> {
@@ -170,7 +187,7 @@ export function ModelAccessOnboardingPanel({
     if (!client || busy) return;
     setBusy(true);
     try {
-      const start = await client.supergrokConnectStart(workspaceId, "workspace");
+      const start = await client.supergrokConnectStart(workspaceId, "user");
       setPending({
         kind: "supergrok",
         userCode: start.userCode,
@@ -193,7 +210,7 @@ export function ModelAccessOnboardingPanel({
       if (!result || controller.signal.aborted || cancelled.current) return;
       setPending(null);
       if (result.status === "connected") {
-        toast.success("SuperGrok connected for the workspace");
+        toast.success("SuperGrok connected");
         await finishWithConnectedModel();
         return;
       }
@@ -387,6 +404,26 @@ export function ModelAccessOnboardingPanel({
             </div>
           )}
         </div>
+
+        {selectionRetryAvailable ? (
+          <div className="mt-6 grid gap-3 rounded-lg border border-border bg-bg p-4" role="alert">
+            <div>
+              <p className="text-sm font-medium">Your service is connected</p>
+              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+                Its model is not selectable yet. Try again to use it for your next chat.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void retryConnectedModelSelection()}
+            >
+              {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+              Try again
+            </Button>
+          </div>
+        ) : null}
 
         {billingMode === "stripe" ? (
           <div className="mt-6 grid gap-4 border-t border-border pt-6">

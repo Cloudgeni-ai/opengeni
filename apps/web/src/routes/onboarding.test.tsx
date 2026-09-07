@@ -91,6 +91,7 @@ mock.module("@tanstack/react-router", () => ({
 }));
 
 const { ManagedAuthPanel } = await import("@/components/managed-auth-panel");
+const { ModelAccessOnboardingPanel } = await import("@/components/model-access-onboarding");
 const { OrganizationOnboardingPanel } = await import("@/components/organization-onboarding-panel");
 const { SetupAccountRoute, setupAccountTokenFromUrl } = await import("./setup-account");
 const { takeBootstrappedSetupAccountToken } = await import("@/setup-account-token");
@@ -431,6 +432,94 @@ describe("organization onboarding UI", () => {
     } finally {
       await act(async () => root.unmount());
       container.remove();
+    }
+  });
+
+  test("a connected provider stays in onboarding until its model becomes selectable", async () => {
+    const onComplete = mock(() => undefined);
+    const createConnection = mock(async () => undefined);
+    const client = {
+      createConnection,
+      getWorkspaceModelCatalog: mock(async () => ({ models: [] })),
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={onComplete}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Connect Vercel AI Gateway")!
+          .click(),
+      );
+      await flush();
+      expect(createConnection).toHaveBeenCalledTimes(1);
+      expect(onComplete).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Your service is connected");
+      expect(container.textContent).toContain("Try again");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("SuperGrok onboarding starts an actor-private connection", async () => {
+    const supergrokConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      verificationUriComplete: null,
+      intervalSeconds: 60,
+      expiresInSeconds: 600,
+      scope: "user" as const,
+    }));
+    const client = {
+      supergrokConnectStart,
+      supergrokConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            supergrokEnabled
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect SuperGrok"]')!
+          .click(),
+      );
+      await flush();
+      expect(supergrokConnectStart).toHaveBeenCalledWith("personal-workspace", "user");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
     }
   });
 
