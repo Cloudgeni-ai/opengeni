@@ -1002,7 +1002,11 @@ describe("SessionChrome goal pill reasons", () => {
 describe("SessionChrome compact actions", () => {
   test("visibly identifies the goal when its continuation needs attention", async () => {
     mounted = await renderComponent(
-      <SessionChrome compact queue={queue({ queue: [] })} goal={goal({ continuation: undefined })} />,
+      <SessionChrome
+        compact
+        queue={queue({ queue: [] })}
+        goal={goal({ continuation: undefined })}
+      />,
     );
     const chip = mounted.container.querySelector<HTMLButtonElement>(
       '[data-og-session-chrome-signal="goal"]',
