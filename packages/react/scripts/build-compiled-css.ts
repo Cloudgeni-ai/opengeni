@@ -2,7 +2,13 @@
 import tailwindcss from "@tailwindcss/postcss";
 import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import postcss, { parse, type AcceptedPlugin, type Declaration, type Rule } from "postcss";
+import postcss, {
+  parse,
+  type AcceptedPlugin,
+  type AtRule,
+  type Declaration,
+  type Rule,
+} from "postcss";
 import selectorParser, { type Selector } from "postcss-selector-parser";
 
 const packageRoot = resolve(import.meta.dir, "..");
@@ -14,8 +20,8 @@ const effectiveTokensPath = join(stylesRoot, "effective-tokens.css");
 const checkOnly = process.argv.includes("--check");
 
 const input = `@import "tailwindcss/theme.css" layer(theme);
-@import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./index.css";
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
 @import "./responsive.css";
 @source "../src";
 `;
@@ -362,9 +368,17 @@ export function scopeSelectors(css: string): string {
     if (isInsideKeyframes(rule) || parentRule(rule)) return;
     const parsed = selectorParser().astSync(rule.selector);
     const preservesTypographyGuard = parsed.nodes.some((selector) => rootClassCount(selector) > 1);
+    const isScopedBase = parentsOf(rule).some(
+      (parent) =>
+        parent.type === "atrule" && parent.name === "layer" && (parent as AtRule).params === "base",
+    );
     const scoped = parsed.nodes.flatMap((selector) => {
       if (containsRoot(selector)) {
-        return [preservesTypographyGuard ? selector.clone() : lowerRootSpecificity(selector)];
+        return [
+          preservesTypographyGuard || isScopedBase
+            ? selector.clone()
+            : lowerRootSpecificity(selector),
+        ];
       }
       if (isDocumentRoot(selector)) {
         return [selectorParser.selector({ value: "", nodes: [scope.clone()] })];

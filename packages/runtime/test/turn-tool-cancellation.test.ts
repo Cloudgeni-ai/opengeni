@@ -137,14 +137,14 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(1);
   });
 
-  test("a process-local retained command stays foreground until terminal", async () => {
+  test("a process-local retained command yields a turn-scoped handle without background adoption", async () => {
     const controller = createTurnToolCancellationController();
     let writes = 0;
     let adoptions = 0;
     const exec = functionTool("exec_command", async () => running(118, "ready\n"));
     const write = functionTool("write_stdin", async () => {
       writes += 1;
-      return writes === 1 ? running(118) : exited(0, "finished\n");
+      return exited(0, "finished\n");
     });
     const session = {
       hasRetainedProcess: (sessionId: number) => sessionId === 118,
@@ -153,7 +153,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         adoptions += 1;
       },
     };
-    const [wrappedExec] = controller.wrapTools([exec, write], session) as Array<
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], session) as Array<
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
@@ -162,9 +162,16 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       JSON.stringify({ cmd: "local-task", yield_time_ms: 0 }),
     );
 
-    expect(output).toContain("Process exited with code 0");
-    expect(output).toContain("ready\nfinished");
-    expect(writes).toBe(2);
+    expect(output).toContain("Process running with session ID 118");
+    expect(output).toContain("turn-scoped");
+    expect(output).toContain("ready");
+    expect(writes).toBe(0);
+    const completed = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 118, chars: "", yield_time_ms: 0 }),
+    );
+    expect(completed).toContain("Process exited with code 0");
+    expect(writes).toBe(1);
     expect(adoptions).toBe(0);
   });
 
@@ -277,9 +284,10 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       writes.push(input.chars ?? "");
       return processAlive ? running(7) : exited(137);
     });
-    const wrapped = controller.wrapTools([exec, write]) as Array<
-      Extract<Tool<unknown>, { type: "function" }>
-    >;
+    const wrapped = controller.wrapTools([exec, write], {
+      hasRetainedProcess: (id: number) => id === 7,
+      canAdoptRetainedProcessAsBackgroundCommand: () => false,
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
 
     const output = await wrapped[0]!.invoke(
       runContext,

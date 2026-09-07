@@ -204,6 +204,38 @@ export const workspaceArtifacts = pgTable(
   }),
 );
 
+export const workspaceArtifactUploads = pgTable(
+  "workspace_artifact_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    status: text("status")
+      .$type<"pending" | "published" | "expired">()
+      .notNull()
+      .default("pending"),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    index("workspace_artifact_uploads_expiry_idx")
+      .on(table.workspaceId, table.expiresAt)
+      .where(sql`${table.status} <> 'published'`),
+    check(
+      "workspace_artifact_uploads_status_check",
+      sql`${table.status} in ('pending', 'published', 'expired')`,
+    ),
+  ],
+);
+
 export const workspaceArtifactVersions = pgTable(
   "workspace_artifact_versions",
   {
@@ -218,11 +250,11 @@ export const workspaceArtifactVersions = pgTable(
     revision: integer("revision").notNull(),
     contentKey: text("content_key").notNull(),
     contentType: text("content_type").$type<"text/html">().notNull().default("text/html"),
-    contentSha256: text("content_sha256").notNull(),
-    sizeBytes: integer("size_bytes").notNull(),
+    contentSha256: text("content_sha256"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     sourceKey: text("source_key"),
     sourceSha256: text("source_sha256"),
-    sourceSizeBytes: integer("source_size_bytes"),
+    sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),

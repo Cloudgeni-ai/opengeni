@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  prepareWorkspaceArtifactUpload,
+  prepareWorkspaceArtifactPublication,
+  workspaceArtifactDownloads,
+} from "../site-uploads";
+import {
   CreateScheduledTaskRequest,
   boundSessionMcpText as capSessionDiscoveryText,
   compactSessionMcpListRow,
@@ -293,10 +298,6 @@ import { registerRememberTools } from "./remember";
 import { mintSandboxCodemodeToken } from "@opengeni/runtime/sandbox";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
 import { observeWorkDiscovery, summarizeWorkDiscoveryRows } from "../work-discovery-observability";
-import {
-  prepareWorkspaceArtifactContent,
-  readWorkspaceArtifactContent,
-} from "../workspace-artifact-content";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -634,8 +635,9 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   atlassian_sources_list: { allOf: ["connections:read"] },
   atlassian_search: { allOf: ["connections:read"] },
   atlassian_get: { allOf: ["connections:read"] },
-  artifacts_list: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_list: { allOf: ["artifacts:read"] },
   artifacts_get_source: { sessionRequired: true, allOf: ["artifacts:read"] },
+  artifacts_prepare_upload: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_create: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_publish: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
@@ -846,6 +848,24 @@ export function buildOpenGeniMcpServer(
       options.workspaceMemoryPromptMode ?? "retrieval_only",
     );
   }
+  server.registerTool(
+    "artifacts_list",
+    {
+      description:
+        "List the generic published artifacts in this workspace and their current versions.",
+      inputSchema: {},
+    },
+    async () => {
+      if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.first_party_mcp.call");
+      }
+      return json(
+        redactWorkspaceArtifactListProvenance(
+          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
+        ),
+      );
+    },
+  );
   if (sessionId !== null && exactAgentAttemptClaims(grant) !== null) {
     registerPreferenceRegistryTools(server, deps, grant, json);
     registerTaskNoteTools(server, deps, grant, sessionId, json);
@@ -3017,13 +3037,15 @@ function registerWorkspaceArtifactTools(
   const mutation = async (response: WorkspaceArtifactMutationResponse) =>
     await projectWorkspaceArtifactMutationProvenance(response, canReadProvenanceSession);
   const prepare = (
-    html: string,
+    html: string | undefined,
     source?: { entrypoint: string; files: Array<{ path: string; content: string }> },
     requestedTools?: Array<{ serverId: string; toolName: string }>,
+    uploadId?: string,
   ) => {
     if (!deps.objectStorage) throw new Error("Object storage is not configured");
-    return prepareWorkspaceArtifactContent(deps.objectStorage, grant.workspaceId, {
-      html,
+    return prepareWorkspaceArtifactPublication(deps, grant, {
+      ...(html === undefined ? {} : { html }),
+      ...(uploadId ? { uploadId } : {}),
       ...(source ? { source } : {}),
       ...(requestedTools ? { requestedTools } : {}),
     });
@@ -3054,19 +3076,15 @@ function registerWorkspaceArtifactTools(
   };
 
   server.registerTool(
-    "artifacts_list",
+    "artifacts_prepare_upload",
     {
       description:
-        "List the generic published artifacts in this workspace and their current versions.",
+        "Get signed upload URLs for a Site's HTML and optional source JSON. Upload with curl or fetch, then pass uploadId to artifacts_create/artifacts_publish. No hashes or sizes needed. Source upload may be omitted for HTML-only Sites.",
       inputSchema: {},
     },
     async () => {
       await authorize();
-      return json(
-        redactWorkspaceArtifactListProvenance(
-          await listWorkspaceArtifacts(deps.db, grant.workspaceId),
-        ),
-      );
+      return json(await prepareWorkspaceArtifactUpload(deps, grant));
     },
   );
 
@@ -3074,7 +3092,7 @@ function registerWorkspaceArtifactTools(
     "artifacts_get_source",
     {
       description:
-        "Read an artifact's metadata and exact HTML source. Omit versionId for the current version.",
+        "Get artifact metadata, version id, and signed download URLs for HTML and optional source JSON. Download with curl or Bun. If source is null, edit the HTML instead. Omit versionId for the current version.",
       inputSchema: {
         artifactId: z4.string().uuid(),
         versionId: z4.string().uuid().optional(),
@@ -3099,11 +3117,11 @@ function registerWorkspaceArtifactTools(
         projectWorkspaceArtifactDetailProvenance(rawDetail, canReadSourceSession),
         projectWorkspaceArtifactVersionProvenance(ref.version, canReadSourceSession),
       ]);
-      const content = await readWorkspaceArtifactContent(deps.objectStorage, ref);
+      const downloads = await workspaceArtifactDownloads(deps.objectStorage, ref, "sandbox");
       return json({
         detail,
         version: projectedVersion,
-        ...content,
+        downloads,
       });
     },
   );
@@ -3121,7 +3139,8 @@ function registerWorkspaceArtifactTools(
           .regex(/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/)
           .max(96)
           .optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
         source: z4
           .object({
             entrypoint: z4.string().min(1).max(256),
@@ -3148,7 +3167,16 @@ function registerWorkspaceArtifactTools(
         idempotencyKey: z4.string().min(1).max(200),
       },
     },
-    async ({ title, description, slug, html, source, requestedTools, idempotencyKey }) => {
+    async ({
+      title,
+      description,
+      slug,
+      html,
+      source,
+      requestedTools,
+      idempotencyKey,
+      uploadId,
+    }) => {
       await authorize();
       const artifactId = crypto.randomUUID();
       const slugBase = slug ?? (normalizeWorkspaceArtifactSlug(title) || "artifact");
@@ -3161,7 +3189,7 @@ function registerWorkspaceArtifactTools(
             requestedSlug: slug ?? null,
             title,
             description: description ?? null,
-            ...prepare(html, source, requestedTools),
+            ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_create"),
           }),
         ),
@@ -3179,7 +3207,8 @@ function registerWorkspaceArtifactTools(
         expectedCurrentVersionId: z4.string().uuid(),
         title: z4.string().min(1).max(120).optional(),
         description: z4.string().max(2000).nullable().optional(),
-        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES),
+        html: z4.string().min(1).max(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).optional(),
+        uploadId: z4.string().uuid().optional(),
         source: z4
           .object({
             entrypoint: z4.string().min(1).max(256),
@@ -3212,6 +3241,7 @@ function registerWorkspaceArtifactTools(
       title,
       description,
       html,
+      uploadId,
       source,
       requestedTools,
       idempotencyKey,
@@ -3224,7 +3254,7 @@ function registerWorkspaceArtifactTools(
             expectedCurrentVersionId,
             ...(title !== undefined ? { title } : {}),
             ...(description !== undefined ? { description } : {}),
-            ...prepare(html, source, requestedTools),
+            ...(await prepare(html, source, requestedTools, uploadId)),
             ...provenance(idempotencyKey, "artifacts_publish"),
           }),
         ),

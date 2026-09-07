@@ -2025,6 +2025,14 @@ Do not commit real secret values.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
+The same drained rollout procedure below applies to
+`0417_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
+allows hash-free HTML versions and optional source, and widens stored byte counts.
+Stop old API and both worker roles, supply the complete runtime login list,
+migrate, provision the target roles, then start the matching binary. After this
+cutover, do not restart a pre-0417 binary. Existing Site versions and source remain
+readable; local development data does not need resetting.
+
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` change the exact application-role
 table, grant, and RLS inventory. The previous API/worker runtime-posture

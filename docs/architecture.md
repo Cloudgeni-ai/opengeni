@@ -177,6 +177,10 @@ A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
 adoption, ordinary turn completion and Steer detach from it, while explicit
 command cancellation, Pause, or terminal Cancel control its lifetime.
+Docker/local SDK processes instead expose turn-scoped handles after a bounded
+wait. They remain on the exact turn's cancellation fence and are stopped and
+settled before finalization; they are not durable background commands. This
+lets an agent test its preview server without waiting for that server to exit.
 An explicitly stopped, revoked, or replaced Connected Machine instance ends
 command tracking as `lost`; this never asserts operating-system process death.
 A temporary transport outage alone preserves tracking. Reconciliation drains
@@ -1171,7 +1175,12 @@ approval still applies at execution. An agent-authored version may retain any
 identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
-port and every derived tool-call port are revoked on navigation or replacement.
+port and every derived tool-call port are revoked on document navigation or replacement.
+Multiple SDK clients in the same document retain independent ports; connecting
+one must not cancel another. The same Site client exposes the ordinary session
+SDK for React providers, timelines, and composers. Published requests use the
+viewer-authenticated parent; sandbox previews use the existing attempt-bound
+Codemode HTTP handler, including incremental, cancellable event streams.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1259,10 +1268,16 @@ not register a runnable legacy computer tool.
 Static published HTML, retained evidence, Documents/RAG, and editable artifacts
 are different products and must not share mutable truth accidentally. Workspace
 Sites are immutable versions of the existing HTML artifact primitive: one
-self-contained HTML runtime, one retained source bundle, an exact requested-tool
+self-contained HTML runtime, an optional retained source bundle, an exact requested-tool
 allowlist, rollback, and recoverable archive/restore. They run in the existing
 opaque-origin iframe; there is no second host, wildcard domain, or compute
 runtime.
+The agent prepares signed Site-specific upload URLs, uploads HTML and optional
+source JSON directly, then publishes the upload id. Publication freezes immutable
+copies without caller hashes or byte counts. Source retrieval returns signed
+download URLs; HTML-only Sites remain editable as HTML. Viewing fetches HTML
+separately from source, currently into the existing srcDoc frame. The reference
+embedding example is `examples/site-session-embed`.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1273,6 +1288,19 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 `@opengeni/sdk` is the framework-neutral client contract. `@opengeni/react`
 adds hooks and UI. `apps/web` is a consumer of those packages and should not
 become a hidden source of domain semantics.
+
+`SessionConversation` is the default complete existing-session embed. It owns
+one event feed, queue projection/actions, durable composer and model policy,
+human-input forms, and timeline history. `ChatComposer` remains the lower-level
+input surface, not an implicit queue or whole conversation. Sites use the same
+component with their standard Site-bound SDK client.
+
+The stock sandbox build runs `scripts/pack-sandbox-site-packages.ts` from its
+checkout and ships Bun-installable source archives at `/opt/opengeni/site-packages`.
+SDK, React, Codemode and their internal dependencies resolve to that same set;
+projects install these after ordinary dependencies with `bun add --no-save`.
+Local image builds include dirty worktree source. Registry canaries and the
+fallback module path are not the deployment-matching mechanism.
 
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE

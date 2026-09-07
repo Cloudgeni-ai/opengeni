@@ -25,6 +25,8 @@ export type {
   TurnSummaryOptions,
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
+export { SessionConversation } from "./components/session-conversation";
+export type { SessionConversationProps } from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
   SessionChrome,
