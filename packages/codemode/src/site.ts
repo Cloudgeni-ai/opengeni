@@ -29,6 +29,9 @@ export function createCodemodeSiteRequestHandler(
           headers: {
             "content-type": request.headers.get("content-type") ?? "application/json",
             accept: request.headers.get("accept") ?? "application/json",
+            ...(request.headers.has("last-event-id")
+              ? { "last-event-id": request.headers.get("last-event-id")! }
+              : {}),
           },
           ...(request.body ? { body: await request.text() } : {}),
         });

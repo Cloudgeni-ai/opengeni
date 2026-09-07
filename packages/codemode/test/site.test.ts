@@ -30,9 +30,11 @@ const catalog: AttemptToolCatalog = {
 describe("local Site Codemode handler", () => {
   test("SDK event streams deliver before completion and retain cancellation", async () => {
     let cancelled = false;
+    let forwardedHeaders: HeadersInit | undefined;
     const client = {
-      sessionRequest: async () =>
-        new Response(
+      sessionRequest: async (_path: string, init: RequestInit) => {
+        forwardedHeaders = init.headers;
+        return new Response(
           new ReadableStream({
             start(controller) {
               controller.enqueue(new TextEncoder().encode("data: live\n\n"));
@@ -42,14 +44,17 @@ describe("local Site Codemode handler", () => {
             },
           }),
           { headers: { "content-type": "text/event-stream" } },
-        ),
+        );
+      },
     } as unknown as CodemodeClient;
     const response = await createCodemodeSiteRequestHandler(client)(
       new Request(
         "http://localhost/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions/one/events/stream",
+        { headers: { "last-event-id": "cursor-42" } },
       ),
     );
     const reader = response.body!.getReader();
+    expect(new Headers(forwardedHeaders).get("last-event-id")).toBe("cursor-42");
     expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: live\n\n");
     await reader.cancel();
     expect(cancelled).toBe(true);

@@ -1272,7 +1272,9 @@ allowlist, rollback, and recoverable archive/restore. They run in the existing
 opaque-origin iframe; there is no second host, wildcard domain, or compute
 runtime.
 The agent prepares signed Site-specific upload URLs, uploads HTML and optional
-source JSON directly, then publishes the upload id. Publication freezes immutable
+source JSON directly, then publishes the upload id. Editable source JSON is capped
+at 64 MiB before parsing; HTML uses the storage upload limit and remains streamed.
+Publication freezes immutable
 copies without caller hashes or byte counts. Source retrieval returns signed
 download URLs; HTML-only Sites remain editable as HTML. Viewing fetches HTML
 separately from source, currently into the existing srcDoc frame. The reference

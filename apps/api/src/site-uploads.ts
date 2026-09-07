@@ -11,6 +11,25 @@ import {
   type PreparedWorkspaceArtifactContent,
 } from "./workspace-artifact-content";
 type Storage = NonNullable<ObjectStorageDependency>;
+export const MAX_SITE_SOURCE_BYTES = 64 * 1024 * 1024;
+
+export async function validateSiteSource(storage: Storage, key: string, sizeBytes: number) {
+  if (sizeBytes > MAX_SITE_SOURCE_BYTES) {
+    throw new WorkspaceArtifactOperationError(
+      "Editable source JSON must be at most 64 MiB. Exclude dependencies and build output; HTML has a separate storage limit.",
+    );
+  }
+  const content = await storage.getObjectBytes(key);
+  try {
+    WorkspaceArtifactSourceBundle.parse(
+      JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(content!.bytes)),
+    );
+  } catch {
+    throw new WorkspaceArtifactOperationError(
+      "Source must be JSON {entrypoint, files: [{path, content}]}. Correct it and prepare a new upload.",
+    );
+  }
+}
 function keys(workspaceId: string, id: string) {
   const base = `workspaces/${workspaceId}/workspace-artifacts`;
   return {
@@ -150,16 +169,7 @@ export async function prepareWorkspaceArtifactPublication(
       ? null
       : await freeze(storage, paths.source, paths.frozenSource, "application/json", true);
   if (sourceSizeBytes !== null) {
-    const content = await storage.getObjectBytes(paths.frozenSource);
-    try {
-      WorkspaceArtifactSourceBundle.parse(
-        JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(content!.bytes)),
-      );
-    } catch {
-      throw new WorkspaceArtifactOperationError(
-        "Source must be JSON {entrypoint, files: [{path, content}]}. Correct it and prepare a new upload.",
-      );
-    }
+    await validateSiteSource(storage, paths.frozenSource, sourceSizeBytes);
   }
   return {
     uploadId: row.id,
