@@ -7860,7 +7860,7 @@ export function renderSessionSystemUpdateBatch(
   }
   return [
     "[OpenGeni internal updates]",
-    "These platform updates were delivered together for this inference. They are not human prompts.",
+    "These platform updates were delivered together for this inference.",
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,

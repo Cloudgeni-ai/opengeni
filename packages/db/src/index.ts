@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -38551,6 +38552,42 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.position,
             ],
           });
+        // A position conflict is idempotent only when the exact conversation
+        // item is already there. Never acknowledge a different item as saved.
+        const saved = await tx
+          .select({
+            position: schema.sessionHistoryItems.position,
+            turnId: schema.sessionHistoryItems.turnId,
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              inArray(
+                schema.sessionHistoryItems.position,
+                input.items.map((entry) => entry.position),
+              ),
+            ),
+          );
+        const byPosition = new Map(saved.map((row) => [row.position, row]));
+        for (const entry of input.items) {
+          const row = byPosition.get(entry.position);
+          if (
+            !row ||
+            row.turnId !== input.turnId ||
+            !isDeepStrictEqual(
+              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+            )
+          ) {
+            throw new Error(
+              `Conversation history persistence conflict at position ${entry.position}`,
+            );
+          }
+        }
         return true;
       });
     },
