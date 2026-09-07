@@ -192,8 +192,9 @@ remain subject to the configured confirmation policy.
 The GitHub integration sheet exposes that policy per acting identity in three
 independent groups: routine creation/update work, review submission, and merge.
 Routine work includes branch, issue, pull-request, comment, and reviewer-request
-writes. Choosing Allow there does not broaden review or merge. Existing or
-missing policy rows project as Ask, and a pre-existing per-tool split projects
+writes. Choosing Allow there does not broaden review or merge. Explicit policy rows retain their configured decision. Missing rows inherit
+accepted repository write capability and project as Allow, matching execution;
+this does not grant missing repository access. A pre-existing per-tool split projects
 as Mixed until the user chooses one group decision. The API surface is
 `GET`/`PATCH /v1/workspaces/:workspaceId/github/action-policies`; workspace App
 changes require `github:manage`, while a Personal policy requires the exact

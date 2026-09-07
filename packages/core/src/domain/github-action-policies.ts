@@ -52,7 +52,9 @@ function effectiveToolDecision(
     toolName,
     actionName: toolName,
   });
-  if (!resolved.managed) return "ask";
+  // Match connector_write admission: absent policy inherits repository capability.
+  // This is a policy projection, not a grant of repository or provider access.
+  if (!resolved.managed) return "allow";
   if (resolved.entry) return resolved.entry.policy;
   return resolved.decision;
 }

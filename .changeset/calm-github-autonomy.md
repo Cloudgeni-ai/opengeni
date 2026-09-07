@@ -6,4 +6,4 @@
 "@opengeni/sdk": minor
 ---
 
-Expose independently configurable GitHub action approval policies for routine writes, review submission, and pull-request merges, while preserving Ask as the default and attempt-frozen execution authority.
+Expose independently configurable GitHub action approval policies for routine writes, review submission, and pull-request merges, while preserving capability-first defaults, explicit policies, and attempt-frozen execution authority.

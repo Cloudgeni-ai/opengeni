@@ -329,7 +329,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
               kind: "choice" as const,
               id: optionId,
               label: `${actor.label} · ${group.label}`,
-              description: group.description,
+              description: `${group.description} Applies to new attempts; existing approvals keep their original policy. Repository access and session approval settings still apply.`,
               value,
               choices: [
                 ...(value === "mixed" ? [{ value: "mixed", label: "Mixed", disabled: true }] : []),

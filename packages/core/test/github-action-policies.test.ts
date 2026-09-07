@@ -33,12 +33,12 @@ describe("GitHub action policy projection", () => {
     expect([...grouped].sort()).toEqual([...GITHUB_REST_WRITE_TOOL_NAMES].sort());
   });
 
-  test("defaults every unmanaged GitHub write group to Ask", () => {
+  test("inherits accepted repository write capability when no policy exists", () => {
     expect(projectGitHubActionPolicyActor([], actor)).toEqual({
       kind: "workspace_app",
       installationId: 71,
       label: "OpenGeni bot on Cloudgeni-ai",
-      groups: { routine: "ask", review: "ask", merge: "ask" },
+      groups: { routine: "allow", review: "allow", merge: "allow" },
     });
   });
 
@@ -57,11 +57,11 @@ describe("GitHub action policy projection", () => {
 
   test("surfaces a pre-existing per-tool split as Mixed", () => {
     expect(
-      projectGitHubActionPolicyActor([policy("pull_request_create", "allow")], actor).groups,
+      projectGitHubActionPolicyActor([policy("pull_request_create", "ask")], actor).groups,
     ).toEqual({
       routine: "mixed",
-      review: "ask",
-      merge: "ask",
+      review: "allow",
+      merge: "allow",
     });
   });
 });
