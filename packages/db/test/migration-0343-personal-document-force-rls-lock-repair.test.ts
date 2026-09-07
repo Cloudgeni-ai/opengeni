@@ -66,6 +66,13 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column input_wait_until timestamptz,
       add column input_wait_reason text,
       add column input_wait_set_at timestamptz`;
+    await admin`
+      alter table workspace_inference_controls
+      add column timer_id uuid,
+      add column timer_action text,
+      add column timer_due_at timestamptz,
+      add column timer_pause_for_seconds integer,
+      add column timer_pause_revision bigint`;
     await provisionRoles(adminUrl, { appPassword, rlsStrategy: "force" });
 
     const [posture] = await admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
@@ -234,6 +241,13 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column input_wait_until,
       drop column input_wait_reason,
       drop column input_wait_set_at`;
+    await admin`
+      alter table workspace_inference_controls
+      drop column timer_id,
+      drop column timer_action,
+      drop column timer_due_at,
+      drop column timer_pause_for_seconds,
+      drop column timer_pause_revision`;
     await migrate(ownerUrl);
     app = openApp();
 
