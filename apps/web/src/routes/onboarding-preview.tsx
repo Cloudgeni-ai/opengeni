@@ -139,6 +139,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
     <OrganizationOnboardingPanel
       client={previewClient}
       billingMode="stripe"
+      supergrokEnabled
       previewState="required"
       onComplete={() => setCompleted(true)}
     />
@@ -148,6 +149,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       organizationId="preview-organization"
       workspaceId="preview-workspace"
       billingMode="stripe"
+      supergrokEnabled
       onComplete={() => setCompleted(true)}
     />
   );

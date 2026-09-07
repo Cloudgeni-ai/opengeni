@@ -2797,6 +2797,9 @@ export function RootRouteComponent() {
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
         billingMode={clientConfig.billingMode ?? "disabled"}
+        supergrokEnabled={clientConfig.models.some(
+          (catalogModel) => catalogModel.source === "supergrok",
+        )}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
@@ -2806,6 +2809,9 @@ export function RootRouteComponent() {
         <OrganizationOnboardingPanel
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
+          supergrokEnabled={clientConfig.models.some(
+            (catalogModel) => catalogModel.source === "supergrok",
+          )}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {

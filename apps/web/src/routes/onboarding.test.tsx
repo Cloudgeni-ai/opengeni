@@ -369,6 +369,7 @@ describe("organization onboarding UI", () => {
           <OrganizationOnboardingPanel
             client={setupClient as never}
             billingMode="stripe"
+            supergrokEnabled
             previewState="required"
             onComplete={onComplete}
           />,
@@ -380,6 +381,7 @@ describe("organization onboarding UI", () => {
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Choose how to power your chats");
       expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).not.toBeNull();
       expect(container.textContent).toContain("Use OpenGeni credits");
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
@@ -401,6 +403,31 @@ describe("organization onboarding UI", () => {
           .click(),
       );
       expect(onComplete).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("the model-access step omits SuperGrok when the deployment disables it", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            previewState="required"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
       container.remove();

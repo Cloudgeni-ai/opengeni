@@ -23,6 +23,7 @@ export function OrganizationOnboardingPanel({
   onComplete,
   client,
   billingMode = "disabled",
+  supergrokEnabled = false,
   previewState,
   activeEmail = null,
   invitation = null,
@@ -31,6 +32,7 @@ export function OrganizationOnboardingPanel({
   onComplete: () => void;
   client?: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
+  supergrokEnabled?: boolean;
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
@@ -291,6 +293,7 @@ export function OrganizationOnboardingPanel({
         organizationId={createdSetup.organizationId}
         workspaceId={createdSetup.personalWorkspaceId}
         billingMode={billingMode}
+        supergrokEnabled={supergrokEnabled}
         onComplete={onComplete}
       />
     );

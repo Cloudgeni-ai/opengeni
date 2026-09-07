@@ -286,6 +286,7 @@ export function BrowserAccountsSignedOutPanel(props: {
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
   client: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
+  supergrokEnabled?: boolean;
   activeEmail: string | null;
   invitation: OrganizationInvitationContinuation | null;
   onComplete: () => void;
@@ -323,6 +324,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
     <OrganizationOnboardingPanel
       client={props.client}
       billingMode={props.billingMode}
+      supergrokEnabled={props.supergrokEnabled}
       activeEmail={props.activeEmail}
       invitation={props.invitation}
       onUseInvitedAccount={useInvitedAccount}

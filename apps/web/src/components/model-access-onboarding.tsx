@@ -52,12 +52,14 @@ export function ModelAccessOnboardingPanel({
   organizationId,
   workspaceId,
   billingMode = "disabled",
+  supergrokEnabled = false,
   onComplete,
 }: {
   client?: OpenGeniBrowserClient;
   organizationId: string;
   workspaceId: string;
   billingMode?: "disabled" | "stripe";
+  supergrokEnabled?: boolean;
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -300,7 +302,7 @@ export function ModelAccessOnboardingPanel({
       action: () => toggleKeyProvider("openrouter"),
       key: "openrouter",
     },
-  ];
+  ].filter((provider) => supergrokEnabled || provider.name !== "SuperGrok");
 
   return (
     <section className="flex flex-1 items-center justify-center px-4 py-8">
