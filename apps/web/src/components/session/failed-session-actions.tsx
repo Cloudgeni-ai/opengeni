@@ -1,11 +1,23 @@
+import type { ComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+
+type ContinuationBlocker = "draft" | "unsent" | "delivery" | "queued" | "loading";
+const CONTINUATION_REASONS: Record<ContinuationBlocker, string> = {
+  draft: "Send your draft below to continue.",
+  unsent: "Retry or remove the unsent message below before continuing.",
+  delivery: "A message is being delivered below. Check its delivery status.",
+  queued: "Work is already queued or running. Check the activity controls below.",
+  loading: "Wait for the composer to finish loading or sending.",
+};
 
 /** Normal Send owns delivery and retry; this shortcut never replays a tool. */
 export function FailedSessionActions(props: {
   failureId?: string | null;
+  composerBlocker?: ComposerSendBlocker | null;
+  repositoryError?: string | null;
   onContinue: () => Promise<boolean>;
-  continueBlockedReason: string | null;
+  continuationBlocker: ContinuationBlocker | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
 }) {
@@ -22,15 +34,31 @@ export function FailedSessionActions(props: {
 
 function FailureActionsAttempt({
   onContinue,
-  continueBlockedReason,
+  composerBlocker,
+  repositoryError,
+  continuationBlocker,
   onChooseModel,
   modelDisabled,
 }: {
   onContinue: () => Promise<boolean>;
-  continueBlockedReason: string | null;
+  composerBlocker?: ComposerSendBlocker | null;
+  repositoryError?: string | null;
+  continuationBlocker: ContinuationBlocker | null;
   onChooseModel: () => void;
   modelDisabled: boolean;
 }) {
+  const continueBlockedReason = composerBlocker
+    ? {
+        upload: "Wait for the upload below to finish, or remove it.",
+        repository: repositoryError || "Resolve repository access below.",
+        policy: "Choose a supported model, reasoning level and speed below.",
+        variable_sets: "Review the Variable Sets selection below.",
+        personal_decision: "Review the personal resource attachment below.",
+        personal_loading: "Wait for personal resource access to finish loading.",
+      }[composerBlocker]
+    : continuationBlocker
+      ? CONTINUATION_REASONS[continuationBlocker]
+      : null;
   const pending = useRef(false);
   const accepted = useRef(false);
   const [submitting, setSubmitting] = useState(false);
