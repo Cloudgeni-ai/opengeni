@@ -467,18 +467,21 @@ export function SessionRoute({
     sessionId,
     workspaceId,
   ]);
+  const acknowledgementSessionId = session?.id ?? null;
+  const acknowledgementEligible = shouldAcknowledgeActiveSession({
+    activeSessionId: sessionId,
+    workspaceId,
+    session: routeUnreadProjection,
+    ...foreground,
+  });
+  // Same-value list/focus projections must not invalidate an in-flight retry.
   useEffect(() => {
     const projectionKey = activeReadProjectionKey;
     if (
-      !session ||
+      !acknowledgementSessionId ||
       !projectionKey ||
       acknowledgedProjectionRef.current === projectionKey ||
-      !shouldAcknowledgeActiveSession({
-        activeSessionId: sessionId,
-        workspaceId,
-        session: routeUnreadProjection,
-        ...foreground,
-      })
+      !acknowledgementEligible
     ) {
       return;
     }
@@ -487,7 +490,7 @@ export function SessionRoute({
     if (!acceptedTransition) return;
     acknowledgedProjectionRef.current = projectionKey;
     void client
-      .updateSessionAttention(workspaceId, session.id, {
+      .updateSessionAttention(workspaceId, acknowledgementSessionId, {
         unread: false,
         acknowledgedThroughSequence: readThroughSequence,
       })
@@ -526,17 +529,15 @@ export function SessionRoute({
       active = false;
     };
   }, [
+    acknowledgementEligible,
+    acknowledgementSessionId,
     attentionRetryRevision,
     activeReadProjectionKey,
     captureWorkspaceInvocation,
     client,
-    foreground,
     ownsWorkspaceInvocation,
     projectSessionAttention,
     readThroughSequence,
-    routeUnreadProjection,
-    session,
-    sessionId,
     workspaceId,
   ]);
   useEffect(() => {
