@@ -24,7 +24,7 @@ let mounted: RenderedComponent | null = null;
 function expectChromeCollapsed(container: HTMLElement) {
   expect(container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
   expect(container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
-  const queueChip = container.querySelector("[data-og-session-chrome-signal=\"queue\"]");
+  const queueChip = container.querySelector('[data-og-session-chrome-signal="queue"]');
   if (queueChip) expect(queueChip.getAttribute("aria-expanded")).toBe("false");
 }
 
@@ -1099,7 +1099,9 @@ describe("SessionChrome compact actions", () => {
       <SessionChrome compact queue={queue()} composer={composer()} />,
     );
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
-    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
     expect(
       mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')?.textContent,
     ).toContain("first queued prompt");
@@ -1137,7 +1139,9 @@ describe("SessionChrome compact actions", () => {
         .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="goal"]')
         ?.click();
     });
-    expect(mounted.container.querySelector('[data-og-session-chrome-panel="queue"]')).not.toBeNull();
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-panel="queue"]'),
+    ).not.toBeNull();
     expect(mounted.container.querySelector('[data-og-session-chrome-open="true"]')).not.toBeNull();
   });
 

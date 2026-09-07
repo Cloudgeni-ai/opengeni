@@ -482,11 +482,8 @@ export function SessionChrome({
   const queueOfferAdmissionSuppressedRef = useRef(
     defaultActive == null &&
       initialAuthoritativeQueuedCount === 0 &&
-      countOptimisticQueuedMessages(
-        composer?.optimisticMessages,
-        queuedTurnIds,
-        queue.snapshot,
-      ) > 0,
+      countOptimisticQueuedMessages(composer?.optimisticMessages, queuedTurnIds, queue.snapshot) >
+        0,
   );
   const queueOfferDismissedSessionIdsRef = useRef<Set<string>>(new Set());
   const occupancySessionId = queuedTurns[0]?.sessionId ?? null;
