@@ -13,6 +13,9 @@ import { SetupAccountRoute } from "@/routes/setup-account";
 
 // Local-only fixtures. No provider credentials or real payments are used.
 const previewMethods = {
+  async getBilling() {
+    return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
+  },
   async createBillingCheckout({ amountUsd }: { amountUsd: number }) {
     return { url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}` };
   },

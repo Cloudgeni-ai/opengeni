@@ -16,13 +16,9 @@ import {
 import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
+import { validTopupAmount } from "@/lib/format";
 
 const DEFAULT_TOPUP = "25.00";
-
-function validTopupAmount(value: string): boolean {
-  const amount = Number(value);
-  return Number.isFinite(amount) && amount >= 5 && amount <= 10_000;
-}
 
 type CreditRequiredPromptProps = {
   open: boolean;
@@ -46,6 +42,27 @@ export function CreditRequiredPromptView({
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
+  const [stripeEnabled, setStripeEnabled] = useState(false);
+
+  useEffect(() => {
+    if (!open || !accountId || !canBuyCredits) {
+      setStripeEnabled(false);
+      return;
+    }
+    let active = true;
+    setStripeEnabled(false);
+    void client
+      .getBilling({ accountId })
+      .then((billing) => {
+        if (active) setStripeEnabled(billing.mode === "stripe");
+      })
+      .catch(() => {
+        if (active) setStripeEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [accountId, canBuyCredits, client, open]);
 
   async function buyCredits(): Promise<void> {
     if (!accountId || !validTopupAmount(topupAmount) || busy) return;
@@ -76,7 +93,7 @@ export function CreditRequiredPromptView({
             connect a model you already pay for.
           </DialogDescription>
         </DialogHeader>
-        {canBuyCredits ? (
+        {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
             <Button
@@ -92,11 +109,11 @@ export function CreditRequiredPromptView({
               Buy credits
             </Button>
           </div>
-        ) : (
+        ) : !canBuyCredits ? (
           <p className="text-sm text-fg-muted">
             Ask an organization owner to add credits, or connect a model in workspace settings.
           </p>
-        )}
+        ) : null}
         <DialogFooter>
           <Button asChild type="button" variant="secondary">
             <Link
@@ -128,8 +145,11 @@ export function EmptyCreditsNotice({
 }) {
   const client = useAppContext().client;
   const [empty, setEmpty] = useState(false);
+  const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
+    setEmpty(false);
+    setStripeEnabled(false);
     if (!accountId || !canReadBilling) return;
     let active = true;
     void client
@@ -137,10 +157,12 @@ export function EmptyCreditsNotice({
       .then((summary) => {
         if (!active) return;
         setEmpty(summary.balance.balanceMicros <= 0);
+        setStripeEnabled(summary.mode === "stripe");
       })
       .catch(() => {
         if (!active) return;
         setEmpty(false);
+        setStripeEnabled(false);
       });
     return () => {
       active = false;
@@ -152,7 +174,7 @@ export function EmptyCreditsNotice({
     <Notice tone="waiting" title="This model uses OpenGeni credits">
       The organization has no credits yet. Buy some or connect a model so the first chat can run.
       <div className="mt-2 flex flex-wrap gap-2">
-        {canBuyCredits ? (
+        {canBuyCredits && stripeEnabled ? (
           <Button asChild type="button" size="sm">
             <Link
               to="/workspaces/$workspaceId/organization"

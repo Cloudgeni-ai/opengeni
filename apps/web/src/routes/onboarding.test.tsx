@@ -48,6 +48,10 @@ const acceptSetupInvitation = mock(async () => ({
 const setupClient = {
   listOrganizationInvitations: listSetupInvitations,
   acceptOrganizationInvitation: acceptSetupInvitation,
+  getBilling: mock(async () => ({
+    mode: "stripe" as const,
+    balance: { balanceMicros: 0 },
+  })),
 };
 
 class TestAuthApiError extends Error {
@@ -361,7 +365,11 @@ describe("organization onboarding UI", () => {
     try {
       await act(async () =>
         root.render(
-          <OrganizationOnboardingPanel previewState="required" onComplete={onComplete} />,
+          <OrganizationOnboardingPanel
+            client={setupClient as never}
+            previewState="required"
+            onComplete={onComplete}
+          />,
         ),
       );
       await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");

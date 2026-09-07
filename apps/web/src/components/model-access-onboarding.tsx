@@ -7,6 +7,7 @@ import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { validTopupAmount } from "@/lib/format";
 import { applyConnectedModelToNewSessionDraft } from "@/lib/model-access-onboarding";
 import { pollSuperGrokDeviceLogin } from "@/components/supergrok-device-poll";
 
@@ -62,18 +63,46 @@ export function ModelAccessOnboardingPanel({
   const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
+  const [stripeEnabled, setStripeEnabled] = useState(false);
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
+  const codexPollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const providerKeyOperation = useRef<{
+    provider: ProviderKey;
+    credential: string;
+    operationId: string;
+  } | null>(null);
 
   useEffect(() => {
     cancelled.current = false;
     return () => {
       cancelled.current = true;
       pollAbort.current?.abort();
+      if (codexPollTimer.current) clearTimeout(codexPollTimer.current);
     };
   }, []);
 
-  async function finishWithConnectedModel(): Promise<void> {
+  useEffect(() => {
+    if (!client) {
+      setStripeEnabled(false);
+      return;
+    }
+    let active = true;
+    setStripeEnabled(false);
+    void client
+      .getBilling({ accountId: organizationId })
+      .then((billing) => {
+        if (active) setStripeEnabled(billing.mode === "stripe");
+      })
+      .catch(() => {
+        if (active) setStripeEnabled(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [client, organizationId]);
+
+  async function finishWithConnectedModel(): Promise<boolean> {
     if (client) {
       try {
         const modelId = await applyConnectedModelToNewSessionDraft(client, workspaceId);
@@ -86,9 +115,11 @@ export function ModelAccessOnboardingPanel({
         toast.error("Model connected, but your new-chat selection could not be saved", {
           description: error instanceof Error ? error.message : String(error),
         });
+        return false;
       }
     }
     onComplete();
+    return true;
   }
 
   async function connectCodex(): Promise<void> {
@@ -103,8 +134,15 @@ export function ModelAccessOnboardingPanel({
       });
       window.open(start.verificationUri, "_blank", "noopener,noreferrer");
       const interval = Math.max(2, start.intervalSeconds) * 1000;
+      const expiresAt = Date.now() + 15 * 60 * 1_000;
       const poll = async (): Promise<void> => {
-        if (cancelled.current) return;
+        if (cancelled.current || Date.now() >= expiresAt) {
+          if (!cancelled.current) {
+            setPending(null);
+            toast.error("The code expired before it was authorized. Try again.");
+          }
+          return;
+        }
         let result: Awaited<ReturnType<OpenGeniBrowserClient["codexConnectPoll"]>>;
         try {
           result = await client.codexConnectPoll(workspaceId, start.state);
@@ -134,9 +172,9 @@ export function ModelAccessOnboardingPanel({
           }
           return;
         }
-        setTimeout(() => void poll(), interval);
+        codexPollTimer.current = setTimeout(() => void poll(), interval);
       };
-      setTimeout(() => void poll(), interval);
+      codexPollTimer.current = setTimeout(() => void poll(), interval);
     } catch (error) {
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start Codex login");
@@ -193,6 +231,12 @@ export function ModelAccessOnboardingPanel({
       return;
     }
     const config = PROVIDER_KEYS[keyProvider];
+    const priorOperation = providerKeyOperation.current;
+    const operationId =
+      priorOperation?.provider === keyProvider && priorOperation.credential === value
+        ? priorOperation.operationId
+        : crypto.randomUUID();
+    providerKeyOperation.current = { provider: keyProvider, credential: value, operationId };
     setBusy(true);
     try {
       await client.createConnection(workspaceId, {
@@ -205,10 +249,10 @@ export function ModelAccessOnboardingPanel({
           credentialRole: config.role,
           credentialLabel: config.label,
         },
-        operationId: crypto.randomUUID(),
+        operationId,
       });
       toast.success(`${config.label} connected`);
-      await finishWithConnectedModel();
+      if (await finishWithConnectedModel()) providerKeyOperation.current = null;
     } catch (error) {
       toast.error(error instanceof Error ? error.message : `Failed to connect ${config.label}`);
     } finally {
@@ -219,8 +263,8 @@ export function ModelAccessOnboardingPanel({
   async function buyCredits(): Promise<void> {
     if (!client || busy) return;
     const amountUsd = Number(topupAmount);
-    if (!Number.isFinite(amountUsd) || amountUsd < 5 || amountUsd > 10_000) {
-      toast.error("Enter an amount between $5 and $10,000");
+    if (!validTopupAmount(topupAmount)) {
+      toast.error("Enter $5 to $10,000 using no more than two decimal places");
       return;
     }
     setBusy(true);
@@ -240,10 +284,7 @@ export function ModelAccessOnboardingPanel({
     }
   }
 
-  const validAmount =
-    Number.isFinite(Number(topupAmount)) &&
-    Number(topupAmount) >= 5 &&
-    Number(topupAmount) <= 10_000;
+  const validAmount = validTopupAmount(topupAmount);
   const providers = [
     {
       name: "Codex",
@@ -355,34 +396,36 @@ export function ModelAccessOnboardingPanel({
           )}
         </div>
 
-        <div className="mt-6 grid gap-4 border-t border-border pt-6">
-          <div>
-            <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Pay for hosted models as you go. No provider account needed.
+        {stripeEnabled ? (
+          <div className="mt-6 grid gap-4 border-t border-border pt-6">
+            <div>
+              <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
+              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+                Pay for hosted models as you go. No provider account needed.
+              </p>
+            </div>
+            <CreditAmountPicker
+              value={topupAmount}
+              onChange={setTopupAmount}
+              disabled={busy || !!pending}
+            />
+            <Button
+              type="button"
+              className="h-10 w-full"
+              disabled={!client || busy || !!pending || !validAmount}
+              onClick={() => void buyCredits()}
+            >
+              {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+              {validAmount
+                ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
+                : "Buy credits"}
+              <ArrowUpRightIcon className="size-4" />
+            </Button>
+            <p className="-mt-2 text-center text-xs text-fg-subtle">
+              You’ll review your payment in Stripe Checkout.
             </p>
           </div>
-          <CreditAmountPicker
-            value={topupAmount}
-            onChange={setTopupAmount}
-            disabled={busy || !!pending}
-          />
-          <Button
-            type="button"
-            className="h-10 w-full"
-            disabled={!client || busy || !!pending || !validAmount}
-            onClick={() => void buyCredits()}
-          >
-            {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-            {validAmount
-              ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
-              : "Buy credits"}
-            <ArrowUpRightIcon className="size-4" />
-          </Button>
-          <p className="-mt-2 text-center text-xs text-fg-subtle">
-            You’ll review your payment in Stripe Checkout.
-          </p>
-        </div>
+        ) : null}
         <Button
           type="button"
           variant="ghost"
