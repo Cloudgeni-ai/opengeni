@@ -22144,9 +22144,6 @@ export async function setWorkspaceCodexSubscriptionModeInTransaction(
   if (current.accountId !== input.accountId) {
     throw new Error("Codex source account does not match the workspace account");
   }
-  if (current.workspaceKind === "personal" && input.mode !== "automatic") {
-    throw new Error("personal workspaces always use workspace Codex subscriptions");
-  }
   const effectiveSourceBeforeMutation =
     input.effectiveSourceBeforeMutation ?? current.effectiveSource;
   let next = current;

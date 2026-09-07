@@ -284,14 +284,6 @@ function SessionsIndexRouteContent({
   const tenancyCapabilityGeneration = useRef(0);
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
-    if (personalWorkspace) {
-      setTenancyCapabilities({
-        activated: true,
-        canCreatePrivate: true,
-        reason: "available",
-      });
-      return;
-    }
     setTenancyCapabilities(null);
     void context.client
       .getSessionTenancyCreateCapabilities(workspaceId)
@@ -316,6 +308,11 @@ function SessionsIndexRouteContent({
         );
       });
   }, [context.client, personalWorkspace, workspaceId]);
+  const createVisibility = newSessionCreateVisibility(
+    personalWorkspace,
+    draft.visibility,
+    tenancyCapabilities?.canCreatePrivate === true,
+  );
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -540,7 +537,7 @@ function SessionsIndexRouteContent({
   const personalResourceCatalogRefreshGeneration = useRef(0);
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
     personalResourceCount: selectedPersonalResourceCount,
-    visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+    visibility: createVisibility,
   });
   const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
     const generation = ++personalResourceCatalogRefreshGeneration.current;
@@ -704,7 +701,7 @@ function SessionsIndexRouteContent({
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
-        newSessionCreateVisibility(personalWorkspace, draft.visibility),
+        createVisibility,
       ),
     }),
     [
@@ -716,7 +713,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
-      personalWorkspace,
+      createVisibility,
       persistedToolPolicy,
       projectProvenancePresent,
       selectedChannelId,
@@ -828,9 +825,10 @@ function SessionsIndexRouteContent({
   });
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
-    !personalWorkspace &&
-    draft.visibility === "private" &&
-    tenancyCapabilities?.canCreatePrivate !== true;
+    (personalWorkspace && tenancyCapabilities === null) ||
+    (!personalWorkspace &&
+      draft.visibility === "private" &&
+      tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
@@ -947,6 +945,7 @@ function SessionsIndexRouteContent({
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
+                    tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request }) => {
                     newSessionDraft.captureConflict(error);
@@ -1000,6 +999,7 @@ function SessionsIndexRouteContent({
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
                 ),
                 onFailure: ({ error, request }) => {
                   newSessionDraft.captureConflict(error);
@@ -1367,7 +1367,7 @@ function SessionsIndexRouteContent({
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
-              visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+              visibility: createVisibility,
             }}
             fleet={fleet}
             machines={machines}

@@ -1528,6 +1528,14 @@ principal transitions make delayed browser outcomes inert.
 boundary; the web component and Chromium acceptance tests pin the browser
 boundary.
 
+The stock new-session composer reads the server's create capabilities for
+Personal workspaces as well as shared workspaces. When private-session tenancy
+is unavailable, a Personal session uses workspace visibility inside the existing
+owner-only workspace boundary. It does not require the organization Only-me
+setting or claim that session-tenancy activation has happened. When supported,
+it retains the private-session create path.
+
+
 ## Referential integrity
 
 - Organization membership belongs to one `managed_accounts.id` organization.

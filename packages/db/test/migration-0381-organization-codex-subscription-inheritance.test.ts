@@ -154,7 +154,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     }
   });
 
-  test("inherits into shared workspaces, excludes personal workspaces, and honors overrides", async () => {
+  test("inherits into shared and Personal workspaces and honors overrides", async () => {
     if (!shared || !app || !client) return;
     const [account] = await shared.admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('organization-codex-inheritance') returning id`;
@@ -249,7 +249,50 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       select resolve_workspace_codex_subscription_source(
         ${account!.id}, ${personalWorkspace!.id}
       ) as source`;
-    expect(personalSource?.source).toBe("workspace");
+    expect(personalSource?.source).toBe("organization");
+    const personalPool = await app<{ id: string }[]>`
+      select id from codex_subscription_credentials`;
+    expect(personalPool.map((row) => row.id)).toEqual([organizationCredential!.id]);
+    await expectSqlState(
+      () => app!`update codex_subscription_credentials set label = 'personal takeover'
+        where id = ${organizationCredential!.id}`,
+      "42501",
+    );
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "disabled",
+    });
+    const [personalDisabled] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(personalDisabled?.source).toBe("disabled");
+    await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "automatic",
+    });
+    await app`
+      insert into codex_subscription_credentials (
+        account_id, workspace_id, authority_scope, credential_encrypted, status
+      ) values (${account!.id}, ${personalWorkspace!.id}, 'workspace', 'local-ciphertext', 'active')`;
+    const [localPreferred] = await app<{ source: string }[]>`
+      select resolve_workspace_codex_subscription_source(
+        ${account!.id}, ${personalWorkspace!.id}) as source`;
+    expect(localPreferred?.source).toBe("workspace");
+    const organizationPreferred = await setWorkspaceCodexSubscriptionMode(client.db, {
+      accountId: account!.id,
+      workspaceId: personalWorkspace!.id,
+      subjectId: ownerSubjectId,
+      mode: "organization",
+    });
+    expect(organizationPreferred.effectiveSource).toBe("organization");
+    const [otherAccount] = await shared.admin<{ id: string }[]>`
+      insert into managed_accounts (name) values ('other organization') returning id`;
+    await setAppContext({ accountId: otherAccount!.id, workspaceId: personalWorkspace!.id });
+    expect(await app`select id from codex_subscription_credentials`).toHaveLength(0);
 
     await setAppContext({ accountId: account!.id, workspaceId: sharedWorkspace!.id });
     await app`
@@ -536,7 +579,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
     expect(turn.id).toBeString();
   });
 
-  test("allows an organization credential lease only in an inheriting shared workspace", async () => {
+  test("allows organization credential leases in inheriting shared and Personal workspaces", async () => {
     if (!shared || !app || !client) return;
     const dbClient = client;
     const [account] = await shared.admin<{ id: string }[]>`
@@ -687,16 +730,13 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
       return turn!;
     });
     await setAppContext({ accountId: account!.id, workspaceId: personalWorkspace!.id });
-    await expectSqlState(
-      () =>
-        app!`
-          insert into codex_credential_leases (
-            account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
-          ) values (
-            ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
-            ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
-          )`,
-      "23514",
-    );
+    const [personalLease] = await app<{ credential_id: string }[]>`
+      insert into codex_credential_leases (
+        account_id, workspace_id, credential_id, turn_id, holder_id, leased_until
+      ) values (
+        ${account!.id}, ${personalWorkspace!.id}, ${credential!.id},
+        ${personalTurn.id}, 'personal-holder', now() + interval '5 minutes'
+      ) returning credential_id`;
+    expect(personalLease?.credential_id).toBe(credential!.id);
   });
 });
