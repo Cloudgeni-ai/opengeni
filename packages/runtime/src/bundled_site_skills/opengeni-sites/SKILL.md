@@ -135,16 +135,18 @@ const issues = await client.tools.linear.issues_list({ state: "Todo" });
 
 For embedded conversations, `site.client` is the ordinary OpenGeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
-provider and complete conversation surface—do not implement session REST or SSE yourself:
+complete conversation surface—do not implement session REST or SSE yourself:
 
 ```tsx
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const site = createOpenGeniSiteClient();
-<OpenGeniProvider client={site.client} workspaceId={site.workspaceId}>
-  <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>
+<SessionConversation
+  client={site.client}
+  workspaceId={site.workspaceId}
+  sessionId={sessionId}
+/>
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
@@ -162,8 +164,9 @@ timeline scrolling and the bottom composer—do not add fixed/sticky positioning
 or another timeline scroller. Expand steps, stream messages, and resize the
 preview: history should scroll without pushing the composer down the page.
 
-Import `OpenGeniProvider` and the needed components from `@opengeni/react`, and
-`@opengeni/react/compiled.css` once. Session creation, history, live events,
+Use the narrow `@opengeni/react/session-ui` entry for chat, not the broad root
+entry that pulls unrelated editor/terminal peers. Import compiled CSS once.
+Session creation, history, live events,
 composer drafts, Send/Steer and queue/control use this client. The same local
 Bun handler above forwards them using the agent's current Codemode token;
 published Sites use the viewing user's host auth. Agent authority remains
