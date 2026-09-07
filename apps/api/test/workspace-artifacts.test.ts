@@ -236,6 +236,14 @@ test("direct uploads publish large HTML with optional downloadable source and im
     expect(mismatchedReplay.status).toBe(409);
     const runtime = await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/html`);
     expect(await runtime.text()).toBe(html);
+    for (const endpoint of ["html", "downloads", "content"]) {
+      for (const versionId of ["not-a-uuid", ""]) {
+        const invalid = await requestAsCanonicalLocalHuman(
+          `${base}/${result.artifact.id}/${endpoint}?versionId=${versionId}`,
+        );
+        expect(invalid.status).toBe(422);
+      }
+    }
   }
 });
 
@@ -406,14 +414,14 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       method: "POST",
       body: JSON.stringify({ ...createBody, title: "Changed status board" }),
     });
-    expect(changedCreateMetadata.status).toBe(201);
+    expect(changedCreateMetadata.status).toBe(409);
 
     const createWithoutRequestedTools = { ...createBody, requestedTools: undefined };
     const createAuthorityConflict = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
       body: JSON.stringify(createWithoutRequestedTools),
     });
-    expect(createAuthorityConflict.status).toBe(201);
+    expect(createAuthorityConflict.status).toBe(409);
 
     const authoritySeedResponse = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
@@ -443,7 +451,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       method: "POST",
       body: JSON.stringify({ ...authorityPublishBody, title: "Changed publication title" }),
     });
-    expect(changedPublishMetadata.status).toBe(200);
+    expect(changedPublishMetadata.status).toBe(409);
     const publishWithoutRequestedTools = {
       ...authorityPublishBody,
       requestedTools: undefined,
@@ -452,7 +460,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       method: "POST",
       body: JSON.stringify(publishWithoutRequestedTools),
     });
-    expect(publishAuthorityConflict.status).toBe(200);
+    expect(publishAuthorityConflict.status).toBe(409);
 
     const conflictSeed = await requestAsCanonicalLocalHuman(base, {
       method: "POST",
@@ -753,7 +761,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         name: "artifacts_create",
         arguments: {
           title: "Agent-created map",
-          html: "<!doctype html><main>Created through MCP</main>",
+          uploadId: upload.uploadId,
           idempotencyKey: "agent-create-map",
         },
       });
@@ -886,7 +894,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           name: "artifacts_create",
           arguments: {
             title: "Agent-created map",
-            html: "<!doctype html><main>Created through MCP</main>",
+            uploadId: upload.uploadId,
             idempotencyKey: "agent-create-map",
           },
         });

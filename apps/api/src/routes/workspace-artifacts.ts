@@ -58,6 +58,13 @@ async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z
   return parsed.data;
 }
 
+function parseVersionId(value: string | undefined): string | undefined {
+  if (value !== undefined && !ArtifactId.safeParse(value).success) {
+    throw new HTTPException(422, { message: "Invalid artifact version id" });
+  }
+  return value;
+}
+
 function artifactId(context: Context): string {
   const parsed = ArtifactId.safeParse(context.req.param("artifactId"));
   if (!parsed.success) throw new HTTPException(422, { message: "Invalid artifact id" });
@@ -179,7 +186,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       deps.db,
       workspaceId,
       artifactId(context),
-      context.req.query("versionId"),
+      parseVersionId(context.req.query("versionId")),
     );
     return context.json(await workspaceArtifactDownloads(deps.objectStorage, ref, "public"));
   });
@@ -279,7 +286,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       deps.db,
       workspaceId,
       artifactId(context),
-      context.req.query("versionId"),
+      parseVersionId(context.req.query("versionId")),
     );
     const iterator = readArtifactObject(deps.objectStorage, ref.contentKey);
     return new Response(
@@ -314,10 +321,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       throw new HTTPException(503, {
         message: "Object storage is not configured",
       });
-    const parsedVersion = context.req.query("versionId");
-    if (parsedVersion && !ArtifactId.safeParse(parsedVersion).success) {
-      throw new HTTPException(422, { message: "Invalid artifact version id" });
-    }
+    const parsedVersion = parseVersionId(context.req.query("versionId"));
     try {
       const ref = await getWorkspaceArtifactContentRef(
         deps.db,

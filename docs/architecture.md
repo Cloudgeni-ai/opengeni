@@ -1,39 +1,21 @@
 # OpenGeni architecture reference
 
-> **This is the whole-system orientation map, not a second source of truth.**
-> Code and the focused topic docs own exact behavior. This document explains
-> the stable system shape, the boundaries that must not be crossed casually,
-> and where to look before changing a subsystem. For setup and contributor
-> procedure, use [`../AGENTS.md`](../AGENTS.md). For the documentation index,
-> use [`README.md`](README.md).
+> Whole-system orientation; code and focused docs own exact behavior.
+> Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## How to use this document
 
-1. **New to the repository?** Read §2, §3, §4, and skim §6.
-2. **Changing a subsystem?** Start with §13, then read the linked topic doc and
-   canonical source.
-3. **Looking for an exact route, field, permission, setting, table, timeout, or
-   migration rule?** Follow the source links. Do not treat an architecture
-   summary as an inventory.
-4. **Found a stale boundary?** Update this map in the same change. See §14.
+1. **New here?** Read §2–4; skim §6.
+2. **Changing a subsystem?** Start with §13 and its canonical sources.
+3. **Exact behavior?** Follow source links, not this summary.
+4. **Stale boundary?** Update this map; see §14.
 
 ---
 
 ## 1. Scope
 
-This document owns five things:
-
-- the product and process-level shape of OpenGeni;
-- cross-cutting invariants whose violation can cause security, durability, or
-  recovery defects;
-- the major request, event, and execution paths;
-- the repository map and responsibility boundaries; and
-- a routing index from change area to canonical source.
-
-Exact API, schema, configuration, permission, migration, provider, and release
-inventories belong in code, package READMEs, focused topic docs,
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md), or [`../AGENTS.md`](../AGENTS.md).
-Keep migration numbers, timeouts, route lists, and table counts there.
+This map covers product shape, invariants, execution paths, repository ownership,
+and canonical-source routing. Exact inventories belong in code and focused docs.
 
 ---
 
@@ -1040,6 +1022,7 @@ handlers because its host owns process lifecycle.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+| `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
 ### 6.4 Rust agent and relay
 
@@ -1264,21 +1247,11 @@ Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
-Static published HTML, retained evidence, Documents/RAG, and editable artifacts
-are different products and must not share mutable truth accidentally. Workspace
-Sites are immutable versions of the existing HTML artifact primitive: one
-self-contained HTML runtime, an optional retained source bundle, an exact requested-tool
-allowlist, rollback, and recoverable archive/restore. They run in the existing
-opaque-origin iframe; there is no second host, wildcard domain, or compute
-runtime.
-The agent prepares signed Site-specific upload URLs, uploads HTML and optional
-source JSON directly, then publishes the upload id. Editable source JSON is capped
-at 64 MiB before parsing; HTML uses the storage upload limit and remains streamed.
-Publication freezes immutable
-copies without caller hashes or byte counts. Source retrieval returns signed
-download URLs; HTML-only Sites remain editable as HTML. Viewing fetches HTML
-separately from source, currently into the existing srcDoc frame. The reference
-embedding example is `examples/site-session-embed`.
+Sites retain immutable HTML, optional source, tool allowlists and rollback;
+they remain separate from Documents and editable artifacts. Agents upload through
+signed URLs and publish upload IDs, without hashes or byte counts. Source JSON
+is capped at 64 MiB; HTML is streamed within storage limits. Retrieval returns
+download URLs; viewing loads HTML into the existing opaque-origin srcDoc frame.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
