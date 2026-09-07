@@ -14,6 +14,7 @@ import {
   sessionDraftFromNewSessionDraftOptions,
   submissionFromSessionDraft,
 } from "./session-create";
+import { newSessionProjectSelection } from "../routes/sessions-index-hydration";
 
 const fileA = "00000000-0000-4000-8000-0000000000a1";
 const fileB = "00000000-0000-4000-8000-0000000000b2";
@@ -422,6 +423,204 @@ describe("successful-create selection history", () => {
       path: "repos/cloudgeni",
     });
     expect(rememberedMachineFolder(history, null, machineB)).toEqual({ kind: "root" });
+  });
+
+  test("reapplies the complete Default project selection on repeated same-route launches", () => {
+    const defaultHistory = {
+      projects: [
+        {
+          channelId: null,
+          targetSandboxId: machineB,
+          machines: [{ sandboxId: machineB, workingDir: "/workspace/default-project" }],
+        },
+        ...history.projects,
+      ],
+    };
+    const staleProjectCompute = {
+      kind: "machine" as const,
+      sandboxId: machineA,
+      folder: { kind: "path" as const, path: "/workspace/other-project" },
+    };
+
+    const firstDefault = newSessionProjectSelection(defaultHistory, null, {
+      channelId: project,
+      compute: staleProjectCompute,
+    });
+    expect(firstDefault).toEqual({
+      channelId: null,
+      compute: {
+        kind: "machine",
+        sandboxId: machineB,
+        folder: { kind: "path", path: "/workspace/default-project" },
+      },
+    });
+
+    const locallyChanged = newSessionProjectSelection(defaultHistory, project, firstDefault);
+    const repeatedDefault = newSessionProjectSelection(defaultHistory, null, locallyChanged);
+    expect(repeatedDefault).toEqual(firstDefault);
+  });
+
+  test("resets stale compute when the selected project has no history", () => {
+    const staleProjectSelection = {
+      channelId: project,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineA,
+        folder: { kind: "path" as const, path: "/workspace/other-project" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection)).toEqual({
+      channelId: null,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, staleProjectSelection, "selfhosted"),
+    ).toEqual({
+      channelId: null,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("preserves persisted machine placement for the same project without history", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const selection = newSessionProjectSelection({ projects: [] }, project, {
+      channelId: project,
+      compute: hydratedCompute,
+    });
+
+    expect(selection).toEqual({ channelId: project, compute: hydratedCompute });
+    expect(
+      submissionFromSessionDraft({ ...emptySessionDraft(), compute: selection.compute }).options,
+    ).toEqual({
+      targetSandboxId: machineB,
+      workingDir: "/workspace/project-a",
+      visibility: "workspace",
+    });
+  });
+
+  test("resets persisted compute for a different explicit launch target", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/project-a" },
+    };
+    const projectB = "00000000-0000-4000-8000-000000000032";
+    const historyWithoutTargets = {
+      projects: history.projects.filter(
+        (candidate) => candidate.channelId !== null && candidate.channelId !== projectB,
+      ),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutTargets, projectB, {
+        channelId: project,
+        compute: hydratedCompute,
+      }),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "sandbox", backend: "" },
+    });
+    expect(
+      newSessionProjectSelection(
+        historyWithoutTargets,
+        projectB,
+        { channelId: project, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: projectB,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("resets legacy hydrated compute with missing project provenance", () => {
+    const hydratedCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/legacy" },
+    };
+
+    expect(
+      newSessionProjectSelection(
+        { projects: [] },
+        project,
+        { channelId: undefined, compute: hydratedCompute },
+        "selfhosted",
+      ),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "machine", sandboxId: null, folder: { kind: "root" } },
+    });
+  });
+
+  test("remembered project history wins over hydrated compute with unknown provenance", () => {
+    expect(
+      newSessionProjectSelection(history, project, {
+        channelId: undefined,
+        compute: {
+          kind: "machine",
+          sandboxId: machineB,
+          folder: { kind: "path", path: "/workspace/unknown-project" },
+        },
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: {
+        kind: "machine",
+        sandboxId: machineA,
+        folder: { kind: "path", path: "/workspace/opengeni" },
+      },
+    });
+  });
+
+  test("preserves explicit compute intent with established same-project provenance", () => {
+    const explicitDefaultSelection = {
+      channelId: null,
+      compute: {
+        kind: "machine" as const,
+        sandboxId: machineB,
+        folder: { kind: "path" as const, path: "/workspace/explicit-default" },
+      },
+    };
+    const historyWithoutDefault = {
+      projects: history.projects.filter((candidate) => candidate.channelId !== null),
+    };
+
+    expect(
+      newSessionProjectSelection(historyWithoutDefault, null, explicitDefaultSelection),
+    ).toEqual(explicitDefaultSelection);
+  });
+
+  test("treats null as explicit Default-project provenance", () => {
+    const defaultCompute = {
+      kind: "machine" as const,
+      sandboxId: machineB,
+      folder: { kind: "path" as const, path: "/workspace/default-draft" },
+    };
+
+    expect(
+      newSessionProjectSelection({ projects: [] }, null, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({ channelId: null, compute: defaultCompute });
+    expect(
+      newSessionProjectSelection({ projects: [] }, project, {
+        channelId: null,
+        compute: defaultCompute,
+      }),
+    ).toEqual({
+      channelId: project,
+      compute: { kind: "sandbox", backend: "" },
+    });
   });
 });
 

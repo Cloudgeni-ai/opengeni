@@ -399,6 +399,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.4",
       reasoningEffort: "medium",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: { sandboxBackend: "none" },
       updatedAt: "2026-07-20T01:02:03.000Z",
     };
@@ -415,6 +416,7 @@ describe("OpenGeniClient", () => {
         model: draft.model,
         reasoningEffort: "medium",
         latencyMode: "standard",
+        selectedProjectChannelId: null,
         options: { sandboxBackend: "none" },
       }),
     ).toEqual(draft as never);
@@ -432,6 +434,7 @@ describe("OpenGeniClient", () => {
       model: "gpt-5.4",
       reasoningEffort: "medium",
       latencyMode: "standard",
+      selectedProjectChannelId: null,
       options: { sandboxBackend: "none" },
     });
   });
