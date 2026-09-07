@@ -2307,12 +2307,6 @@
 :where(.og-root).bg-black,:where(.og-root) .bg-black {
     background-color: var(--color-black);
   }
-:where(.og-root).bg-black\/5,:where(.og-root) .bg-black\/5 {
-    background-color: color-mix(in srgb, #000 5%, transparent);
-    @supports (color: color-mix(in lab, red, red)) {
-      background-color: color-mix(in oklab, var(--color-black) 5%, transparent);
-    }
-  }
 :where(.og-root).bg-black\/45,:where(.og-root) .bg-black\/45 {
     background-color: color-mix(in srgb, #000 45%, transparent);
     @supports (color: color-mix(in lab, red, red)) {
@@ -2429,6 +2423,12 @@
   }
 :where(.og-root).bg-og-fg-subtle,:where(.og-root) .bg-og-fg-subtle {
     background-color: var(--og-color-fg-subtle);
+  }
+:where(.og-root).bg-og-fg\/5,:where(.og-root) .bg-og-fg\/5 {
+    background-color: var(--og-color-fg);
+    @supports (color: color-mix(in lab, red, red)) {
+      background-color: color-mix(in oklab, var(--og-color-fg) 5%, transparent);
+    }
   }
 :where(.og-root).bg-og-status-cancelled,:where(.og-root) .bg-og-status-cancelled {
     background-color: var(--og-color-status-cancelled);
@@ -5094,14 +5094,6 @@
 :where(.og-root).xl\:grid-cols-3,:where(.og-root) .xl\:grid-cols-3 {
     @media (width >= 80rem) {
       grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-  }
-:where(.og-root).dark\:bg-white\/5,:where(.og-root) .dark\:bg-white\/5 {
-    @media (prefers-color-scheme: dark) {
-      background-color: color-mix(in srgb, #fff 5%, transparent);
-      @supports (color: color-mix(in lab, red, red)) {
-        background-color: color-mix(in oklab, var(--color-white) 5%, transparent);
-      }
     }
   }
 :where(.og-root).dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20,:where(.og-root) .dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20 {
