@@ -20,6 +20,7 @@ import {
 import { Hono } from "hono";
 import postgres from "postgres";
 import { registerApiKeyRoutes, organizationApiKeyPermissions } from "../src/routes/api-keys";
+import { registerVideoGenerationRoutes } from "../src/routes/video-generation";
 import { registerWorkspaceLearningRoutes } from "../src/routes/workspace-learning";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 
@@ -134,6 +135,7 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
   registerApiKeyRoutes(registered, deps);
   registerWorkspaceRoutes(registered, deps);
   registerWorkspaceLearningRoutes(registered, deps);
+  registerVideoGenerationRoutes(registered, deps);
   return registered;
 }
 
@@ -221,6 +223,18 @@ describe("managed personal workspace access", () => {
     expect(await saved.json()).toMatchObject({
       settings: { memoryEnabled: false, voiceInput: { enabled: false } },
     });
+    const video = await app.request(`${base}/video-generation/policy`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({
+        expectedRevision: 0,
+        fundingSource: "workspace_gateway",
+        enabledModelIds: [],
+        defaultModelId: null,
+      }),
+    });
+    expect(video.status).toBe(200);
+    expect(await video.json()).toMatchObject({ revision: 1, enabledModelIds: [] });
     const revisionResponse = await app.request(`${base}/learning/revisions`, {
       method: "POST",
       headers,
@@ -274,6 +288,7 @@ describe("managed personal workspace access", () => {
         ["PATCH", "/settings", { memoryEnabled: true }],
         ["POST", "/learning/revisions", { workspaceMode: "automatic", sourceOverrides: [] }],
         ["PUT", "/model-policy", {}],
+        ["PUT", "/video-generation/policy", {}],
         ["POST", "/gateway-custom-models", {}],
         ["POST", "/openrouter-custom-models", {}],
         ["POST", "/inference-control", {}],
@@ -302,6 +317,15 @@ describe("managed personal workspace access", () => {
         body: JSON.stringify({ memoryEnabled: false }),
       });
       expect(response.status).toBe(403);
+      const video = await app.request(
+        `http://x/v1/workspaces/${sharedWorkspaceId}/video-generation/policy`,
+        {
+          method: "PUT",
+          headers: { cookie: "session=present", "content-type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      expect(video.status).toBe(403);
     } finally {
       await shared.admin`update workspace_memberships set permissions = ${JSON.stringify(before!.permissions)}::jsonb where workspace_id = ${sharedWorkspaceId} and subject_id = ${`user:${userId}`}`;
     }
