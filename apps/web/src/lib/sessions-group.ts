@@ -31,6 +31,15 @@ const RUNNING_STATUSES = new Set<SessionStatus>([
   "requires_action",
 ]);
 
+/** In-flight work that a parent may roll up from sub-agents. Waiting and
+ *  failed stay on the child (and For You); they do not paint the parent. */
+const LIVE_WORK_STATUSES = new Set<SessionStatus>([
+  "running",
+  "queued",
+  "waiting_capacity",
+  "recovering",
+]);
+
 export function isRunningStatus(status: SessionStatus): boolean {
   return RUNNING_STATUSES.has(status);
 }
@@ -39,9 +48,19 @@ function hasActiveEffectiveControl(session: Session): boolean {
   return (session.effectiveControl?.state ?? "active") === "active";
 }
 
+function isLiveWork(session: Session): boolean {
+  if (session.backgroundCommandActivity) return true;
+  return hasActiveEffectiveControl(session) && LIVE_WORK_STATUSES.has(session.status);
+}
+
 function isEffectivelyRunning(session: Session): boolean {
   if (session.backgroundCommandActivity) return true;
   return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+}
+
+function hasSummarizedLiveWork(session: Session): boolean {
+  const stats = session.treeStats;
+  return Boolean(stats && stats.runningDescendants + stats.queuedDescendants > 0);
 }
 
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
@@ -155,17 +174,24 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
    The rail nests spawned worker sessions under the manager that spawned them
    (parentSessionId). A session is a ROOT in the rail when it has no parent OR
    its parent isn't in the loaded page (an orphan child renders at the root, as
-   before). Roots are pinned/bucketed exactly like the flat list — but a root
-   counts as "running" when it OR any descendant is active, so a manager whose
-   only activity is a live child still floats to the top.
+   before).    Roots are pinned/bucketed exactly like the flat list — but a root
+   counts as "running" when it OR any descendant is in live work, so a manager
+   whose only activity is a running child still floats to the top. A parked or
+   failed child does not promote the parent: those states stay on the child row
+   and the For You surface.
    -------------------------------------------------------------------------- */
 
 export type SessionTreeNode = {
   session: Session;
   children: SessionTreeNode[];
-  /** A descendant (any depth, not the node itself) is running/queued/awaiting action. */
+  /** A descendant (any depth, not the node itself) is running or queued. */
   hasActiveDescendant: boolean;
 };
+
+/** True when this node, or any descendant, is actually running/queued. */
+export function nodeHasLiveWork(node: SessionTreeNode): boolean {
+  return isLiveWork(node.session) || node.hasActiveDescendant || hasSummarizedLiveWork(node.session);
+}
 
 export type RailAggregateStatusKind =
   | "send_failed"
@@ -184,9 +210,9 @@ export type RailAggregateStatus = {
   total: number;
   label: string;
   /**
-   * `needs_attention` only: when the longest-waiting represented session
-   * entered `requires_action` (the earliest known `requiresActionSince` /
-   * `treeStats.attentionSince`). Absent when no server reported it.
+   * `needs_attention` only: when the longest-waiting represented *root*
+   * entered `requires_action` (`requiresActionSince`). Spawned descendants
+   * are not included. Absent when no represented session reported it.
    */
   attentionSince?: string;
 };
@@ -248,6 +274,13 @@ function addRailStatusCounts(target: RailStatusCounts, source: RailStatusCounts)
   target.activeWork += source.activeWork;
 }
 
+/** Descendants contribute in-flight work only. Waiting, failed, unread, and
+ *  local send failures stay on the child row (and For You). */
+function addDescendantWorkCounts(target: RailStatusCounts, source: RailStatusCounts): void {
+  target.total += source.total;
+  target.active += source.active;
+}
+
 function railStatusCounts(
   node: SessionTreeNode,
   localDeliveryAttention: ReadonlyMap<string, number>,
@@ -256,50 +289,26 @@ function railStatusCounts(
   const stats = node.session.treeStats;
   if (stats) {
     counts.total += stats.totalDescendants;
-    counts.attention += stats.attentionDescendants;
-    counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
-    counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
     counts.active += stats.runningDescendants + stats.queuedDescendants;
-    counts.unread += stats.unreadDescendants ?? 0;
-    counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
     // Scheduled-task grouping appends older root runs as synthetic children of
     // the newest run. They are not part of that run's server treeStats, unlike
     // ordinary spawned children, so include only those extra roots here.
     for (const child of node.children) {
       if (child.session.parentSessionId !== node.session.id) {
-        addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
-      } else {
-        counts.sendFailed += loadedLocalDeliveryFailureCount(child, localDeliveryAttention);
+        addDescendantWorkCounts(counts, railStatusCounts(child, localDeliveryAttention));
       }
     }
   } else {
     for (const child of node.children) {
-      addRailStatusCounts(counts, railStatusCounts(child, localDeliveryAttention));
+      addDescendantWorkCounts(counts, railStatusCounts(child, localDeliveryAttention));
     }
   }
   return counts;
 }
 
-/**
- * Durable treeStats already account for ordinary descendants' lifecycle state,
- * but browser-local delivery failures have no server aggregate. Fold only that
- * local fact through the loaded child tree so collapsed parents stay truthful.
- */
-function loadedLocalDeliveryFailureCount(
-  node: SessionTreeNode,
-  localDeliveryAttention: ReadonlyMap<string, number>,
-): number {
-  return (
-    (localDeliveryAttention.get(node.session.id) ?? 0) +
-    node.children.reduce(
-      (total, child) => total + loadedLocalDeliveryFailureCount(child, localDeliveryAttention),
-      0,
-    )
-  );
-}
-
-/** One status for a collapsed parent or workstream, including all descendants. */
+/** One status for a row or workstream. The row's own waiting/failed/unread
+ *  still win; spawned descendants only add live work to "N working". */
 export function summarizeRailNodes(
   nodes: readonly SessionTreeNode[],
   localDeliveryAttention: ReadonlyMap<string, number> = new Map(),
@@ -329,8 +338,8 @@ export function summarizeRailNodes(
   }
 
   if (counts.attention > 0) {
-    // "2 need you · 10h": how long the longest-waiting one has been blocked on
-    // a human, so a parked child is never silent in a collapsed parent row.
+    // "2 need you · 10h" is this row's own wait (or a workstream of roots).
+    // Parked children are not rolled up here.
     const waiting = counts.attentionSince ? formatWaitingSince(counts.attentionSince, now) : "";
     return {
       kind: "needs_attention",
@@ -652,16 +661,15 @@ export type PinnedRailSections = {
   ordinary: SessionForest;
 };
 
-/** Whether the node's own status, or any descendant, is in a live state. */
+/** Pin this root when it itself is live, or a descendant is actually working. */
 export function nodeIsActive(node: SessionTreeNode): boolean {
-  const stats = node.session.treeStats;
-  const summarizedActive = Boolean(
-    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+  return (
+    isEffectivelyRunning(node.session) ||
+    node.hasActiveDescendant ||
+    hasSummarizedLiveWork(node.session)
   );
-  return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
 
-/** Bucket already-built roots using the rail's activity and recency rules. */
 /**
  * The scheduled task a session was created for, or null. The worker stamps this
  * onto every session it generates for a run; it is deliberately read from
@@ -722,8 +730,7 @@ export function groupScheduledRuns(roots: SessionTreeNode[]): SessionTreeNode[] 
       // so a subagent of the latest run never sorts below an older run.
       children: [...latestRun.children, ...olderRuns],
       hasActiveDescendant:
-        latestRun.hasActiveDescendant ||
-        olderRuns.some((run) => nodeIsActive(run) || run.hasActiveDescendant),
+        latestRun.hasActiveDescendant || olderRuns.some((run) => nodeHasLiveWork(run)),
     });
   }
   return grouped;
@@ -790,7 +797,7 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
       : (childrenOf.get(session.id) ?? [])
           .sort(compareSessionActivity)
           .map((child) => build(child, new Set(seen).add(session.id)));
-    const hasActiveDescendant = children.some((child) => nodeIsActive(child));
+    const hasActiveDescendant = children.some((child) => nodeHasLiveWork(child));
     return { session, children, hasActiveDescendant };
   };
 
@@ -951,7 +958,7 @@ function prunePinnedSubtreesWithCounts(
     node: {
       session,
       children,
-      hasActiveDescendant: children.some((child) => nodeIsActive(child)),
+      hasActiveDescendant: children.some((child) => nodeHasLiveWork(child)),
     },
     removed,
   };
