@@ -459,6 +459,7 @@ describe("child read acknowledgment on parent consumption", () => {
       workflowId: `session-${parent.session.id}`,
       trigger: { kind: "next" },
       error: "Agent turn admission failed before attempt claim.",
+      admissionFailure: { disposition: "permanent", code: "claim_invariant" },
     });
     expect(failed.action).toBe("failed");
     const failedSequence = await lastSequence(parent.session.id);
@@ -476,6 +477,8 @@ describe("child read acknowledgment on parent consumption", () => {
       payload: {
         status: "failed",
         code: "pre_claim_failure",
+        error: "Agent turn admission failed before attempt claim.",
+        admissionFailure: { disposition: "permanent", code: "claim_invariant" },
         failedSystemUpdateIds: [pendingUpdate.id],
       },
       turnId: null,

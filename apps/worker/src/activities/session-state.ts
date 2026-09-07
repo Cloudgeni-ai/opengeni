@@ -160,6 +160,7 @@ export function createSessionStateActivities(
           workflowId,
           trigger: input.trigger,
           error: input.error ?? "Agent turn admission failed before attempt claim.",
+          ...(input.preClaimFailure ? { admissionFailure: input.preClaimFailure } : {}),
         });
         if (failed.action === "terminal") return { action: "terminal" };
         if (failed.action === "stale") return { action: "stale" };
