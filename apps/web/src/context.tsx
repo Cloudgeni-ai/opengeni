@@ -2777,15 +2777,15 @@ export function RootRouteComponent() {
     accessContext &&
     !defaultWorkspaceId &&
     !slackLinkContinuationWorkspaceId ? (
-    <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
-      {browserAccountsEnabled ? (
-        <BrowserAccountsOrganizationOnboardingPanel
-          client={client}
-          activeEmail={authSession?.user.email ?? null}
-          invitation={organizationInvitationContinuation}
-          onComplete={revalidatePrincipalAccess}
-        />
-      ) : (
+    browserAccountsEnabled ? (
+      <BrowserAccountsOrganizationOnboardingPanel
+        client={client}
+        activeEmail={authSession?.user.email ?? null}
+        invitation={organizationInvitationContinuation}
+        onComplete={revalidatePrincipalAccess}
+      />
+    ) : (
+      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
         <OrganizationOnboardingPanel
           client={client}
           activeEmail={authSession?.user.email ?? null}
@@ -2797,8 +2797,8 @@ export function RootRouteComponent() {
           }}
           onComplete={revalidatePrincipalAccess}
         />
-      )}
-    </Suspense>
+      </Suspense>
+    )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
