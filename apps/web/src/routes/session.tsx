@@ -1870,7 +1870,7 @@ function SessionChatPane(props: {
                   canConnectModel={hasWorkspacePermission(
                     context.accessContext,
                     props.session.workspaceId,
-                    "workspace:admin",
+                    "connections:write",
                   )}
                   actions={{
                     failureId: props.failure.failureEventId,
