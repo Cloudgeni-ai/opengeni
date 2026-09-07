@@ -25,6 +25,8 @@ test("Site skill composition needs no writable application directory", () => {
         sites: true, editableArtifacts: false, videoGeneration: false,
       });
       const site = composition.lazySource.source.children["opengeni-sites"];
+      const index = composition.lazySource.getIndex({ extraPathGrants: [] }, ".agents");
+      if (!index.some(entry => entry.name === "opengeni-sites")) throw new Error("missing skill index");
       if (!site.children["SKILL.md"].content.includes("OpenGeni")) throw new Error("missing skill");
       if (!site.children.agents.children["openai.yaml"].content) throw new Error("missing nested asset");
       console.log(site.children["package-versions.json"].content);

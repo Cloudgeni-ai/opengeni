@@ -320,7 +320,7 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
     sources.push({
       directory,
       entries: { "opengeni-sites": site },
-      lazySource: localDirLazySkillSource({ src: directory }),
+      lazySource: localDirLazySkillSource({ src: directory, baseDir: directory }),
       names: skillDirNames(directory),
       reason: "bundled Site authoring skill",
     });
