@@ -836,6 +836,55 @@ describe("SessionChrome", () => {
     ).toBe(true);
   });
 
+  test("explains pending child receipts and opens only their typed source", async () => {
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const inputs = [
+      {
+        ...pendingInput(),
+        id: "pending-1",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "Waiting for CI.",
+      },
+      {
+        ...pendingInput(),
+        id: "pending-2",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "PR merged; parent has not consumed this result.",
+      },
+      { ...pendingInput(), id: "pending-3", sourceId: childId },
+      {
+        ...pendingInput(),
+        id: "pending-4",
+        kind: "child_terminal_result" as const,
+        sourceId: "invalid",
+      },
+    ];
+    mounted = await renderComponent(
+      <SessionChrome
+        readOnly
+        defaultActive="incoming"
+        queue={queue({ queue: [], pendingInputs: inputs })}
+        onOpenSession={(id) => opened.push(id)}
+      />,
+    );
+    expect(mounted.container.textContent).toContain("Waiting to be included in an agent turn.");
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    const links = [...panel.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(panel.textContent).toContain(inputs[1]!.summary);
+    expect(panel.querySelectorAll("li")).toHaveLength(4);
+  });
+
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
     const dismissed: string[] = [];
     mounted = await renderComponent(

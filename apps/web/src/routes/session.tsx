@@ -2027,6 +2027,7 @@ function SessionChatPane(props: {
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
             compact
+            onOpenSession={props.onOpenSession}
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}
