@@ -9737,6 +9737,10 @@ export const sessionBackgroundCommands = pgTable(
       .notNull()
       .default("running"),
     retainedProcessId: uuid("retained_process_id"),
+    // Exact launch receipt, never inferred from a later turn or session owner.
+    launchTurnId: uuid("launch_turn_id"),
+    launchAttemptId: uuid("launch_attempt_id"),
+    launchExecutionGeneration: integer("launch_execution_generation"),
     controlWorkspaceId: uuid("control_workspace_id"),
     enrollmentId: uuid("enrollment_id"),
     connectionInstanceId: text("connection_instance_id"),
@@ -9815,6 +9819,12 @@ export const sessionBackgroundCommands = pgTable(
     stopping: index("session_background_commands_stopping_idx")
       .on(table.reconcileAfter, table.cancelRequestedAt, table.id)
       .where(sql`${table.state} in ('running', 'stopping')`),
+    launchIdentityValid: check(
+      "session_background_commands_launch_identity_check",
+      sql`(${table.launchTurnId} is null and ${table.launchAttemptId} is null and ${table.launchExecutionGeneration} is null)
+        or (${table.launchTurnId} is not null and ${table.launchAttemptId} is not null
+          and ${table.launchExecutionGeneration} is not null and ${table.launchExecutionGeneration} > 0)`,
+    ),
     providerValid: check(
       "session_background_commands_provider_check",
       sql`${table.provider} in ('managed', 'connected_machine')`,
