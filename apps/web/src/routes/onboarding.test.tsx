@@ -344,7 +344,7 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Create your organization");
       expect(container.textContent).toContain("Organization name");
       expect(container.textContent).not.toContain("Workspace name");
-      expect(container.textContent).not.toContain("Connect a model or buy credits");
+      expect(container.textContent).not.toContain("Choose how to power your chats");
       expect(container.querySelectorAll("input")).toHaveLength(1);
       expect(onComplete).not.toHaveBeenCalled();
     } finally {
@@ -368,9 +368,9 @@ describe("organization onboarding UI", () => {
       await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
-      expect(container.textContent).toContain("Connect a model or buy credits");
-      expect(container.textContent).toContain("Connect Codex");
-      expect(container.textContent).toContain("buy OpenGeni credits");
+      expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).not.toBeNull();
+      expect(container.textContent).toContain("Use OpenGeni credits");
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
         Array.from(container.querySelectorAll("button"))

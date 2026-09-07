@@ -1,3 +1,4 @@
+import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -12,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { CreditAmountPicker } from "@/components/credit-amount-picker";
 import { Notice } from "@/components/ui/notice";
 import { useAppContext } from "@/context";
 
@@ -23,20 +24,26 @@ function validTopupAmount(value: string): boolean {
   return Number.isFinite(amount) && amount >= 5 && amount <= 10_000;
 }
 
-export function CreditRequiredPrompt({
-  open,
-  workspaceId,
-  accountId,
-  canBuyCredits,
-  onOpenChange,
-}: {
+type CreditRequiredPromptProps = {
   open: boolean;
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
   onOpenChange: (open: boolean) => void;
-}) {
-  const client = useAppContext().client;
+};
+
+export function CreditRequiredPrompt(props: CreditRequiredPromptProps) {
+  return <CreditRequiredPromptView {...props} client={useAppContext().client} />;
+}
+
+export function CreditRequiredPromptView({
+  client,
+  open,
+  workspaceId,
+  accountId,
+  canBuyCredits,
+  onOpenChange,
+}: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
 
@@ -70,16 +77,8 @@ export function CreditRequiredPrompt({
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits ? (
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-            <Input
-              aria-label="Credit amount"
-              type="number"
-              min="5"
-              max="10000"
-              step="0.01"
-              value={topupAmount}
-              onChange={(event) => setTopupAmount(event.target.value)}
-            />
+          <div className="grid gap-4">
+            <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
             <Button
               type="button"
               disabled={busy || !validTopupAmount(topupAmount)}

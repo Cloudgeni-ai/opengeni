@@ -9,7 +9,21 @@ const getBilling = mock(async () => ({
 }));
 
 mock.module("@tanstack/react-router", () => ({
-  Link: ({ children }: { children: ReactNode }) => <a href="#models">{children}</a>,
+  Link: ({
+    children,
+    to,
+    params,
+    search,
+  }: {
+    children: ReactNode;
+    to: string;
+    params: { workspaceId: string };
+    search: { section: string };
+  }) => (
+    <a href={`${to.replace("$workspaceId", params.workspaceId)}?section=${search.section}`}>
+      {children}
+    </a>
+  ),
 }));
 
 mock.module("@/context", () => ({
@@ -68,6 +82,9 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Add OpenGeni credits to continue");
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
+    expect(
+      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+    ).not.toBeNull();
   });
 
   test("empty-credits notice appears only when the organization balance is empty", async () => {
@@ -88,6 +105,9 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("This model uses OpenGeni credits");
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
+    expect(
+      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+    ).not.toBeNull();
     const connect = [...container.querySelectorAll("a")].find((node) =>
       node.textContent?.includes("Connect a model"),
     );

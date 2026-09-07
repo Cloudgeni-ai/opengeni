@@ -26,8 +26,8 @@ export function isPaymentRequiredError(error: unknown): error is OpenGeniApiErro
   );
 }
 
-/** Persist a connected model as the workspace default so new chats preselect it. */
-export async function applyConnectedModelAsWorkspaceDefault(
+/** Select the connected model in the actor-private draft without workspace administration. */
+export async function applyConnectedModelToNewSessionDraft(
   client: OpenGeniBrowserClient,
   workspaceId: string,
 ): Promise<string | null> {
@@ -35,11 +35,20 @@ export async function applyConnectedModelAsWorkspaceDefault(
   const modelId = preferredConnectedModelId(catalog.models);
   if (!modelId) return null;
   const model = catalog.models.find((candidate) => candidate.id === modelId);
-  await client.updateWorkspaceSettings(workspaceId, {
-    sessionDefaults: {
-      model: modelId,
-      reasoningEffort: model ? defaultEffortForModel(model) : "low",
-    },
+  const draft = await client.getNewSessionDraft(workspaceId);
+  await client.saveNewSessionDraft(workspaceId, {
+    text: draft.text,
+    resources: draft.resources,
+    tools: draft.tools,
+    toolsProvided: draft.toolsProvided,
+    model: modelId,
+    reasoningEffort: model ? defaultEffortForModel(model) : "low",
+    latencyMode: draft.latencyMode,
+    ...(draft.selectedProjectChannelId !== undefined
+      ? { selectedProjectChannelId: draft.selectedProjectChannelId }
+      : {}),
+    options: draft.options,
+    expectedRevision: draft.revision,
   });
   return modelId;
 }

@@ -609,8 +609,10 @@ because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
 The stock web console may then show a skippable product step to connect a
-model or buy OpenGeni credits. Connecting writes the Personal workspace
-`sessionDefaults` so a new chat preselects that model. Skip and invitation
+model or buy OpenGeni credits. Connecting selects the model in the human’s
+actor-private new-session draft with its expected revision, preserving the
+other draft fields. It never writes workspace settings or requires
+`workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
 accept still complete immediately. The step does not widen
 `POST /v1/auth/organization-onboarding`, invitation accept, or any worker
 surface. Empty OpenGeni-credit create and failed-session paths prompt the

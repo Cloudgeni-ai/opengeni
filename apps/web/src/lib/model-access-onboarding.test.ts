@@ -3,7 +3,7 @@ import { OpenGeniApiError } from "@opengeni/sdk/browser";
 import type { WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 import {
-  applyConnectedModelAsWorkspaceDefault,
+  applyConnectedModelToNewSessionDraft,
   isPaymentRequiredError,
   preferredConnectedModelId,
 } from "./model-access-onboarding";
@@ -108,9 +108,21 @@ describe("preferredConnectedModelId", () => {
   });
 });
 
-describe("applyConnectedModelAsWorkspaceDefault", () => {
-  test("writes the first selectable connected model as the workspace session default", async () => {
-    const updateWorkspaceSettings = mock(async () => undefined);
+describe("applyConnectedModelToNewSessionDraft", () => {
+  test("selects the connected model in the private draft while preserving existing content", async () => {
+    const saveNewSessionDraft = mock(async () => undefined);
+    const draft = {
+      revision: 7,
+      text: "Keep my unsent message",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      latencyMode: "priority",
+      options: {},
+      selectedProjectChannelId: null,
+    };
     const client = {
       getWorkspaceModelCatalog: async () => ({
         models: [
@@ -128,17 +140,76 @@ describe("applyConnectedModelAsWorkspaceDefault", () => {
           }),
         ],
       }),
+      getNewSessionDraft: async () => draft,
+      saveNewSessionDraft,
+    };
+    await expect(
+      applyConnectedModelToNewSessionDraft(client as never, "workspace-a"),
+    ).resolves.toBe("codex/gpt-5.6-sol");
+    expect(saveNewSessionDraft).toHaveBeenCalledWith("workspace-a", {
+      text: draft.text,
+      resources: draft.resources,
+      tools: draft.tools,
+      toolsProvided: false,
+      model: "codex/gpt-5.6-sol",
+      reasoningEffort: "low",
+      latencyMode: "priority",
+      options: draft.options,
+      selectedProjectChannelId: null,
+      expectedRevision: 7,
+    });
+  });
+});
+
+describe("onboarding draft authority", () => {
+  test("does not touch the draft when there is no selectable connected model", async () => {
+    const getNewSessionDraft = mock(async () => {
+      throw new Error("must not read draft");
+    });
+    const client = { getWorkspaceModelCatalog: async () => ({ models: [] }), getNewSessionDraft };
+    expect(
+      await applyConnectedModelToNewSessionDraft(client as never, "personal-workspace"),
+    ).toBeNull();
+    expect(getNewSessionDraft).not.toHaveBeenCalled();
+  });
+
+  test("surfaces a concurrent draft edit without retrying or writing workspace settings", async () => {
+    const conflict = new Error("draft revision conflict");
+    const saveNewSessionDraft = mock(async () => {
+      throw conflict;
+    });
+    const updateWorkspaceSettings = mock(async () => undefined);
+    const client = {
+      getWorkspaceModelCatalog: async () => ({
+        models: [
+          catalogModel({
+            id: "codex/gpt-5.6-sol",
+            provider: "codex-subscription",
+            source: "codex",
+            cost: "subscription",
+            billing: { upstreamPayer: "connected_subscription", metering: "external" },
+          }),
+        ],
+      }),
+      getNewSessionDraft: async () => ({
+        revision: 2,
+        text: "existing draft",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "gpt-5.6-sol",
+        reasoningEffort: "low",
+        latencyMode: "standard",
+        options: {},
+      }),
+      saveNewSessionDraft,
       updateWorkspaceSettings,
     };
     await expect(
-      applyConnectedModelAsWorkspaceDefault(client as never, "workspace-a"),
-    ).resolves.toBe("codex/gpt-5.6-sol");
-    expect(updateWorkspaceSettings).toHaveBeenCalledWith("workspace-a", {
-      sessionDefaults: {
-        model: "codex/gpt-5.6-sol",
-        reasoningEffort: "low",
-      },
-    });
+      applyConnectedModelToNewSessionDraft(client as never, "personal-workspace"),
+    ).rejects.toBe(conflict);
+    expect(saveNewSessionDraft).toHaveBeenCalledTimes(1);
+    expect(updateWorkspaceSettings).not.toHaveBeenCalled();
   });
 });
 
