@@ -3018,3 +3018,15 @@ A deployment is not acceptable until it proves:
 Use `bun run deployment:stack`, `bun run deployment:preflight`, provider
 Terraform validation, Helm rendering, and this conformance suite as the merge
 and release gate for deployment changes.
+
+
+### Background-command launch authority (0419)
+
+Migration `0419_background_command_launch_authority.sql` is rolling: nullable
+launch turn/attempt/generation columns and an immutable identity fence let older
+adoption writers remain compatible. New writers stamp the existing accepted
+attempt; terminal commands use that receipt without creating a personal grant.
+Historical managed rows may derive it from their exact retained process, while
+unattributed Connected Machine rows remain service-owned. Deploy the new API and
+worker together to enable command and wait-timeout causal admission; this source
+change does not itself deploy or authorize pre-claim recovery.

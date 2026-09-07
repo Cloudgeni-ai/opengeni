@@ -205,6 +205,9 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     commandId: string;
     retainedProcessId: string;
     command: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
   },
 ): Promise<SessionBackgroundCommand> {
   const [process] = await db
@@ -213,6 +216,11 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       workspaceId: schema.sandboxRetainedProcesses.workspaceId,
       sessionId: schema.sandboxRetainedProcesses.sessionId,
       state: schema.sandboxRetainedProcesses.state,
+      ownerActorKind: schema.sandboxRetainedProcesses.ownerActorKind,
+      ownerActorId: schema.sandboxRetainedProcesses.ownerActorId,
+      ownerTurnId: schema.sandboxRetainedProcesses.ownerTurnId,
+      ownerAttemptId: schema.sandboxRetainedProcesses.ownerAttemptId,
+      ownerExecutionGeneration: schema.sandboxRetainedProcesses.ownerExecutionGeneration,
     })
     .from(schema.sandboxRetainedProcesses)
     .where(eq(schema.sandboxRetainedProcesses.id, input.retainedProcessId))
@@ -238,6 +246,9 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
       state: "running",
       retainedProcessId: input.retainedProcessId,
       commandPreview: commandPreview(input.command),
+      launchTurnId: input.turnId ?? null,
+      launchAttemptId: input.attemptId ?? null,
+      launchExecutionGeneration: input.executionGeneration ?? null,
     })
     .onConflictDoUpdate({
       target: schema.sessionBackgroundCommands.retainedProcessId,
@@ -246,10 +257,23 @@ export async function insertManagedSessionBackgroundCommandInTransaction(
     })
     .returning();
   if (!row) throw new Error("Managed background command adoption returned no row");
+  const legacyReplayMatches =
+    row.launchTurnId === null &&
+    row.launchAttemptId === null &&
+    row.launchExecutionGeneration === null &&
+    process.ownerActorKind === "turn" &&
+    process.ownerActorId === input.attemptId &&
+    process.ownerTurnId === input.turnId &&
+    process.ownerAttemptId === input.attemptId &&
+    process.ownerExecutionGeneration === input.executionGeneration;
   if (
     row.accountId !== input.accountId ||
     row.workspaceId !== input.workspaceId ||
     row.sessionId !== input.sessionId ||
+    (!legacyReplayMatches &&
+      (row.launchTurnId !== (input.turnId ?? null) ||
+        row.launchAttemptId !== (input.attemptId ?? null) ||
+        row.launchExecutionGeneration !== (input.executionGeneration ?? null))) ||
     row.provider !== "managed" ||
     row.retainedProcessId !== input.retainedProcessId
   ) {
@@ -271,6 +295,9 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
     connectionInstanceId: string;
     opId: string;
     command: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
   },
 ): Promise<SessionBackgroundCommand> {
   const [row] = await db
@@ -287,6 +314,9 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
       connectionInstanceId: input.connectionInstanceId,
       opId: input.opId,
       commandPreview: commandPreview(input.command),
+      launchTurnId: input.turnId ?? null,
+      launchAttemptId: input.attemptId ?? null,
+      launchExecutionGeneration: input.executionGeneration ?? null,
     })
     .onConflictDoUpdate({
       target: [
@@ -304,6 +334,9 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
     row.accountId !== input.accountId ||
     row.workspaceId !== input.workspaceId ||
     row.sessionId !== input.sessionId ||
+    row.launchTurnId !== (input.turnId ?? null) ||
+    row.launchAttemptId !== (input.attemptId ?? null) ||
+    row.launchExecutionGeneration !== (input.executionGeneration ?? null) ||
     row.provider !== "connected_machine" ||
     row.controlWorkspaceId !== input.controlWorkspaceId ||
     row.enrollmentId !== input.enrollmentId ||
