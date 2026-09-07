@@ -122,6 +122,24 @@ describe("Session rail row metadata in Chromium", () => {
     expect(cardBox!.x + cardBox!.width).toBeLessThanOrEqual(1280);
   });
 
+  test("contains long hover titles, creator names, and age within the card", async () => {
+    await page.mouse.move(1000, 700);
+    await page.locator('[data-row-case="overflow"] a').hover();
+    const card = page.locator('[data-slot="hover-card-content"]');
+    await card.waitFor({ state: "visible" });
+    await card.getByText("Long_unbroken_session_title_".repeat(8), { exact: true }).waitFor();
+    expect(await card.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    const cardBox = (await card.boundingBox())!;
+    const contents = card.locator("[data-session-row-hover-details], p, [aria-label], span");
+    for (const element of await contents.all()) {
+      const box = (await element.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(cardBox.x);
+      expect(box.x + box.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
+    }
+    expect(await card.locator("p").innerText()).toBe("Long_unbroken_session_title_".repeat(8));
+    await page.screenshot({ path: "/tmp/opengeni-session-hover-overflow.png", fullPage: true });
+  });
+
   test("reveals direct pin and archive controls on hover and keyboard focus", async () => {
     const row = page.locator('[data-row-case="time-only"]');
     const link = row.locator("a");
