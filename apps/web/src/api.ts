@@ -105,9 +105,48 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     public readonly body: string,
+    options: {
+      code?: string;
+      retryable?: boolean;
+      outcomeUnknown?: boolean;
+      details?: Record<string, unknown>;
+      message?: string;
+    } = {},
   ) {
-    super(`API ${status}: ${body}`);
+    super(options.message ?? `API ${status}: ${body}`);
     this.name = "ApiError";
+    this.code = options.code;
+    this.retryable = options.retryable === true;
+    this.outcomeUnknown = options.outcomeUnknown === true;
+    this.details = options.details;
+  }
+
+  readonly code: string | undefined;
+  readonly retryable: boolean;
+  readonly outcomeUnknown: boolean;
+  readonly details: Record<string, unknown> | undefined;
+}
+
+export function apiErrorFromResponseBody(status: number, body: string): ApiError {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown };
+    if (typeof parsed.error !== "object" || parsed.error === null || Array.isArray(parsed.error)) {
+      return new ApiError(status, body);
+    }
+    const error = parsed.error as Record<string, unknown>;
+    return new ApiError(status, body, {
+      ...(typeof error.code === "string" ? { code: error.code } : {}),
+      ...(typeof error.message === "string" ? { message: error.message } : {}),
+      ...(error.retryable === true ? { retryable: true } : {}),
+      ...(error.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+      ...(typeof error.details === "object" &&
+      error.details !== null &&
+      !Array.isArray(error.details)
+        ? { details: error.details as Record<string, unknown> }
+        : {}),
+    });
+  } catch {
+    return new ApiError(status, body);
   }
 }
 
@@ -724,7 +763,7 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     handleApiContractResponse(response);
     const text = await response.text();
-    throw new ApiError(response.status, text);
+    throw apiErrorFromResponseBody(response.status, text);
   }
   return (await response.json()) as T;
 }
@@ -942,7 +981,7 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
   });
   if (!response.ok) {
     handleApiContractResponse(response);
-    throw new ApiError(response.status, await response.text());
+    throw apiErrorFromResponseBody(response.status, await response.text());
   }
   return (await response.json()) as T;
 }

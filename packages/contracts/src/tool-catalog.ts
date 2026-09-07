@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const ATTEMPT_TOOL_CATALOG_VERSION = 1 as const;
+export const TOOL_GATEWAY_CATALOG_VERSION = 1 as const;
 export const ATTEMPT_TOOL_CATALOG_MAX_ENTRIES = 4_096;
 export const ATTEMPT_TOOL_CATALOG_MAX_BYTES = 16 * 1024 * 1024;
 export const ATTEMPT_TOOL_CATALOG_MAX_PATH_SEGMENTS = 8;
@@ -42,6 +43,10 @@ export const AttemptToolIdentity = z
   })
   .strict();
 export type AttemptToolIdentity = z.infer<typeof AttemptToolIdentity>;
+
+/** Protocol-neutral tool identity shared by MCP, HTTP/SDK, agents, and Codemode. */
+export const ToolGatewayIdentity = AttemptToolIdentity;
+export type ToolGatewayIdentity = AttemptToolIdentity;
 
 export const AttemptToolCatalogIcon = z
   .object({
@@ -87,6 +92,64 @@ export const AttemptToolCatalogEntry = z
   })
   .strict();
 export type AttemptToolCatalogEntry = z.infer<typeof AttemptToolCatalogEntry>;
+
+/** One canonical gateway entry. Adapter-specific names are projections, never authority. */
+export const ToolGatewayCatalogEntry = AttemptToolCatalogEntry;
+export type ToolGatewayCatalogEntry = AttemptToolCatalogEntry;
+
+export const ToolGatewayCatalog = z
+  .object({
+    version: z.literal(TOOL_GATEWAY_CATALOG_VERSION),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    generation: z.number().int().positive(),
+    digest: sha256,
+    createdAt: z.string().datetime({ offset: true }),
+    entries: z.array(ToolGatewayCatalogEntry).max(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES),
+  })
+  .strict()
+  .superRefine((catalog, context) => {
+    const identities = new Set<string>();
+    const modelNames = new Set<string>();
+    const toolPaths = new Set<string>();
+    for (const [index, entry] of catalog.entries.entries()) {
+      const identity = `${entry.identity.serverId}\u0000${entry.identity.toolName}`;
+      const toolPath = entry.codemodePath.join(".");
+      if (identities.has(identity)) {
+        context.addIssue({
+          code: "custom",
+          path: ["entries", index, "identity"],
+          message: "duplicate tool identity",
+        });
+      }
+      if (modelNames.has(entry.modelName)) {
+        context.addIssue({
+          code: "custom",
+          path: ["entries", index, "modelName"],
+          message: "duplicate model tool name",
+        });
+      }
+      if (toolPaths.has(toolPath)) {
+        context.addIssue({
+          code: "custom",
+          path: ["entries", index, "codemodePath"],
+          message: "duplicate tool path",
+        });
+      }
+      identities.add(identity);
+      modelNames.add(entry.modelName);
+      toolPaths.add(toolPath);
+    }
+  });
+export type ToolGatewayCatalog = z.infer<typeof ToolGatewayCatalog>;
+
+export const ToolGatewayCaller = z
+  .object({
+    kind: z.enum(["model", "codemode", "http", "mcp", "browser"]),
+    subjectId: z.string().min(1).max(1_024),
+  })
+  .strict();
+export type ToolGatewayCaller = z.infer<typeof ToolGatewayCaller>;
 
 export const AttemptToolCatalog = z
   .object({
@@ -250,6 +313,79 @@ export const AttemptToolResult = z
   })
   .loose();
 export type AttemptToolResult = z.infer<typeof AttemptToolResult>;
+
+export const ToolGatewayResult = AttemptToolResult;
+export type ToolGatewayResult = AttemptToolResult;
+
+export const ToolGatewayCallRequest = z
+  .object({
+    operationId: z.string().uuid().optional(),
+    catalogDigest: sha256,
+    identity: ToolGatewayIdentity,
+    arguments: jsonObject,
+    /** Host-owned Site context. Publisher-controlled iframe code cannot set it. */
+    siteArtifactId: z.string().uuid().optional(),
+    siteVersionId: z.string().uuid().optional(),
+    /** Opaque, server-issued, single-use capability for an approval-required call. */
+    approvalToken: z
+      .string()
+      .regex(/^ogta_[A-Za-z0-9_-]{43}$/u)
+      .optional(),
+  })
+  .strict()
+  .superRefine(requireCompleteSiteToolContext);
+export type ToolGatewayCallRequest = z.infer<typeof ToolGatewayCallRequest>;
+
+export const ToolGatewayApprovalRequest = z
+  .object({
+    operationId: z.string().uuid(),
+    catalogDigest: sha256,
+    identity: ToolGatewayIdentity,
+    arguments: jsonObject,
+  })
+  .strict();
+export type ToolGatewayApprovalRequest = z.infer<typeof ToolGatewayApprovalRequest>;
+
+export const ToolGatewayApprovalResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    catalogDigest: sha256,
+    identity: ToolGatewayIdentity,
+    approvalToken: z.string().regex(/^ogta_[A-Za-z0-9_-]{43}$/u),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type ToolGatewayApprovalResponse = z.infer<typeof ToolGatewayApprovalResponse>;
+
+export const ToolGatewayCallResponse = z
+  .object({
+    operationId: z.string().uuid(),
+    catalogDigest: sha256,
+    result: ToolGatewayResult,
+  })
+  .strict();
+export type ToolGatewayCallResponse = z.infer<typeof ToolGatewayCallResponse>;
+
+export const ToolGatewayDeclarationsResponse = z
+  .object({
+    catalogDigest: sha256,
+    moduleSpecifier: z.string().min(1).max(512),
+    source: z.string().max(16 * 1024 * 1024),
+  })
+  .strict();
+export type ToolGatewayDeclarationsResponse = z.infer<typeof ToolGatewayDeclarationsResponse>;
+
+function requireCompleteSiteToolContext(
+  value: { siteArtifactId?: string | undefined; siteVersionId?: string | undefined },
+  context: z.RefinementCtx,
+): void {
+  if ((value.siteArtifactId === undefined) === (value.siteVersionId === undefined)) return;
+  context.addIssue({
+    code: "custom",
+    message: "siteArtifactId and siteVersionId must be provided together",
+    path: [value.siteArtifactId === undefined ? "siteArtifactId" : "siteVersionId"],
+  });
+}
 
 export const CodemodeOperationState = z.enum([
   "queued",

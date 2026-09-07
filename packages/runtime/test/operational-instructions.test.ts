@@ -29,7 +29,9 @@ describe("provider-neutral operational instructions", () => {
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.py](sandbox:/home/u/proj/app.py:12)");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("[app.ts](<sandbox:C:/repo/app.ts:12>)");
-    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Never link directly to `/tmp`");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "In managed sandboxes, never link directly to `/tmp`",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
       "or any file outside the current workspace",
     );
@@ -37,6 +39,9 @@ describe("provider-neutral operational instructions", () => {
       "copy it into the current workspace before responding",
     );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("canonical sandbox path");
+    expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain(
+      "absolute file links may point outside the working directory",
+    );
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("a host path");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("host-absolute paths");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).toContain("Do not provide ranges of lines.");

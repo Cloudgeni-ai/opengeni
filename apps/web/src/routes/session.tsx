@@ -65,6 +65,7 @@ import {
 import { useRail } from "@/components/rail/rail-context";
 import { CLOUD_SANDBOX_LABEL } from "@/components/session/sandbox-switcher";
 import { ChatViewportFileDropTarget } from "@/components/session/chat-viewport-file-drop-target";
+import { SessionCommands } from "@/components/session/commands";
 import { SubagentTree } from "@/components/session/subagents";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import {
@@ -1823,8 +1824,10 @@ function SessionChatPane(props: {
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
+              key={props.session.id}
               className="h-full"
               items={timelineWithOptimisticSends}
+              events={props.events}
               status={props.session.status}
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
@@ -1962,10 +1965,19 @@ function SessionChatPane(props: {
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            compact
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}
             readOnly={terminal}
+            commandsCount={props.session.backgroundCommandActivity?.count ?? 0}
+            commandsPanel={
+              <SessionCommands
+                key={props.session.id}
+                sessionId={props.session.id}
+                readOnly={terminal}
+              />
+            }
             agentsSignal={agentsSignal}
             agentsPanel={
               props.agentNodes.length > 0 ? (
@@ -2074,7 +2086,9 @@ function SessionChatPane(props: {
                     // the reply turn dies the same budget death.
                     "Out of OpenGeni credits — add credits to continue."
                   : props.session.status === "failed"
-                    ? "This session failed — send a message to revive it."
+                    ? props.failure?.safetyRefusal
+                      ? "The model provider blocked the previous request."
+                      : "This session failed — send a message to revive it."
                     : "Send a follow-up…"
             }
             controls={

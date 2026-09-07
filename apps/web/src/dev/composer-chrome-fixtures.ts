@@ -11,6 +11,7 @@ import type {
   EffectiveSessionControl,
   LineageNode,
   Session,
+  SessionBackgroundCommand,
   SessionGoal,
   SessionPendingInputPreview,
   SessionTurn,
@@ -409,6 +410,19 @@ export const screenshotIncomingInputs: SessionPendingInputPreview[] = [
 ];
 
 export type ChromeScenarioId =
+  | "commands-running"
+  | "commands-stopping"
+  | "commands-empty"
+  | "commands-loading"
+  | "commands-error"
+  | "commands-stop-error"
+  | "commands-many"
+  | "activity-mixed"
+  | "activity-load"
+  | "activity-readonly"
+  | "goal-action-error"
+  | "queue-action-error"
+  | "delivered-inputs"
   | "crowded-mobile"
   | "screenshot"
   | "queued-only"
@@ -433,8 +447,12 @@ export type ChromeScenario = {
   queue: UseTurnQueueResult;
   goal: UseGoalResult;
   agentNodes: LineageNode[];
+  commands?: SessionBackgroundCommand[];
+  commandState?: "loading" | "error" | "stop-error";
+  readOnly?: boolean;
+  showDeliveredInputs?: boolean;
   /** Open this segment when the phone mounts (matches production uncontrolled default). */
-  defaultActive?: "incoming" | "steering" | "queue" | "goal" | "agents" | null;
+  defaultActive?: "incoming" | "steering" | "queue" | "goal" | "agents" | "commands" | null;
 };
 
 export function chromeScenarios(): ChromeScenario[] {
@@ -478,7 +496,191 @@ export function chromeScenarios(): ChromeScenario[] {
     }),
   );
 
+  const command = (
+    index: number,
+    state: "running" | "stopping" = "running",
+  ): SessionBackgroundCommand => ({
+    id: "00000000-0000-4000-8000-" + String(index + 1).padStart(12, "0"),
+    workspaceId: GALLERY_WORKSPACE_ID,
+    sessionId: GALLERY_SESSION_ID,
+    provider: index % 2 ? "connected_machine" : "managed",
+    state,
+    commandPreview:
+      index === 0
+        ? "bun run build"
+        : index === 1
+          ? "bun test packages/react/test/session-chrome.test.tsx"
+          : "bun run check --filter=" + "long-package-name-".repeat((index % 5) + 1) + index,
+    cancelRequestedAt: state === "stopping" ? isoMinutesAgo(1) : null,
+    exitCode: null,
+    settlementReason: null,
+    startedAt: new Date(Date.now() - (index + 1) * 120_000).toISOString(),
+    settledAt: null,
+    updatedAt: isoMinutesAgo(1),
+  });
+  const activityBase = {
+    session,
+    queue: galleryQueue(),
+    goal: galleryGoal(null),
+    agentNodes: [],
+    defaultActive: "commands" as const,
+  };
+  const mixed = {
+    ...activityBase,
+    commands: [command(0), command(1, "stopping")],
+    goal: galleryGoal({
+      text: "Finish the navigation update and verify keyboard access",
+      createdAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      updatedAt: new Date().toISOString(),
+      continuation: {
+        state: "scheduled",
+        reason: "wake_pending",
+        wakeRevision: 1,
+        observedRevision: 0,
+        nextAttemptAt: null,
+        lastError: null,
+      },
+    }),
+    queue: galleryQueue({
+      queue: [
+        galleryTurn(0, "Check the keyboard navigation first."),
+        galleryTurn(1, "Then verify the narrow layout."),
+      ],
+      pendingInputs: [
+        galleryPendingInput(0, {
+          kind: "background_command_result",
+          summary: "bun run lint finished successfully.",
+          classification: "success",
+        }),
+      ],
+    }),
+    agentNodes: twoAgents,
+  };
   return [
+    {
+      ...mixed,
+      id: "activity-load",
+      title: "Activity under load",
+      description:
+        "250 incoming notifications, 150 agents, and 200 active commands. Synthetic data only; no work is executed.",
+      defaultActive: "incoming",
+      queue: galleryQueue({
+        queue: mixed.queue.queue,
+        pendingInputs: Array.from({ length: 250 }, (_, i) =>
+          galleryPendingInput(i, {
+            kind: "background_command_result",
+            summary:
+              i % 7 === 0
+                ? `Validation batch ${i + 1} needs attention: a long diagnostic message to test wrapping and readable rows on small screens.`
+                : `Validation batch ${i + 1} finished successfully.`,
+            classification: i % 7 === 0 ? "failure" : "success",
+          }),
+        ),
+      }),
+      agentNodes: Array.from({ length: 150 }, (_, i) =>
+        galleryAgentNode(i, {
+          title: `Worker ${i + 1} · ${i % 3 === 0 ? "Accessibility and keyboard navigation review" : "Validation"}`,
+          status: i % 3 === 0 ? "running" : "idle",
+        }),
+      ),
+      commands: Array.from({ length: 200 }, (_, i) =>
+        command(i, i % 5 === 0 ? "stopping" : "running"),
+      ),
+    },
+    {
+      ...mixed,
+      id: "activity-mixed",
+      title: "Commands, goal, queue and inbox",
+      description:
+        "Goal and queue shortcuts stay visible. Stop a command, then simulate its result. No finished-command list.",
+      defaultActive: null,
+    },
+    {
+      ...activityBase,
+      id: "commands-running",
+      title: "Running commands",
+      description:
+        "Only live commands. Stop becomes stopping; receiving the result removes the command.",
+      commands: [command(0), command(1)],
+    },
+    {
+      ...activityBase,
+      id: "commands-stopping",
+      title: "Stopping commands",
+      description: "A stop request is still active until its result is confirmed.",
+      commands: [command(0, "stopping"), command(1, "stopping")],
+    },
+    {
+      ...activityBase,
+      id: "commands-empty",
+      title: "Last command finished",
+      description: "Keep the open panel steady. Close it to remove the empty Commands chip.",
+      commands: [],
+    },
+    {
+      ...activityBase,
+      id: "commands-loading",
+      title: "Commands loading",
+      description: "A truthful loading state, never an empty-state flash.",
+      commands: [],
+      commandState: "loading",
+    },
+    {
+      ...activityBase,
+      id: "commands-error",
+      title: "Command list unavailable",
+      description: "Retry without losing the rest of the session.",
+      commands: [],
+      commandState: "error",
+    },
+    {
+      ...activityBase,
+      id: "commands-stop-error",
+      title: "Stop not confirmed",
+      description: "A failed stop keeps the command visible and allows retry.",
+      commands: [command(0)],
+      commandState: "stop-error",
+    },
+    {
+      ...activityBase,
+      id: "commands-many",
+      title: "Many active commands",
+      description: "Bounded scroll area and wrapping long commands keep the composer usable.",
+      commands: Array.from({ length: 24 }, (_, i) => command(i)),
+    },
+    {
+      ...mixed,
+      id: "activity-readonly",
+      title: "Read-only activity",
+      description: "Statuses and details remain available; mutation actions are absent.",
+      readOnly: true,
+    },
+    {
+      ...mixed,
+      id: "goal-action-error",
+      title: "Goal action not confirmed",
+      description: "Keep the error visible even while the goal panel is closed.",
+      goal: { ...mixed.goal, mutationError: new Error("Connection interrupted. Try again.") },
+      defaultActive: null,
+    },
+    {
+      ...mixed,
+      id: "queue-action-error",
+      title: "Steer not confirmed",
+      description: "The first message remains queued. The queue chip signals the failed action.",
+      queue: { ...mixed.queue, mutationError: new Error("Connection interrupted. Try again.") },
+      defaultActive: "queue",
+    },
+    {
+      ...activityBase,
+      id: "delivered-inputs",
+      title: "Why the agent continued",
+      description:
+        "Command results, mixed batches and wait timeouts stay outside collapsed steps, including updates received during a turn.",
+      commands: [],
+      defaultActive: null,
+      showDeliveredInputs: true,
+    },
     {
       id: "crowded-mobile",
       title: "Crowded mobile (reference)",

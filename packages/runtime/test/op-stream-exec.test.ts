@@ -171,7 +171,7 @@ describe("op-stream exec (fake runner)", () => {
     expect(runner.runs.get("call_adoption_failure:0")?.exit.cancelled).toBe(true);
   });
 
-  test("exit during adoption is fast-settled instead of returned as running", async () => {
+  test("exit during adoption settles the adopted command and returns only its receipt", async () => {
     const settlements: Array<Record<string, unknown>> = [];
     let session!: SelfhostedSession;
     const rig = buildRig({
@@ -196,8 +196,9 @@ describe("op-stream exec (fake runner)", () => {
       session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
     );
 
-    expect(result).toContain("Process exited with code -1");
-    expect(result).not.toContain("Command running in background");
+    expect(result).toContain("Command running in background");
+    expect(result).toContain("command ID 22222222-2222-4222-8222-222222222222");
+    expect(result).not.toContain("Process exited with code -1");
     expect(settlements).toEqual([
       {
         commandId: "22222222-2222-4222-8222-222222222222",
@@ -212,7 +213,7 @@ describe("op-stream exec (fake runner)", () => {
     ]);
   });
 
-  test("fast-settlement failure preserves the terminal result for durable reconciliation", async () => {
+  test("fast-settlement failure still returns only the adopted command receipt", async () => {
     let session!: SelfhostedSession;
     const rig = buildRig({
       connectionInstanceId: "launch-instance",
@@ -236,7 +237,9 @@ describe("op-stream exec (fake runner)", () => {
       session.execCommand({ cmd: "sleep 60", yieldTimeMs: 1 }),
     );
 
-    expect(result).toContain("Process exited with code -1");
+    expect(result).toContain("Command running in background");
+    expect(result).toContain("command ID 33333333-3333-4333-8333-333333333333");
+    expect(result).not.toContain("Process exited with code -1");
     expect(result).not.toContain("database unavailable");
   });
 

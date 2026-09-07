@@ -403,7 +403,11 @@ The runtime keeps these sources inspectable and separate:
 2. legacy pre-v2 Pack inline Skills;
 3. inline per-session Skills;
 4. repository-local `.agents/skills` or `.claude/skills` discovered at their real mounted path; and
-5. native editable-artifact Skills, only after the exact artifact runtime preflight succeeds.
+5. native tool-bound Skills: Site authoring after the frozen attempt catalog can
+   create a Site or perform the complete source-read/publish edit workflow;
+   editable documents, spreadsheets, and presentations after the complete
+   canonical editable-artifact catalog is present; and video generation only
+   when its executable provider surface is available.
 
 V2 Pack installation resolves names before mutation: identical case-insensitive name plus exact content is one shareable Skill component, while different content under an effective name is a blocking mismatch. It therefore never relies on runtime shadowing. Legacy Pack inline Skills retain their historical precedence only for installations with no frozen manifest snapshot/digest. The effective runtime selection reports source, version, hash, and reason without exposing secrets.
 
@@ -442,7 +446,7 @@ The authoritative persistence model stores the immutable Plugin version, Skill
 facet, exact text files, workspace installation, and component owners under
 FORCE RLS. Runtime materialization revalidates the stored artifact and digest
 before adding it to the same lazy `.agents/` Skill index as other active
-workspace components, session, repository, and native artifact Skills. Uninstall is previewed and
+workspace components, session, repository, and native tool-bound Skills. Uninstall is previewed and
 optimistic-concurrency fenced: removing the direct owner retains the Skill when
 a Plugin or Pack still owns it, and only the final owner removes it from later
 turns. Migration `0233_skill_and_integration_authority_cutover.sql` preserves

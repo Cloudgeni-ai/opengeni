@@ -261,3 +261,33 @@ Compact/Clear transition is reconstructed as inactive audit evidence, so the
 migration never resurrects context that the user already replaced. Deliveries
 after that boundary are inserted into active history at their causal turn
 position. There is no runtime compatibility path for ephemeral update injection.
+
+### Showing incoming work in the session
+
+The session dock separates pending inbox inputs from active background commands.
+Its Commands panel lists only `running` and `stopping` records for the selected
+session. The HTTP list filters at the database; settled records are never loaded
+for this panel. Session detail carries the existing active-count projection, and
+the command list mounts and polls only while its panel is open. Closing it aborts
+an outstanding read and prevents a late Stop response from starting another read.
+
+Delivery remains the timeline landmark: `system.update.delivered` renders through
+the existing input row for every supported kind, including command results and
+wait timeouts. Those rows stay outside collapsed steps, including an input received
+partway through the same turn. A delivered input does not necessarily start a new
+turn. Command-result summaries include the bounded command preview; an unavailable
+exit result is described as unavailable rather than asserting that execution failed.
+
+The Goal segment keeps pause/resume and clear visible beside its label. The
+Queue segment exposes Steer for its first authoritative queued message. These shortcuts stay visible for every pointer type; read-only views omit mutation
+controls.
+
+For deterministic local review, run `bun run dev` and open
+`/dev/composer-chrome`. The gallery uses the production controls and timeline
+projection with synthetic events, covers command loading/empty/error/stopping
+states, crowded and read-only layouts, and supports local goal/queue actions.
+Its command-result simulator changes fixture state only; no model calls or real
+processes are needed. Actual command filtering and settlement are covered by the
+real-PostgreSQL session-control algebra tests.
+
+The web session uses compact chrome: queue and goal actions remain visible, while inbox, agents, and active commands share an Activity disclosure. Goal state stays visible; goal age is labelled as time since creation, not execution time. The development gallery includes a synthetic high-volume activity scenario.

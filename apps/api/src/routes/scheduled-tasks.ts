@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   CreateScheduledTaskRequest,
   TriggerScheduledTaskRequest,
@@ -72,7 +73,24 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   app.get("/v1/workspaces/:workspaceId/scheduled-tasks", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "scheduled_tasks:run");
-    const tasks = await listScheduledTasks(db, workspaceId, boundedLimit(c.req.query("limit")));
+    const sessionId = c.req.query("sessionId");
+    const offset = Number(c.req.query("offset") ?? 0);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new HTTPException(400, { message: "invalid offset" });
+    }
+    if (sessionId !== undefined) {
+      if (!z.string().uuid().safeParse(sessionId).success) {
+        throw new HTTPException(400, { message: "invalid sessionId" });
+      }
+      await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    }
+    const tasks = await listScheduledTasks(
+      db,
+      workspaceId,
+      boundedLimit(c.req.query("limit")),
+      offset,
+      sessionId,
+    );
     return c.json(tasks.map((task) => scheduledTaskForGrant(task, grant)));
   });
 

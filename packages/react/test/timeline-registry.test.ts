@@ -72,6 +72,15 @@ describe("createToolRegistry resolution order", () => {
     expect(registry.resolve(item({ name: "unknown_tool", raw: undefined }))).toBe(Fallback);
     expect(registry.fallback).toBe(Fallback);
   });
+
+  test("identity-sensitive names can reject arbitrary MCP leaf aliases", () => {
+    const exactRegistry = createToolRegistry(
+      [{ match: "name", name: "artifacts_create", render: ByName, matchPrefixedLeaf: false }],
+      Fallback,
+    );
+    expect(exactRegistry.resolve(item({ name: "artifacts_create" }))).toBe(ByName);
+    expect(exactRegistry.resolve(item({ name: "external__artifacts_create" }))).toBe(Fallback);
+  });
 });
 
 describe("consumer overrides", () => {

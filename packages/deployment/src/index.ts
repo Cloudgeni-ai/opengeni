@@ -237,6 +237,14 @@ export const EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_KERNEL_BROWSER_STEALTH",
 ];
 
+/** Public workspace MCP OAuth rollout settings. The enable switch is
+ * deployment-sensitive because OAuth needs a canonical managed/local human
+ * session and one stable public issuer origin. */
+export const MCP_OAUTH_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_MCP_OAUTH_ENABLED",
+  "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
+];
+
 /** Control-plane secrets needed for a complete Connected Machine deployment.
  * The config layer permits graceful degradation when these are absent; a
  * deployment whose primary backend is selfhosted cannot. */
@@ -1429,6 +1437,7 @@ export function requiredRuntimeEnvVars(
   contract: DeploymentContract,
   env: Record<string, string | undefined> = process.env,
 ): string[] {
+  assertMcpOauthDeploymentContract(contract, env);
   const vars = [
     "OPENGENI_PRODUCT_ACCESS_MODE",
     "OPENGENI_BILLING_MODE",
@@ -1557,6 +1566,12 @@ export function requiredRuntimeEnvVars(
   }
   if (env.OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS) {
     vars.push("OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS");
+  }
+  for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+    if (env[key]) vars.push(key);
+  }
+  if (mcpOauthDeploymentEnabled(env)) {
+    vars.push("OPENGENI_MCP_OAUTH_ENABLED", "OPENGENI_PUBLIC_BASE_URL");
   }
   if (contract.product.billingMode === "stripe") {
     vars.push(
@@ -1801,14 +1816,20 @@ export const MODEL_CATALOG_MAINTENANCE_CUTOVER = "0389_model_catalog_and_gateway
 export const SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER = "0394_session_selected_skill_activation";
 export const SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER =
   "0402_session_input_wait_and_background_command_results";
+export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0404_mcp_oauth_authorization_server";
 export const CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER =
   "0403_codex_unconditional_credential_leasing";
 
 const MAINTENANCE_CUTOVERS = {
-  [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migration: "0389" },
-  [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migration: "0394" },
-  [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migration: "0402" },
-  [CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER]: { migration: "0403" },
+  [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0389" },
+  [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0394" },
+  [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0402" },
+  [CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER]: {
+    migrationSummary: "migration 0403",
+  },
+  [MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER]: {
+    migrationSummary: "migrations 0404 and 0405",
+  },
 } as const;
 
 type MaintenanceCutover = keyof typeof MAINTENANCE_CUTOVERS;
@@ -2397,7 +2418,7 @@ function planNotes(
   const maintenanceCutover = requestedMaintenanceCutover(env);
   if (maintenanceCutover) {
     notes.push(
-      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until migration ${MAINTENANCE_CUTOVERS[maintenanceCutover].migration} and the final exact-digest upgrade succeed. If that final upgrade fails, Helm restores only the preceding exact-image, applications-disabled revision so recovery remains drained and forward-only.`,
+      `This plan includes the explicit ${maintenanceCutover} application drain; keep the application stopped until ${MAINTENANCE_CUTOVERS[maintenanceCutover].migrationSummary} and the final exact-digest upgrade succeed. If that final upgrade fails, Helm restores only the preceding exact-image, applications-disabled revision so recovery remains drained and forward-only.`,
     );
   }
   return notes;
@@ -2488,7 +2509,9 @@ function runtimeEnvValues(
   terraformOutputs: TerraformOutputs,
   env: Record<string, string | undefined>,
 ): RuntimeEnvEntry[] {
+  assertMcpOauthDeploymentContract(contract, env);
   const publicBaseUrl = env.OPENGENI_PUBLIC_BASE_URL ?? contract.product.publicBaseUrl;
+  const mcpOauthEnabled = mcpOauthDeploymentEnabled(env);
   const entries: RuntimeEnvEntry[] = [
     envOrRequiredRuntime(
       "OPENGENI_DATABASE_URL",
@@ -2517,6 +2540,8 @@ function runtimeEnvValues(
     valueEnv("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID", env.OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID),
     valueEnv("OPENGENI_INTEGRATIONS_ENABLED", env.OPENGENI_INTEGRATIONS_ENABLED),
     valueEnv("OPENGENI_INTEGRATIONS_STATE_SECRET", env.OPENGENI_INTEGRATIONS_STATE_SECRET),
+    valueEnv("OPENGENI_MCP_OAUTH_ENABLED", env.OPENGENI_MCP_OAUTH_ENABLED),
+    valueEnv("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS", env.OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS),
     valueEnv("OPENGENI_SLACK_CLIENT_ID", env.OPENGENI_SLACK_CLIENT_ID),
     valueEnv("OPENGENI_SLACK_CLIENT_SECRET", env.OPENGENI_SLACK_CLIENT_SECRET),
     valueEnv("OPENGENI_SLACK_SIGNING_SECRET", env.OPENGENI_SLACK_SIGNING_SECRET),
@@ -2549,7 +2574,11 @@ function runtimeEnvValues(
           ),
         ]
       : []),
-    ...(publicBaseUrl ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)] : []),
+    ...(mcpOauthEnabled
+      ? [requiredEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)]
+      : publicBaseUrl
+        ? [valueEnv("OPENGENI_PUBLIC_BASE_URL", publicBaseUrl)]
+        : []),
     ...(contract.product.accessMode === "managed" ||
     (contract.product.accessMode === "configured" && contract.access.mode !== "sharedKey")
       ? [requiredEnv("OPENGENI_DELEGATION_SECRET", env.OPENGENI_DELEGATION_SECRET)]
@@ -3002,6 +3031,7 @@ function addRuntimeConfigHelmValues(
   contract: DeploymentContract,
   env: Record<string, string | undefined>,
 ): void {
+  assertMcpOauthDeploymentContract(contract, env);
   const publicBaseUrl = env.OPENGENI_PUBLIC_BASE_URL ?? contract.product.publicBaseUrl;
   values["config.OPENGENI_AUTH_REQUIRED"] = String(contract.access.mode === "sharedKey");
   values["config.OPENGENI_AUTH_ALLOW_HEALTH"] = String(contract.access.allowUnauthenticatedHealth);
@@ -3042,6 +3072,8 @@ function addRuntimeConfigHelmValues(
     "OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID",
     "OPENGENI_DEFAULT_FIRST_PARTY_MCP_TOOLS",
     "OPENGENI_ALLOWED_FIRST_PARTY_MCP_TOOLS",
+    "OPENGENI_MCP_OAUTH_ENABLED",
+    "OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS",
   ] as const) {
     const value = env[key];
     if (value) {
@@ -3067,6 +3099,23 @@ function addRuntimeConfigHelmValues(
   if (contract.database.mode === "inCluster" && runtimeDatabaseUrlRequired(contract)) {
     values["postgres.runtime.existingSecret"] = "opengeni-runtime";
     values["postgres.runtime.databaseUrlKey"] = "OPENGENI_DATABASE_URL";
+  }
+}
+
+function mcpOauthDeploymentEnabled(env: Record<string, string | undefined>): boolean {
+  const normalized = env.OPENGENI_MCP_OAUTH_ENABLED?.trim().toLowerCase();
+  return normalized !== undefined && ["true", "1", "yes", "y", "on"].includes(normalized);
+}
+
+function assertMcpOauthDeploymentContract(
+  contract: DeploymentContract,
+  env: Record<string, string | undefined>,
+): void {
+  if (!mcpOauthDeploymentEnabled(env)) return;
+  if (contract.product.accessMode === "configured") {
+    throw new Error(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
   }
 }
 

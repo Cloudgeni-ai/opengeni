@@ -494,10 +494,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
-    const targetActions = pageA.getByRole("button", { name: /^Actions for Master pin target/ });
-    await targetActions.focus();
-    await pageA.keyboard.press("Enter");
-    const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
+    const pinMenuItem = pageA
+      .locator(`a[data-session-row="${target.id}"]`)
+      .locator("xpath=..")
+      .getByRole("button", { name: "Pin session", exact: true });
     await pinMenuItem.waitFor();
     const initialPinMutation = pageA.waitForResponse(
       (response) => {
@@ -520,19 +520,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       status: initialPinResponse.status(),
       body: await initialPinResponse.text(),
     }).toEqual({ status: 200, body: expect.any(String) });
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
     // that intentional parallel surface instead of measuring the rail alone.
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
-    await pageA.waitForFunction(() =>
-      document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
+    await pageA.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Unpin session",
     );
-    expect(
-      await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
-    ).toStartWith("Actions for Master pin target");
+    expect(await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+      "Unpin session",
+    );
 
     // A sibling tab in the same browser context must reconcile through the
     // document-scoped invalidation channel without a reload or the 15s poll.
@@ -552,8 +552,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.getByRole("button", { name: "Unpin session" }).click();
-    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     await Promise.all([unpinMutation, sameTabUnpinRefresh]);
     await sameTabPinnedTarget.waitFor({ state: "detached" });
 
@@ -564,8 +564,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.getByRole("button", { name: "Pin session" }).click();
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await Promise.all([repinMutation, sameTabRepinRefresh]);
     await sameTabPinnedTarget.waitFor();
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
@@ -579,10 +579,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const pageB = await deviceB.newPage();
     await pageB.goto(targetUrl);
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Newer unrelated activity");
     await pageB.reload();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
     await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
@@ -601,7 +601,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const otherPage = await otherMember.newPage();
     await otherPage.goto(targetUrl);
-    await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Search is server-backed: a matching pin remains in the pin section while
@@ -653,7 +653,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await boundaryRow.focus();
     await pageB.keyboard.press("Home");
     const boundaryActions = pageB.locator(
-      `button[data-session-actions="${boundarySessionId}"][data-session-actions-mode="quick"]`,
+      `button[data-session-actions="${boundarySessionId}"][data-session-actions-mode="quick"]:not([data-session-action="archive"])`,
     );
     await boundaryActions.focus();
     const boundaryRefresh = pageB.waitForResponse(
@@ -713,12 +713,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // online through the same header action succeeds without a second logical
     // pin state or an OCC dead end.
     await deviceB.setOffline(true);
-    await pageB.getByRole("button", { name: "Unpin session" }).click();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
     await pageB.getByText("Couldn't unpin session", { exact: true }).waitFor();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await deviceB.setOffline(false);
-    await pageB.getByRole("button", { name: "Unpin session" }).click();
-    await pageB.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
+    await pageB.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
 
     // A different device has no shared browser channel. Returning focus must
     // trigger a real server reconciliation without reloading the document.
@@ -734,18 +734,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
     await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
     await crossDeviceRefresh;
-    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
     // owner device and the other member reconcile to their respective truths.
-    await pageA.getByRole("button", { name: "Pin session" }).click();
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await pageB.reload();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await otherPage.reload();
-    await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     expect(browserPageErrors.get(deviceA)).toEqual([]);
@@ -777,9 +777,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const targetLink = page.locator(`a[data-session-row="${target.id}"]`);
       const targetRow = targetLink.locator("xpath=..");
       const quickActions = targetRow.locator(`[data-session-quick-actions="${target.id}"]`);
-      const overflow = targetRow.getByRole("button", {
-        name: /^Actions for Failed row-menu rollback/,
-      });
+      const overflow = targetRow.locator(
+        `button[data-session-actions="${target.id}"][data-session-actions-mode="overflow"]`,
+      );
       const unpin = targetRow.getByRole("button", { name: "Unpin session", exact: true });
 
       await targetLink.waitFor();
@@ -851,6 +851,26 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           document.activeElement?.getAttribute("data-session-actions-mode"),
         ),
       ).toBe("quick");
+
+      const archiveUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/archive`;
+      await page.route(archiveUrl, async (route) => {
+        if (route.request().method() !== "PUT") return route.continue();
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "synthetic archive failure" }),
+        });
+      });
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      await page.getByText("Couldn't archive the chat.", { exact: true }).waitFor();
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      await page.waitForFunction(
+        (sessionId) =>
+          document.activeElement?.getAttribute("data-session-actions") === sessionId &&
+          document.activeElement?.getAttribute("aria-label") === "Archive session",
+        target.id,
+        { timeout: 5000 },
+      );
     } finally {
       await context.close();
     }
@@ -1315,7 +1335,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const chrome = desktopPage.getByTestId("session-chrome");
       const queueChip = desktopPage.getByTestId("session-chrome-queue");
       const goalChip = desktopPage.getByTestId("session-chrome-goal");
-      const agentsChip = desktopPage.getByTestId("session-chrome-agents");
+      const activityButton = desktopPage.getByRole("button", {
+        name: "Session activity",
+        exact: true,
+      });
       const composer = desktopPage.getByLabel("Message the agent");
       const timeline = desktopPage.getByTestId("session-timeline");
       await timeline
@@ -1323,10 +1346,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .waitFor();
       expect(await queueChip.count()).toBe(0);
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
+      await activityButton.click();
+      await chrome.getByRole("button", { name: /^\d+ agents?$/ }).waitFor();
+      await activityButton.click();
       await composer.waitFor();
       expect(await desktopPage.getByTestId("session-chrome").count()).toBe(1);
-      expect(await desktopPage.getByTestId("session-chrome-agents").count()).toBe(1);
+      expect(
+        await desktopPage.getByRole("button", { name: "Session activity", exact: true }).count(),
+      ).toBe(1);
       const [chromeBounds, composerBounds] = await Promise.all([
         chrome.boundingBox(),
         composer.locator("xpath=ancestor::*[@data-og-composer-id][1]").boundingBox(),
@@ -1349,7 +1377,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A first prompt queued from the composer",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor({ timeout: 20_000 });
+      await queueChip.getByText("1 queued", { exact: true }).waitFor({ timeout: 20_000 });
       await composer.fill("A second prompt queued from the composer");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1358,10 +1386,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 20_000 });
-      // A freshly queued prompt intentionally opens the queue for the transfer
-      // animation. Preserve that open state; only click when an older client
-      // or reduced host did not open it.
+      await queueChip.getByText("2 queued", { exact: true }).waitFor({ timeout: 20_000 });
+      // Queue receipts pulse the compact control; open it to inspect the prompts.
       if ((await queueChip.getAttribute("aria-expanded")) !== "true") {
         await queueChip.click();
       }
@@ -1386,6 +1412,20 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // where users reorder, edit, steer, or delete a waiting prompt.
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
+        // Keep the hover-revealed actions visible while Axe inspects their text.
+        const steerAction = chrome.getByRole("button", {
+          name: "Steer queued prompt 2",
+          exact: true,
+        });
+        await steerAction.focus();
+        await steerAction.evaluate(async (node) => {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          await Promise.all(
+            node
+              .parentElement!.getAnimations()
+              .map((animation) => animation.finished.catch(() => undefined)),
+          );
+        });
         await expectNoPageOverflow(desktopPage);
         await expectNoAxeViolations(desktopPage, ["[data-testid=session-chrome]"]);
         await desktopPage.screenshot({
@@ -1429,7 +1469,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         async () => (await composer.inputValue()) === "A second prompt queued from the composer",
         { timeoutMs: 10_000 },
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await composer.fill("A second prompt queued from the composer (edited)");
       await submitQueuedComposerPrompt(
         desktopPage,
@@ -1438,7 +1478,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A second prompt queued from the composer (edited)",
       );
-      await queueChip.getByText("2 queued prompts", { exact: true }).waitFor();
+      await queueChip.getByText("2 queued", { exact: true }).waitFor();
 
       // Pause is a durable workstream barrier. Row Steer is one atomic action:
       // it moves that row to the head and resumes the branch. The accepted row
@@ -1463,7 +1503,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
       expect(await chrome.getByText("Changing direction…", { exact: true }).count()).toBe(0);
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       await expectRowPrompt(queuedRows, 0, "A first prompt queued from the composer");
 
       // Remove deletes only the selected waiting prompt. Add one final prompt so
@@ -1478,7 +1518,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         manager.id,
         "A replacement prompt after delete",
       );
-      await queueChip.getByText("1 queued prompt", { exact: true }).waitFor();
+      await queueChip.getByText("1 queued", { exact: true }).waitFor();
       expect(
         await timeline
           .getByText("Inspect the full session-control surface", { exact: true })
@@ -1532,7 +1572,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
       await desktopPage
         .getByTestId("session-chrome-queue")
-        .getByText("1 queued prompt", { exact: true })
+        .getByText("1 queued", { exact: true })
         .waitFor();
 
       // The manager remains paused: queueing in a descendant is never a hidden
@@ -1545,13 +1585,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       // must not require one to block the other, so await both independently
       // owned chips before asserting the settled control stack.
       await goalChip.waitFor();
-      await agentsChip.waitFor();
+      await activityButton.waitFor();
 
       const boxes = await Promise.all([chrome.boundingBox(), composer.boundingBox()]);
       for (const box of boxes) expect(box).not.toBeNull();
       expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
       expect(await goalChip.count()).toBe(1);
-      expect(await agentsChip.count()).toBe(1);
+      expect(await activityButton.count()).toBe(1);
 
       for (const theme of ["light", "dark"] as const) {
         await setTheme(desktopPage, theme);
@@ -1584,10 +1624,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await mobilePage.goto(managerUrl);
       await mobilePage.getByTestId("session-chrome").waitFor();
       await mobilePage.getByTestId("session-chrome-goal").waitFor();
-      await mobilePage.getByTestId("session-chrome-agents").waitFor();
+      await mobilePage.getByRole("button", { name: "Session activity", exact: true }).waitFor();
       await expectNoPageOverflow(mobilePage);
       await expectTouchTarget(mobilePage.getByTestId("session-chrome-queue"));
-      await expectTouchTarget(mobilePage.getByTestId("session-chrome-agents"));
+      await expectTouchTarget(
+        mobilePage.getByRole("button", { name: "Session activity", exact: true }),
+      );
       await mobilePage.screenshot({
         path: "/tmp/opengeni-session-control-stack-mobile.png",
         fullPage: true,
@@ -1621,11 +1663,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
     // Wait for the session shell before sampling React commits — a cold goto can
     // read the probe at 0 before the first paint registers.
-    await page.getByRole("button", { name: "Pin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
-    await page.getByRole("button", { name: "Pin session" }).click();
-    await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
@@ -1644,14 +1686,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // the responsive assertion from a fresh server projection instead of
     // racing the rail's 15-second background reconciliation interval.
     await page.reload();
-    await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
 
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
-        const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
+        const pin = page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ });
         const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
         for (const control of [pin, inspector, hamburger]) {
@@ -2393,6 +2435,7 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
   let scan = new AxeBuilder({ page });
   for (const include of includes) scan = scan.include(include);
   const results = await scan.analyze();
+
   expect(
     results.violations.map((violation) => ({
       id: violation.id,

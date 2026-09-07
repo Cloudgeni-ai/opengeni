@@ -355,14 +355,15 @@ OpenRouter routes—default to `credits` unless
 may still group such a route under External while the payment sentence and
 `list_models` output show its deployment-defined cost.
 
-### OpenCode Zen temporary free preview
+### OpenCode Zen temporary free contributor model
 
 OpenCode Zen currently exposes an OpenAI-compatible endpoint at
-`https://opencode.ai/zen/v1`. On August 21, 2026, its public model registry
-included `x-preview-f-free`, and that model accepted keyless Chat Completions,
-Responses, SSE streaming, and function calls. OpenCode documents the Ox Alpha
-free window as temporary, so configure it as an operator-owned registry entry
-rather than treating it as a permanent built-in or availability promise:
+`https://opencode.ai/zen/v1`. On September 3, 2026, its public model registry
+included `muse-spark-1.3-contributor-free`, and the model accepted keyless
+Responses API calls, SSE streaming, and function calls. OpenCode documents the
+free contributor window as temporary, so configure it as an operator-owned
+registry entry rather than treating it as a permanent built-in or availability
+promise:
 
 ```json
 [
@@ -370,16 +371,47 @@ rather than treating it as a permanent built-in or availability promise:
     "kind": "anonymous",
     "id": "opencode-zen",
     "label": "OpenCode Zen",
-    "api": "chat",
+    "api": "responses",
     "baseUrl": "https://opencode.ai/zen/v1",
     "models": [
       {
-        "id": "opencode/x-preview-f-free",
-        "upstreamModelId": "x-preview-f-free",
-        "label": "OpenCode Ox Alpha (temporary free preview)",
-        "contextWindowTokens": 1000000,
+        "id": "opencode/muse-spark-1.3-contributor-free",
+        "upstreamModelId": "muse-spark-1.3-contributor-free",
+        "label": "Muse Spark 1.3 Contributor Free",
+        "contextWindowTokens": 1048576,
         "reasoningEffort": true,
-        "hostedWebSearch": false
+        "hostedWebSearch": false,
+        "capabilities": {
+          "reasoning": {
+            "upstream": "supported",
+            "runnable": true,
+            "efforts": ["minimal", "low", "medium", "high", "xhigh"],
+            "defaultEffort": "low",
+            "required": true
+          },
+          "functionCalling": { "upstream": "supported", "runnable": true },
+          "structuredOutput": { "upstream": "supported", "runnable": true },
+          "hostedTools": {
+            "webSearch": { "upstream": "unknown", "runnable": false },
+            "xSearch": { "upstream": "unknown", "runnable": false },
+            "codeExecution": { "upstream": "unknown", "runnable": false }
+          },
+          "inputModalities": ["text"],
+          "inputFileMediaTypes": [
+            "application/json",
+            "application/pdf",
+            "application/x-yaml",
+            "application/yaml",
+            "text/*"
+          ],
+          "outputModalities": ["text"],
+          "transports": {
+            "sse": { "upstream": "supported", "runnable": true },
+            "responsesWebSocket": { "upstream": "unknown", "runnable": false },
+            "realtimeAudio": { "upstream": "unsupported", "runnable": false }
+          },
+          "latencyModes": [{ "id": "standard", "upstream": "supported", "runnable": true }]
+        }
       }
     ]
   }
@@ -389,19 +421,18 @@ rather than treating it as a permanent built-in or availability promise:
 Requests go from OpenGeni to OpenCode's `opencode.ai` service; this is not local
 inference. Anonymous routes are shown on the External rail. To make this
 temporary preview free to the workspace, set
-`OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/x-preview-f-free":"free"}'`;
+`OPENGENI_MODEL_COST_POLICY_JSON='{"opencode/muse-spark-1.3-contributor-free":"free"}'`;
 external settlement alone does not bypass credits. A free route still emits
 ordinary model-call/token telemetry plus a zero-cost audit marker. It remains
 subject to the upstream provider's changing
-model catalogue, rate limits, retention policy, preview duration, and terms.
+model catalogue, rate limits, retention policy, contributor duration, and terms.
 Verify `GET /zen/v1/models` before enabling the route and remove or update the
-registry entry when keyless access or the model slug changes. OpenCode's
-client-side model metadata advertises image input, but raw image probes on
-August 21, 2026 returned upstream `503`/image-parse failures, so this example
-deliberately keeps OpenGeni's runnable input capability at its text-only default.
+registry entry when keyless access or the model slug changes. The example keeps
+OpenGeni's runnable input capability at its conservative text-only default until
+the image path is independently verified end to end.
 
 OpenCode Zen uses the same provider-neutral progressive disclosure as other
-ordinary Chat Completions providers. The first request receives the stable
+ordinary Responses API providers. The first request receives the stable
 `tool_search` and `tool_invoke` functions plus OpenGeni's always-visible base
 tools and any explicitly eager MCP tools. Deferred MCP and other non-base tool
 schemas stay out of the initial prompt; matching definitions are disclosed on

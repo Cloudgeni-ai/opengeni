@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { projectSessionForRelatedAccess } from "@opengeni/db";
+import { sessionWithEffectiveToolPolicy } from "@opengeni/core";
 import {
   compactSessionEventResult,
   type Rig,
@@ -240,6 +242,86 @@ function sessionFixture(overrides: Partial<Session> = {}): Session {
 }
 
 describe("boundSessionDetailMcp", () => {
+  test("target-only full detail cannot restore hidden policy lineage during effective-policy assembly", () => {
+    const ancestorId = "00000000-0000-4000-8000-000000000091";
+    for (const mode of ["workspace_default", "explicit", "inherited"] as const) {
+      const session = sessionFixture({
+        parentSessionId: ancestorId,
+        toolPolicy: { mode, inheritedFromSessionId: ancestorId },
+        tools: [
+          { kind: "mcp", id: "docs", optional: true },
+          { kind: "mcp", id: "removed", optional: true },
+        ],
+      });
+      const assemble = (value: Session) =>
+        sessionWithEffectiveToolPolicy(value, ["docs", "files", "opengeni"], ["files"]);
+      const original = assemble(session);
+      const expectedPolicy = { ...original.effectiveToolPolicy!, inheritedFromSessionId: null };
+      // MCP and REST can assemble effective policy after target authorization;
+      // another adapter may already carry a computed policy. Both orders must
+      // produce the same exact policy apart from unauthorized provenance.
+      const projectedFirst = projectSessionForRelatedAccess(session, "target");
+      expect(projectedFirst).not.toHaveProperty("effectiveToolPolicy");
+      for (const projected of [
+        assemble(projectedFirst),
+        projectSessionForRelatedAccess(original, "target"),
+      ]) {
+        expect(projected.toolPolicy).toEqual({ mode, inheritedFromSessionId: null });
+        expect(projected.effectiveToolPolicy).toEqual(expectedPolicy);
+        const full = boundSessionDetailMcp(projected);
+        expect(full.effectiveToolPolicy).toEqual(expectedPolicy);
+        expect(JSON.stringify(full)).not.toContain(ancestorId);
+      }
+      expect(session.toolPolicy.inheritedFromSessionId).toBe(ancestorId);
+      expect(original.effectiveToolPolicy!.inheritedFromSessionId).toBe(ancestorId);
+    }
+  });
+
+  test("root-authorized and exact-target policy identities remain available", () => {
+    const ancestorId = "00000000-0000-4000-8000-000000000092";
+    const session = sessionWithEffectiveToolPolicy(
+      sessionFixture({
+        parentSessionId: ancestorId,
+        toolPolicy: { mode: "inherited", inheritedFromSessionId: ancestorId },
+      }),
+      ["opengeni"],
+    );
+    expect(projectSessionForRelatedAccess(session, "root")).toBe(session);
+    expect(
+      boundSessionDetailMcp(projectSessionForRelatedAccess(session, "root")).effectiveToolPolicy,
+    ).toEqual(session.effectiveToolPolicy);
+    for (const inheritedFromSessionId of [null, SESSION]) {
+      const target = sessionWithEffectiveToolPolicy(
+        sessionFixture({
+          toolPolicy: { mode: "explicit", inheritedFromSessionId },
+        }),
+        ["opengeni"],
+      );
+      const projected = projectSessionForRelatedAccess(target, "target");
+      expect(projected.toolPolicy).toBe(target.toolPolicy);
+      expect(projected.effectiveToolPolicy).toBe(target.effectiveToolPolicy);
+    }
+  });
+
+  test("precomputed policy provenance is checked independently of persisted policy provenance", () => {
+    const hiddenId = "00000000-0000-4000-8000-000000000093";
+    const session = sessionWithEffectiveToolPolicy(
+      sessionFixture({
+        toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      }),
+      ["opengeni"],
+    );
+    session.effectiveToolPolicy!.inheritedFromSessionId = hiddenId;
+    const projected = projectSessionForRelatedAccess(session, "target");
+    expect(projected.toolPolicy).toBe(session.toolPolicy);
+    expect(projected.effectiveToolPolicy).toEqual({
+      ...session.effectiveToolPolicy!,
+      inheritedFromSessionId: null,
+    });
+    expect(session.effectiveToolPolicy!.inheritedFromSessionId).toBe(hiddenId);
+    expect(JSON.stringify(boundSessionDetailMcp(projected))).not.toContain(hiddenId);
+  });
+
   test("preserves the complete ordered Variable Set selection and derives legacy aliases", () => {
     const variableSetIds = [
       "00000000-0000-4000-8000-000000000011",

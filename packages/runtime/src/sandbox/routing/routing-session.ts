@@ -247,6 +247,12 @@ export interface RoutingSandboxSessionDeps {
     process: RoutingRetainedProcess;
     proof: RoutingRetainedProcessTerminalProof;
   }) => Promise<void>;
+  /** Transfer an already-durable retained process to session background
+   * ownership immediately before its running receipt becomes model-visible. */
+  adoptProcessAsBackgroundCommand?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }) => Promise<void>;
   /** Called only when an operation against the default/home backend throws a
    * non-fence error. Wiring may classify definitive provider disappearance and
    * atomically retire the exact lease epoch. Returning a result makes dispatch
@@ -453,6 +459,7 @@ type RetainedProcessRecord = {
     result: string;
   } | null;
   settlement: Promise<void> | null;
+  backgroundAdoption: Promise<void> | null;
 };
 
 /** Recognize a stale-epoch FENCE error from a backend op so the proxy retries
@@ -844,6 +851,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       pendingMutationSettlement: null,
       pendingTerminal: null,
       settlement: null,
+      backgroundAdoption: null,
     };
     this.retainedProcesses.set(process.providerSessionId, record);
     return record;
@@ -906,6 +914,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       pendingMutationSettlement: null,
       pendingTerminal: null,
       settlement: null,
+      backgroundAdoption: null,
     });
   }
 
@@ -1585,12 +1594,54 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
+  /** Local and Docker SDK process ids address an in-memory table on one worker
+   * session object. They are not valid durable locators for the independently
+   * scheduled reaper, so those providers stay turn-owned until terminal. */
+  canAdoptRetainedProcessAsBackgroundCommand(providerSessionId: number): boolean {
+    const record = this.retainedProcesses.get(providerSessionId);
+    return (
+      record !== undefined && record.backend.kind !== "local" && record.backend.kind !== "docker"
+    );
+  }
+
   /** Return only OpenGeni's durable UUID + provider locator. Backend/session
    * objects remain private so a caller cannot forge route authority from this
    * diagnostic handoff. */
   retainedProcessIdentity(providerSessionId: number): RoutingRetainedProcess | null {
     const record = this.retainedProcesses.get(providerSessionId);
     return record ? { ...record.process } : null;
+  }
+
+  /** Make a retained process session-owned before exposing its live locator.
+   * Provider yield alone is not adoption: short commands can still finish and
+   * return inline during the model-facing eager-wait window. */
+  async adoptRetainedProcessAsBackgroundCommand(providerSessionId: number): Promise<void> {
+    const record = this.retainedProcess(providerSessionId);
+    if (!this.canAdoptRetainedProcessAsBackgroundCommand(providerSessionId)) {
+      throw new RoutingUnsupportedError("backgroundCommandAdoption", record.backend.kind);
+    }
+    await this.ensureParentPromotion(record);
+    if (!this.deps.adoptProcessAsBackgroundCommand) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "backgroundCommandAdoption",
+        `Retained provider session ${providerSessionId} has no durable session-adoption authority`,
+        { retainedProcess: record.process },
+      );
+    }
+    record.backgroundAdoption ??= this.deps.adoptProcessAsBackgroundCommand({
+      backend: record.backend,
+      process: record.process,
+    });
+    try {
+      await record.backgroundAdoption;
+    } catch (error) {
+      record.backgroundAdoption = null;
+      throw new RoutingMutationOutcomeUnknownError(
+        "backgroundCommandAdoption",
+        `Retained provider session ${providerSessionId} could not transfer to session background ownership`,
+        { cause: error, retainedProcess: record.process },
+      );
+    }
   }
 
   /** Model/user-visible stdin is a distinct workspace mutation admission under

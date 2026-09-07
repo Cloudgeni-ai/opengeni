@@ -3793,6 +3793,26 @@ describe("credit exhaustion", () => {
     });
   });
 
+  test("legacy safety refusal is visible in both turn summary and notice", () => {
+    reset();
+    const detail =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    const items = buildTimeline([
+      event("turn.failed", {
+        error: "Upstream unavailable. Send a message to retry.",
+        lastRetryableError: detail,
+      }),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "turn-end",
+      failureText: `The model provider blocked this request. ${detail}`,
+    });
+    expect(items[1]).toMatchObject({
+      kind: "notice",
+      text: `The model provider blocked this request. ${detail}`,
+    });
+  });
+
   test("groupTimeline folds a credit-exhausted turn as failed", () => {
     reset();
     const groups = groupTimeline(
@@ -4018,4 +4038,52 @@ describe("buildTimeline — memory writes", () => {
     expect((items[0] as WorkerItem).kind).toBe("worker");
     expect((items[0] as WorkerItem).workerSessionId).toBe(worker.id);
   });
+});
+
+describe("delivered-input landmarks", () => {
+  for (const kind of [
+    "background_command_result",
+    "session_wait_timeout",
+    "agent_message",
+    "child_terminal_result",
+    "child_progress",
+  ] as const) {
+    test(`${kind} stays visible between steps of the same completed turn`, () => {
+      const groups = groupTimeline(
+        buildTimeline([
+          event("agent.toolCall.created", {
+            id: "before",
+            name: "exec_command",
+            arguments: { cmd: "bun run check" },
+          }),
+          event("agent.toolCall.output", { id: "before", output: "ok" }),
+          event("system.update.delivered", {
+            members: [
+              {
+                id: "update",
+                kind,
+                sourceId: "source",
+                summary: "Result received",
+                classification: "info",
+              },
+            ],
+          }),
+          event("agent.toolCall.created", {
+            id: "after",
+            name: "exec_command",
+            arguments: { cmd: "bun run check" },
+          }),
+          event("agent.toolCall.output", { id: "after", output: "ok" }),
+          event("agent.message.completed", { text: "Checked the result." }),
+          event("turn.completed", {}),
+        ]),
+      );
+      const boundary = groups.findIndex(
+        (group) => group.kind === "item" && group.item.kind === "machine-input-batch",
+      );
+      expect(boundary).toBeGreaterThan(0);
+      expect(groups.slice(boundary + 1).some((group) => group.kind === "turn")).toBe(true);
+      expect(groups.filter((group) => group.kind === "turn")).toHaveLength(1);
+    });
+  }
 });

@@ -624,7 +624,7 @@ async function withChannelAOperation<T>(
       workspaceRoot: fileSystemAuthority.root,
       leaseEpoch: fileSystemEpoch,
       ...(fileSystemAuthority.backendKind === "selfhosted"
-        ? { providerPathMode: "workspace-relative" as const }
+        ? { providerPathMode: "workspace-relative" as const, fileReadScope: "machine" as const }
         : {}),
       emit,
     });

@@ -13,7 +13,6 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ChevronRightIcon,
-  CircleDashedIcon,
   Clock3Icon,
   EllipsisIcon,
   FolderIcon,
@@ -45,6 +44,7 @@ import {
 
 import { useRail } from "@/components/rail/rail-context";
 import {
+  ActiveWorkMark,
   RailTrailingMetadata,
   SessionRowHoverDetails,
   SessionRowContent,
@@ -145,7 +145,6 @@ import {
   mergeSessionForRail,
   normalizeSessionBrowseCreator,
   relativeTimeLabel,
-  scheduledTaskIdOf,
   sessionBrowseResultCount,
   selectedDescendantNode,
   sessionCreatorLabelMap,
@@ -237,13 +236,18 @@ type UpdateAttentionFn = (
   session: Session,
   update: { unread?: boolean; activelyWorking?: boolean },
 ) => Promise<void>;
-type ArchiveFn = (session: Session, archived: boolean) => Promise<void>;
+type ArchiveFn = (
+  session: Session,
+  archived: boolean,
+  restoreFocusTo?: SessionFocusTarget,
+) => Promise<void>;
 type RequestDeleteFn = (session: Session) => void;
 type PinOverride = { session: Session; operation: number };
 type PendingSessionFocus = {
   sessionId: string;
   operation: number;
   target: SessionFocusTarget;
+  action?: "archive";
   settled: boolean;
 };
 type ChildPageState = SessionBranchPage;
@@ -1375,8 +1379,18 @@ export function SessionList() {
     [context, rail.workspaceId, refreshSessionPages],
   );
   const onArchive = useCallback<ArchiveFn>(
-    async (session, archived) => {
+    async (session, archived, restoreFocusTo = "row") => {
       if (archiving.current.has(session.id)) return;
+      const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
+      if (!acceptedTransition) return;
+      const focusOperation = ++focusRestoreOperation.current;
+      pendingSessionFocus.current = {
+        sessionId: session.id,
+        operation: focusOperation,
+        target: restoreFocusTo,
+        action: "archive",
+        settled: false,
+      };
       archiving.current.add(session.id);
       setArchiveTransitions((current) => new Set(current).add(session.id));
       try {
@@ -1413,6 +1427,14 @@ export function SessionList() {
         await refreshSessionPages();
       } finally {
         archiving.current.delete(session.id);
+        const pending = pendingSessionFocus.current;
+        if (
+          pending?.operation === focusOperation &&
+          context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)
+        ) {
+          pending.settled = true;
+          setFocusRestoreRevision((current) => current + 1);
+        }
         setArchiveTransitions((current) => {
           const next = new Set(current);
           next.delete(session.id);
@@ -1725,7 +1747,11 @@ export function SessionList() {
       const destination =
         current.target === "actions"
           ? destinations.find(
-              (element) => element.getAttribute("data-session-actions-mode") === actionMode,
+              (element) =>
+                element.getAttribute("data-session-actions-mode") === actionMode &&
+                (actionMode === "overflow" ||
+                  !current.action ||
+                  element.getAttribute("data-session-action") === current.action),
             )
           : destinations[0];
       if (
@@ -3021,7 +3047,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={Boolean(scheduledTaskIdOf(props.session))}
+          scheduled={props.session.hasSchedules === true}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -3124,7 +3150,7 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={Boolean(scheduledTaskIdOf(props.session))}
+                  scheduled={props.session.hasSchedules === true}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   creator={creator}
                 />
@@ -3207,7 +3233,7 @@ function SessionRow(props: {
                 })
               }
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {props.session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </ContextMenuItem>
           </>
@@ -3309,9 +3335,12 @@ export function RowQuickActions({
           size="icon-xs"
           aria-label={session.archived ? "Restore session" : "Archive session"}
           title={session.archived ? "Restore" : "Archive"}
+          data-session-actions={session.id}
+          data-session-actions-mode="quick"
+          data-session-action="archive"
           onClick={(event) => {
             event.stopPropagation();
-            void onArchive(session, !session.archived);
+            void onArchive(session, !session.archived, "actions");
           }}
           className="text-fg-subtle hover:text-fg"
         >
@@ -3420,7 +3449,7 @@ function RowActionsMenu({
               }
               onClick={(event) => event.stopPropagation()}
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </DropdownMenuItem>
           </>

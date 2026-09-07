@@ -11,23 +11,16 @@ import {
 } from "@opengeni/contracts/personal-github";
 import { personalGitHubRepositoryResources } from "@opengeni/core";
 import {
-  beginConnectorActionExecution,
-  completeConnectorActionExecution,
   getConnectionMetadata,
   getPersonalGitHubRepositorySelectionState,
   hasAuditableGitHubInstallationAuthority,
   listGitHubInstallationAccessForWorkspace,
-  prepareConnectorActionApproval,
   resolveAcceptedConnectionUse,
   type Database,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
   type SessionTurnForExecution,
 } from "@opengeni/db";
-import {
-  AttemptToolApprovalRequiredError,
-  type AttemptToolAuthorization,
-} from "@opengeni/codemode";
 import { createGitHubAppInstallationTokenWithExpiry, githubAppBotIdentity } from "@opengeni/github";
 import {
   type AttemptConnectorActionBinding,
@@ -44,7 +37,6 @@ import {
   GitHubRestAuthorityError,
   githubRestConnectorActionOutcome,
   GitHubRestMcpServer,
-  GitHubRestMutationNotExecutedError,
   type GitHubRestRepository,
 } from "@opengeni/runtime/github-rest-mcp";
 
@@ -60,7 +52,6 @@ export type GitHubRestMcpRuntime = {
   tools: ToolRef[];
   localMcpServers: LocalMcpServerRegistration[];
   connectorBindings: AttemptConnectorActionBinding[];
-  authorizeCodemodeCall: AttemptToolAuthorization | null;
 };
 
 export async function buildGitHubRestMcpForTurn(input: {
@@ -81,7 +72,6 @@ export async function buildGitHubRestMcpForTurn(input: {
       tools: input.tools,
       localMcpServers: [],
       connectorBindings: [],
-      authorizeCodemodeCall: null,
     };
   }
 
@@ -96,7 +86,6 @@ export async function buildGitHubRestMcpForTurn(input: {
       tools: input.tools,
       localMcpServers: [],
       connectorBindings: [],
-      authorizeCodemodeCall: null,
     };
   }
   const configuredIds = new Set(input.settings.mcpServers.map((server) => server.id));
@@ -112,7 +101,6 @@ export async function buildGitHubRestMcpForTurn(input: {
   const localMcpServers: LocalMcpServerRegistration[] = [];
   const toolRefs: ToolRef[] = [];
   const connectorBindings: AttemptConnectorActionBinding[] = [];
-  const codemodeActions = createCodemodeActionLifecycle(input, connectorBindings);
 
   if (appRepositories.length > 0) {
     const appResolver = workspaceAppAuthorityResolver(input, appRepositories);
@@ -123,7 +111,6 @@ export async function buildGitHubRestMcpForTurn(input: {
         authorityKind: "workspace_app",
         repositories: appRepositories,
         resolveAuthority: appResolver,
-        completeCodemodeAction: codemodeActions.complete,
       }),
     });
     configs.push(internalMcpConfig(GITHUB_REST_MCP_APP_SERVER_ID, "GitHub — OpenGeni bot"));
@@ -141,7 +128,6 @@ export async function buildGitHubRestMcpForTurn(input: {
         authorityKind: "personal_oauth",
         repositories: personalRepositories,
         resolveAuthority: personalAuthorityResolver(input),
-        completeCodemodeAction: codemodeActions.complete,
       }),
     });
     configs.push(internalMcpConfig(GITHUB_REST_MCP_PERSONAL_SERVER_ID, "GitHub — My account"));
@@ -159,74 +145,6 @@ export async function buildGitHubRestMcpForTurn(input: {
     tools: mergeToolRefs(input.tools, toolRefs),
     localMcpServers,
     connectorBindings,
-    authorizeCodemodeCall: codemodeActions.authorize,
-  };
-}
-
-function createCodemodeActionLifecycle(
-  input: {
-    db: Database;
-    accountId: string;
-    workspaceId: string;
-    sessionId: string;
-    attemptId: string;
-    turn: SessionTurnForExecution;
-  },
-  bindings: AttemptConnectorActionBinding[],
-): {
-  authorize: AttemptToolAuthorization;
-  complete: NonNullable<
-    ConstructorParameters<typeof GitHubRestMcpServer>[0]["completeCodemodeAction"]
-  >;
-} {
-  const identity = {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    sessionId: input.sessionId,
-    turnId: input.turn.id,
-    attemptId: input.attemptId,
-    executionGeneration: input.turn.executionGeneration,
-    initiator: input.turn.initiator,
-  };
-  const executing = new Map<string, string>();
-  return {
-    authorize: async ({ call, entry }) => {
-      if (call.caller.kind !== "codemode") return;
-      const binding = bindings.find((candidate) => candidate.modelName === entry.modelName);
-      if (!binding) return;
-      const invocation = binding.call(call.operationId, call.arguments);
-      const policy = await prepareConnectorActionApproval(input.db, identity, invocation);
-      if (policy.managed && policy.decision === "ask") {
-        throw new AttemptToolApprovalRequiredError();
-      }
-      if (policy.managed && policy.decision === "block") {
-        throw new GitHubRestMutationNotExecutedError(
-          "GitHub connector action is blocked by policy",
-        );
-      }
-      const admission = await beginConnectorActionExecution(input.db, identity, invocation);
-      if (!admission.allowed) {
-        if (admission.reason === "approval_required") {
-          throw new AttemptToolApprovalRequiredError();
-        }
-        throw new GitHubRestMutationNotExecutedError(
-          `GitHub connector action was not executed: ${admission.reason}`,
-        );
-      }
-      if (admission.managed) executing.set(call.operationId, admission.requestId);
-    },
-    complete: async ({ operationId, outcome }) => {
-      const requestId = executing.get(operationId);
-      if (!requestId) return;
-      executing.delete(operationId);
-      await completeConnectorActionExecution(input.db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        requestId,
-        attemptId: input.attemptId,
-        outcome,
-      });
-    },
   };
 }
 

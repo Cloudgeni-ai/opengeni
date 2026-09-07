@@ -24,7 +24,6 @@ import {
 
 import { RailFooter } from "@/components/rail/rail-footer";
 import { SessionHeader } from "@/components/rail/session-header";
-import { scheduledTaskIdOf } from "@/lib/sessions-group";
 import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
@@ -437,7 +436,10 @@ function CanvasTopStrip({ hamburgerRef }: { hamburgerRef: RefObject<HTMLButtonEl
   if (showSessionActions && context.session) {
     return (
       <SessionRouteHeader
-        session={context.session}
+        session={{
+          ...context.session,
+          hasSchedules: lineage.lineage?.sessionHasSchedules ?? context.session.hasSchedules,
+        }}
         ancestors={ancestors}
         lineageLoading={lineage.loading}
         lineageError={lineage.error}
@@ -501,20 +503,17 @@ function SessionRouteHeader({
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
 
-  // A session the scheduler started carries the task id in its metadata; that is
-  // the only link back, since the run -> session mapping lives on the run row.
-  const scheduledTaskId = scheduledTaskIdOf(session);
   return (
     <SessionHeader
       session={session}
       ancestors={ancestors}
       onOpenSchedule={
-        scheduledTaskId
+        session.hasSchedules
           ? () =>
               void navigate({
                 to: "/workspaces/$workspaceId/schedules",
                 params: { workspaceId: session.workspaceId },
-                search: { taskId: scheduledTaskId },
+                search: { targetSessionId: session.id },
               })
           : null
       }
