@@ -163,7 +163,7 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_events MCP model boundary (real PostgreSQL)", () => {
-  test("legacy messages above the database page budget explicitly report source loss", async () => {
+  test("legacy messages above the database page budget reconstruct through bounded source slices", async () => {
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId,
@@ -187,15 +187,12 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
       nextCursor: string | null;
     };
     let page = await callMcpTool<Page>("session_events", { sessionId: session.id });
-    expect(page.sourceExact).toBe(false);
-    expect(page.sourceLoss).toMatchObject({
-      reason: "database_read_projection",
-      completeTextAvailable: false,
-    });
+    expect(page.sourceExact).toBe(true);
+    expect(page.sourceLoss).toBeUndefined();
     const parts: string[] = [];
     for (let count = 0; ; count++) {
-      expect(count).toBeLessThan(40);
-      expect(page.sourceExact).toBe(false);
+      expect(count).toBeLessThan(400);
+      expect(page.sourceExact).toBe(true);
       expect(Buffer.byteLength(JSON.stringify(page, null, 2))).toBeLessThanOrEqual(16 * 1024);
       parts.push(...page.events.map((event) => event.text));
       if (!page.nextCursor) break;
@@ -204,12 +201,9 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
         cursor: page.nextCursor,
       });
     }
-    expect(parts.join("")).not.toBe(text);
-    // The database preview contains JSON head/tail, not a complete text field.
-    // Never misrepresent that audit preview as conversation or a lossless fragment.
-    expect(parts).toEqual([]);
+    expect(parts.join("")).toBe(text);
     expect(page.nextCursor).toBeNull();
-  });
+  }, 180_000);
   test("compact event-filter schema retains canonical runtime validation", async () => {
     const schema = (mcp as { _registeredTools: Record<string, { inputSchema: z.ZodType }> })
       ._registeredTools.session_events!.inputSchema;

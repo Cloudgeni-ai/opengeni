@@ -397,6 +397,27 @@ export interface NatsRequestConnection {
  *  selfhosted control plane reads this as `agent_offline`, NEVER a NotFound. */
 const NATS_NO_RESPONDERS_CODE = "503";
 
+function natsAuthorizationFailure(error: unknown): SelfhostedControlError | null {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (
+    typeof code !== "string" ||
+    ![
+      "PERMISSIONS_VIOLATION",
+      "AUTHORIZATION_VIOLATION",
+      "AUTHENTICATION_EXPIRED",
+      "BAD_AUTHENTICATION",
+    ].includes(code)
+  )
+    return null;
+  return new SelfhostedControlError({
+    code: ErrorCode.ERROR_CODE_PROTOCOL,
+    message: "Control transport authorization failed.",
+    reason: null,
+    retryable: false,
+    detail: { transport_error_code: code },
+  });
+}
+
 function isNoRespondersError(err: unknown): boolean {
   const code = (err as { code?: unknown })?.code;
   if (typeof code === "string" && code === NATS_NO_RESPONDERS_CODE) {
@@ -452,7 +473,11 @@ export class NatsControlRpc implements ControlRpc {
         }
         return connection;
       })
-      .catch(() => null)
+      .catch((error) => {
+        const denied = natsAuthorizationFailure(error);
+        if (denied) throw denied;
+        return null;
+      })
       .finally(() => {
         this.connecting = undefined;
       });
@@ -471,10 +496,12 @@ export class NatsControlRpc implements ControlRpc {
       return offlineControlResponse(req.requestId, true);
     }
     const payload = ControlRequest.encode(req).finish();
+    let reply: { data: Uint8Array };
     try {
-      const reply = await conn.request(subject, payload, { timeout: opts.timeoutMs });
-      return ControlResponse.decode(reply.data);
+      reply = await conn.request(subject, payload, { timeout: opts.timeoutMs });
     } catch (err) {
+      const denied = natsAuthorizationFailure(err);
+      if (denied) throw denied;
       // Re-allow a future request to re-dial if the cached conn was torn down.
       if (isNoRespondersError(err)) {
         // No subscriber on the subject at all → the request reached no responder and
@@ -490,6 +517,23 @@ export class NatsControlRpc implements ControlRpc {
       // surfaces agent_offline and the lease never cold-creates a rival.
       this.connection = undefined; // force a re-dial next time
       return offlineControlResponse(req.requestId);
+    }
+    // A received but malformed response is not evidence of an offline agent.
+    // Keep decoding outside the transport catch so corruption cannot become a
+    // retryable refresh outage (or license retry of an already-sent operation).
+    try {
+      return ControlResponse.decode(reply.data);
+    } catch {
+      return {
+        requestId: req.requestId,
+        error: {
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          message: "The machine returned a malformed control response.",
+          retryable: false,
+          detail: {},
+        },
+        result: undefined,
+      };
     }
   }
 }

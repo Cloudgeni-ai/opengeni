@@ -14,10 +14,12 @@ import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhost
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import {
   OpStreamExecClient,
+  OP_STREAM_DEFAULT_WINDOW_BYTES,
   type OpStreamJournal,
   type OpStreamOutputFrame,
 } from "../src/sandbox/selfhosted/op-stream";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
+import { executeCommandReadWithRefresh } from "../src/command-read-refresh";
 
 const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
@@ -108,6 +110,223 @@ function buildRig(
 }
 
 describe("op-stream exec (fake runner)", () => {
+  for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO", ""]) {
+    test(`owner refresh preserves terminal classification with zero exit: ${failureCode || "normal"}`, async () => {
+      const events: string[] = [];
+      const settlements: unknown[] = [];
+      const { runner, session } = buildRig({
+        adoptBackgroundCommand: async () => ({ commandId: "typed-terminal" }),
+        captureBackgroundCommandOutput: async (_id, frames) => {
+          if (frames.length) events.push("capture");
+        },
+        settleBackgroundCommand: async (value) => {
+          events.push("settle");
+          settlements.push(value);
+        },
+      });
+      runner.script("typed_terminal:0", {
+        live: true,
+        holdUntilCancel: true,
+        frames: [{ channel: "stdout", bytes: "retained-prefix" }],
+        exit: { exitCode: 0, failureCode, failureDetail: { retained_bytes: "268435456" } },
+      });
+      const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+      await runWithToolCallCorrelation("typed_terminal", () =>
+        session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+      );
+      runner.runs.get("typed_terminal:0")!.script.holdUntilCancel = false;
+      if (failureCode) {
+        await expect(
+          executeCommandReadWithRefresh({
+            toolName: "command_read",
+            args: { commandId: "typed-terminal" },
+            refresh: (id) => session.refreshOwnedCommand(id),
+            call: async () => ({
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    commandId: "typed-terminal",
+                    terminal: false,
+                    chunks: [],
+                    hasMore: false,
+                  }),
+                },
+              ],
+            }),
+          }),
+        ).rejects.toMatchObject({
+          name: "SelfhostedControlError",
+          code:
+            failureCode === "OP_OVERFLOW"
+              ? ErrorCode.ERROR_CODE_PAYLOAD_TOO_LARGE
+              : ErrorCode.ERROR_CODE_STREAM,
+          retryable: false,
+          payloadTooLarge: failureCode === "OP_OVERFLOW",
+          detail: { failure_code: failureCode, retained_bytes: "268435456" },
+        });
+      } else {
+        expect(await session.refreshOwnedCommand("typed-terminal")).toBe(true);
+      }
+      expect(events).toEqual(["capture", "settle"]);
+      expect(settlements).toEqual([
+        expect.objectContaining({
+          outcome: "exited",
+          exitCode: 0,
+          reason: failureCode ? `op_failure_${failureCode}` : "op_exit",
+        }),
+      ]);
+      expect(await session.refreshOwnedCommand("typed-terminal")).toBe(false);
+    });
+  }
+
+  for (const corruptDigest of [false, true]) {
+    test(`running reads bound replay, detach before capture, and preserve UTF-8/integrity (corrupt=${corruptDigest})`, async () => {
+      const { runner, transport, session } = buildRig({
+        adoptBackgroundCommand: async () => ({ commandId: "bounded-read" }),
+      });
+      const bytes = new TextEncoder().encode("🙂" + "x".repeat(128 * 1024));
+      runner.script("bounded_read:0", {
+        live: true,
+        holdUntilCancel: true,
+        frames: [
+          { channel: "stdout", bytes: bytes.slice(0, 2) },
+          { channel: "stdout", bytes: bytes.slice(2) },
+        ],
+      });
+      const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+      await runWithToolCallCorrelation("bounded_read", () =>
+        session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+      );
+      const run = runner.runs.get("bounded_read:0")!;
+      // The fake's retained log grows in stages, as a real still-running child does.
+      const allFrames = [...run.frames];
+      run.liveEmitted = true;
+      run.frames = allFrames.slice(0, 1);
+      const fromSeqs: string[] = [];
+      let delivered = 0;
+      let activeSubscriptions = 0;
+      let expectDetached = true;
+      const reader = new OpStreamExecClient({
+        workspaceId: WORKSPACE,
+        agentId: AGENT,
+        connectionInstanceId: CONNECTION_INSTANCE,
+        epoch: 0,
+        rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+        controlRpc: {
+          request: async (subject, request, opts) => {
+            if (request.op?.$case === "opAttach") fromSeqs.push(request.op.opAttach.fromSeq);
+            return runner.request(subject, request, opts);
+          },
+        },
+        transport: {
+          subscribe: async (subject, handler) => {
+            const subscription = await transport.subscribe(subject, (payload) => {
+              delivered++;
+              handler(payload);
+            });
+            activeSubscriptions++;
+            return {
+              unsubscribe: () => {
+                activeSubscriptions--;
+                subscription.unsubscribe();
+              },
+            };
+          },
+          publish: (subject, payload) => transport.publish(subject, payload),
+        },
+        controlTimeoutMs: 1000,
+        ackIntervalMs: 2,
+        retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      });
+      const captured: OpStreamOutputFrame[] = [];
+      const capture = async (frames: OpStreamOutputFrame[]) => {
+        if (expectDetached) expect(activeSubscriptions).toBe(0);
+        captured.push(...frames);
+      };
+      expect((await reader.readExisting("bounded_read:0", 1, capture)).status).toBe("running");
+      expect(captured).toEqual([]); // split UTF-8 prefix lives in the checkpoint decoder
+      for (let i = 0; i < 5; i++) await reader.readExisting("bounded_read:0", 1, capture);
+      expect(fromSeqs).toEqual(["0", "1", "1", "1", "1", "1"]);
+      expect(delivered).toBe(1);
+      run.frames = allFrames.slice(0, 2);
+      await expect(
+        reader.readExisting("bounded_read:0", 1, async () => {
+          throw new Error("persistence failed");
+        }),
+      ).rejects.toThrow("persistence failed");
+      await reader.readExisting("bounded_read:0", 1, capture);
+      expect(fromSeqs.at(-1)).toBe("0");
+      expect(captured.map((frame) => frame.chunk).join("")).toBe(new TextDecoder().decode(bytes));
+      const afterCapture = delivered;
+      for (let i = 0; i < 5; i++) await reader.readExisting("bounded_read:0", 1, capture);
+      expect(delivered).toBe(afterCapture);
+      expect(captured).toHaveLength(1);
+      // No new bytes in this attachment: periodic credit must not include the
+      // retained prefix counted by the integrity checkpoint.
+      const priorAcks = transport.decodedAcks().length;
+      await reader.readExisting("bounded_read:0", 20, capture);
+      const currentAcks = transport
+        .decodedAcks()
+        .slice(priorAcks)
+        .filter((ack) => BigInt(ack.creditBytes) < 1_000_000_000n);
+      expect(currentAcks.length).toBeGreaterThan(0);
+      expect(
+        currentAcks.every((ack) => ack.creditBytes === String(OP_STREAM_DEFAULT_WINDOW_BYTES)),
+      ).toBe(true);
+      run.frames = allFrames;
+      expectDetached = false;
+      if (corruptDigest) {
+        const originalDigest = run.exit.digests.stdout!;
+        run.exit.digests.stdout = "invalid";
+        await expect(reader.readExisting("bounded_read:0", 100, capture)).rejects.toThrow(
+          "digest mismatch",
+        );
+        expect(captured).toHaveLength(1);
+        run.exit.digests.stdout = originalDigest;
+      }
+      expect((await reader.readExisting("bounded_read:0", 100, capture)).status).toBe("completed");
+      expect(fromSeqs.at(-1)).toBe(corruptDigest ? "0" : "2");
+      expect(captured).toHaveLength(corruptDigest ? 2 : 1);
+      expect(transport.decodedAcks().every((ack) => !ack.final && ack.ackedSeq === "0")).toBe(true);
+    });
+  }
+
+  test("a failure racing adoption is captured and settled as failure, never foreground success", async () => {
+    const events: string[] = [];
+    const settlements: unknown[] = [];
+    let session!: SelfhostedSession;
+    const rig = buildRig({
+      adoptBackgroundCommand: async ({ opId }) => {
+        await session.cancelExecCommand(opId);
+        return { commandId: "raced-failure" };
+      },
+      captureBackgroundCommandOutput: async (_id, frames) => {
+        if (frames.length) events.push("capture");
+      },
+      settleBackgroundCommand: async (value) => {
+        events.push("settle");
+        settlements.push(value);
+      },
+    });
+    session = rig.session;
+    rig.runner.script("raced_failure:0", {
+      live: true,
+      holdUntilCancel: true,
+      frames: [{ channel: "stdout", bytes: "partial" }],
+      exit: { failureCode: "OP_OVERFLOW", failureDetail: { retained_bytes: "7" } },
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const result = await runWithToolCallCorrelation("raced_failure", () =>
+      session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+    );
+    expect(result).toContain("command ID raced-failure");
+    expect(events).toEqual(["capture", "settle"]);
+    expect(settlements).toEqual([
+      expect.objectContaining({ outcome: "exited", reason: "op_failure_OP_OVERFLOW" }),
+    ]);
+  });
+
   test("owner read uses a fresh attach after the reaper and stale consumers cannot replay", async () => {
     const captured: string[] = [];
     const settled: string[] = [];

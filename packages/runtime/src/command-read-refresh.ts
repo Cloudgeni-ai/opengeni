@@ -1,4 +1,6 @@
 import type { AttemptToolResult } from "@opengeni/contracts";
+import { SelfhostedControlError } from "./sandbox/selfhosted/control-rpc";
+import { OpStreamUnavailableError } from "./sandbox/selfhosted/op-transport";
 
 /** First-party execution edge only. API reads authorize before provider access
  * and remain the sole terminal-observation authority. No background poller. */
@@ -25,7 +27,27 @@ export async function executeCommandReadWithRefresh(input: {
     const snapshot = commandSnapshot(result);
     if (!snapshot || snapshot.terminal || input.signal?.aborted)
       return finishReceipt(result, started, seconds);
-    if (!(await input.refresh(input.args.commandId))) {
+    let refreshedOwner: boolean;
+    try {
+      refreshedOwner = await input.refresh(input.args.commandId);
+    } catch (error) {
+      if (input.signal?.aborted || !isTransientRefreshFailure(error)) throw error;
+      // A failed live refresh must not hide durable output. Reauthorize and
+      // reread, rather than serving a cached receipt after authority changed.
+      // Do not retry the provider operation or turn this into observation logic.
+      const retained = await input.call({ ...input.args, waitSeconds: 0 });
+      const retainedSnapshot = commandSnapshot(retained);
+      return finishReceipt(
+        retainedSnapshot && !retainedSnapshot.terminal
+          ? patchReceipt(retained, {
+              freshness: { status: "refresh_unavailable", retryable: true },
+            })
+          : retained,
+        started,
+        seconds,
+      );
+    }
+    if (!refreshedOwner) {
       return finishReceipt(
         await input.call({
           ...input.args,
@@ -54,6 +76,55 @@ export async function executeCommandReadWithRefresh(input: {
   }
 }
 
+/** Fail closed for unknown faults, fencing, consent, and integrity errors.
+ * Neither exception text nor a generic retryable flag is sufficient evidence. */
+function isTransientRefreshFailure(error: unknown): boolean {
+  if (error instanceof SelfhostedControlError) {
+    return (
+      !error.fenced &&
+      !error.payloadTooLarge &&
+      (error.agentOffline || error.reason === "agent_reconnecting" || error.draining)
+    );
+  }
+  if (error instanceof OpStreamUnavailableError) return error.unavailableKind === "transport";
+  if (!(error instanceof Error)) return false;
+  const code = (error as Error & { code?: unknown }).code;
+  return (
+    typeof code === "string" &&
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ETIMEDOUT",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "EAI_AGAIN",
+    ].includes(code)
+  );
+}
+
+function patchReceipt(
+  result: AttemptToolResult,
+  fields: {
+    waitedMs?: number;
+    timedOut?: boolean;
+    freshness?: { status: "refresh_unavailable"; retryable: true };
+  },
+): AttemptToolResult {
+  const snapshot = commandSnapshot(result);
+  if (!snapshot) return result;
+  return {
+    ...result,
+    ...(result.structuredContent
+      ? { structuredContent: { ...result.structuredContent, ...fields } }
+      : {}),
+    content: result.content.map((part, index) =>
+      index === 0 && part.type === "text"
+        ? { ...part, text: JSON.stringify({ ...snapshot, ...fields }) }
+        : part,
+    ),
+  };
+}
+
 function finishReceipt(
   result: AttemptToolResult,
   started: number,
@@ -62,26 +133,15 @@ function finishReceipt(
   const snapshot = commandSnapshot(result);
   if (!snapshot) return result;
   const waitedMs = Date.now() - started;
-  return {
-    ...result,
-    content: result.content.map((part, index) =>
-      index === 0 && part.type === "text"
-        ? {
-            ...part,
-            text: JSON.stringify({
-              ...snapshot,
-              waitedMs,
-              timedOut:
-                seconds > 0 &&
-                waitedMs >= seconds * 1000 &&
-                !snapshot.terminal &&
-                !snapshot.chunks.length &&
-                !snapshot.hasMore,
-            }),
-          }
-        : part,
-    ),
-  };
+  return patchReceipt(result, {
+    waitedMs,
+    timedOut:
+      seconds > 0 &&
+      waitedMs >= seconds * 1000 &&
+      !snapshot.terminal &&
+      !snapshot.chunks.length &&
+      !snapshot.hasMore,
+  });
 }
 
 function commandSnapshot(

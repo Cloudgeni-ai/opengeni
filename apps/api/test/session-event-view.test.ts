@@ -254,5 +254,23 @@ describe("session event content views", () => {
     await expect(readSessionEventView({ sessionId, cursor: "invalid" }, read)).rejects.toThrow(
       "Invalid",
     );
+    const cursor = JSON.parse(Buffer.from(page.nextCursor!, "base64url").toString());
+    for (const change of [
+      { v: 3 },
+      { offset: -1 },
+      { offset: 2_147_483_648 },
+      { sequence: null, offset: 1 },
+      { sequence: cursor.selection.after },
+    ]) {
+      await expect(
+        readSessionEventView(
+          {
+            sessionId,
+            cursor: Buffer.from(JSON.stringify({ ...cursor, ...change })).toString("base64url"),
+          },
+          read,
+        ),
+      ).rejects.toThrow("Invalid");
+    }
   });
 });
