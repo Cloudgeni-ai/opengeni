@@ -1472,6 +1472,23 @@ stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
 
+Migration 0419 records the exact launch turn, attempt, and execution generation
+when either provider adopts a background command under the existing attempt
+fence. Terminal results resolve that immutable receipt, copy only eligible
+same-session successor delegations, and retain the causal human for normal
+personal-resource admission. Legacy managed commands can prove the same tuple
+through their retained process; legacy Connected Machine commands with no receipt
+remain unattributed. A timeout similarly inherits its exact waiting turn.
+Different causal turns claim separately. No path substitutes the newest human,
+extends a once grant, or bypasses live revocation.
+
+The existing exact-set pre-claim recovery can restore unconsumed root command
+results and wait timeouts only after verifying their retained launch or timeout
+receipt, completed causal human turn, failure frontier, and unchanged failed
+update set. It repairs typed authority, preserves message/event content, and is
+idempotent; it does not replay a previously accepted turn or recover a nested
+session with parent-facing terminal truth.
+
 Both command readers accept `commandId`, an optional opaque `cursor`,
 `waitSeconds` (0–50; defaults 0 for read and 45 for wait), and `maxOutputBytes`
 (4–65,536; default 16,384 UTF-8 output bytes). They return ordered stdout/stderr
