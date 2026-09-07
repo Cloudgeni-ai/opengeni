@@ -6,22 +6,16 @@ import {
   ChevronRightIcon,
   Globe2Icon,
   KeyRoundIcon,
+  SearchIcon,
   ZapIcon,
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
-import { DropdownMenu } from "radix-ui";
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-  type SVGProps,
-} from "react";
+import { Popover } from "radix-ui";
+import { useMemo, useState, type CSSProperties, type ReactNode, type SVGProps } from "react";
 import { cn } from "../lib/cn";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
+  coerceReasoningEffortForModel,
   effortOptionsForModel,
   findPickerRow,
   groupPickerRowsByBillingClass,
@@ -34,16 +28,6 @@ import {
 } from "../model-policy";
 
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
-
-type NavLevel = "providers" | "models" | "thinking";
-
-type PickerNavState = {
-  level: NavLevel;
-  rail: PickerBillingClass | null;
-  modelId: string | null;
-};
-
-type NavUpdater = PickerNavState | ((previous: PickerNavState) => PickerNavState);
 
 export type ModelPolicyPickerMessages = {
   label: string;
@@ -92,7 +76,7 @@ export type ModelPolicyPickerProps = {
   onOpenChange?: ((open: boolean) => void) | undefined;
   /** Non-Codex models stay visible but cannot be selected. */
   codexOnly?: boolean | undefined;
-  /** Resets drill-down navigation when the session scope changes. */
+  /** Identity of the current session scope. */
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
@@ -233,36 +217,6 @@ function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly);
 }
 
-function defaultNavState(rows: ClientPickerModelRow[], modelId: string): PickerNavState {
-  const selected = findPickerRow(rows, modelId);
-  if (!selected) {
-    const rails = new Set(rows.map((row) => row.billingClass));
-    const onlyRail = rails.size === 1 ? rows[0]?.billingClass : null;
-    return onlyRail
-      ? { level: "models", rail: onlyRail, modelId: null }
-      : { level: "providers", rail: null, modelId: null };
-  }
-  return {
-    level: "thinking",
-    rail: selected.billingClass,
-    modelId: selected.id,
-  };
-}
-
-function usePickerNavState(
-  sessionKey: string | undefined,
-  rows: ClientPickerModelRow[],
-  model: string,
-): [PickerNavState, (next: NavUpdater) => void] {
-  const [state, setState] = useState<PickerNavState>(() => defaultNavState(rows, model));
-  useEffect(() => {
-    setState(defaultNavState(rows, model));
-    // The menu deliberately preserves its drill-down while the same session is mounted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey]);
-  return [state, setState];
-}
-
 export function PickerNavRow(props: {
   label: string;
   hint?: string | undefined;
@@ -348,255 +302,203 @@ export function PickerAnimatedPage(props: {
   );
 }
 
-export function ModelPolicyPickerMenu(
-  props: ModelPolicyPickerProps & {
-    nav?: PickerNavState | undefined;
-    onNavChange?: ((next: NavUpdater) => void) | undefined;
-  },
-) {
-  const messages = useMemo(
-    () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
-    [props.messages],
-  );
+/** Model selection stays flat; reasoning never becomes a navigation destination. */
+export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
+  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+  const [query, setQuery] = useState("");
   const rows = effectiveRows(props);
-  const groups = useMemo(() => groupPickerRowsByBillingClass(rows), [rows]);
-  const [localNav, setLocalNav] = usePickerNavState(
-    props.nav === undefined ? props.sessionKey : undefined,
-    rows,
-    props.model,
-  );
-  const nav = props.nav ?? localNav;
-  const setNav = props.onNavChange ?? setLocalNav;
-  const [direction, setDirection] = useState<1 | -1>(1);
-
-  const effectiveNav =
-    nav.level === "providers" && groups.length === 1
-      ? {
-          level: "models" as const,
-          rail: groups[0]!.billingClass,
-          modelId: null,
-        }
-      : nav;
-  const activeGroup =
-    effectiveNav.rail === null
-      ? undefined
-      : groups.find((group) => group.billingClass === effectiveNav.rail);
-  const focusModel =
-    effectiveNav.modelId === null ? undefined : findPickerRow(rows, effectiveNav.modelId);
-  const selectedRow = findPickerRow(rows, props.model);
-
-  const go = (next: PickerNavState, nextDirection: 1 | -1) => {
-    setDirection(nextDirection);
-    setNav(next);
-  };
-
-  const selectEffort = (row: ClientPickerModelRow, effort: ReasoningEffort) => {
-    if (!row.selectable) return;
+  const selected = findPickerRow(rows, props.model);
+  const words = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const filtered = rows.filter((row) => {
+    const text =
+      `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${payerSummaryForModel(row.catalog)}`.toLowerCase();
+    return words.every((word) => text.includes(word));
+  });
+  const groups = groupPickerRowsByBillingClass(filtered)
+    .map((group) => ({
+      ...group,
+      rows: group.rows.filter((row) => words.length > 0 || row.id !== selected?.id),
+    }))
+    .filter((group) => group.rows.length > 0);
+  const choose = (row: ClientPickerModelRow) => {
+    if (!row.selectable || props.disabled) return;
     if (row.id !== props.model) props.onModelChange(row.id);
-    props.onEffortChange(effort);
+    const effort = coerceReasoningEffortForModel(row.catalog, props.effort);
+    if (effort !== props.effort) props.onEffortChange(effort);
+    if (
+      props.latencyMode !== "standard" &&
+      !runnableLatencyModesForModel(row.catalog).includes(props.latencyMode)
+    ) {
+      props.onLatencyModeChange("standard");
+    }
+    props.onOpenChange?.(false);
   };
-
-  const pageKey =
-    effectiveNav.level === "providers"
-      ? "providers"
-      : effectiveNav.level === "models"
-        ? `models:${effectiveNav.rail ?? ""}`
-        : `thinking:${effectiveNav.modelId ?? ""}`;
-
-  let body: ReactNode;
-  if (props.loading) {
-    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>;
-  } else if (groups.length === 0) {
-    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.noModels}</p>;
-  } else if (effectiveNav.level === "providers") {
-    body = (
-      <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
-        {groups.map((group) => (
-          <PickerNavRow
-            key={group.billingClass}
-            label={group.label}
-            hint={messages.billingHints[group.billingClass]}
-            icon={<BillingClassMark billingClass={group.billingClass} />}
-            active={selectedRow?.billingClass === group.billingClass}
-            testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
-          />
-        ))}
-      </div>
-    );
-  } else if (effectiveNav.level === "models" && activeGroup) {
-    body = (
-      <div data-testid="model-picker-models">
-        {groups.length > 1 ? (
-          <PickerBackHeader
-            label={activeGroup.label}
-            icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
-            onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          {activeGroup.rows.map((row) => (
-            <PickerNavRow
-              key={`${row.billingClass}:${row.id}`}
-              label={row.label}
-              hint={row.unavailableReason ?? payerSummaryForModel(row.catalog)}
-              disabled={!row.selectable}
-              title={row.unavailableReason ?? undefined}
-              active={row.id === props.model}
-              testId={`model-picker-choice-${row.id}`}
-              onClick={() => {
-                if (row.selectable) {
-                  go(
-                    {
-                      level: "thinking",
-                      rail: row.billingClass,
-                      modelId: row.id,
-                    },
-                    1,
-                  );
-                }
-              }}
-            />
-          ))}
-        </div>
-      </div>
-    );
-  } else if (effectiveNav.level === "thinking" && focusModel) {
-    const activeModel = focusModel.id === props.model;
-    const supportsFast = runnableLatencyModesForModel(focusModel.catalog).includes("fast");
-    body = (
-      <div data-testid="model-picker-reasoning">
-        <PickerBackHeader
-          label={focusModel.label}
-          icon={<BillingClassMark billingClass={focusModel.billingClass} />}
-          onBack={() => go({ level: "models", rail: focusModel.billingClass, modelId: null }, -1)}
-          trailing={
-            supportsFast && props.allowLatencyMode !== false ? (
-              <button
-                type="button"
-                disabled={!focusModel.selectable}
-                aria-pressed={activeModel && props.latencyMode === "fast"}
-                aria-label={
-                  activeModel && props.latencyMode === "fast"
-                    ? `Disable ${messages.fast}`
-                    : `Enable ${messages.fast}`
-                }
-                title={`${messages.fast} · ${messages.fastRateHint}`}
-                data-testid="model-picker-fast"
-                onClick={() => {
-                  if (!activeModel) {
-                    props.onModelChange(focusModel.id);
-                  }
-                  props.onLatencyModeChange(
-                    activeModel && props.latencyMode === "fast" ? "standard" : "fast",
-                  );
-                }}
-                className={cn(
-                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
-                  activeModel && props.latencyMode === "fast" && "text-og-fg",
-                )}
-              >
-                <ZapIcon
-                  className={cn(
-                    "size-3.5",
-                    activeModel && props.latencyMode === "fast" && "fill-current",
-                  )}
-                />
-              </button>
-            ) : null
-          }
-        />
-        <p className="px-2.5 pt-1 pb-1 text-og-control font-medium tracking-wide text-og-fg-subtle uppercase">
-          {messages.thinking}
-        </p>
-        {focusModel.catalog.capabilities?.inputModalities.includes("image") === false ? (
-          <p className="px-2.5 pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
-            Unsupported attachments stay in the session but are hidden from this model.
-          </p>
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          {effortOptionsForModel(focusModel.catalog).map((effort) => {
-            const selected = activeModel && effort === props.effort;
-            return (
-              <button
-                key={effort}
-                type="button"
-                disabled={!focusModel.selectable}
-                onClick={() => selectEffort(focusModel, effort)}
-                className={cn(
-                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
-                  selected && "bg-og-surface-2",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate">{labelReasoningEffort(effort)}</span>
-                {selected ? (
-                  <CheckIcon
-                    className="ml-auto size-3.5 shrink-0"
-                    data-testid="model-picker-effort-check"
-                  />
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  } else {
-    body = (
-      <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
-        {groups.map((group) => (
-          <PickerNavRow
-            key={group.billingClass}
-            label={group.label}
-            hint={messages.billingHints[group.billingClass]}
-            icon={<BillingClassMark billingClass={group.billingClass} />}
-            testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
-          />
-        ))}
-      </div>
-    );
-  }
-
+  const modelRow = (row: ClientPickerModelRow) => (
+    <PickerNavRow
+      key={row.id}
+      label={row.label}
+      hint={`${payerSummaryForModel(row.catalog)}${row.unavailableReason ? ` · ${row.unavailableReason}` : ""}`}
+      disabled={props.disabled || !row.selectable}
+      title={row.unavailableReason ?? undefined}
+      active={row.id === props.model}
+      showChevron={false}
+      trailing={
+        row.id === props.model ? <CheckIcon className="size-3.5" aria-label="Selected" /> : null
+      }
+      testId={`model-picker-choice-${row.id}`}
+      onClick={() => choose(row)}
+    />
+  );
   return (
-    <div data-testid="model-picker-menu" className="relative overflow-hidden">
+    <div
+      data-testid="model-picker-menu"
+      className="flex min-h-0 flex-col"
+      onKeyDown={(event) => {
+        if (
+          !(event.target instanceof HTMLButtonElement) ||
+          !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)
+        )
+          return;
+        const buttons = Array.from(
+          event.currentTarget.querySelectorAll<HTMLButtonElement>(
+            '[data-testid^="model-picker-choice-"]:not(:disabled)',
+          ),
+        );
+        const index = buttons.indexOf(event.target);
+        if (index < 0) return;
+        event.preventDefault();
+        const next =
+          event.key === "Home"
+            ? 0
+            : event.key === "End"
+              ? buttons.length - 1
+              : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next]?.focus();
+      }}
+    >
+      <div className="flex items-center gap-2 border-b border-og-border px-2 py-2">
+        <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+        <input
+          aria-label="Search models or providers"
+          placeholder="Search models or providers…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Escape" && event.key !== "Tab") event.stopPropagation();
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              event.currentTarget
+                .closest('[data-testid="model-picker-menu"]')
+                ?.querySelector<HTMLButtonElement>("button:not(:disabled)")
+                ?.focus();
+            }
+          }}
+          className="h-8 min-w-0 flex-1 bg-transparent text-og-menu text-og-fg outline-hidden placeholder:text-og-fg-subtle"
+        />
+      </div>
       {props.error ? (
-        <p className="px-2 py-1 text-og-control text-og-status-failed" role="alert">
+        <p className="px-2 py-2 text-og-control text-og-status-failed" role="alert">
           {props.error}
         </p>
       ) : null}
-      <PickerAnimatedPage pageKey={pageKey} direction={direction}>
-        {body}
-      </PickerAnimatedPage>
+      <div
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain py-1"
+        data-testid="model-picker-models"
+      >
+        {props.loading ? (
+          <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>
+        ) : (
+          <>
+            {selected && words.length === 0 ? (
+              <div className="border-b border-og-border/60 pb-1 mb-1">
+                <p className="px-2.5 py-1.5 text-og-control text-og-fg-subtle">Current model</p>
+                {modelRow(selected)}
+              </div>
+            ) : null}
+            {groups.map((group) => (
+              <section key={group.billingClass} aria-label={group.label} className="py-1">
+                <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-medium text-og-fg-subtle">
+                  <BillingClassMark billingClass={group.billingClass} aria-label="" />
+                  {group.label}
+                </div>
+                {group.rows.map(modelRow)}
+              </section>
+            ))}
+            {filtered.length === 0 ? (
+              <p className="px-2 py-4 text-og-control text-og-fg-subtle">
+                {words.length
+                  ? "No matching models. Try a model or provider name."
+                  : messages.noModels}
+              </p>
+            ) : null}
+          </>
+        )}
+      </div>
+      {selected ? (
+        <div className="border-t border-og-border px-2 py-2">
+          <ModelThinkingControls {...props} />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** @internal Shared state seam kept outside the Radix portal for deterministic testing. */
+function ModelThinkingControls(props: ModelPolicyPickerProps) {
+  const selected = findPickerRow(effectiveRows(props), props.model);
+  if (!selected) return null;
+  const efforts = effortOptionsForModel(selected.catalog);
+  const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
+  const supportsFast = runnableLatencyModesForModel(selected.catalog).includes("fast");
+  return (
+    <div
+      className="flex items-center gap-2 text-og-control text-og-fg-muted"
+      data-testid="model-picker-reasoning"
+    >
+      <label className="flex min-h-9 items-center gap-2">
+        {messages.thinking}
+        <select
+          aria-label="Thinking effort"
+          value={coerceReasoningEffortForModel(selected.catalog, props.effort)}
+          disabled={props.disabled || !selected.selectable || efforts.length < 2}
+          onChange={(event) => props.onEffortChange(event.target.value as ReasoningEffort)}
+          className="rounded-og-sm bg-og-surface-2 px-2 py-1.5 text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+        >
+          {efforts.map((effort) => (
+            <option key={effort} value={effort}>
+              {labelReasoningEffort(effort)}
+            </option>
+          ))}
+        </select>
+      </label>
+      {supportsFast && props.allowLatencyMode !== false ? (
+        <button
+          type="button"
+          data-testid="model-picker-fast"
+          disabled={props.disabled || !selected.selectable}
+          aria-pressed={props.latencyMode === "fast"}
+          title={`${messages.fast} · ${messages.fastRateHint}`}
+          onClick={() =>
+            props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
+          }
+          className="ml-auto flex min-h-9 items-center gap-1.5 rounded-og-sm px-2 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+        >
+          <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
+          {messages.fast} <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/** @internal Shared controlled/uncontrolled state seam. */
 export function useModelPolicyPickerState(props: ModelPolicyPickerProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(props.defaultOpen ?? false);
   const open = props.open ?? uncontrolledOpen;
-  const rows = effectiveRows(props);
-  const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
-  const previousControlledOpen = useRef(props.open);
-  useEffect(() => {
-    const wasOpen = previousControlledOpen.current;
-    previousControlledOpen.current = props.open;
-    if (props.open === true && wasOpen !== true) {
-      setNav(defaultNavState(rows, props.model));
-    }
-    // Reset only on the controlled closed-to-open edge; ordinary rerenders
-    // deliberately preserve the current drill-down page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.open]);
   const setOpen = (next: boolean) => {
-    if (next) {
-      setNav(defaultNavState(rows, props.model));
-    }
     if (props.open === undefined) setUncontrolledOpen(next);
     props.onOpenChange?.(next);
   };
-  return { open, setOpen, rows, nav, setNav };
+  return { open, setOpen, rows: effectiveRows(props) };
 }
 
 export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
@@ -606,7 +508,7 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
     [props.messages],
   );
-  const { open, setOpen, rows, nav, setNav } = useModelPolicyPickerState(props);
+  const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
 
   if (props.loading) {
@@ -622,8 +524,8 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     );
   }
   return (
-    <DropdownMenu.Root open={open} onOpenChange={setOpen}>
-      <DropdownMenu.Trigger asChild>
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
         <button
           ref={trigger.ref}
           type="button"
@@ -638,13 +540,16 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
             billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
             className="text-og-fg"
           />
-          <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden">
+          <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
             {selected?.label ?? props.model}
           </span>
-          <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden">
+          <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
             {selected?.shortLabel ?? selected?.label ?? props.model}
           </span>
-          <span className="og-model-policy-effort max-sm:hidden">
+          <span
+            className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
+            title={labelReasoningEffort(props.effort)}
+          >
             {labelReasoningEffort(props.effort)}
           </span>
           {props.latencyMode === "fast" ? (
@@ -656,26 +561,24 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
           ) : null}
           <ChevronDownIcon className="size-3 shrink-0" />
         </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          aria-label={messages.label}
           align="start"
           side={props.menuSide ?? "bottom"}
           sideOffset={8}
           collisionPadding={12}
-          onCloseAutoFocus={(event) => event.preventDefault()}
           className={cn(
-            "og-root og-model-policy-menu z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-[var(--og-model-picker-menu-width)] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
+            "og-root og-model-policy-menu z-50 flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[22rem] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
             props.contentClassName,
           )}
           style={{ ...portalStyle, ...props.contentStyle }}
           data-testid="model-picker-content"
         >
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <ModelPolicyPickerMenu {...props} nav={nav} onNavChange={setNav} />
-          </div>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+          <ModelPolicyPickerMenu {...props} onOpenChange={setOpen} />
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }

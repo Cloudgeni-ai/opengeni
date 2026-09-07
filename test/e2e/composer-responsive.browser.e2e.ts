@@ -108,6 +108,27 @@ describe("container-responsive public composer demo", () => {
 
     await openModelMenu(page);
     await assertPortalBoundToComposer(page, ".og-model-policy-menu");
+    // Flat selection: search and thinking are reachable without a Back step.
+    expect(await page.getByTestId("model-picker-back").count()).toBe(0);
+    const search = page.getByRole("textbox", { name: "Search models or providers" });
+    await search.fill("no-such-model");
+    await page.getByText("No matching models. Try a model or provider name.").waitFor();
+    await search.fill("codex");
+    await page.getByRole("combobox", { name: "Thinking effort" }).selectOption("high");
+    expect(await page.getByRole("combobox", { name: "Thinking effort" }).inputValue()).toBe("high");
+    await search.focus();
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
+    expect(
+      await page
+        .getByRole("button", { name: "Model and effort" })
+        .evaluate((button) => button === document.activeElement),
+    ).toBe(true);
+    await openModelMenu(page);
+    expect(
+      await page.getByRole("textbox", { name: "Search models or providers" }).inputValue(),
+    ).toBe("");
     await page.keyboard.press("Escape");
 
     await page.getByRole("button", { name: "Choose voice model and options" }).click();
