@@ -370,6 +370,7 @@ describe("organization onboarding UI", () => {
           <OrganizationOnboardingPanel
             client={setupClient as never}
             billingMode="stripe"
+            codexEnabled
             supergrokEnabled
             previewState="required"
             onComplete={onComplete}
@@ -410,7 +411,7 @@ describe("organization onboarding UI", () => {
     }
   });
 
-  test("the model-access step omits SuperGrok when the deployment disables it", async () => {
+  test("the model-access step omits subscription providers disabled by the deployment", async () => {
     const container = document.createElement("div");
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -428,6 +429,7 @@ describe("organization onboarding UI", () => {
       await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
       await flush();
       expect(container.textContent).toContain("Choose how to power your chats");
+      expect(container.querySelector('button[aria-label="Connect Codex"]')).toBeNull();
       expect(container.querySelector('button[aria-label="Connect SuperGrok"]')).toBeNull();
     } finally {
       await act(async () => root.unmount());
@@ -546,6 +548,7 @@ describe("organization onboarding UI", () => {
             client={client as never}
             organizationId="organization-a"
             workspaceId="personal-workspace"
+            codexEnabled
             onComplete={() => undefined}
           />,
         ),

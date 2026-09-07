@@ -52,6 +52,7 @@ export function ModelAccessOnboardingPanel({
   organizationId,
   workspaceId,
   billingMode = "disabled",
+  codexEnabled = false,
   supergrokEnabled = false,
   onComplete,
 }: {
@@ -59,6 +60,7 @@ export function ModelAccessOnboardingPanel({
   organizationId: string;
   workspaceId: string;
   billingMode?: "disabled" | "stripe";
+  codexEnabled?: boolean;
   supergrokEnabled?: boolean;
   onComplete: () => void;
 }) {
@@ -319,7 +321,11 @@ export function ModelAccessOnboardingPanel({
       action: () => toggleKeyProvider("openrouter"),
       key: "openrouter",
     },
-  ].filter((provider) => supergrokEnabled || provider.name !== "SuperGrok");
+  ].filter(
+    (provider) =>
+      (codexEnabled || provider.name !== "Codex") &&
+      (supergrokEnabled || provider.name !== "SuperGrok"),
+  );
 
   return (
     <section className="flex flex-1 items-center justify-center px-4 py-8">

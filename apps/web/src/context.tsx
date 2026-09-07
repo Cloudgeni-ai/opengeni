@@ -2797,6 +2797,7 @@ export function RootRouteComponent() {
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
         billingMode={clientConfig.billingMode ?? "disabled"}
+        codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
         supergrokEnabled={clientConfig.models.some(
           (catalogModel) => catalogModel.source === "supergrok",
         )}
@@ -2809,6 +2810,7 @@ export function RootRouteComponent() {
         <OrganizationOnboardingPanel
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
+          codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
           supergrokEnabled={clientConfig.models.some(
             (catalogModel) => catalogModel.source === "supergrok",
           )}
