@@ -1058,6 +1058,11 @@ const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
   "function_call",
   "function_call_result",
   "function_call_output",
+  "shell_call",
+  "shell_call_output",
+  "computer_call",
+  "computer_call_result",
+  "computer_call_output",
   "apply_patch_call",
   "apply_patch_call_output",
 ]);

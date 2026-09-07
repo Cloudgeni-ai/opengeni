@@ -332,7 +332,7 @@ the request as described above.
 ### Portable Responses identity regression
 
 Portable Responses checkpoints detach optional provider response-item `id`
-fields from messages, function calls/results, patch calls/results, and
+fields from messages, function, shell, computer and patch calls/results, and
 client-executed tool search. Opaque reasoning is omitted during checkpoint
 preparation; retaining a dependent message's stored response id can otherwise
 make the provider require that omitted reasoning even with complete inline
@@ -347,7 +347,11 @@ summary text. Such a response still fails the existing empty-summary guard.
 The known missing-reasoning rejection is classified as
 `missing_required_reasoning_item` without retaining the provider message or its
 referenced item ids. Unknown provider messages remain excluded. Provider
-failures and empty summaries still fail closed without changing active history.
+failures, incomplete provider responses (even with text), and empty summaries
+still fail closed without changing active history. A provider's completed status
+does not prove that a summary preserves every fact; the synthetic continuation
+check verifies representative facts and tool semantics, not exhaustive semantic
+equivalence. Original history remains archived by the existing checkpoint flow.
 
 Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for
 SDK wire conversion and history-preservation regression coverage. For a live

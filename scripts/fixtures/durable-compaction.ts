@@ -10,6 +10,7 @@ import {
   getSession,
   requestSessionCompaction,
   withWorkspaceRls,
+  withWorkspaceSessionActivityRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import { acquireSharedTestDatabase } from "@opengeni/testing";
@@ -51,7 +52,7 @@ export async function compactDurableFixture(
       latencyMode: "standard",
       sandboxBackend: "none",
     });
-    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+    await withWorkspaceSessionActivityRls(client.db, workspaceId, async (db) => {
       await db.insert(schema.sessionHistoryItems).values(
         history.map((item, position) => ({
           accountId: grant.accountId,
@@ -130,7 +131,8 @@ export async function compactDurableFixture(
         tokenSignalCleared: true,
         compactionRequestConsumed: true,
         durableCompactionEvent: true,
-        compactionEvent: outcome.events.find(event => event.type === "session.context.compacted")?.payload,
+        compactionEvent: outcome.events.find((event) => event.type === "session.context.compacted")
+          ?.payload,
       },
     };
   } finally {

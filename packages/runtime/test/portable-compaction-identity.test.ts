@@ -154,6 +154,107 @@ describe("portable compaction provider identity", () => {
     expect(summary).toBe("Verified checkpoint.");
   });
 
+  test("detaches shell and computer identities without losing actions, results or safety checks", async () => {
+    const safetyChecks = [{ id: "check_fixture", code: "fixture", message: "Synthetic check" }];
+    const raw: Item[] = [
+      {
+        type: "shell_call",
+        id: "sh_fixture",
+        callId: "shell_fixture",
+        status: "completed",
+        action: { commands: ["echo fixture"], timeoutMs: 1000, maxOutputLength: 100 },
+        providerData: { id: "sh_fixture" },
+      },
+      {
+        type: "shell_call_output",
+        id: "sho_fixture",
+        callId: "shell_fixture",
+        output: [{ stdout: "fixture", stderr: "", outcome: { type: "exit", exitCode: 0 } }],
+        providerData: { id: "sho_fixture" },
+      },
+      {
+        type: "computer_call",
+        id: "cu_fixture",
+        callId: "computer_fixture",
+        status: "completed",
+        action: { type: "screenshot" },
+        providerData: { id: "cu_fixture", pendingSafetyChecks: safetyChecks },
+      },
+      {
+        type: "computer_call_result",
+        id: "cuo_fixture",
+        callId: "computer_fixture",
+        output: { type: "computer_screenshot", data: "data:image/png;base64,fixture" },
+        providerData: { id: "cuo_fixture", acknowledgedSafetyChecks: safetyChecks },
+      },
+    ];
+    const before = structuredClone(raw);
+    const prepared = prepareCompactionPromptInput(sanitizeHistoryItemsForModel(raw), 214_200);
+    let wire: Item[] = [];
+    await summarizeForCompaction(settings, prepared.input, {
+      client: provider(async (request) => {
+        wire = request.input as Item[];
+        for (const item of wire) {
+          if (typeof item.id === "string" && /^(sh|sho|cu|cuo)_fixture$/.test(item.id)) {
+            throw Object.assign(new Error(missingReasoning), { status: 400 });
+          }
+        }
+        return response("Shell succeeded; screenshot and safety acknowledgment recorded.");
+      }),
+    });
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "shell_call",
+        call_id: "shell_fixture",
+        action: { commands: ["echo fixture"], timeout_ms: 1000, max_output_length: 100 },
+      }),
+    );
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "shell_call_output",
+        call_id: "shell_fixture",
+        output: [{ stdout: "fixture", stderr: "", outcome: { type: "exit", exit_code: 0 } }],
+      }),
+    );
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "computer_call",
+        call_id: "computer_fixture",
+        action: { type: "screenshot" },
+        pending_safety_checks: safetyChecks,
+      }),
+    );
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "computer_call_output",
+        call_id: "computer_fixture",
+        output: { type: "computer_screenshot", image_url: "data:image/png;base64,fixture" },
+        acknowledged_safety_checks: safetyChecks,
+      }),
+    );
+    expect(raw).toEqual(before);
+  });
+
+  test("rejects incomplete provider text before it can become a checkpoint", async () => {
+    const raw = longHistory();
+    const before = structuredClone(raw);
+    const usages: unknown[] = [];
+    await expect(
+      summarizeForCompaction(settings, raw, {
+        client: provider(async () => ({
+          ...response("A plausible but truncated summary"),
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        })),
+        onUsage: (usage) => {
+          usages.push(usage);
+        },
+      }),
+    ).rejects.toBeInstanceOf(CompactionProviderResponseError);
+    expect(usages).toHaveLength(1);
+    expect(raw).toEqual(before);
+  });
+
   test("preserves hosted required ids, approval links, program callers and plaintext reasoning", async () => {
     const raw: Item[] = [
       {
