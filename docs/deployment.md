@@ -1721,9 +1721,20 @@ docker build \
   -f docker/sandbox.Dockerfile \
   -t opengeni-sandbox:local-"${SOURCE_SHA:0:12}" \
   .
+
+docker build \
+  --build-arg OPENGENI_SOURCE_SHA="$SOURCE_SHA" \
+  -f docker/desktop.Dockerfile \
+  -t opengeni-desktop:local-"${SOURCE_SHA:0:12}" \
+  .
 ```
 
-Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with that stock image.
+Set `OPENGENI_SANDBOX_ARTIFACT_RUNTIME_ENABLED=true` only with a digest-pinned
+stock image that actually contains `/opt/opengeni/artifact-runtime/installation.json`.
+That is `docker/sandbox.Dockerfile` for Docker and `docker/desktop.Dockerfile` for
+Modal Computer/Browser. Do not enable the flag on a desktop digest published
+before the kernel was installed, and do not point Modal at headless
+`opengeni-sandbox` to obtain the kernel.
 Production Docker/Modal references must be digest-pinned; pack, rig, mutable,
 self-hosted, and mismatched images fail closed. The worker runs the absolute
 runtime doctor inside the actual box before the model starts. `bun run dev`
