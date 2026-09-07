@@ -436,6 +436,11 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       </div>
       {selected ? (
         <div className="border-t border-og-border px-2 py-2">
+          {selected.catalog.capabilities?.inputModalities.includes("image") === false ? (
+            <p className="pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
+              Unsupported attachments stay in the session but are hidden from this model.
+            </p>
+          ) : null}
           <ModelThinkingControls {...props} />
         </div>
       ) : null}

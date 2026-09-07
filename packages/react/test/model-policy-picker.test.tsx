@@ -216,6 +216,31 @@ describe("ModelPolicyPicker", () => {
     expect(calls).toEqual(["codex/gpt-5.6-sol"]);
   });
 
+  test("warns only when the selected model cannot receive images", async () => {
+    const warning = "Unsupported attachments stay in the session but are hidden from this model.";
+    for (const inputModalities of [["text"], ["text", "image"]] as const) {
+      const model: ClientModel = {
+        ...MODELS[0]!,
+        capabilities: { ...MODELS[0]!.capabilities!, inputModalities: [...inputModalities] },
+      };
+      const container = await mount(
+        <ModelPolicyPickerMenu
+          models={[model]}
+          model={model.id}
+          effort="medium"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />,
+      );
+      expect(container.textContent?.includes(warning)).toBe(inputModalities.length === 1);
+      await act(async () => mounted!.root.unmount());
+      container.remove();
+      mounted = null;
+    }
+  });
+
   test("controlled and uncontrolled open state stay independent of model selection", async () => {
     const hook = await renderHook(
       (open: boolean | undefined) =>

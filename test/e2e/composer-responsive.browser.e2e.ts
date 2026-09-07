@@ -120,6 +120,9 @@ describe("container-responsive public composer demo", () => {
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
     await page.locator(".og-model-policy-menu").waitFor({ state: "detached" });
+    await page.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Model and effort",
+    );
     expect(
       await page
         .getByRole("button", { name: "Model and effort" })
