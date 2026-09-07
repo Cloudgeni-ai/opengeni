@@ -1232,7 +1232,7 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 `main` is the daily integration branch and remains GitHub's default branch.
 
 Site authoring installs exact registry versions. Stable builds use their source
-SDK/React/Codemode manifest versions. Before a canary rollout, publish packages
+SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The runtime includes these pins beside
