@@ -152,6 +152,8 @@ test("credit exhaustion retains model selection without offering automatic Conti
       <FailedSessionBanner
         creditExhausted
         workspaceId="workspace-a"
+        canBuyCredits
+        canConnectModel
         failure={{
           reason: "No credits available",
           failedAt: null,
@@ -179,6 +181,35 @@ test("credit exhaustion retains model selection without offering automatic Conti
   ]);
   await act(async () => container.querySelector("button")!.click());
   expect(opened).toBe(1);
+});
+
+test("credit exhaustion hides administrative recovery links from ordinary members", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        creditExhausted
+        workspaceId="workspace-a"
+        failure={{
+          reason: "No credits available",
+          failedAt: null,
+          recoveryCount: 0,
+          failedTurnCount: 1,
+        }}
+        actions={{
+          onContinue: async () => true,
+          continuationBlocker: null,
+          modelDisabled: false,
+          onChooseModel: () => undefined,
+        }}
+      />,
+    ),
+  );
+  expect(container.querySelectorAll("a")).toHaveLength(0);
+  expect(container.textContent).toContain("Ask an organization owner or workspace admin");
+  expect(container.textContent).toContain("Choose another model");
 });
 
 test("shared composer blockers disable Continue and explain the actual unresolved choice", async () => {

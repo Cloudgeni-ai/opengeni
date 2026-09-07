@@ -19,11 +19,15 @@ export function FailedSessionBanner({
   failure,
   creditExhausted,
   workspaceId,
+  canBuyCredits = false,
+  canConnectModel = false,
   actions,
 }: {
   failure: SessionFailureSummary;
   creditExhausted?: boolean;
   workspaceId?: string;
+  canBuyCredits?: boolean;
+  canConnectModel?: boolean;
   actions?: ComponentProps<typeof FailedSessionActions>;
 }) {
   if (creditExhausted) {
@@ -47,7 +51,7 @@ export function FailedSessionBanner({
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            {workspaceId ? (
+            {workspaceId && canBuyCredits ? (
               <Button asChild type="button" size="sm" className="shrink-0">
                 <Link
                   to="/workspaces/$workspaceId/organization"
@@ -59,7 +63,7 @@ export function FailedSessionBanner({
                 </Link>
               </Button>
             ) : null}
-            {workspaceId ? (
+            {workspaceId && canConnectModel ? (
               <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
                 <Link
                   to="/workspaces/$workspaceId/settings"
@@ -80,6 +84,11 @@ export function FailedSessionBanner({
               >
                 Choose another model
               </Button>
+            ) : null}
+            {!canBuyCredits && !canConnectModel ? (
+              <span className="self-center text-xs text-fg-muted">
+                Ask an organization owner or workspace admin for help.
+              </span>
             ) : null}
           </div>
         </div>

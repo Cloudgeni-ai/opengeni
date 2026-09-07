@@ -265,6 +265,15 @@ export function ModelAccessOnboardingPanel({
     }
   }
 
+  function toggleKeyProvider(provider: ProviderKey): void {
+    const next = keyProvider === provider ? null : provider;
+    if (next !== keyProvider) {
+      setApiKey("");
+      providerKeyOperation.current = null;
+    }
+    setKeyProvider(next);
+  }
+
   const validAmount = validTopupAmount(topupAmount);
   const providers = [
     {
@@ -282,13 +291,13 @@ export function ModelAccessOnboardingPanel({
     {
       name: "Vercel AI Gateway",
       description: "Use your own API key",
-      action: () => setKeyProvider(keyProvider === "gateway" ? null : "gateway"),
+      action: () => toggleKeyProvider("gateway"),
       key: "gateway",
     },
     {
       name: "OpenRouter",
       description: "Use your own API key",
-      action: () => setKeyProvider(keyProvider === "openrouter" ? null : "openrouter"),
+      action: () => toggleKeyProvider("openrouter"),
       key: "openrouter",
     },
   ];

@@ -384,6 +384,18 @@ describe("organization onboarding UI", () => {
       expect(setupClient.getBilling).not.toHaveBeenCalled();
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect Vercel AI Gateway"]')!
+          .click(),
+      );
+      await enter(container.querySelector("#onboarding-provider-key")!, "vercel-secret");
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>('button[aria-label="Connect OpenRouter"]')!
+          .click(),
+      );
+      expect(container.querySelector<HTMLInputElement>("#onboarding-provider-key")!.value).toBe("");
+      await act(async () =>
         Array.from(container.querySelectorAll("button"))
           .find((button) => button.textContent?.trim() === "Skip for now")!
           .click(),
