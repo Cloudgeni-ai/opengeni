@@ -112,6 +112,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(sdk.browserAcceptanceLanes).toEqual([
@@ -347,6 +348,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
     expect(tests.e2e).not.toContain("test/e2e/codex-overview.e2e.ts");

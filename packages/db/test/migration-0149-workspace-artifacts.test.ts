@@ -5,7 +5,6 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { bootstrapWorkspace, createDb } from "../src/index";
 
 const migration = "0149_workspace_artifacts.sql";
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
@@ -57,7 +56,6 @@ describe("workspace artifacts migration", () => {
   test("freezes only historical NULL permissions and preserves empty and narrow selections", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
-    let db: ReturnType<typeof createDb> | null = null;
     try {
       await admin.unsafe(`create table schema_migrations (
         name text primary key,
@@ -71,17 +69,17 @@ describe("workspace artifacts migration", () => {
           on conflict do nothing`;
       }
 
-      db = createDb(blank.databaseUrl);
-      const access = await bootstrapWorkspace(db.db, {
-        accountExternalSource: "migration-0147",
-        accountExternalId: crypto.randomUUID(),
-        accountName: "Migration 0149 account",
-        workspaceExternalSource: "migration-0147",
-        workspaceExternalId: crypto.randomUUID(),
-        workspaceName: "Migration 0149 workspace",
-        subjectId: "user:migration-0147",
-      });
-      const grant = access.workspaceGrants[0]!;
+      // Seed the historical schema directly; today's bootstrap references
+      // columns added after this migration (for example workspace timers).
+      const [account] = await admin<{ id: string }[]>`
+        insert into managed_accounts (name) values ('Migration 0149 account') returning id`;
+      const [workspace] = await admin<{ id: string }[]>`
+        insert into workspaces (account_id, name)
+        values (${account!.id}, 'Migration 0149 workspace') returning id`;
+      const grant = { accountId: account!.id, workspaceId: workspace!.id };
+      await admin`
+        insert into workspace_inference_controls (workspace_id, account_id)
+        values (${grant.workspaceId}, ${grant.accountId})`;
       const historicalTools = FIRST_PARTY_MCP_TOOL_NAMES.filter(
         (name) => !name.startsWith("artifacts_"),
       );
@@ -156,7 +154,6 @@ describe("workspace artifacts migration", () => {
       expect(column?.column_default).toContain("artifacts_publish");
       expect(column?.column_default).toContain("artifacts_rollback");
     } finally {
-      await db?.close();
       await admin.end();
     }
   }, 180_000);
