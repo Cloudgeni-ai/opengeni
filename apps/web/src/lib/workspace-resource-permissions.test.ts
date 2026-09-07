@@ -53,6 +53,11 @@ test("denied resource reads and manual retries remain request-free, including af
   permissions = [];
   const machines = useWorkspaceMachines();
   const rigs = useWorkspaceRigs();
+  expect(useWorkspaceMachines().fetchSeries).toBe(machines.fetchSeries);
+  expect(useWorkspaceMachines().machines).toBe(machines.machines);
+  expect(useWorkspaceMachines().refresh).toBe(machines.refresh);
+  expect(useWorkspaceRigs().rigs).toBe(rigs.rigs);
+  expect(useWorkspaceRigs().refresh).toBe(rigs.refresh);
   expect(machineEnabled).toBe(false);
   expect(rigsEnabled).toBe(false);
   expect(machines.machines).toEqual([]);

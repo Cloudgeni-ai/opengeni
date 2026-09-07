@@ -1,7 +1,18 @@
 import { useOpenGeni } from "@opengeni/react";
-import { useMachines, type UseMachinesOptions } from "@opengeni/react/machines";
+import {
+  useMachines,
+  type MachineView,
+  type MetricSample,
+  type UseMachinesOptions,
+} from "@opengeni/react/machines";
 import { useAppContext } from "@/context";
 import { hasWorkspacePermission } from "@/lib/permissions";
+
+const EMPTY_MACHINES: MachineView[] = [];
+const ignoreRefresh = async () => {};
+const denyMutation = async () => null;
+const denyAttach = async () => false;
+const emptySeries = async (): Promise<MetricSample[]> => [];
 
 // Stock-console reads follow the current workspace grant. The public React
 // hook remains usable by embedding hosts with their own authorization model.
@@ -28,17 +39,17 @@ export function useWorkspaceMachines(options: UseMachinesOptions = {}) {
     canRemove: canManage && fleet.canRemove,
     canUpdateAgent: canManage && fleet.canUpdateAgent,
     canUpdateOperationPolicy: canManage && fleet.canUpdateOperationPolicy,
-    remove: canManage ? fleet.remove : async () => null,
-    updateAgent: canManage ? fleet.updateAgent : async () => null,
-    updateOperationPolicy: canManage ? fleet.updateOperationPolicy : async () => null,
-    attach: canControl ? fleet.attach : async () => false,
-    fetchSeries: canRead ? fleet.fetchSeries : async () => [],
+    remove: canManage ? fleet.remove : denyMutation,
+    updateAgent: canManage ? fleet.updateAgent : denyMutation,
+    updateOperationPolicy: canManage ? fleet.updateOperationPolicy : denyMutation,
+    attach: canControl ? fleet.attach : denyAttach,
+    fetchSeries: canRead ? fleet.fetchSeries : emptySeries,
     mutationError: canRead ? fleet.mutationError : null,
-    machines: canRead ? fleet.machines : [],
+    machines: canRead ? fleet.machines : EMPTY_MACHINES,
     activeSandboxId: canRead ? fleet.activeSandboxId : null,
     loading: canRead && fleet.loading,
     error: canRead ? fleet.error : null,
-    refresh: canRead ? fleet.refresh : async () => {},
+    refresh: canRead ? fleet.refresh : ignoreRefresh,
     canAttach: canControl && fleet.canAttach,
   };
 }
