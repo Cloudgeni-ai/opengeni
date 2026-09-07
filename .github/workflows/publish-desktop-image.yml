@@ -17,6 +17,11 @@ on:
       - "docker/opengeni-git-askpass"
       - "docker/browserd-THIRD-PARTY-NOTICES"
       - "packages/browserd/**"
+      - "packages/artifact-tool/**"
+      - "packages/artifact-kernel-wasm-document/**"
+      - "packages/artifact-kernel-wasm-presentation/**"
+      - "packages/artifact-kernel-wasm-spreadsheet/**"
+      - "scripts/*artifact*.ts"
       - ".github/workflows/publish-desktop-image.yml"
       - ".github/workflows/artifact-runtime.yml"
   workflow_dispatch:

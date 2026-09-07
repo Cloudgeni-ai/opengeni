@@ -180,5 +180,15 @@ describe("artifact runtime workflow contract", () => {
         "build-args"
       ],
     ).toBe("OPENGENI_SOURCE_SHA=${{ github.sha }}");
+    for (const glob of [
+      "packages/artifact-tool/**",
+      "packages/artifact-kernel-wasm-document/**",
+      "packages/artifact-kernel-wasm-presentation/**",
+      "packages/artifact-kernel-wasm-spreadsheet/**",
+      "scripts/*artifact*.ts",
+      ".github/workflows/artifact-runtime.yml",
+    ]) {
+      expect(source).toContain(`- "${glob}"`);
+    }
   });
 });
