@@ -116,16 +116,18 @@ export function EmptyCreditsNotice({
   workspaceId,
   accountId,
   canBuyCredits,
+  canReadBilling,
 }: {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
+  canReadBilling: boolean;
 }) {
   const client = useAppContext().client;
   const [empty, setEmpty] = useState(false);
 
   useEffect(() => {
-    if (!accountId) return;
+    if (!accountId || !canReadBilling) return;
     let active = true;
     void client
       .getBilling({ accountId })
@@ -140,7 +142,7 @@ export function EmptyCreditsNotice({
     return () => {
       active = false;
     };
-  }, [accountId, client]);
+  }, [accountId, canReadBilling, client]);
 
   if (!empty) return null;
   return (

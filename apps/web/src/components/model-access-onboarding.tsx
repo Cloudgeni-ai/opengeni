@@ -67,7 +67,6 @@ export function ModelAccessOnboardingPanel({
   const [keyProvider, setKeyProvider] = useState<ProviderKey | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [topupAmount, setTopupAmount] = useState("25.00");
-  const [billingMode, setBillingMode] = useState<"stripe" | "disabled" | "unknown">("unknown");
   const cancelled = useRef(false);
   const pollAbort = useRef<AbortController | null>(null);
 
@@ -78,27 +77,6 @@ export function ModelAccessOnboardingPanel({
       pollAbort.current?.abort();
     };
   }, []);
-
-  useEffect(() => {
-    if (!client) {
-      setBillingMode("disabled");
-      return;
-    }
-    let active = true;
-    void client
-      .getBilling({ accountId: organizationId })
-      .then((summary) => {
-        if (!active) return;
-        setBillingMode(summary.mode === "stripe" ? "stripe" : "disabled");
-      })
-      .catch(() => {
-        if (!active) return;
-        setBillingMode("disabled");
-      });
-    return () => {
-      active = false;
-    };
-  }, [client, organizationId]);
 
   async function finishWithConnectedModel(): Promise<void> {
     if (client) {
@@ -365,31 +343,25 @@ export function ModelAccessOnboardingPanel({
 
         <div className="mt-4 grid gap-2 border-t border-border pt-4">
           <p className="text-xs text-fg-muted">Or buy OpenGeni credits for hosted models.</p>
-          {billingMode === "stripe" ? (
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <Input
-                aria-label="Credit amount"
-                type="number"
-                min="5"
-                max="10000"
-                step="0.01"
-                value={topupAmount}
-                onChange={(event) => setTopupAmount(event.target.value)}
-              />
-              <Button
-                type="button"
-                disabled={!client || busy}
-                onClick={() => void buyCredits()}
-              >
-                {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CreditCardIcon className="size-4" />}
-                Buy credits
-              </Button>
-            </div>
-          ) : (
-            <p className="text-xs text-fg-subtle">
-              Credit checkout is available when Stripe billing is enabled for this deployment.
-            </p>
-          )}
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <Input
+              aria-label="Credit amount"
+              type="number"
+              min="5"
+              max="10000"
+              step="0.01"
+              value={topupAmount}
+              onChange={(event) => setTopupAmount(event.target.value)}
+            />
+            <Button
+              type="button"
+              disabled={!client || busy}
+              onClick={() => void buyCredits()}
+            >
+              {busy ? <Loader2Icon className="size-4 animate-spin" /> : <CreditCardIcon className="size-4" />}
+              Buy credits
+            </Button>
+          </div>
         </div>
 
         <Button

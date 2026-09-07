@@ -76,7 +76,12 @@ describe("credit required prompt", () => {
     root = createRoot(container);
     await act(async () =>
       root!.render(
-        <EmptyCreditsNotice workspaceId="workspace-a" accountId="account-a" canBuyCredits />,
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+        />,
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
@@ -92,10 +97,34 @@ describe("credit required prompt", () => {
     root = createRoot(container);
     await act(async () =>
       root!.render(
-        <EmptyCreditsNotice workspaceId="workspace-a" accountId="account-a" canBuyCredits />,
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+        />,
       ),
     );
     await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(container.textContent).not.toContain("This model uses OpenGeni credits");
+  });
+
+  test("empty-credits notice does not probe billing without read permission", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling={false}
+        />,
+      ),
+    );
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(getBilling).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("This model uses OpenGeni credits");
   });
 });

@@ -96,7 +96,7 @@ describe("preferredConnectedModelId", () => {
             checkedAt: null,
           },
           credentialReadiness: {
-            status: "missing",
+            status: "not_ready",
             reason: "missing_credential",
             basis: "connection",
             checkedAt: null,

@@ -50,6 +50,8 @@ import {
 } from "lucide-react";
 import {
   createElement,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -61,7 +63,6 @@ import {
 import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
-import { EmptyCreditsNotice } from "@/components/credit-required-prompt";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
@@ -168,6 +169,12 @@ import {
 import type { Channel, SandboxBackend, Session } from "@/types";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+const EmptyCreditsNotice = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.EmptyCreditsNotice,
+  })),
+);
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -1220,17 +1227,25 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
-        {selectedPolicyRow?.billingClass === "opengeni_credits" ? (
+        {selectedPolicyRow?.billingClass === "opengeni_credits" &&
+        hasAccountPermission(
+          context.accessContext,
+          workspace?.accountId ?? "",
+          "billing:read",
+        ) ? (
           <div className="mt-6">
-            <EmptyCreditsNotice
-              workspaceId={workspaceId}
-              accountId={workspace?.accountId ?? null}
-              canBuyCredits={hasAccountPermission(
-                context.accessContext,
-                workspace?.accountId ?? "",
-                "billing:manage",
-              )}
-            />
+            <Suspense fallback={null}>
+              <EmptyCreditsNotice
+                workspaceId={workspaceId}
+                accountId={workspace?.accountId ?? null}
+                canBuyCredits={hasAccountPermission(
+                  context.accessContext,
+                  workspace?.accountId ?? "",
+                  "billing:manage",
+                )}
+                canReadBilling
+              />
+            </Suspense>
           </div>
         ) : null}
 

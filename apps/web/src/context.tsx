@@ -49,8 +49,6 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { CreditRequiredPrompt } from "@/components/credit-required-prompt";
-import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -187,6 +185,18 @@ const BrowserAccountsLoadingGate = lazy(() =>
 const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsOrganizationOnboardingPanel,
+  })),
+);
+
+const CreditRequiredPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
+  })),
+);
+
+const OrganizationOnboardingPanel = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.OrganizationOnboardingPanel,
   })),
 );
 
@@ -2767,26 +2777,28 @@ export function RootRouteComponent() {
     accessContext &&
     !defaultWorkspaceId &&
     !slackLinkContinuationWorkspaceId ? (
-    browserAccountsEnabled ? (
-      <BrowserAccountsOrganizationOnboardingPanel
-        client={client}
-        activeEmail={authSession?.user.email ?? null}
-        invitation={organizationInvitationContinuation}
-        onComplete={revalidatePrincipalAccess}
-      />
-    ) : (
-      <OrganizationOnboardingPanel
-        client={client}
-        activeEmail={authSession?.user.email ?? null}
-        invitation={organizationInvitationContinuation}
-        onUseInvitedAccount={() => {
-          void handleManagedSignOut().catch((error) =>
-            toast.error("Sign out failed", { description: String(error) }),
-          );
-        }}
-        onComplete={revalidatePrincipalAccess}
-      />
-    )
+    <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+      {browserAccountsEnabled ? (
+        <BrowserAccountsOrganizationOnboardingPanel
+          client={client}
+          activeEmail={authSession?.user.email ?? null}
+          invitation={organizationInvitationContinuation}
+          onComplete={revalidatePrincipalAccess}
+        />
+      ) : (
+        <OrganizationOnboardingPanel
+          client={client}
+          activeEmail={authSession?.user.email ?? null}
+          invitation={organizationInvitationContinuation}
+          onUseInvitedAccount={() => {
+            void handleManagedSignOut().catch((error) =>
+              toast.error("Sign out failed", { description: String(error) }),
+            );
+          }}
+          onComplete={revalidatePrincipalAccess}
+        />
+      )}
+    </Suspense>
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
   ) : !defaultWorkspaceId && !slackLinkContinuationWorkspaceId ? (
@@ -2798,18 +2810,20 @@ export function RootRouteComponent() {
     <AppContext.Provider value={appContext}>
       <Outlet />
       {creditRequired ? (
-        <CreditRequiredPrompt
-          open
-          workspaceId={creditRequired.workspaceId}
-          accountId={creditRequired.accountId}
-          canBuyCredits={
-            Boolean(creditRequired.accountId) &&
-            hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
-          }
-          onOpenChange={(open) => {
-            if (!open) setCreditRequired(null);
-          }}
-        />
+        <Suspense fallback={null}>
+          <CreditRequiredPrompt
+            open
+            workspaceId={creditRequired.workspaceId}
+            accountId={creditRequired.accountId}
+            canBuyCredits={
+              Boolean(creditRequired.accountId) &&
+              hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
+            }
+            onOpenChange={(open) => {
+              if (!open) setCreditRequired(null);
+            }}
+          />
+        </Suspense>
       ) : null}
       {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
         <TanStackRouterDevtools position="bottom-right" />
