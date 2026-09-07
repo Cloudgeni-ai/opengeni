@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
 import { SessionConversation } from "@opengeni/react";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
-import "@opengeni/react/styles.css";
+import "@opengeni/react/compiled.css";
 
 const control: SessionQueueSnapshot["effectiveControl"] = {
   state: "active",
