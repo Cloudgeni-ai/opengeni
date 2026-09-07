@@ -1,3 +1,5 @@
+import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
+import { FailedSessionBanner } from "./failed-session-banner";
 import { FailureRecoveryBoundary } from "./failure-recovery-boundary";
 import { afterEach, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
@@ -33,7 +35,7 @@ test("one Continue click sequence submits one visible follow-up and leaves deliv
       sends++;
       return receipt;
     },
-    continueBlockedReason: null,
+    continuationBlocker: null,
     onChooseModel: () => {
       modelOpens++;
     },
@@ -61,7 +63,7 @@ test("failed local submission remains retryable and blocked drafts explain the r
       sends++;
       return false;
     },
-    continueBlockedReason: null as string | null,
+    continuationBlocker: null as "draft" | null,
     onChooseModel: () => {},
     modelDisabled: false,
   };
@@ -70,12 +72,7 @@ test("failed local submission remains retryable and blocked drafts explain the r
   expect(container.querySelector('[role="alert"]')?.textContent).toContain("could not be added");
   expect(container.querySelector("button")!.disabled).toBe(false);
   await act(async () =>
-    root!.render(
-      <FailedSessionActions
-        {...props}
-        continueBlockedReason="Send your draft below to continue."
-      />,
-    ),
+    root!.render(<FailedSessionActions {...props} continuationBlocker="draft" />),
   );
   expect(container.textContent).toContain("Send your draft below to continue.");
   await act(async () => container.querySelector("button")!.click());
@@ -117,7 +114,7 @@ test("history hydration preserves a request while a distinct failure gets a fres
           })
         : Promise.resolve(true);
     },
-    continueBlockedReason: null,
+    continuationBlocker: null,
     onChooseModel: () => {},
     modelDisabled: false,
   };
@@ -134,4 +131,84 @@ test("history hydration preserves a request while a distinct failure gets a fres
   await act(async () => container.querySelector("button")!.click());
   expect(sends).toBe(2);
   expect(container.querySelector("button")!.textContent).toBe("Continue requested");
+});
+
+test("credit exhaustion retains model selection without offering automatic Continue", async () => {
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  let opened = 0;
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner
+        creditExhausted
+        failure={{
+          reason: "No credits available",
+          failedAt: null,
+          recoveryCount: 0,
+          failedTurnCount: 1,
+        }}
+        actions={{
+          onContinue: async () => true,
+          continuationBlocker: null,
+          modelDisabled: false,
+          onChooseModel: () => {
+            opened++;
+          },
+        }}
+      />,
+    ),
+  );
+  expect(container.textContent).toContain("choose another");
+  expect([...container.querySelectorAll("button")].map((button) => button.textContent)).toEqual([
+    "Choose another model",
+  ]);
+  await act(async () => container.querySelector("button")!.click());
+  expect(opened).toBe(1);
+});
+
+test("shared composer blockers disable Continue and explain the actual unresolved choice", async () => {
+  const ready = {
+    uploadPending: false,
+    repositoryError: null,
+    policyValid: true,
+    variableSetBlocked: false,
+    personalDecision: false,
+    personalLoading: false,
+  };
+  let sends = 0;
+  const props = {
+    onContinue: async () => {
+      sends++;
+      return true;
+    },
+    continuationBlocker: "draft" as const,
+    onChooseModel: () => {},
+    modelDisabled: false,
+  };
+  const container = await render(props);
+  for (const [change, expected] of [
+    [{ uploadPending: true }, "upload"],
+    [{ repositoryError: "Repository access expired" }, "Repository access expired"],
+    [{ repositoryError: "" }, "repository access"],
+    [{ policyValid: false }, "supported model"],
+    [{ variableSetBlocked: true }, "Variable Sets"],
+    [{ personalDecision: true }, "personal resource attachment"],
+    [{ personalLoading: true }, "personal resource access"],
+  ] as const) {
+    const input = { ...ready, ...change };
+    await act(async () =>
+      root!.render(
+        <FailedSessionActions
+          {...props}
+          composerBlocker={getComposerSendBlocker(input)}
+          repositoryError={input.repositoryError}
+        />,
+      ),
+    );
+    expect(container.querySelector("button")!.disabled).toBe(true);
+    expect(container.textContent).toContain(expected);
+    await act(async () => container.querySelector("button")!.click());
+  }
+  expect(sends).toBe(0);
 });

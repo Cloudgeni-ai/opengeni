@@ -11,9 +11,9 @@ import { FailedSessionActions } from "./failed-session-actions";
  * were retried automatically before it, and the fact that the composer stays
  * usable — sending a message revives the session.
  *
- * Credit exhaustion gets its own copy: "send a message to revive" is a lie
- * when the workspace has no credits (the revive turn dies the same death), so
- * the banner points at the actual fix — the organization's Credits section.
+ * Credit exhaustion keeps Add credits and the policy-constrained model picker
+ * available. The automatic continuation shortcut stays hidden until the user
+ * resolves that billing choice through the existing composer flow.
  */
 export function FailedSessionBanner({
   failure,
@@ -41,19 +41,32 @@ export function FailedSessionBanner({
                 {failure.failedAt ? ` (since ${formatTimestamp(failure.failedAt)})` : ""}.
               </span>
               <div className="mt-1 text-xs text-fg-muted">
-                The conversation history is preserved. Add credits to the organization, then keep
-                working from right here.
+                The conversation history is preserved. Add organization credits or choose another
+                available model, then keep working here.
               </div>
             </div>
           </div>
-          {workspaceId ? (
-            <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
-              <Link to="/workspaces/$workspaceId/organization" params={{ workspaceId }}>
-                <CreditCardIcon className="size-3.5" />
-                Add credits
-              </Link>
-            </Button>
-          ) : null}
+          <div className="flex flex-wrap gap-2">
+            {actions ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                disabled={actions.modelDisabled}
+                onClick={actions.onChooseModel}
+              >
+                Choose another model
+              </Button>
+            ) : null}
+            {workspaceId ? (
+              <Button asChild type="button" size="sm" variant="secondary" className="shrink-0">
+                <Link to="/workspaces/$workspaceId/organization" params={{ workspaceId }}>
+                  <CreditCardIcon className="size-3.5" />
+                  Add credits
+                </Link>
+              </Button>
+            ) : null}
+          </div>
         </div>
       </div>
     );
