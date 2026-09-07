@@ -5270,7 +5270,12 @@ function registerWorkspaceOrchestrationTools(
           ),
         instructions: z4.string().min(1).max(SESSION_INSTRUCTIONS_MAX_CHARACTERS).optional(),
         goal: z4.unknown().optional(),
-        resources: z4.array(z4.unknown()).optional(),
+        resources: z4
+          .array(z4.unknown())
+          .optional()
+          .describe(
+            "Omit to inherit parent repositories only. Files are never inherited automatically; explicitly include file resources to attach them. An empty array inherits no resources.",
+          ),
         tools: z4.array(z4.unknown()).optional(),
         mcpServers: z4.array(z4.unknown()).optional(),
         variableSetId: z4.string().uuid().optional(),

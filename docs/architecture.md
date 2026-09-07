@@ -752,7 +752,9 @@ These producers all converge on the ordinary session/turn runtime:
 - an **automation** authenticates an external event, freezes the matching
   trigger revision, and creates an ordinary session/run; and
 - a **child session** is a normal session with explicit lineage, depth, compute,
-  visibility, and initiating-authority rules.
+  visibility, and initiating-authority rules. Omitted child resources inherit
+  repositories only; file attachments require explicit selection (see
+  [`nested-agent-depth.md`](nested-agent-depth.md)).
 
 Session header and sidebar schedule indicators use `Session.hasSchedules`, derived by one batched indexed lookup of non-deleted `scheduled_tasks.reusable_session_id` targets after session authorization. Paused schedules remain linked. Creation metadata is only historical run-grouping provenance. The schedules list accepts a server-side `sessionId` filter; the web route passes `targetSessionId` on navigation.
 The existing lineage refresh also carries `sessionHasSchedules` for the open header and schedule flags for its nodes, so external schedule mutations converge through the existing 30-second header / 15-second sidebar refreshes without a new polling loop or event protocol.
