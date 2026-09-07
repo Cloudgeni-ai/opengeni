@@ -14,14 +14,31 @@ mock.module("@tanstack/react-router", () => ({
 
 mock.module("@/context", () => ({
   useAppContext: () => ({
-    client: { getBilling, createBillingCheckout: mock(async () => ({ url: "https://checkout.test" })) },
+    client: {
+      getBilling,
+      createBillingCheckout: mock(async () => ({ url: "https://checkout.test" })),
+    },
   }),
+}));
+
+mock.module("@/components/ui/dialog", () => ({
+  Dialog: ({ open, children }: { open: boolean; children: ReactNode }) =>
+    open ? <div>{children}</div> : null,
+  DialogContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogDescription: ({ children }: { children: ReactNode }) => <p>{children}</p>,
+  DialogFooter: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogHeader: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  DialogTitle: ({ children }: { children: ReactNode }) => <h2>{children}</h2>,
 }));
 
 const { CreditRequiredPrompt, EmptyCreditsNotice } = await import("./credit-required-prompt");
 
 beforeAll(() => {
-  GlobalRegistrator.register();
+  try {
+    GlobalRegistrator.register();
+  } catch {
+    // Another web test in this process already installed Happy DOM.
+  }
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 
@@ -48,9 +65,9 @@ describe("credit required prompt", () => {
         />,
       ),
     );
-    expect(document.body.textContent).toContain("Add OpenGeni credits to continue");
-    expect(document.body.textContent).toContain("Buy credits");
-    expect(document.body.textContent).toContain("Connect a model");
+    expect(container.textContent).toContain("Add OpenGeni credits to continue");
+    expect(container.textContent).toContain("Buy credits");
+    expect(container.textContent).toContain("Connect a model");
   });
 
   test("empty-credits notice appears only when the organization balance is empty", async () => {

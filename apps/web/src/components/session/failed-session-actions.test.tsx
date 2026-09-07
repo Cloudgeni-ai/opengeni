@@ -13,8 +13,12 @@ mock.module("@tanstack/react-router", () => ({
 const { FailedSessionBanner } = await import("./failed-session-banner");
 
 beforeAll(() => {
-  GlobalRegistrator.register();
-  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  try {
+    GlobalRegistrator.register();
+  } catch {
+    // Another web test in this process already installed Happy DOM.
+  }
+  (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 });
 let root: Root | undefined;
 afterEach(async () => {

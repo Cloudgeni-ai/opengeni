@@ -370,7 +370,7 @@ describe("organization onboarding UI", () => {
       expect(completeSelfServiceSetup).not.toHaveBeenCalled();
       expect(container.textContent).toContain("Connect a model or buy credits");
       expect(container.textContent).toContain("Connect Codex");
-      expect(container.textContent).toContain("Buy OpenGeni credits");
+      expect(container.textContent).toContain("buy OpenGeni credits");
       expect(onComplete).not.toHaveBeenCalled();
       await act(async () =>
         Array.from(container.querySelectorAll("button"))
