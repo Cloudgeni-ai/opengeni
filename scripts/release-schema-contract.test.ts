@@ -131,7 +131,9 @@ describe("release schema contract", () => {
 
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
-    expect(completeSourceContract.latestMigration).toBe("0418_site_direct_uploads.sql");
+    expect(completeSourceContract.latestMigration).toBe(
+      "0419_background_command_launch_authority.sql",
+    );
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );
@@ -248,6 +250,9 @@ describe("release schema contract", () => {
     );
     const siteDirectUploads = completeSourceContract.migrations.some(
       (migration) => migration.path === "0418_site_direct_uploads.sql",
+    );
+    const backgroundCommandLaunchAuthority = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0419_background_command_launch_authority.sql",
     );
     const commandRunnerFailureMetadata = completeSourceContract.migrations.some(
       (migration) => migration.path === "0417_command_runner_failure_metadata.sql",
@@ -685,6 +690,7 @@ describe("release schema contract", () => {
       "0416_scheduled_inherited_tool_admission.sql",
       "0417_command_runner_failure_metadata.sql",
       "0418_site_direct_uploads.sql",
+      "0419_background_command_launch_authority.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -740,6 +746,7 @@ describe("release schema contract", () => {
         (newSessionDraftProjectProvenanceBackfill ? 1 : 0) +
         (commandCompletionObservation ? 1 : 0) +
         (siteDirectUploads ? 1 : 0) +
+        (backgroundCommandLaunchAuthority ? 1 : 0) +
         (commandRunnerFailureMetadata ? 1 : 0) +
         (scheduledInheritedToolAdmission ? 1 : 0) +
         (scheduledGeneratedProducerMaterialization ? 1 : 0) +
@@ -983,6 +990,9 @@ describe("release schema contract", () => {
             latestMigration: "0412_new_session_draft_project_provenance_validation.sql",
           }
         : {}),
+      ...(backgroundCommandLaunchAuthority
+        ? { latestMigration: "0419_background_command_launch_authority.sql" }
+        : {}),
       ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
@@ -1064,6 +1074,9 @@ describe("release schema contract", () => {
     );
     const siteDirectUploads = completeSourceContract.migrations.some(
       (migration) => migration.path === "0418_site_direct_uploads.sql",
+    );
+    const backgroundCommandLaunchAuthority = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0419_background_command_launch_authority.sql",
     );
     const commandRunnerFailureMetadata = completeSourceContract.migrations.some(
       (migration) => migration.path === "0417_command_runner_failure_metadata.sql",
@@ -1378,6 +1391,7 @@ describe("release schema contract", () => {
       "0416_scheduled_inherited_tool_admission.sql",
       "0417_command_runner_failure_metadata.sql",
       "0418_site_direct_uploads.sql",
+      "0419_background_command_launch_authority.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1667,6 +1681,7 @@ describe("release schema contract", () => {
         (newSessionDraftProjectProvenanceBackfill ? 1 : 0) +
         (commandCompletionObservation ? 1 : 0) +
         (siteDirectUploads ? 1 : 0) +
+        (backgroundCommandLaunchAuthority ? 1 : 0) +
         (commandRunnerFailureMetadata ? 1 : 0) +
         (scheduledGeneratedProducerMaterialization ? 1 : 0) +
         (newSessionDraftProjectProvenanceValidation ? 1 : 0) +
@@ -1912,6 +1927,9 @@ describe("release schema contract", () => {
         ? {
             latestMigration: "0412_new_session_draft_project_provenance_validation.sql",
           }
+        : {}),
+      ...(backgroundCommandLaunchAuthority
+        ? { latestMigration: "0419_background_command_launch_authority.sql" }
         : {}),
       ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
     });
