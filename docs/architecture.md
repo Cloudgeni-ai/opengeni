@@ -30,15 +30,10 @@ This document owns five things:
 - the repository map and responsibility boundaries; and
 - a routing index from change area to canonical source.
 
-It intentionally does **not** own exhaustive API, schema, configuration,
-permission, migration, provider, or release inventories. Those facts change
-more frequently than the architecture and already have canonical homes in
-code, package READMEs, focused topic docs, [`../CONTRIBUTING.md`](../CONTRIBUTING.md),
-and [`../AGENTS.md`](../AGENTS.md).
-
-A useful test is: if a paragraph needs a migration number, an exact timeout, a
-complete route list, or a current table count to make sense, it probably
-belongs in a focused topic document rather than here.
+Exact API, schema, configuration, permission, migration, provider, and release
+inventories belong in code, package READMEs, focused topic docs,
+[`../CONTRIBUTING.md`](../CONTRIBUTING.md), or [`../AGENTS.md`](../AGENTS.md).
+Keep migration numbers, timeouts, route lists, and table counts there.
 
 ---
 
