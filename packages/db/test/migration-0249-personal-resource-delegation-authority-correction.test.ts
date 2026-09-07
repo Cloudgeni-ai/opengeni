@@ -32,7 +32,7 @@ const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_
 // 0414 patches the producer fence created by withheld 0275; replay them together.
 const scheduledProducerMaterializationMigrationName =
   "0414_scheduled_generated_producer_materialization.sql";
-const scheduledInheritedToolAdmissionMigrationName = "0415_scheduled_inherited_tool_admission.sql";
+const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",

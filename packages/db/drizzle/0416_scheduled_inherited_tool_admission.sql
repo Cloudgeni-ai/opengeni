@@ -19,7 +19,7 @@ BEGIN
     / length(old_expression);
   IF occurrences = 0 AND strpos(definition, new_expression) > 0 THEN RETURN; END IF;
   IF occurrences <> 1 THEN
-    RAISE EXCEPTION '0415 scheduled inherited tools prerequisite definition drift'
+    RAISE EXCEPTION '0416 scheduled inherited tools prerequisite definition drift'
       USING ERRCODE = '55000';
   END IF;
   EXECUTE replace(definition, old_expression, new_expression);

@@ -132,7 +132,7 @@ describe("release schema contract", () => {
   test("registers forward migrations in order after published history", async () => {
     const completeSourceContract = await buildCompleteSchemaContract();
     expect(completeSourceContract.latestMigration).toBe(
-      "0415_scheduled_inherited_tool_admission.sql",
+      "0416_scheduled_inherited_tool_admission.sql",
     );
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
@@ -231,7 +231,7 @@ describe("release schema contract", () => {
   test("registers forward migrations without repinning host-export history", async () => {
     let completeSourceContract = await buildSchemaContract();
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0415_scheduled_inherited_tool_admission.sql",
+      (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
     );
     const newSessionDraftProjectProvenance = completeSourceContract.migrations.some(
       (migration) => migration.path === "0409_new_session_draft_project_provenance.sql",
@@ -674,7 +674,7 @@ describe("release schema contract", () => {
       "0412_new_session_draft_project_provenance_validation.sql",
       "0413_session_filter_activity.sql",
       "0414_scheduled_generated_producer_materialization.sql",
-      "0415_scheduled_inherited_tool_admission.sql",
+      "0416_scheduled_inherited_tool_admission.sql",
     ]);
     const migrationsBeforeAutomaticSessionTitles = completeSourceContract.migrations.filter(
       (migration) => !automaticSessionTitleMigrationPaths.has(migration.path),
@@ -793,7 +793,7 @@ describe("release schema contract", () => {
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: scheduledInheritedToolAdmission
-        ? "0415_scheduled_inherited_tool_admission.sql"
+        ? "0416_scheduled_inherited_tool_admission.sql"
         : scheduledGeneratedProducerMaterialization
           ? "0414_scheduled_generated_producer_materialization.sql"
           : sessionFilterActivity
@@ -1026,7 +1026,7 @@ describe("release schema contract", () => {
       "0361_remember_knowledge_memory_materialization.sql",
     ]);
     const scheduledInheritedToolAdmission = completeSourceContract.migrations.some(
-      (migration) => migration.path === "0415_scheduled_inherited_tool_admission.sql",
+      (migration) => migration.path === "0416_scheduled_inherited_tool_admission.sql",
     );
     const newSessionDraftProjectProvenance = completeSourceContract.migrations.some(
       (migration) => migration.path === "0409_new_session_draft_project_provenance.sql",
@@ -1346,7 +1346,7 @@ describe("release schema contract", () => {
       "0412_new_session_draft_project_provenance_validation.sql",
       "0413_session_filter_activity.sql",
       "0414_scheduled_generated_producer_materialization.sql",
-      "0415_scheduled_inherited_tool_admission.sql",
+      "0416_scheduled_inherited_tool_admission.sql",
     ].filter((path) =>
       completeSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -1703,7 +1703,7 @@ describe("release schema contract", () => {
         (mcpOauthAuthorizationServer ? 1 : 0) +
         (toolGatewayApprovalCapabilities ? 1 : 0),
       latestMigration: scheduledInheritedToolAdmission
-        ? "0415_scheduled_inherited_tool_admission.sql"
+        ? "0416_scheduled_inherited_tool_admission.sql"
         : scheduledGeneratedProducerMaterialization
           ? "0414_scheduled_generated_producer_materialization.sql"
           : sessionFilterActivity

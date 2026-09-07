@@ -37,7 +37,7 @@ test("scheduled admission inherits omitted tools but preserves explicit override
       ),
     ).rejects.toMatchObject({ code: "40001" });
     const migration = await readFile(
-      new URL("../drizzle/0415_scheduled_inherited_tool_admission.sql", import.meta.url),
+      new URL("../drizzle/0416_scheduled_inherited_tool_admission.sql", import.meta.url),
       "utf8",
     );
     await sql.begin(async (tx) => {
