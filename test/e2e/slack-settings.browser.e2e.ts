@@ -113,8 +113,15 @@ test("sibling workspace finds the verified connection and opens its home setting
 test("OAuth conflict returns to a visible recovery message that survives reload", async () => {
   const context = await browser.newContext();
   const page = await context.newPage();
+  const state = {
+    installed: false,
+    routingSaves: 0,
+    disconnects: 0,
+    connectionsReady: undefined as Promise<void> | undefined,
+  };
+  let releaseConnections = () => {};
   try {
-    await installApi(page, { installed: false, routingSaves: 0, disconnects: 0 });
+    await installApi(page, state);
     await page.goto(
       `${baseUrl}/workspaces/${workspaceId}/capabilities?slack=error&reason=http_409`,
     );
@@ -126,22 +133,41 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     expect(redirected.pathname).toBe(`/workspaces/${workspaceId}/plugins`);
     expect(redirected.searchParams.get("slack")).toBe("error");
     expect(redirected.searchParams.get("reason")).toBe("http_409");
+    state.connectionsReady = new Promise<void>((resolve) => {
+      releaseConnections = resolve;
+    });
     await page.reload();
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
-    expect(await sheet.getByRole("button", { name: "Set up", exact: true }).count()).toBe(0);
+    const setup = sheet.getByRole("button", { name: "Set up", exact: true });
+    await setup.waitFor();
+    expect(await setup.isDisabled()).toBe(true);
+    releaseConnections();
+    await sheet
+      .getByText(
+        "Your organization owner needs to resolve the existing Slack installation before setup can continue.",
+        { exact: true },
+      )
+      .waitFor();
+    expect(await setup.count()).toBe(0);
     await sheet.getByRole("button", { name: "Dismiss setup message" }).click();
     expect(new URL(page.url()).searchParams.has("slack")).toBe(false);
     await sheet.getByRole("button", { name: "Set up", exact: true }).waitFor();
   } finally {
+    releaseConnections();
     await context.close();
   }
 }, 60_000);
 
 async function installApi(
   page: Page,
-  state: { installed: boolean; routingSaves: number; disconnects: number },
+  state: {
+    installed: boolean;
+    routingSaves: number;
+    disconnects: number;
+    connectionsReady?: Promise<void>;
+  },
 ) {
   await page.route("http://127.0.0.1:9/**", async (route) => {
     const request = route.request();
@@ -193,8 +219,10 @@ async function installApi(
     if (path === "/v1/workspaces")
       return json([workspace(workspaceId, "Cloudgeni"), workspace(siblingId, "Analytics")]);
     if (path.endsWith("/capabilities")) return json({ items: [], installations: [] });
-    if (path.endsWith("/connections"))
+    if (path.endsWith("/connections")) {
+      await state.connectionsReady;
       return json({ connections: state.installed && path.includes(workspaceId) ? [bot()] : [] });
+    }
     if (path.endsWith("/connections/slack-bot/bindings"))
       return json({ bindings: state.installed && path.includes(workspaceId) ? [binding()] : [] });
     if (path.endsWith("/channel-routes")) {
