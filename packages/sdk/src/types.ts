@@ -3089,6 +3089,7 @@ export type FirstPartyMcpToolName =
   | "sandbox_file_publish"
   | "artifacts_list"
   | "artifacts_get_source"
+  | "artifacts_prepare_upload"
   | "artifacts_create"
   | "artifacts_publish"
   | "artifacts_rollback"

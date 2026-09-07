@@ -1,4 +1,13 @@
-import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { sitePackageVersions } from "./site-package-versions";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -348,11 +357,14 @@ function bundledArtifactSkillsDir(): string {
 
 function bundledSiteSkillsDir(): string {
   const packaged = packagedSkillDirectory("bundled_site_skills");
-  if (isPathWithin(process.cwd(), packaged)) return packaged;
   if (!stagedBundledSiteSkillsDir) {
     stagedBundledSiteSkillsDir = stageSkillDirectory(
       packaged,
       join(process.cwd(), ".opengeni", "bundled_site_skills"),
+    );
+    writeFileSync(
+      join(stagedBundledSiteSkillsDir, "opengeni-sites", "package-versions.json"),
+      JSON.stringify(sitePackageVersions(), null, 2),
     );
   }
   return stagedBundledSiteSkillsDir;

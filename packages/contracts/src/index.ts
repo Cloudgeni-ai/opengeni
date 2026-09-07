@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
+export { siteSessionPath } from "./site-session-http";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -901,6 +902,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
+  "artifacts_prepare_upload",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",

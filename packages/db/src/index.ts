@@ -25787,11 +25787,11 @@ function mapXaiCapacityWaiter(row: typeof schema.xaiCapacityWaiters.$inferSelect
 
 function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
   return earliestResetAt && earliestResetAt.getTime() > now.getTime()
-    ? earliestResetAt
+    ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
     : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
 }
 
-async function resolveXaiWaiterSubject(
+export async function resolveXaiWaiterSubject(
   db: Database,
   workspaceId: string,
   sessionId: string,

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   WorkspaceArtifactHtml,
   WorkspaceArtifactRequestedTools,
@@ -15,11 +14,11 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export type PreparedWorkspaceArtifactContent = {
   contentKey: string;
-  contentSha256: string;
+  contentSha256: null;
   sizeBytes: number;
-  sourceKey: string;
-  sourceSha256: string;
-  sourceSizeBytes: number;
+  sourceKey: string | null;
+  sourceSha256: null;
+  sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
   persistContent: () => Promise<void>;
   discardContent: () => Promise<void>;
@@ -35,31 +34,31 @@ export function prepareWorkspaceArtifactContent(
   },
 ): PreparedWorkspaceArtifactContent {
   const html = WorkspaceArtifactHtml.parse(input.html);
-  const source = WorkspaceArtifactSourceBundle.parse(input.source ?? sourceBundleFromHtml(html));
+  const source = input.source ? WorkspaceArtifactSourceBundle.parse(input.source) : null;
   const requestedTools =
     input.requestedTools === undefined
       ? undefined
       : WorkspaceArtifactRequestedTools.parse(input.requestedTools);
   const contentBytes = encoder.encode(html);
-  const sourceBytes = encoder.encode(JSON.stringify(source));
-  const contentSha256 = sha256(contentBytes);
-  const sourceSha256 = sha256(sourceBytes);
+  const sourceBytes = source ? encoder.encode(JSON.stringify(source)) : null;
+  const contentSha256 = null;
+  const sourceSha256 = null;
   const storageGroupId = crypto.randomUUID();
-  const contentKey = `workspaces/${workspaceId}/workspace-artifacts/blobs/${storageGroupId}-${contentSha256}.html`;
-  const sourceKey = `workspaces/${workspaceId}/workspace-artifacts/sources/${storageGroupId}-${sourceSha256}.json`;
+  const contentKey = `workspaces/${workspaceId}/workspace-artifacts/blobs/${storageGroupId}.html`;
+  const sourceKey = `workspaces/${workspaceId}/workspace-artifacts/sources/${storageGroupId}.json`;
   const discardContent = async (): Promise<void> => {
     await Promise.allSettled([
       objectStorage.deleteObject(contentKey),
-      objectStorage.deleteObject(sourceKey),
+      ...(source ? [objectStorage.deleteObject(sourceKey)] : []),
     ]);
   };
   return {
     contentKey,
     contentSha256,
     sizeBytes: contentBytes.byteLength,
-    sourceKey,
+    sourceKey: source ? sourceKey : null,
     sourceSha256,
-    sourceSizeBytes: sourceBytes.byteLength,
+    sourceSizeBytes: sourceBytes?.byteLength ?? null,
     ...(requestedTools === undefined ? {} : { requestedTools }),
     discardContent,
     persistContent: async () => {
@@ -68,14 +67,14 @@ export function prepareWorkspaceArtifactContent(
           key: contentKey,
           contentType: "text/html; charset=utf-8",
           body: contentBytes,
-          sha256: contentSha256,
         }),
-        objectStorage.putObject({
-          key: sourceKey,
-          contentType: "application/json; charset=utf-8",
-          body: sourceBytes,
-          sha256: sourceSha256,
-        }),
+        sourceBytes
+          ? objectStorage.putObject({
+              key: sourceKey,
+              contentType: "application/json; charset=utf-8",
+              body: sourceBytes,
+            })
+          : Promise.resolve(),
       ]);
       const failed = writes.find((write) => write.status === "rejected");
       if (!failed) return;
@@ -110,24 +109,10 @@ export async function readWorkspaceArtifactContent(
       : Promise.resolve(null),
   ]);
   if (!contentObject) throw new Error("Artifact content is unavailable");
-  if (
-    sha256(contentObject.bytes) !== input.version.contentSha256 ||
-    contentObject.bytes.byteLength !== input.version.sizeBytes
-  ) {
-    throw new Error("Artifact content failed integrity verification");
-  }
   const html = decode(contentObject.bytes, "Artifact content is not valid UTF-8");
   let source = sourceBundleFromHtml(html);
   if (input.sourceKey) {
     if (!sourceObject) throw new Error("Artifact source is unavailable");
-    if (
-      !input.version.sourceSha256 ||
-      input.version.sourceSizeBytes === null ||
-      sha256(sourceObject.bytes) !== input.version.sourceSha256 ||
-      sourceObject.bytes.byteLength !== input.version.sourceSizeBytes
-    ) {
-      throw new Error("Artifact source failed integrity verification");
-    }
     try {
       source = WorkspaceArtifactSourceBundle.parse(
         JSON.parse(decode(sourceObject.bytes, "Artifact source is not valid UTF-8")),
@@ -148,10 +133,6 @@ export async function readWorkspaceArtifactContent(
 
 export function sourceBundleFromHtml(html: string): WorkspaceArtifactSourceBundleValue {
   return { entrypoint: "index.html", files: [{ path: "index.html", content: html }] };
-}
-
-function sha256(bytes: Uint8Array): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 function decode(bytes: Uint8Array, message: string): string {

@@ -1367,8 +1367,14 @@ Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
 live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object, so those providers remain turn-owned until terminal or
-turn cancellation instead of publishing a false background locator. A yielded
+worker session object. After the bounded foreground wait, those providers return
+an explicitly turn-scoped handle so the agent can test a running server. The
+shell remains registered with the exact turn cancellation fence: ordinary
+completion, Pause, Steer, and cancellation stop it and settle its process holder
+before workspace capture. It is not registered as a session background command,
+does not create terminal background notifications, and cannot be reused by a
+successor attempt. Never wait for an indefinitely running server to exit before
+returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,

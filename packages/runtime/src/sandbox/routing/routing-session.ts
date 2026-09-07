@@ -1745,7 +1745,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
 
   /** Local, Docker, and OpenSandbox process ids address an in-memory table on one worker
    * session object. They are not valid durable locators for the independently
-   * scheduled reaper, so those providers stay turn-owned until terminal. */
+   * scheduled reaper, so their yielded handles stay turn-owned until terminal
+   * or turn finalization, never session-owned background commands. */
   canAdoptRetainedProcessAsBackgroundCommand(providerSessionId: number): boolean {
     const record = this.retainedProcesses.get(providerSessionId);
     return (
