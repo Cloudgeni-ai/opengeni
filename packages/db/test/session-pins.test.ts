@@ -191,36 +191,60 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     const channel = await createChannel(db, { ...workspace, name: "Before move" });
     const target = await session({ ...workspace, message: "moving row", channelId: channel.id });
     let changed = false;
-    const wrap = (value: any): any => new Proxy(value, {
-      get(target, property) {
-        if (property === "transaction") return (callback: any, config: any) =>
-          target.transaction((tx: any) => callback(wrap(tx)), config);
-        if (property === "then" && typeof target.toSQL === "function") {
-          return (resolve: any, reject: any) => Promise.resolve(target).then(async (rows: any) => {
-            const query = target.toSQL().sql;
-            if (!changed && query.includes('order by "sessions"."updated_at"') && query.includes(" limit ")) {
-              changed = true;
-              await setSessionChannel(db, { workspaceId: workspace.workspaceId, sessionId: targetId, channelId: null });
-            }
-            return rows;
-          }).then(resolve, reject);
-        }
-        const member = Reflect.get(target, property, target);
-        if (typeof member !== "function") return member;
-        return (...args: any[]) => {
-          const result = member.apply(target, args);
-          return result && typeof result === "object" && (typeof result.toSQL === "function" || typeof result.select === "function" || typeof result.from === "function") ? wrap(result) : result;
-        };
-      },
-    });
+    const wrap = (value: any): any =>
+      new Proxy(value, {
+        get(proxiedQuery, property) {
+          if (property === "transaction")
+            return (callback: any, config: any) =>
+              proxiedQuery.transaction((tx: any) => callback(wrap(tx)), config);
+          if (property === "then" && typeof proxiedQuery.toSQL === "function") {
+            return (resolve: any, reject: any) =>
+              Promise.resolve(proxiedQuery)
+                .then(async (rows: any) => {
+                  const query = proxiedQuery.toSQL().sql;
+                  if (
+                    !changed &&
+                    query.includes('order by "sessions"."updated_at"') &&
+                    query.includes(" limit ")
+                  ) {
+                    changed = true;
+                    await setSessionChannel(db, {
+                      workspaceId: workspace.workspaceId,
+                      sessionId: targetId,
+                      channelId: null,
+                    });
+                  }
+                  return rows;
+                })
+                .then(resolve, reject);
+          }
+          const member = Reflect.get(proxiedQuery, property, proxiedQuery);
+          if (typeof member !== "function") return member;
+          return (...args: any[]) => {
+            const result = member.apply(proxiedQuery, args);
+            return result &&
+              typeof result === "object" &&
+              (typeof result.toSQL === "function" ||
+                typeof result.select === "function" ||
+                typeof result.from === "function")
+              ? wrap(result)
+              : result;
+          };
+        },
+      });
     const targetId = target.id;
     const page = await listSessionsForSubject(wrap(db), workspace.workspaceId, {
-      subjectId, channelId: channel.id, limit: 10,
+      subjectId,
+      channelId: channel.id,
+      limit: 10,
     });
     expect(changed).toBe(true);
     expect(page.sessions).toHaveLength(1);
     expect(page.sessions[0]!.channelId).toBe(channel.id);
-    const fresh = await listSessionsForSubject(db, workspace.workspaceId, { subjectId, channelId: channel.id });
+    const fresh = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      channelId: channel.id,
+    });
     expect(fresh.sessions).toHaveLength(0);
   }, 60_000);
 
@@ -228,14 +252,22 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const channel = await createChannel(db, { ...workspace, name: "Deleted concurrently" });
-    const target = await session({ ...workspace, message: "late channel attachment", channelId: channel.id });
-    const [before] = await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
+    const target = await session({
+      ...workspace,
+      message: "late channel attachment",
+      channelId: channel.id,
+    });
+    const [before] =
+      await admin`select activity_revision::text as revision from sessions where id = ${target.id}`;
     // The channel FK runs the same UPDATE channel_id = NULL for a row attached
     // after deleteChannel's preliminary scan. Only the FK statement sees it.
     await withWorkspaceSessionActivityRls(db, workspace.workspaceId, async (tx) => {
-      await tx.execute(sql`delete from channels where id = ${channel.id} and workspace_id = ${workspace.workspaceId}`);
+      await tx.execute(
+        sql`delete from channels where id = ${channel.id} and workspace_id = ${workspace.workspaceId}`,
+      );
     });
-    const [after] = await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
+    const [after] =
+      await admin`select activity_revision::text as revision, channel_id from sessions where id = ${target.id}`;
     expect(after!.channel_id).toBeNull();
     expect(BigInt(after!.revision)).toBeGreaterThan(BigInt(before!.revision));
   }, 60_000);
@@ -244,13 +276,19 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const channel = await createChannel(db, { ...workspace, name: "Old caller rollback" });
-    const target = await session({ ...workspace, message: "retained filing", channelId: channel.id });
+    const target = await session({
+      ...workspace,
+      message: "retained filing",
+      channelId: channel.id,
+    });
     let failure: unknown;
     try {
       await withWorkspaceRls(db, workspace.workspaceId, async (tx) => {
         await tx.execute(sql`delete from channels where id = ${channel.id}`);
       });
-    } catch (error) { failure = error; }
+    } catch (error) {
+      failure = error;
+    }
     expect(failure).toBeDefined();
     const [row] = await admin`select channel_id from sessions where id = ${target.id}`;
     expect(row!.channel_id).toBe(channel.id);
@@ -259,26 +297,45 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
   test("uses a bounded creator-prefix index for sparse creator pages", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const target = await session({ ...workspace, message: "older sparse creator", createdBy: { kind: "subject", subjectId: "user:sparse" } });
-    await executeSessionActivity(workspace.workspaceId, sql`
+    const target = await session({
+      ...workspace,
+      message: "older sparse creator",
+      createdBy: { kind: "subject", subjectId: "user:sparse" },
+    });
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`
       insert into sessions (id, account_id, workspace_id, initial_message, model, reasoning_effort,
         latency_mode, sandbox_backend, sandbox_group_id, tool_policy, created_by_kind, created_by_subject_id)
       select generated.id, ${workspace.accountId}, ${workspace.workspaceId}, 'newer other creator',
         'test-model', 'medium', 'standard', 'none', generated.id,
         jsonb_build_object('mode', 'explicit', 'inheritedFromSessionId', null), 'subject', 'user:other'
       from (select gen_random_uuid() as id from generate_series(1, 5000)) generated
-    `);
+    `,
+    );
     await admin`analyze sessions`;
-    const plan = await withWorkspaceSubjectRls(db, workspace.workspaceId, "user:sparse", async (tx) =>
-      await tx.execute(sql`explain (analyze, format json) select id from sessions
+    const plan = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute(sql`explain (analyze, format json) select id from sessions
         where workspace_id = ${workspace.workspaceId} and created_by_kind = 'subject'
           and created_by_subject_id = 'user:sparse'
-        order by updated_at desc, id desc limit 20`));
+        order by updated_at desc, id desc limit 20`),
+    );
     expect(JSON.stringify(plan)).toContain("sessions_workspace_creator_updated_id_idx");
-    const rows: Array<{ id: string }> = await withWorkspaceSubjectRls(db, workspace.workspaceId, "user:sparse", async (tx) =>
-      await tx.execute<{ id: string }>(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
+    const rows: Array<{ id: string }> = await withWorkspaceSubjectRls(
+      db,
+      workspace.workspaceId,
+      "user:sparse",
+      async (tx) =>
+        await tx.execute<{
+          id: string;
+        }>(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
         and created_by_kind = 'subject' and created_by_subject_id = 'user:sparse'
-        order by updated_at desc, id desc limit 20`));
+        order by updated_at desc, id desc limit 20`),
+    );
     expect(rows.map((row) => row.id)).toEqual([target.id]);
   }, 60_000);
 

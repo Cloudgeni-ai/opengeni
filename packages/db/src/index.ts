@@ -33477,10 +33477,12 @@ export async function listSessionsForSubject(
         // Keep each selected row in the same MVCC statement as its filters and
         // keyset boundary. A second READ COMMITTED hydration can observe a move
         // or activity change and return content that no longer matches the page.
-        let selectedOrdinaryRows: Array<{
-          session: typeof schema.sessions.$inferSelect;
-          pin: typeof schema.sessionPins.$inferSelect | null;
-        }> | undefined;
+        let selectedOrdinaryRows:
+          | Array<{
+              session: typeof schema.sessions.$inferSelect;
+              pin: typeof schema.sessionPins.$inferSelect | null;
+            }>
+          | undefined;
         let nextCursor: string | null = null;
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
@@ -33680,7 +33682,8 @@ export async function listSessionsForSubject(
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
-          selectedOrdinaryRows ?? (pageIds.length === 0
+          selectedOrdinaryRows ??
+          (pageIds.length === 0
             ? []
             : await tx
                 .select({ session: schema.sessions, pin: schema.sessionPins })

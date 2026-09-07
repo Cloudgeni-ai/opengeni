@@ -372,8 +372,9 @@ describe("API component integration", () => {
     expect(currentDateFiltered.status).toBe(200);
     expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
     for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
-      const response = await app.request(workspacePath(workspaceId,
-        `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`));
+      const response = await app.request(
+        workspacePath(workspaceId, `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`),
+      );
       expect(response.status).toBe(400);
       expect(await response.text()).toContain("millisecond precision");
     }
