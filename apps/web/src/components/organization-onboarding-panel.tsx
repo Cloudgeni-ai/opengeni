@@ -22,6 +22,7 @@ import type { OrganizationInvitation } from "@/types";
 export function OrganizationOnboardingPanel({
   onComplete,
   client,
+  billingMode = "disabled",
   previewState,
   activeEmail = null,
   invitation = null,
@@ -29,6 +30,7 @@ export function OrganizationOnboardingPanel({
 }: {
   onComplete: () => void;
   client?: OpenGeniBrowserClient;
+  billingMode?: "disabled" | "stripe";
   previewState?: SelfServiceOrganizationOnboardingState;
   activeEmail?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
@@ -288,6 +290,7 @@ export function OrganizationOnboardingPanel({
         client={client}
         organizationId={createdSetup.organizationId}
         workspaceId={createdSetup.personalWorkspaceId}
+        billingMode={billingMode}
         onComplete={onComplete}
       />
     );

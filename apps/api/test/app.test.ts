@@ -1876,6 +1876,7 @@ describe("GET /v1/config/client", () => {
 
     expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.managedAuthSessionSetMode).toBe("legacy");
+    expect(config.billingMode).toBe(settings.billingMode);
     expect(config.defaultSandboxBackend).toBe(settings.sandboxBackend);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
@@ -1931,6 +1932,15 @@ describe("GET /v1/config/client", () => {
       (await fetchClientConfig(testSettings({ managedAuthSessionSetMode: "broker" })))
         .managedAuthSessionSetMode,
     ).toBe("broker");
+  });
+
+  test("projects whether Stripe checkout is available", async () => {
+    expect((await fetchClientConfig(testSettings({ billingMode: "disabled" }))).billingMode).toBe(
+      "disabled",
+    );
+    expect((await fetchClientConfig(testSettings({ billingMode: "stripe" }))).billingMode).toBe(
+      "stripe",
+    );
   });
 
   test("projects only configured managed social provider names", async () => {

@@ -367,6 +367,7 @@ describe("organization onboarding UI", () => {
         root.render(
           <OrganizationOnboardingPanel
             client={setupClient as never}
+            billingMode="stripe"
             previewState="required"
             onComplete={onComplete}
           />,

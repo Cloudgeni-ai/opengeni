@@ -51,11 +51,13 @@ export function ModelAccessOnboardingPanel({
   client,
   organizationId,
   workspaceId,
+  billingMode = "disabled",
   onComplete,
 }: {
   client?: OpenGeniBrowserClient;
   organizationId: string;
   workspaceId: string;
+  billingMode?: "disabled" | "stripe";
   onComplete: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -375,39 +377,36 @@ export function ModelAccessOnboardingPanel({
           )}
         </div>
 
-        {/*
-          Offer checkout here without GET /v1/billing. After org create the
-          grant is not revalidated until onComplete, so billing:read is missing
-          and a 403 is an unexpected browser-acceptance error.
-        */}
-        <div className="mt-6 grid gap-4 border-t border-border pt-6">
-          <div>
-            <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
-            <p className="mt-1 text-xs leading-relaxed text-fg-muted">
-              Pay for hosted models as you go. No provider account needed.
+        {billingMode === "stripe" ? (
+          <div className="mt-6 grid gap-4 border-t border-border pt-6">
+            <div>
+              <h2 className="text-sm font-medium">Use OpenGeni credits</h2>
+              <p className="mt-1 text-xs leading-relaxed text-fg-muted">
+                Pay for hosted models as you go. No provider account needed.
+              </p>
+            </div>
+            <CreditAmountPicker
+              value={topupAmount}
+              onChange={setTopupAmount}
+              disabled={busy || !!pending}
+            />
+            <Button
+              type="button"
+              className="h-10 w-full"
+              disabled={!client || busy || !!pending || !validAmount}
+              onClick={() => void buyCredits()}
+            >
+              {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
+              {validAmount
+                ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
+                : "Buy credits"}
+              <ArrowUpRightIcon className="size-4" />
+            </Button>
+            <p className="-mt-2 text-center text-xs text-fg-subtle">
+              You’ll review your payment in Stripe Checkout.
             </p>
           </div>
-          <CreditAmountPicker
-            value={topupAmount}
-            onChange={setTopupAmount}
-            disabled={busy || !!pending}
-          />
-          <Button
-            type="button"
-            className="h-10 w-full"
-            disabled={!client || busy || !!pending || !validAmount}
-            onClick={() => void buyCredits()}
-          >
-            {busy ? <Loader2Icon className="size-4 animate-spin" /> : null}
-            {validAmount
-              ? `Buy $${Number(topupAmount).toLocaleString("en-US", { maximumFractionDigits: 2 })} in credits`
-              : "Buy credits"}
-            <ArrowUpRightIcon className="size-4" />
-          </Button>
-          <p className="-mt-2 text-center text-xs text-fg-subtle">
-            You’ll review your payment in Stripe Checkout.
-          </p>
-        </div>
+        ) : null}
         <Button
           type="button"
           variant="ghost"

@@ -138,6 +138,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
   return organization ? (
     <OrganizationOnboardingPanel
       client={previewClient}
+      billingMode="stripe"
       previewState="required"
       onComplete={() => setCompleted(true)}
     />
@@ -146,6 +147,7 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       client={previewClient}
       organizationId="preview-organization"
       workspaceId="preview-workspace"
+      billingMode="stripe"
       onComplete={() => setCompleted(true)}
     />
   );

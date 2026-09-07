@@ -2780,6 +2780,7 @@ export function RootRouteComponent() {
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
+        billingMode={clientConfig.billingMode ?? "disabled"}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
@@ -2788,6 +2789,7 @@ export function RootRouteComponent() {
       <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
         <OrganizationOnboardingPanel
           client={client}
+          billingMode={clientConfig.billingMode ?? "disabled"}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {

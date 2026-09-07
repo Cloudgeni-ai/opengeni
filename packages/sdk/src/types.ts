@@ -3732,6 +3732,8 @@ export type ClientConfig = {
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
   productAccessMode: ProductAccessMode;
+  /** Client-safe hint for whether the console should offer Stripe checkout. */
+  billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
   analytics: {
