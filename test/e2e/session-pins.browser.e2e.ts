@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import {
   appendSessionEventsAndUpdateSession,
+  addSessionSystemUpdate,
   createDb,
   appendSessionEvents,
   createSession,
@@ -1702,6 +1703,148 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 60_000);
+
+  test("opens the exact child from pending and delivered results without claiming the failed parent completed", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const parent = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failed result parent",
+      );
+      const child = await createTitledSession(dbClient.db, {
+        accountId: parent.accountId,
+        workspaceId,
+        initialMessage: "Child with verified PR result",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        parentSessionId: parent.id,
+        createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+      });
+      // Historical delivered receipts and current pending receipts are distinct.
+      // Both travel through the actual API and event projection in the browser.
+      await appendSessionEvents(dbClient.db, workspaceId, parent.id, [
+        {
+          type: "system.update.delivered",
+          payload: {
+            historyItemId: crypto.randomUUID(),
+            count: 2,
+            members: [0, 1].map((index) => ({
+              id: crypto.randomUUID(),
+              kind: "child_terminal_result",
+              classification: index === 0 ? "success" : "failure",
+              sourceId: child.id,
+              summary:
+                index === 0
+                  ? "Earlier turn went idle waiting for CI."
+                  : "Earlier review turn failed.",
+            })),
+          },
+        },
+      ]);
+      for (let index = 0; index < 9; index += 1) {
+        await addSessionSystemUpdate(dbClient.db, {
+          accountId: parent.accountId,
+          workspaceId,
+          sessionId: parent.id,
+          kind: "child_terminal_result",
+          classification: "success",
+          sourceId: child.id,
+          dedupeKey: `child-result-browser:${parent.id}:${index}`,
+          summary:
+            index === 8
+              ? "The child reports that its PR merged after review and green CI."
+              : "The child went idle while waiting for CI; its goal is not complete.",
+          payload: { type: "child_terminal_result", childSessionId: child.id, status: "idle" },
+        });
+      }
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        parent.id,
+        [
+          {
+            type: "session.status.changed",
+            payload: { status: "failed", code: "pre_claim_failure" },
+          },
+        ],
+        { status: "failed" },
+      );
+      const parentUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${parent.id}`;
+      await page.goto(parentUrl);
+      await page.getByTestId("failed-session-banner").waitFor();
+      const delivered = page.locator("details[data-og-machine-input-batch]");
+      await delivered.getByText("2 agent results received", { exact: true }).click();
+      expect(
+        await delivered.getByRole("button", { name: "View session", exact: true }).count(),
+      ).toBe(2);
+      await delivered.getByRole("button", { name: "View session", exact: true }).first().click();
+      await page.waitForURL(`**/sessions/${child.id}`);
+      expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
+      await page.goBack();
+      await page.getByTestId("failed-session-banner").waitFor();
+      await page.getByRole("button", { name: "Session activity", exact: true }).click();
+      const incoming = page.getByRole("list", { name: "Incoming updates", exact: true });
+      await incoming.waitFor();
+      await page.getByText("Waiting to be included in an agent turn.", { exact: true }).waitFor();
+      expect(await incoming.getByRole("listitem").count()).toBe(9);
+      expect(
+        await incoming.getByRole("button", { name: "View session", exact: true }).count(),
+      ).toBe(9);
+      expect(await page.getByTestId("failed-session-banner").isVisible()).toBe(true);
+      const mobileContext = await configuredContext(browser, {
+        viewport: { width: 375, height: 812 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      try {
+        const mobilePage = await mobileContext.newPage();
+        mobilePage.on("pageerror", (error) => errors.push(error.message));
+        await mobilePage.goto(parentUrl);
+        await mobilePage.getByTestId("failed-session-banner").waitFor();
+        await mobilePage.getByRole("button", { name: "Session activity", exact: true }).click();
+        const mobileIncoming = mobilePage.getByRole("list", {
+          name: "Incoming updates",
+          exact: true,
+        });
+        await mobileIncoming.waitFor();
+        await mobilePage
+          .getByText("Waiting to be included in an agent turn.", { exact: true })
+          .scrollIntoViewIfNeeded();
+        expect(
+          await mobilePage.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
+          ),
+        ).toBe(true);
+        await mobilePage.screenshot({
+          path: `${process.env.TMPDIR ?? "/tmp"}/opengeni-child-results-mobile.png`,
+        });
+        await mobileIncoming
+          .getByRole("button", { name: "View session", exact: true })
+          .last()
+          .click();
+        await mobilePage.waitForURL(`**/sessions/${child.id}`);
+        expect(new URL(mobilePage.url()).pathname.endsWith(child.id)).toBe(true);
+      } finally {
+        await mobileContext.close();
+      }
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
 
   test("opens waiting descendants at every depth from a failed parent in For you", async () => {
     const context = await configuredContext(browser, {

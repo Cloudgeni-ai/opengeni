@@ -67,6 +67,16 @@ describe("session control surface architecture", () => {
     expect(hostBranch).not.toContain("startConnectionOAuth");
   });
 
+  test("offers failed-session model recovery to Personal workspace connection owners", async () => {
+    const route = await source("routes/session.tsx");
+    const recoveryGateStart = route.indexOf("canConnectModel={hasWorkspacePermission(");
+    const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
+
+    expect(recoveryGateStart).toBeGreaterThan(-1);
+    expect(recoveryGate).toContain('"connections:write"');
+    expect(recoveryGate).not.toContain('"workspace:admin"');
+  });
+
   test("routes every markdown sandbox file reference into Files without implicit publication", async () => {
     const route = await source("routes/session.tsx");
     expect(route).toContain("onSandboxFile={props.onOpenSandboxFile}");

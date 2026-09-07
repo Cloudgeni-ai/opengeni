@@ -3257,6 +3257,9 @@
 :where(.og-root).underline-offset-2,:where(.og-root) .underline-offset-2 {
     text-underline-offset: 2px;
   }
+:where(.og-root).underline-offset-4,:where(.og-root) .underline-offset-4 {
+    text-underline-offset: 4px;
+  }
 :where(.og-root).accent-og-accent,:where(.og-root) .accent-og-accent {
     accent-color: var(--og-color-accent);
   }
@@ -4521,6 +4524,22 @@
         outline: 2px solid transparent;
         outline-offset: 2px;
       }
+    }
+  }
+:where(.og-root).focus-visible\:outline-2,:where(.og-root) .focus-visible\:outline-2 {
+    &:focus-visible {
+      outline-style: var(--tw-outline-style);
+      outline-width: 2px;
+    }
+  }
+:where(.og-root).focus-visible\:outline-offset-2,:where(.og-root) .focus-visible\:outline-offset-2 {
+    &:focus-visible {
+      outline-offset: 2px;
+    }
+  }
+:where(.og-root).focus-visible\:outline-og-accent,:where(.og-root) .focus-visible\:outline-og-accent {
+    &:focus-visible {
+      outline-color: var(--og-color-accent);
     }
   }
 :where(.og-root).focus-visible\:ring-inset,:where(.og-root) .focus-visible\:ring-inset {

@@ -836,6 +836,55 @@ describe("SessionChrome", () => {
     ).toBe(true);
   });
 
+  test("explains pending child receipts and opens only their typed source", async () => {
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const inputs = [
+      {
+        ...pendingInput(),
+        id: "pending-1",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "Waiting for CI.",
+      },
+      {
+        ...pendingInput(),
+        id: "pending-2",
+        kind: "child_terminal_result" as const,
+        sourceId: childId,
+        summary: "PR merged; parent has not consumed this result.",
+      },
+      { ...pendingInput(), id: "pending-3", sourceId: childId },
+      {
+        ...pendingInput(),
+        id: "pending-4",
+        kind: "child_terminal_result" as const,
+        sourceId: "invalid",
+      },
+    ];
+    mounted = await renderComponent(
+      <SessionChrome
+        readOnly
+        defaultActive="incoming"
+        queue={queue({ queue: [], pendingInputs: inputs })}
+        onOpenSession={(id) => opened.push(id)}
+      />,
+    );
+    expect(mounted.container.textContent).toContain("Waiting to be included in an agent turn.");
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="incoming"]')!;
+    const links = [...panel.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(panel.textContent).toContain(inputs[1]!.summary);
+    expect(panel.querySelectorAll("li")).toHaveLength(4);
+  });
+
   test("inbox dismiss action appears when onDismissIncoming is provided", async () => {
     const dismissed: string[] = [];
     mounted = await renderComponent(
@@ -1468,4 +1517,44 @@ test("controlled compact command selection exposes activity navigation", async (
       ?.getAttribute("aria-expanded"),
   ).toBe("true");
   expect(mounted.container.textContent).toContain("Controlled command body");
+});
+
+test("a failed session blocks only active goal presentation", () => {
+  const continuation = goal().goal!.continuation;
+  const failedState = sessionChromeGoalPillState("active", continuation, "failed");
+  expect(sessionChromeGoalPillLabel(failedState, goal().goal)).toBe("Blocked by session failure");
+  expect(sessionChromeGoalPillExplanation(failedState, goal().goal)).toContain("Continue");
+  expect(sessionChromeGoalPillState("completed", continuation, "failed")).toBe("completed");
+  expect(sessionChromeGoalPillState("paused", continuation, "failed")).toBe("paused");
+  expect(sessionChromeGoalPillState("active", continuation, "idle")).toBe(
+    sessionChromeGoalPillState("active", continuation),
+  );
+});
+
+test("failed-session goal chip and panel explain the block without changing the goal", async () => {
+  const activeGoal = goal({
+    continuation: {
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 3,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
+  });
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      sessionStatus="failed"
+      queue={queue({ queue: [] })}
+      goal={activeGoal}
+      defaultActive="goal"
+    />,
+  );
+  expect(mounted.container.textContent).toContain("Goal · Blocked by session failure");
+  expect(
+    mounted.container.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+  ).toContain("use Continue or send a message");
+  expect(mounted.container.textContent).not.toContain("Waiting to continue automatically");
+  expect(activeGoal.goal?.status).toBe("active");
 });
