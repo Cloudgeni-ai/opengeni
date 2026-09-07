@@ -154,7 +154,7 @@ describe("summarizeRailNodes", () => {
     expect(nodes[0]?.session.status).toBe("idle");
   });
 
-  test("keeps a loaded child's local failure visible through server tree stats", () => {
+  test("does not paint a parent with a child's local send failure", () => {
     const forest = buildRailForest([
       session({
         id: "root",
@@ -172,16 +172,23 @@ describe("summarizeRailNodes", () => {
       session({ id: "child", parentSessionId: "root" }),
     ]);
     const nodes = forest.grouped.flatMap((bucket) => bucket.sessions);
+    const child = nodes[0]!.children[0]!;
 
     expect(summarizeRailNodes(nodes, new Map([["child", 1]]))).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 2,
+      label: "Read",
+    });
+    expect(summarizeRailNodes([child], new Map([["child", 1]]))).toEqual({
       kind: "send_failed",
       count: 1,
-      total: 2,
+      total: 1,
       label: "1 message not sent",
     });
   });
 
-  test("uses the highest-priority hidden descendant state", () => {
+  test("rolls up only live descendant work, not waiting or failed children", () => {
     const forest = buildRailForest([
       session({
         id: "root",
@@ -200,10 +207,116 @@ describe("summarizeRailNodes", () => {
     ]);
     const summary = summarizeRailNodes(forest.running);
     expect(summary).toEqual({
+      kind: "active",
+      count: 2,
+      total: 5,
+      label: "2 working",
+    });
+  });
+
+  test("keeps a parent's own wait ahead of descendant live work", () => {
+    const forest = buildRailForest([
+      session({
+        id: "root",
+        status: "requires_action",
+        treeStats: {
+          directChildren: 1,
+          totalDescendants: 1,
+          runningDescendants: 1,
+          queuedDescendants: 0,
+          attentionDescendants: 0,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          truncated: false,
+        },
+      }),
+    ]);
+    expect(summarizeRailNodes(forest.running)).toEqual({
       kind: "needs_attention",
       count: 1,
-      total: 5,
+      total: 2,
       label: "1 needs you",
+    });
+  });
+
+  test("does not promote an idle parent for parked or failed children", () => {
+    const waitingOnly = buildRailForest([
+      session({
+        id: "waiting-parent",
+        status: "idle",
+        treeStats: {
+          directChildren: 2,
+          totalDescendants: 2,
+          runningDescendants: 0,
+          queuedDescendants: 0,
+          attentionDescendants: 2,
+          pausedDescendants: 0,
+          failedDescendants: 0,
+          unreadFailedDescendants: 0,
+          truncated: false,
+        },
+      }),
+    ]);
+    expect(waitingOnly.running).toEqual([]);
+    expect(summarizeRailNodes(waitingOnly.grouped[0]!.sessions)).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 3,
+      label: "Read",
+    });
+
+    const failedChild = buildRailForest([
+      session({ id: "root" }),
+      session({
+        id: "failed-child",
+        parentSessionId: "root",
+        status: "failed",
+        unread: true,
+      }),
+    ]);
+    expect(failedChild.running).toEqual([]);
+    expect(summarizeRailNodes(failedChild.grouped[0]!.sessions)).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 2,
+      label: "Read",
+    });
+    expect(summarizeRailNodes(failedChild.grouped[0]!.sessions[0]!.children)).toEqual({
+      kind: "failed",
+      count: 1,
+      total: 1,
+      label: "1 failed",
+    });
+  });
+
+  test("a loaded waiting child stays on the child row and does not pin the parent", () => {
+    const forest = buildRailForest([
+      session({ id: "root", status: "idle", updatedAt: "2026-08-01T00:00:00.000Z" }),
+      session({
+        id: "child",
+        parentSessionId: "root",
+        status: "requires_action",
+        requiresActionSince: "2026-08-01T01:00:00.000Z",
+        updatedAt: "2026-08-01T02:00:00.000Z",
+      }),
+    ]);
+    expect(forest.running).toEqual([]);
+    const parent = forest.grouped[0]!.sessions[0]!;
+    expect(parent.hasActiveDescendant).toBe(false);
+    expect(summarizeRailNodes([parent])).toEqual({
+      kind: "neutral",
+      count: 0,
+      total: 2,
+      label: "Read",
+    });
+    expect(
+      summarizeRailNodes(parent.children, new Map(), new Date("2026-08-01T02:00:00.000Z")),
+    ).toEqual({
+      kind: "needs_attention",
+      count: 1,
+      total: 1,
+      label: "1 needs you · 1h",
+      attentionSince: "2026-08-01T01:00:00.000Z",
     });
   });
 
@@ -368,7 +481,7 @@ describe("summarizeRailNodes waiting duration", () => {
   const NOW = new Date("2026-08-22T12:00:00.000Z");
   const hoursAgo = (hours: number) => new Date(NOW.getTime() - hours * 3_600_000).toISOString();
 
-  test("says how long the longest-waiting hidden descendant has needed input", () => {
+  test("does not advertise a parked child's wait on the idle parent", () => {
     const forest = buildRailForest([
       session({
         id: "root",
@@ -386,16 +499,16 @@ describe("summarizeRailNodes waiting duration", () => {
         },
       }),
     ]);
-    expect(summarizeRailNodes(forest.running, new Map(), NOW)).toEqual({
-      kind: "needs_attention",
-      count: 2,
+    expect(forest.running).toEqual([]);
+    expect(summarizeRailNodes(forest.grouped[0]!.sessions, new Map(), NOW)).toEqual({
+      kind: "neutral",
+      count: 0,
       total: 4,
-      label: "2 need you · 10h",
-      attentionSince: hoursAgo(10),
+      label: "Read",
     });
   });
 
-  test("takes the earliest wait across the node's own turn and its descendants", () => {
+  test("takes the earliest wait across represented roots, not their children", () => {
     const forest = buildRailForest([
       session({
         id: "root",
@@ -422,9 +535,9 @@ describe("summarizeRailNodes waiting duration", () => {
     const nodes = [...forest.running, ...forest.grouped.flatMap((bucket) => bucket.sessions)];
     expect(summarizeRailNodes(nodes, new Map(), NOW)).toMatchObject({
       kind: "needs_attention",
-      count: 3,
-      label: "3 need you · 26h",
-      attentionSince: hoursAgo(26),
+      count: 2,
+      label: "2 need you · 5h",
+      attentionSince: hoursAgo(5),
     });
   });
 

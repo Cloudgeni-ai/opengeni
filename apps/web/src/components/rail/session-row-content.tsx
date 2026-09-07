@@ -125,9 +125,8 @@ export function RailTrailingMetadata({
   const hasStatusMarker = summary.kind !== "neutral";
   const hasRelativeTime = Boolean(relativeTime);
   const hasMonogram = creator ? creatorInitials(creator) !== null : false;
-  // How long the longest-waiting session behind a "needs you" marker has been
-  // blocked on a human. A collapsed parent with a child parked for ten hours
-  // must say so, not hide it behind a dot.
+  // How long this row itself has been blocked on a human. Parked children
+  // keep their own wait on the child row, not on the parent.
   const waitingFor =
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)

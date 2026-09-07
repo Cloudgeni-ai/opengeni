@@ -163,7 +163,6 @@ import {
   writeSessionBrowseGroupBy,
 } from "@/lib/session-browse-preferences";
 import { railRowCreator } from "@/lib/creator-initials";
-import { formatWaitingSince } from "@/lib/format";
 import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { requestCreateComposerFocus } from "@/lib/create-composer-focus";
 import {
@@ -2952,7 +2951,7 @@ function SessionRow(props: {
   childCountTruncated: boolean;
   hasChildren: boolean;
   expanded: boolean;
-  /** One status for this session and every hidden descendant. */
+  /** Own waiting/failed/unread, plus live work rolled up from descendants. */
   aggregateStatus: RailAggregateStatus;
   onToggleExpand: () => void;
   active: boolean;
@@ -3266,10 +3265,6 @@ function sessionDescendantLabel(session: Session): string | null {
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
   const total = sessionDescendantCountText(stats.totalDescendants, stats.truncated);
-  if (stats.attentionDescendants > 0) {
-    const waiting = stats.attentionSince ? formatWaitingSince(stats.attentionSince) : "";
-    return `${stats.attentionDescendants} need you${waiting ? ` for ${waiting}` : ""} · ${total} total`;
-  }
   if (live > 0) return `${live} active · ${total} total`;
   return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
 }
