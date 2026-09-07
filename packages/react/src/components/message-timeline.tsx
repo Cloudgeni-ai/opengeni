@@ -3400,41 +3400,46 @@ type GoalMeta = { label: string; pill: string; icon: ComponentType<{ className?:
 
 const NEUTRAL_PILL = "border-og-border bg-og-surface-1 text-og-fg-muted";
 
-const GOAL_META: Record<GoalItem["action"], GoalMeta> = {
-  set: {
-    label: "Goal set",
-    pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
-    icon: TargetIcon,
-  },
-  updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
-  completed: {
-    label: "Goal completed",
-    pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
-    icon: CheckIcon,
-  },
-  paused: {
-    label: "Goal paused",
-    pill: WAITING_PILL_CLASS,
-    icon: PauseIcon,
-  },
-  resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
-  cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
-  held: {
-    label: "Goal held",
-    pill: WAITING_PILL_CLASS,
-    icon: PauseCircleIcon,
-  },
-  continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
-};
+// Shared production chunks can be cyclic. Resolve icon bindings during render,
+// after their modules initialize, rather than permanently capturing undefined.
+function goalMeta(action: GoalItem["action"]): GoalMeta {
+  const metadata: Record<GoalItem["action"], GoalMeta> = {
+    set: {
+      label: "Goal set",
+      pill: "border-og-accent/30 bg-og-accent/10 text-og-accent",
+      icon: TargetIcon,
+    },
+    updated: { label: "Goal updated", pill: NEUTRAL_PILL, icon: PencilLineIcon },
+    completed: {
+      label: "Goal completed",
+      pill: "border-og-status-idle/30 bg-og-status-idle/10 text-og-status-idle",
+      icon: CheckIcon,
+    },
+    paused: {
+      label: "Goal paused",
+      pill: WAITING_PILL_CLASS,
+      icon: PauseIcon,
+    },
+    resumed: { label: "Goal resumed", pill: NEUTRAL_PILL, icon: PlayIcon },
+    cleared: { label: "Goal cleared", pill: NEUTRAL_PILL, icon: Trash2Icon },
+    held: {
+      label: "Goal held",
+      pill: WAITING_PILL_CLASS,
+      icon: PauseCircleIcon,
+    },
+    continuation: { label: "Continuing toward the goal", pill: NEUTRAL_PILL, icon: ArrowRightIcon },
+  };
+  return metadata[action];
+}
 
 /**
  * A goal landmark pill. Resolves its label, accent/tone, and glyph from
- * {@link GOAL_META} so all six actions are visually distinguishable while the
+ * {@link goalMeta} so all six actions are visually distinguishable while the
  * palette stays restrained — see that table for the per-action rationale.
  */
 function GoalRow({ item }: { item: GoalItem }) {
   const enter = useEntranceAnimation();
-  const { label, pill, icon: Icon } = GOAL_META[item.action];
+  const { label, pill, icon: Icon } = goalMeta(item.action);
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <span
