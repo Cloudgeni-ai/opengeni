@@ -80,6 +80,12 @@ function firstTextNode(element: Element): Text {
   return node;
 }
 
+function addNoteButton(): HTMLButtonElement | undefined {
+  return [...document.body.querySelectorAll("button")].find((button) =>
+    button.getAttribute("aria-label")?.startsWith("Add a note about"),
+  );
+}
+
 async function waitFor(condition: () => boolean, message: string): Promise<void> {
   const deadline = Date.now() + 1_000;
   while (!condition()) {
@@ -103,17 +109,11 @@ describe("timeline annotations", () => {
     const text = firstTextNode(source!);
     selectText(text, 6, 10);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    await waitFor(
-      () =>
-        [...document.body.querySelectorAll("button")].some(
-          (button) => button.textContent?.trim() === "Add note",
-        ),
-      "annotation action did not appear",
-    );
-    const action = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Add note",
-    );
+    await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
+    const action = addNoteButton();
     expect(action).toBeDefined();
+    expect(action?.textContent).toContain("Add note");
+    expect(action?.textContent).toContain("beta");
     await act(async () => action?.click());
     expect(captured).toMatchObject({
       quote: "beta",
@@ -147,11 +147,7 @@ describe("timeline annotations", () => {
     selection?.addRange(range);
     sources[1]?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
     await flush();
-    expect(
-      [...document.body.querySelectorAll("button")].some(
-        (button) => button.textContent?.trim() === "Add note",
-      ),
-    ).toBe(false);
+    expect(addNoteButton()).toBeUndefined();
     await rendered.unmount();
   });
 
@@ -257,6 +253,23 @@ describe("timeline annotations", () => {
     await rendered.unmount();
   });
 
+  test("keeps a full sentence quote visible in the composer draft", async () => {
+    const rendered = await renderComponent(
+      <TimelineAnnotationDraftList
+        annotations={[
+          {
+            ...annotation(""),
+            quote: "OpenGeni stack is working.",
+          },
+        ]}
+        onUpdate={() => undefined}
+        onRemove={() => undefined}
+      />,
+    );
+    expect(rendered.container.textContent).toContain("OpenGeni stack is working.");
+    await rendered.unmount();
+  });
+
   test("keeps the Add note popover through pointerdown so the click can land", async () => {
     let captured: DraftTimelineAnnotation | null = null;
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
@@ -270,23 +283,12 @@ describe("timeline annotations", () => {
     const text = firstTextNode(source!);
     selectText(text, 6, 10);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    await waitFor(
-      () =>
-        [...document.body.querySelectorAll("button")].some(
-          (button) => button.textContent?.trim() === "Add note",
-        ),
-      "annotation action did not appear",
-    );
-    const action = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Add note",
-    );
+    await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear");
+    const action = addNoteButton();
     action?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     await flush();
-    expect(
-      [...document.body.querySelectorAll("button")].some(
-        (button) => button.textContent?.trim() === "Add note",
-      ),
-    ).toBe(true);
+    expect(addNoteButton()).toBeDefined();
+    expect(addNoteButton()?.textContent).toContain("beta");
     await act(async () => action?.click());
     expect(captured?.quote).toBe("beta");
     await rendered.unmount();

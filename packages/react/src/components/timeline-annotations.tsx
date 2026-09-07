@@ -64,6 +64,7 @@ export function TimelineAnnotationDraftList({
               <div className="min-w-0 flex-1">
                 <AnnotationQuoteSourceButton
                   annotation={annotation}
+                  lines={2}
                   onRevealSource={onRevealSource}
                   onUnavailable={setUnavailableId}
                 />

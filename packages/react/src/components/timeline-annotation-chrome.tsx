@@ -21,40 +21,49 @@ function autosizeNote(textarea: HTMLTextAreaElement | null): void {
   textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 32), NOTE_MAX_HEIGHT_PX)}px`;
 }
 
+function quotePreview(quote: string): { text: string; multiline: boolean } {
+  const trimmed = quote.trim();
+  const multiline = trimmed.includes("\n");
+  return {
+    text: multiline ? trimmed : trimmed.replace(/\s+/g, " "),
+    multiline,
+  };
+}
+
 export function AnnotationQuoteSourceButton({
   annotation,
-  lines = 1,
+  lines = 2,
   onRevealSource,
   onUnavailable,
 }: {
   annotation: TimelineAnnotationLike;
-  lines?: 1 | 2 | 3;
+  lines?: 2 | 3;
   onRevealSource?: ((source: TimelineAnnotationSource) => boolean) | undefined;
   onUnavailable: (id: string | null) => void;
 }) {
-  const preview =
-    lines === 1 ? truncateAnnotationQuote(annotation.quote, 88) : annotation.quote;
+  const preview = quotePreview(annotation.quote);
   const sourceLabel = annotationSourceLabel(annotation.source);
   return (
     <button
       type="button"
       title={annotation.quote}
       aria-label={`View ${sourceLabel} source: ${truncateAnnotationQuote(annotation.quote, 88)}`}
-      className={cn(
-        "min-w-0 w-full rounded-sm border-0 bg-transparent text-left text-og-sm leading-5 text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]",
-        lines === 1
-          ? "truncate"
-          : lines === 2
-            ? "line-clamp-2 whitespace-pre-wrap"
-            : "line-clamp-3 whitespace-pre-wrap",
-      )}
+      className="block w-full min-w-0 rounded-sm border-0 bg-transparent text-left text-og-sm leading-5 text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       onClick={() => {
         const revealed =
           onRevealSource?.(annotation.source) ?? revealLoadedAnnotationSource(annotation.source);
         onUnavailable(revealed ? null : annotation.id);
       }}
     >
-      {preview}
+      <span
+        className={cn(
+          "block min-w-0 max-w-full break-words",
+          preview.multiline ? "whitespace-pre-wrap" : "whitespace-normal",
+          lines === 3 ? "line-clamp-3" : "line-clamp-2",
+        )}
+      >
+        {preview.text}
+      </span>
       <span className="sr-only"> view source</span>
     </button>
   );

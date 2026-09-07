@@ -17,8 +17,8 @@ const INTERACTIVE_SELECTOR =
   'a,button,input,textarea,select,summary,[role="button"],[contenteditable="true"],[tabindex]:not([tabindex="-1"])';
 const SOURCE_CONTEXT_BYTES = 160;
 const MAX_QUOTE_BYTES = 16 * 1024;
-const POPOVER_WIDTH = 220;
-const POPOVER_HEIGHT = 44;
+const POPOVER_WIDTH = 280;
+const POPOVER_HEIGHT = 64;
 
 function utf8Prefix(value: string, maxBytes: number): string {
   let output = "";
@@ -228,14 +228,15 @@ export function TimelineAnnotationSelection({
   }, [candidate]);
 
   if (!candidate || !onAnnotate || typeof document === "undefined") return null;
-  const preview = truncateAnnotationQuote(candidate.annotation.quote, 42);
+  const preview = truncateAnnotationQuote(candidate.annotation.quote, 72);
   return createPortal(
     <button
       ref={buttonRef}
       type="button"
       style={{ left: candidate.left, top: candidate.top, ...portalStyle }}
-      className="og-root fixed z-[80] flex max-w-[min(15rem,calc(100vw-1.5rem))] -translate-x-1/2 items-center gap-2 rounded-full border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg shadow-xl outline-hidden transition hover:border-og-accent/40 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
+      className="og-root fixed z-[80] flex max-w-[min(18rem,calc(100vw-1.5rem))] -translate-x-1/2 items-start gap-2 rounded-2xl border border-og-border bg-og-surface-1 px-3 py-2 text-og-sm font-medium text-og-fg shadow-xl outline-hidden transition hover:border-og-accent/40 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
       aria-label={`Add a note about “${preview}”`}
+      title={candidate.annotation.quote}
       onPointerDown={(event) => event.preventDefault()}
       onClick={() => {
         onAnnotate(candidate.annotation);
@@ -243,8 +244,13 @@ export function TimelineAnnotationSelection({
         setCandidate(null);
       }}
     >
-      <QuoteIcon className="size-3.5 shrink-0 text-og-accent" aria-hidden="true" />
-      <span>Add note</span>
+      <QuoteIcon className="mt-0.5 size-3.5 shrink-0 text-og-accent" aria-hidden="true" />
+      <span className="min-w-0 text-left">
+        <span className="block leading-5">Add note</span>
+        <span className="mt-0.5 block truncate text-og-xs font-normal text-og-fg-muted">
+          {preview}
+        </span>
+      </span>
     </button>,
     document.body,
   );
