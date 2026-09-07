@@ -474,12 +474,7 @@ processes therefore cannot make an opted-in viewer, turn, or mutation caller
 abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
 probes remain immediate.
 
-Turn recovery does not poll or repeatedly provision while that rotation remains
-owned by the same lease epoch. The active recovering turn carries an exact
-lifecycle marker; the session workflow parks at its database work peek, and the
-authoritative rotation-ending or epoch-advancing commit durably wakes only matching group/epoch waiters. This
-keeps healthy sandbox admission unchanged while moving rotation waiting off the
-turn-worker pool.
+Rotation recovery: [lifecycle](run-lifecycle.md).
 
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
