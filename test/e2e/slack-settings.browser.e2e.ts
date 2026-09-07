@@ -122,6 +122,10 @@ test("OAuth conflict returns to a visible recovery message that survives reload"
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
       .waitFor();
+    const redirected = new URL(page.url());
+    expect(redirected.pathname).toBe(`/workspaces/${workspaceId}/plugins`);
+    expect(redirected.searchParams.get("slack")).toBe("error");
+    expect(redirected.searchParams.get("reason")).toBe("http_409");
     await page.reload();
     await sheet
       .getByText("Slack is already linked to another installation", { exact: true })
