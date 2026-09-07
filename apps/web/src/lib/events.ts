@@ -1,4 +1,4 @@
-import { buildTimeline, humanizeFailureReason, type TimelineItem } from "@opengeni/react";
+import { buildTimeline, presentFailure, type TimelineItem } from "@opengeni/react";
 
 import type { Session, SessionEvent, SessionStatus } from "@/types";
 
@@ -62,6 +62,7 @@ export function projectSessionTimeline(
 export type SessionFailureSummary = {
   /** Human-readable reason from the most recent turn.failed event, if any. */
   reason: string | null;
+  safetyRefusal?: boolean;
   /** When the most recent failure happened. */
   failedAt: string | null;
   /** Same-turn recovery attempts recorded by the control plane. */
@@ -79,6 +80,7 @@ export function summarizeSessionFailure(
   _sessionStatus: SessionStatus,
 ): SessionFailureSummary {
   let reason: string | null = null;
+  let safetyRefusal = false;
   let failedAt: string | null = null;
   let recoveryCount = 0;
   let failedTurnCount = 0;
@@ -92,11 +94,13 @@ export function summarizeSessionFailure(
         event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
           ? (event.payload as Record<string, unknown>)
           : {};
-      reason = humanizeFailureReason(failurePayloadMessage(payload) ?? null) ?? reason;
+      const presentation = presentFailure(payload);
+      reason = presentation.reason;
+      safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
     }
   }
-  return { reason, failedAt, recoveryCount, failedTurnCount };
+  return { reason, safetyRefusal, failedAt, recoveryCount, failedTurnCount };
 }
 
 export function reasoningSummaryText(payload: unknown): string {

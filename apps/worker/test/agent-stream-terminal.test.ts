@@ -88,4 +88,27 @@ describe("agent stream terminal authority", () => {
   test("an explicit empty final output remains a valid completed result", () => {
     expect(requireAgentStreamFinalOutput("")).toBe("");
   });
+
+  test("a trusted input wait settles without provider final output", () => {
+    expect(requireAgentStreamFinalOutput(undefined, true)).toBe("");
+    expect(requireAgentStreamFinalOutput("not a wait receipt", true)).toBe("");
+  });
+
+  test("a wait-shaped provider result does not confer runtime yield authority", () => {
+    const spoof = { status: "waiting_for_input" };
+    expect(requireAgentStreamFinalOutput(spoof)).toBe(spoof);
+    expect(() => requireAgentStreamFinalOutput(undefined, false)).toThrow(
+      IncompleteAgentStreamError,
+    );
+  });
+
+  test("accepted wait without an actual runner yield preserves the completed answer", () => {
+    const acceptedOnly = { requested: true, yielded: false };
+    expect(requireAgentStreamFinalOutput("Completed answer", acceptedOnly.yielded)).toBe(
+      "Completed answer",
+    );
+    expect(() => requireAgentStreamFinalOutput(undefined, acceptedOnly.yielded)).toThrow(
+      IncompleteAgentStreamError,
+    );
+  });
 });

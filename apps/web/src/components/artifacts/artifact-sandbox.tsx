@@ -1,20 +1,24 @@
 import {
   ArrowLeftIcon,
+  Globe2Icon,
   Maximize2Icon,
+  PlugZapIcon,
   RefreshCwIcon,
   SparklesIcon,
-  SquareIcon,
 } from "lucide-react";
 import {
   PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX,
   PublishedHtmlArtifactFrame,
+  publishedHtmlArtifactDocument,
+  type PublishedHtmlArtifactToolBridge,
 } from "@opengeni/react/artifacts";
 import { useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX };
+export { PUBLISHED_HTML_ARTIFACT_IFRAME_SANDBOX, publishedHtmlArtifactDocument };
 
 export function ArtifactSandbox(props: {
   html: string;
@@ -23,48 +27,72 @@ export function ArtifactSandbox(props: {
   className?: string;
   editDisabled?: boolean;
   onEdit?: () => void;
+  toolBridge?: PublishedHtmlArtifactToolBridge;
+  connectedToolCount?: number;
+  sourceFileCount?: number;
 }) {
   const [reloadKey, setReloadKey] = useState(0);
   const [focused, setFocused] = useState(false);
-  const [running, setRunning] = useState(true);
   const reload = () => {
-    setRunning(true);
     setReloadKey((value) => value + 1);
   };
   return (
     <section
       className={cn(
-        "overflow-hidden rounded-lg border border-border bg-white",
-        focused && "fixed inset-0 z-50 flex flex-col border-0 bg-surface",
+        "overflow-hidden rounded-2xl border border-border/80 bg-white shadow-sm",
+        focused && "fixed inset-0 z-50 flex flex-col rounded-none border-0 bg-surface shadow-none",
         props.className,
       )}
     >
-      <div className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-2 py-1.5">
-        <div className="flex min-w-0 items-center gap-2">
+      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-border/80 bg-surface/95 px-3 sm:px-4">
+        <div className="flex min-w-0 items-center gap-2.5">
           {focused ? (
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 shrink-0 px-2"
+              className="h-8 shrink-0 px-2"
               onClick={() => setFocused(false)}
             >
               <ArrowLeftIcon className="mr-2 size-3.5" />
               Back
             </Button>
           ) : null}
-          <span className="truncate text-xs font-medium text-fg">{props.title}</span>
+          {!focused ? (
+            <span className="grid size-6 shrink-0 place-items-center rounded-md bg-surface-2 text-fg-muted">
+              <Globe2Icon className="size-3.5" />
+            </span>
+          ) : null}
+          <span className="truncate text-xs font-semibold text-fg">{props.title}</span>
           {props.versionLabel ? (
-            <span className="shrink-0 rounded-full bg-surface-2 px-2 py-0.5 text-2xs text-fg-subtle">
+            <Badge
+              variant="outline"
+              className="hidden h-5 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex"
+            >
               {props.versionLabel}
+            </Badge>
+          ) : null}
+          {props.connectedToolCount ? (
+            <Badge
+              variant="outline"
+              className="hidden h-5 max-w-40 gap-1 rounded-md border-border/80 px-1.5 text-2xs font-normal text-fg-muted sm:inline-flex"
+              title={`${props.connectedToolCount} workspace tools available to this Site`}
+            >
+              <PlugZapIcon className="size-3" />
+              {props.connectedToolCount} {props.connectedToolCount === 1 ? "tool" : "tools"}
+            </Badge>
+          ) : null}
+          {props.sourceFileCount ? (
+            <span className="hidden text-2xs text-fg-subtle xl:inline">
+              {props.sourceFileCount} source {props.sourceFileCount === 1 ? "file" : "files"}
             </span>
           ) : null}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           {focused && props.onEdit ? (
             <Button
               variant="ghost"
               size="sm"
-              className="h-7 px-2"
+              className="h-8 px-2"
               disabled={props.editDisabled}
               onClick={props.onEdit}
             >
@@ -73,22 +101,15 @@ export function ArtifactSandbox(props: {
               <span className="sm:hidden">Edit</span>
             </Button>
           ) : null}
-          {running ? (
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-7"
-              aria-label="Stop artifact"
-              onClick={() => setRunning(false)}
-            >
-              <SquareIcon className="size-3" />
-            </Button>
-          ) : null}
+          <span className="mr-1 hidden items-center gap-1.5 text-2xs font-medium text-fg-muted sm:inline-flex">
+            <span className="size-1.5 rounded-full bg-status-success ring-4 ring-status-success/10" />
+            Live
+          </span>
           <Button
             variant="ghost"
             size="icon"
-            className="size-7"
-            aria-label="Reload artifact"
+            className="size-8 rounded-md text-fg-muted hover:text-fg"
+            aria-label="Reload Site"
             onClick={reload}
           >
             <RefreshCwIcon className="size-3.5" />
@@ -97,8 +118,8 @@ export function ArtifactSandbox(props: {
             <Button
               variant="ghost"
               size="icon"
-              className="size-7"
-              aria-label="Open focus mode"
+              className="size-8 rounded-md text-fg-muted hover:text-fg"
+              aria-label="Open Site full screen"
               onClick={() => setFocused(true)}
             >
               <Maximize2Icon className="size-3.5" />
@@ -106,24 +127,16 @@ export function ArtifactSandbox(props: {
           ) : null}
         </div>
       </div>
-      {running ? (
-        <PublishedHtmlArtifactFrame
-          key={reloadKey}
-          title={props.title}
-          html={props.html}
-          className={cn("h-[62vh] w-full border-0 bg-white", focused && "min-h-0 flex-1")}
-        />
-      ) : (
-        <div
-          className={cn(
-            "flex h-[62vh] w-full flex-col items-center justify-center gap-2 bg-surface-2/30 text-center",
-            focused && "min-h-0 flex-1",
-          )}
-        >
-          <p className="text-sm font-medium text-fg">Artifact stopped</p>
-          <p className="text-xs text-fg-subtle">Reload to run it again.</p>
-        </div>
-      )}
+      <PublishedHtmlArtifactFrame
+        key={reloadKey}
+        title={props.title}
+        html={props.html}
+        toolBridge={props.toolBridge}
+        className={cn(
+          "h-[clamp(30rem,62vh,48rem)] w-full border-0 bg-white",
+          focused && "min-h-0 flex-1",
+        )}
+      />
     </section>
   );
 }

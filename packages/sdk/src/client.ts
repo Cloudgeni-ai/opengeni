@@ -4,6 +4,7 @@ import {
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
 } from "./errors";
+import type { OpenGeniToolsFacade, OpenGeniToolTransport, OpenGeniWorkspaceTools } from "./tools";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
@@ -811,6 +812,46 @@ function normalizeScheduledTaskMachineTarget<
  * WHATWG `fetch` + streams, so it runs in Node 18+, Bun, Deno, browsers, and
  * edge runtimes.
  */
+function createLazyToolsFacade(transport: OpenGeniToolTransport): OpenGeniToolsFacade {
+  return {
+    forWorkspace(workspaceId: string): OpenGeniWorkspaceTools {
+      const normalizedWorkspaceId = workspaceId.trim();
+      if (!normalizedWorkspaceId) throw new TypeError("workspaceId is required");
+      let workspaceTools: Promise<OpenGeniWorkspaceTools> | undefined;
+      const load = (): Promise<OpenGeniWorkspaceTools> =>
+        (workspaceTools ??= import("./tools").then(({ OpenGeniToolsClient }) =>
+          new OpenGeniToolsClient(transport).forWorkspace(normalizedWorkspaceId),
+        ));
+      const node = (path: readonly string[]): OpenGeniWorkspaceTools =>
+        new Proxy(
+          (async (...args: unknown[]) => {
+            let target: unknown = await load();
+            for (const segment of path) {
+              target = (target as Record<string, unknown>)[segment];
+            }
+            if (typeof target !== "function")
+              throw new TypeError("OpenGeni tool path is not callable");
+            return await Reflect.apply(target, undefined, args);
+          }) as unknown as OpenGeniWorkspaceTools,
+          {
+            get: (_target, property) => {
+              if (property === "then") return undefined;
+              if (typeof property !== "string") return undefined;
+              return node([...path, property]);
+            },
+          },
+        );
+      return new Proxy(Object.create(null) as OpenGeniWorkspaceTools, {
+        get: (_target, property) => {
+          if (property === "then") return undefined;
+          if (typeof property !== "string") return undefined;
+          return node([property]);
+        },
+      });
+    },
+  };
+}
+
 export class OpenGeniClient {
   private readonly baseUrl: string;
   private readonly options: OpenGeniClientOptions;
@@ -821,6 +862,8 @@ export class OpenGeniClient {
   private readonly queued = new Map<string, SingleFlightReadEntry>();
   /** Resource-oriented Browser/Computer facade over this exact authenticated client. */
   readonly interaction: OpenGeniInteractionClient;
+  /** Dynamic typed tool facade backed by the canonical workspace gateway. */
+  readonly tools: OpenGeniToolsFacade;
 
   constructor(options: OpenGeniClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -833,6 +876,7 @@ export class OpenGeniClient {
     }
     this.sessionCommandTimeoutMs = sessionCommandTimeoutMs;
     this.interaction = new OpenGeniInteractionClient(this);
+    this.tools = createLazyToolsFacade(this);
   }
 
   // --- Session lifecycle ---------------------------------------------------
@@ -1230,13 +1274,18 @@ export class OpenGeniClient {
     );
   }
 
+  /** Running and stopping commands only; settled results remain in session history. */
   async listSessionBackgroundCommands(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<SessionBackgroundCommandListResponse> {
     return await this.requestJson<SessionBackgroundCommandListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/background-commands`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -1937,13 +1986,15 @@ export class OpenGeniClient {
 
   async listScheduledTasks(
     workspaceId: string,
-    options: { limit?: number } = {},
+    options: { limit?: number; offset?: number; sessionId?: string } = {},
   ): Promise<ScheduledTask[]> {
     return await this.requestJson<ScheduledTask[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks`,
       undefined,
       {
+        ...(options.offset !== undefined ? { offset: String(options.offset) } : {}),
+        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
       },
     );
@@ -4871,11 +4922,13 @@ export class OpenGeniClient {
   async createWorkspaceInstructionPolicyDraft(
     workspaceId: string,
     request: CreateWorkspaceInstructionPolicyDraftRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyRevision> {
-    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyRevision>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
       request,
+      options,
     );
   }
 
@@ -4935,11 +4988,13 @@ export class OpenGeniClient {
     workspaceId: string,
     revisionId: string,
     request: ActivateWorkspaceInstructionPolicyRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<WorkspaceInstructionPolicyActivationResponse> {
-    return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
+    return await this.requestSessionCommand<WorkspaceInstructionPolicyActivationResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/instruction-policies/${encodeURIComponent(revisionId)}/activate`,
       request,
+      options,
     );
   }
 
@@ -7661,14 +7716,18 @@ export class OpenGeniClient {
         throw error;
       }
       assertApiContractResponse(response);
-      if (!response.ok) {
-        throw await apiErrorFromResponse(response, { method, correlationId });
-      }
-      await assertJsonResponse(response, { method, correlationId });
       try {
-        return (await response.json()) as T;
+        if (!response.ok) {
+          throw await awaitWithAbort(
+            apiErrorFromResponse(response, { method, correlationId }),
+            abort.signal,
+          );
+        }
+        await awaitWithAbort(assertJsonResponse(response, { method, correlationId }), abort.signal);
+        return (await awaitWithAbort(response.json(), abort.signal)) as T;
       } catch (error) {
         if (options.signal?.aborted) throw error;
+        if (error instanceof OpenGeniApiError) throw error;
         if (isMutationMethod(method)) {
           throw mutationTransportError(correlationId);
         }

@@ -1030,107 +1030,150 @@ async function adoptLegacyModalCheckpointReceipts(
 /** Reconcile commands only against the immutable physical locator copied at
  * adoption. A successor enrollment connection is intentionally irrelevant: no
  * query or cancellation is ever rebound to it. */
-async function reconcileConnectedMachineBackgroundCommands(
+export async function reconcileConnectedMachineBackgroundCommands(
   db: ActivityServices["db"],
   settings: ActivityServices["settings"],
   observability: ActivityServices["observability"],
   bus: ActivityServices["bus"],
+  controlRpcOverride?: ControlRpc,
 ): Promise<void> {
-  const claimId = crypto.randomUUID();
-  let claims: ConnectedMachineBackgroundCommandClaim[];
-  try {
-    claims = await claimConnectedMachineSessionBackgroundCommands(db, {
-      claimId,
-      limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
-      claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
-    });
-  } catch (error) {
-    recordConnectedCommandReconciliation(observability, "claim_failed");
-    observability.warn("sandbox reaper: connected-command claim failed", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return;
-  }
+  const dueBefore = new Date();
+  const deadline = Date.now() + settings.sandboxLeaseReaperPeriodMs;
+  const offlineConnections = new Set<string>();
+  const firstConnectionProbes = new Map<string, Promise<void>>();
+  // Drain the fixed due frontier with the existing concurrency. Yield to the
+  // remaining maintenance work each period; retries belong to a later sweep.
+  do {
+    const claimId = crypto.randomUUID();
+    let claims: ConnectedMachineBackgroundCommandClaim[];
+    try {
+      claims = await claimConnectedMachineSessionBackgroundCommands(db, {
+        claimId,
+        dueBefore,
+        limit: CONNECTED_COMMAND_RECONCILIATION_LIMIT,
+        claimTtlMs: CONNECTED_COMMAND_RECONCILIATION_CLAIM_TTL_MS,
+      });
+    } catch (error) {
+      recordConnectedCommandReconciliation(observability, "claim_failed");
+      observability.warn("sandbox reaper: connected-command claim failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
 
-  const controlRpc = new NatsControlRpc(
-    async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
-  );
-  await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
-    let proof = claim.proof;
-    if (!proof) {
-      try {
-        proof = await probeConnectedMachineBackgroundCommand(
-          claim,
-          controlRpc,
-          Math.min(
-            settings.sandboxSelfhostedControlTimeoutMs,
-            RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
-          ),
-        );
-        if (!proof) {
-          await deferConnectedCommandClaim(db, settings, observability, claim, "provider_running");
+    const controlRpc =
+      controlRpcOverride ??
+      new NatsControlRpc(
+        async (): Promise<NatsRequestConnection | null> => bus.getRequestConnection(),
+      );
+    await forEachWithConcurrency(claims, SANDBOX_MAINTENANCE_ITEM_CONCURRENCY, async (claim) => {
+      let proof = claim.proof;
+      const connectionKey = JSON.stringify([
+        claim.controlWorkspaceId,
+        claim.enrollmentId,
+        claim.connectionInstanceId,
+      ]);
+      if (!proof) {
+        const firstProbe = firstConnectionProbes.get(connectionKey);
+        if (firstProbe) await firstProbe;
+        if (offlineConnections.has(connectionKey)) {
+          await deferConnectedCommandClaim(db, settings, observability, claim, "provider_offline");
           return;
         }
-      } catch (error) {
-        const offline =
-          error instanceof SelfhostedControlError &&
-          (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
-        if (!offline) {
-          observability.warn("sandbox reaper: connected-command provider probe failed", {
+        // Share only the initial connection observation, never another command's result.
+        let finishFirstProbe: (() => void) | undefined;
+        if (!firstProbe) {
+          firstConnectionProbes.set(
+            connectionKey,
+            new Promise<void>((resolve) => {
+              finishFirstProbe = resolve;
+            }),
+          );
+        }
+        try {
+          proof = await probeConnectedMachineBackgroundCommand(
+            claim,
+            controlRpc,
+            Math.min(
+              settings.sandboxSelfhostedControlTimeoutMs,
+              RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+            ),
+          );
+          if (!proof) {
+            await deferConnectedCommandClaim(
+              db,
+              settings,
+              observability,
+              claim,
+              "provider_running",
+            );
+            return;
+          }
+        } catch (error) {
+          const offline =
+            error instanceof SelfhostedControlError &&
+            (error.agentOffline || error.reason === "agent_reconnecting" || error.draining);
+          if (offline) offlineConnections.add(connectionKey);
+          if (!offline) {
+            observability.warn("sandbox reaper: connected-command provider probe failed", {
+              commandId: claim.commandId,
+              enrollmentId: claim.enrollmentId,
+              connectionInstanceId: claim.connectionInstanceId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          await deferConnectedCommandClaim(
+            db,
+            settings,
+            observability,
+            claim,
+            offline ? "provider_offline" : "provider_error",
+          );
+          return;
+        } finally {
+          finishFirstProbe?.();
+        }
+
+        try {
+          await recordConnectedMachineBackgroundCommandProof(db, { claim, proof });
+          recordConnectedCommandReconciliation(observability, `proof_${proof.outcome}`);
+        } catch (error) {
+          recordConnectedCommandReconciliation(observability, "proof_checkpoint_failed");
+          observability.warn("sandbox reaper: connected-command proof checkpoint failed", {
             commandId: claim.commandId,
-            enrollmentId: claim.enrollmentId,
-            connectionInstanceId: claim.connectionInstanceId,
             error: error instanceof Error ? error.message : String(error),
           });
+          return;
         }
-        await deferConnectedCommandClaim(
-          db,
-          settings,
-          observability,
-          claim,
-          offline ? "provider_offline" : "provider_error",
-        );
-        return;
       }
 
       try {
-        await recordConnectedMachineBackgroundCommandProof(db, { claim, proof });
-        recordConnectedCommandReconciliation(observability, `proof_${proof.outcome}`);
+        const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
+        if (!settlement.settled) {
+          throw new Error("Connected command settlement lost its exact claim or proof");
+        }
+        if (settlement.events.length > 0) {
+          try {
+            await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
+          } catch (error) {
+            observability.warn("sandbox reaper: connected-command event fanout failed", {
+              commandId: claim.commandId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
       } catch (error) {
-        recordConnectedCommandReconciliation(observability, "proof_checkpoint_failed");
-        observability.warn("sandbox reaper: connected-command proof checkpoint failed", {
+        recordConnectedCommandReconciliation(observability, "settlement_failed");
+        observability.warn("sandbox reaper: connected-command settlement failed", {
           commandId: claim.commandId,
           error: error instanceof Error ? error.message : String(error),
         });
-        return;
+        await deferConnectedCommandClaim(db, settings, observability, claim, "settlement_failed");
       }
-    }
-
-    try {
-      const settlement = await settleClaimedConnectedMachineBackgroundCommand(db, { claim });
-      if (!settlement.settled) {
-        throw new Error("Connected command settlement lost its exact claim or proof");
-      }
-      if (settlement.events.length > 0) {
-        try {
-          await bus.publish(claim.workspaceId, claim.sessionId, settlement.events);
-        } catch (error) {
-          observability.warn("sandbox reaper: connected-command event fanout failed", {
-            commandId: claim.commandId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
-      recordConnectedCommandReconciliation(observability, `settled_${proof.outcome}`);
-    } catch (error) {
-      recordConnectedCommandReconciliation(observability, "settlement_failed");
-      observability.warn("sandbox reaper: connected-command settlement failed", {
-        commandId: claim.commandId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      await deferConnectedCommandClaim(db, settings, observability, claim, "settlement_failed");
-    }
-  });
+    });
+    if (claims.length < CONNECTED_COMMAND_RECONCILIATION_LIMIT) break;
+  } while (Date.now() < deadline);
 }
 
 export async function probeConnectedMachineBackgroundCommand(

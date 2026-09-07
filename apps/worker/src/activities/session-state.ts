@@ -224,7 +224,9 @@ export function createSessionStateActivities(
       : input.preClaimFailure?.disposition === "retryable" &&
           input.preClaimFailure.code !== "claim_invariant"
         ? input.preClaimFailure.code
-        : null;
+        : input.preClaimFailureDisposition === "retryable"
+          ? "legacy_retryable_preclaim_database_failure"
+          : null;
     if (recoveredClaimCode) {
       const recovery = await requestSessionTurnRecoveryFn(db, input.workspaceId, {
         sessionId: input.sessionId,

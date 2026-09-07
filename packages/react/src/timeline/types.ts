@@ -378,6 +378,8 @@ export type MachineInputMember = {
   kind:
     | "scheduled_occurrence"
     | "goal_continuation"
+    | "background_command_result"
+    | "session_wait_timeout"
     | "agent_message"
     | "agent_steer_instruction"
     | "child_terminal_result"

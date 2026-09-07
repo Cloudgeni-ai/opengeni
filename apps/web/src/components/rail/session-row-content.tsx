@@ -20,10 +20,14 @@ import { sessionDescendantCountText } from "@/lib/session-tree-count";
 import { cn } from "@/lib/utils";
 import type { RailAggregateStatus } from "@/lib/sessions-group";
 
-function ActiveWorkMark() {
+export function ActiveWorkMark({ className }: { className?: string }) {
   const maskId = `active-work-${useId().replaceAll(":", "")}`;
   return (
-    <svg aria-hidden="true" viewBox="0 0 108 108" className="size-2.5 shrink-0 text-brand">
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 108 108"
+      className={cn("size-2.5 shrink-0 text-brand", className)}
+    >
       <defs>
         <mask id={maskId} maskUnits="userSpaceOnUse" x="0" y="0" width="108" height="108">
           <circle cx="54" cy="54" r="48" fill="white" />

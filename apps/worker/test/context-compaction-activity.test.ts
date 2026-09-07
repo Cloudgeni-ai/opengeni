@@ -1756,15 +1756,15 @@ describe("standalone context compaction execution", () => {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
       sessionId: session.id,
-      kind: "child_terminal_result",
-      classification: "success",
+      kind: "agent_message",
+      classification: "info",
       sourceId: crypto.randomUUID(),
-      dedupeKey: `child-${crypto.randomUUID()}`,
-      summary: "Child completed",
+      dedupeKey: `ordinary-${crypto.randomUUID()}`,
+      summary: "Ordinary durable notice",
       payload: {
-        type: "child_terminal_result",
-        childSessionId: crypto.randomUUID(),
-        status: "idle",
+        type: "agent_message",
+        text: "Ordinary durable notice",
+        operationId: crypto.randomUUID(),
       },
     });
     if (!ordinary.added) throw new Error("ordinary update was not inserted");

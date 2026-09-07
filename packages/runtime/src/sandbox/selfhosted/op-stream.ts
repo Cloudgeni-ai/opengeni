@@ -166,6 +166,9 @@ export type OpStreamExecResult =
       heals: number;
       startRetries: number;
       replyBytes: number;
+      /** Terminal proof may race durable adoption. The caller must settle the
+       * adopted command but still return only its background receipt. */
+      terminal?: { outcome: OpStreamExecOutcome; exitSeq: string };
     };
 
 export type OpStreamYieldOptions = {
@@ -495,6 +498,7 @@ class OpConsumer {
     }, this.ackIntervalMs);
     const liveness = this.watchLiveness(wallMs);
     let yieldTimer: ReturnType<typeof setTimeout> | undefined;
+    let adopted = false;
     try {
       if (yieldOptions && yieldOptions.yieldMs > 0) {
         const phase = await Promise.race([
@@ -507,6 +511,7 @@ class OpConsumer {
         if (phase === "yield" && this.exitSeq === undefined) {
           try {
             await yieldOptions.onYield();
+            adopted = true;
           } catch (adoptionError) {
             // The command has started, so the failed durable transfer is an
             // outcome-unknown mutation. Cancel only this exact idempotent op and
@@ -516,9 +521,9 @@ class OpConsumer {
             await Promise.race([settled, liveness.wall]);
             throw adoptionError;
           }
-          // The process may have completed while the durable adoption committed.
-          // In that race return its real terminal result; the caller settles the
-          // just-created command row from the same exact locator.
+          // Once adoption commits, this invocation owns only the background
+          // receipt. A completion racing the transaction is handled below as
+          // terminal proof for the adopted command, never returned inline too.
           if (this.exitSeq === undefined) {
             await this.sendBackgroundCredit();
             const partial = this.snapshotOutput();
@@ -550,20 +555,33 @@ class OpConsumer {
       throw runnerFailureToControlError(exit);
     }
     const { stdout, stderr } = this.assembleAndVerify(exit);
-    return {
-      status: "completed",
-      outcome: {
-        response: {
-          exitCode: exit.exitCode,
-          stdout,
-          stderr,
-          timedOut: exit.timedOut,
-          durationMs: exit.durationMs,
-        },
+    const outcome: OpStreamExecOutcome = {
+      response: {
+        exitCode: exit.exitCode,
+        stdout,
+        stderr,
+        timedOut: exit.timedOut,
+        durationMs: exit.durationMs,
+      },
+      heals: this.heals,
+      startRetries,
+      replyBytes: stdout.byteLength + stderr.byteLength,
+    };
+    if (adopted) {
+      return {
+        status: "running",
+        opId: this.opId,
+        stdout,
+        stderr,
         heals: this.heals,
         startRetries,
-        replyBytes: stdout.byteLength + stderr.byteLength,
-      },
+        replyBytes: outcome.replyBytes,
+        terminal: { outcome, exitSeq: exitSeq.toString() },
+      };
+    }
+    return {
+      status: "completed",
+      outcome,
       exitSeq: exitSeq.toString(),
     };
   }

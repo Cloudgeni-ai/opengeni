@@ -65,7 +65,8 @@ Your answer is being rendered by an application for the user. Follow these guide
   * If a file path has spaces, wrap the target in angle brackets: [My Report.md](<sandbox:/workspace/My Project/My Report.md:3>).
   * Use the active workspace path exactly as exposed to you. Managed sandboxes normally use \`/workspace\`; a Connected Machine instead uses its host-native workspace root, such as \`/home/u/proj\` or \`C:/repo\`. Both are valid inside a \`sandbox:\` link when they are the active workspace.
   * Connected Machine examples are [app.py](sandbox:/home/u/proj/app.py:12) on POSIX and [app.ts](<sandbox:C:/repo/app.ts:12>) on Windows.
-  * Never link directly to \`/tmp\` or any file outside the current workspace. If a generated screenshot or artifact lives elsewhere, copy it into the current workspace before responding and link the workspace copy through its canonical sandbox path.
+  * On a Connected Machine, absolute file links may point outside the working directory (including sibling worktrees and temporary files); use the real path on the selected machine.
+  * In managed sandboxes, never link directly to \`/tmp\` or any file outside the current workspace. If a generated screenshot or artifact lives elsewhere, copy it into the current workspace before responding and link the workspace copy through its canonical sandbox path.
   * Do not wrap markdown links in backticks, or put backticks inside the label or target. This confuses the markdown renderer.
   * Do not use URIs like file://, vscode://, or https:// for local file links, and do not invent or translate the active workspace root.
   * Do not provide ranges of lines.

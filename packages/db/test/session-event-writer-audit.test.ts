@@ -220,6 +220,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
+  "packages/db/src/index.ts#recoverSessionWorkFailedBeforeAttemptClaim": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
     inserts: 2,
     contract: "canonical",
@@ -441,7 +446,8 @@ function productionTypeScriptFiles(): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (
         entry.isDirectory() &&
-        ["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name)
+        (["node_modules", "dist", "coverage", "test", "tests", "__tests__"].includes(entry.name) ||
+          entry.name.startsWith(".native-closure-"))
       ) {
         continue;
       }

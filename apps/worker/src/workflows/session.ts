@@ -95,6 +95,14 @@ export function deferredResultMayContinue(entryWakeups: number, currentWakeups: 
   return currentWakeups !== entryWakeups;
 }
 
+/** A typed activity cancellation is recoverable unless its exact-attempt
+ * redispatch budget was atomically exhausted. */
+export function cancelledAttemptRecoveryMayContinue(
+  action: activities.RecoverDispatchResult["action"],
+): boolean {
+  return action !== "exceeded";
+}
+
 /**
  * Bound repeated failures that happen before an attempt row exists. The
  * activity mirrors this deterministic delay into the durable wake outbox, so
@@ -340,8 +348,13 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   // every new run records v2 and uses the activity-owned receipt contract.
   const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
   const writerSetQuiescenceRecovery = patched("session-attempt-writer-set-quiescence-v1");
+  const preserveQuiescenceWake = patched("session-quiescence-reconciliation-wake-v1");
   const staleControlSignalIsOnlyWakeHint = patched("session-control-stale-wake-v1");
   const unclaimedAttemptRecovery = patched("session-unclaimed-attempt-recovery-v1");
+  // PR #2208 changed a typed-cancelled result from a plain re-peek into a
+  // recoverDispatch activity. Version that new command so histories which
+  // already recorded the legacy re-peek remain deterministic on replay.
+  const cancelledAttemptRecovery = patched("session-cancelled-attempt-recovery-v1");
   const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
   let approvalWakeups = 0;
   let interruptionWakeups = 0;
@@ -572,6 +585,8 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       continue;
     }
     if (peek.kind === "cancellation-wait") {
+      // The receipt wake can arrive while reconciliation returns an older pending result.
+      const beforeReconciliationSignalVersion = signalVersion;
       if (writerSetQuiescenceRecovery) {
         const reconciliation = await activity.reconcileSessionAttemptQuiescence({
           accountId: input.accountId,
@@ -588,7 +603,9 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // genuinely slow, close this workflow run rather than consuming a turn
       // slot or churning control activities; the outbox uses signalWithStart to
       // restart this exact workflow after the receipt commits.
-      const seenSignalVersion = signalVersion;
+      const seenSignalVersion = preserveQuiescenceWake
+        ? beforeReconciliationSignalVersion
+        : signalVersion;
       const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
       if (woke) continue;
       // Close only against the same signal snapshot. A proof signal accepted
@@ -1093,8 +1110,33 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return true;
     }
 
-    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
-      return outcome.result.status === "cancelled";
+    if (outcome.result.status === "failed") {
+      return false;
+    }
+
+    if (outcome.result.status === "cancelled") {
+      // Histories created before session-cancelled-attempt-recovery-v1 must
+      // preserve the old command sequence. Their durable state is still safe:
+      // operator recovery or a later fresh workflow run can close a stranded
+      // owner, while new histories use the bounded exact-attempt transaction.
+      if (!cancelledAttemptRecovery) return true;
+      // A typed cancellation is normally observed through the control-signal
+      // branch above, after Pause/Steer has durably fenced the attempt. A
+      // worker can nevertheless return the same shape after a shutdown or a
+      // stale settlement race without closing its attempt row. Blindly
+      // re-peeking then retries forever against `turn.status = running` and
+      // strands every later prompt. Reconcile the exact attempt through the
+      // same bounded, generation-fenced redispatch transaction used after an
+      // activity heartbeat loss. If the attempt actually settled meanwhile,
+      // the transaction is a stale no-op and the next peek observes truth.
+      const recovery = await activity.recoverDispatch({
+        accountId,
+        workspaceId,
+        sessionId,
+        attemptId: outcome.result.attemptId,
+        timeoutType: "HEARTBEAT",
+      });
+      return cancelledAttemptRecoveryMayContinue(recovery.action);
     }
 
     if (outcome.result.capacityWait) {

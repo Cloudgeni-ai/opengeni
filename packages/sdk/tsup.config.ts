@@ -16,6 +16,7 @@ export default defineConfig({
     "src/accounts.ts",
     "src/core.ts",
     "src/browser.ts",
+    "src/site.ts",
     "src/github-repositories.ts",
     "src/document-authority.ts",
     "src/artifacts.ts",

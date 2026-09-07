@@ -1,23 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
-import Ajv, { type ValidateFunction } from "ajv";
-import Ajv2019 from "ajv/dist/2019.js";
-import Ajv2020 from "ajv/dist/2020.js";
+import { randomUUID } from "node:crypto";
 import {
   ATTEMPT_TOOL_CATALOG_VERSION,
   ATTEMPT_TOOL_CATALOG_MAX_BYTES,
   AttemptToolCall,
   AttemptToolCatalog,
-  AttemptToolCatalogEntry,
   AttemptToolResult,
   CodemodeCallSubmission,
   CodemodeOperation,
   CodemodeDispatchAck,
   CodemodeDispatchRequest,
-  OPENGENI_API_CONTRACT_HEADER,
-  OPENGENI_API_CONTRACT_REVISION,
-  isToolResultSpilledReceipt,
   type AttemptToolCall as AttemptToolCallValue,
-  type AttemptToolCaller,
+  AttemptToolCaller,
   type AttemptToolCatalog as AttemptToolCatalogValue,
   type AttemptToolCatalogEntry as AttemptToolCatalogEntryValue,
   type AttemptToolIdentity,
@@ -26,6 +19,22 @@ import {
   type CodemodeDispatchRequest as CodemodeDispatchRequestValue,
   type CodemodeOperation as CodemodeOperationValue,
 } from "@opengeni/contracts";
+import {
+  ToolGateway,
+  ToolGatewayApprovalRequiredError as AttemptToolApprovalRequiredError,
+  ToolGatewayCatalogIntegrityError as AttemptToolCatalogIntegrityError,
+  ToolGatewayCatalogStaleError as AttemptToolCatalogStaleError,
+  ToolGatewayCatalogTooLargeError as AttemptToolCatalogTooLargeError,
+  ToolGatewayInputValidationError as AttemptToolInputValidationError,
+  ToolGatewayOutputValidationError as AttemptToolOutputValidationError,
+  ToolGatewayPathCollisionError as AttemptToolPathCollisionError,
+  ToolGatewayToolNotFoundError as AttemptToolNotFoundError,
+  digestCanonicalJson,
+  prepareToolGatewayDefinitions,
+  type PreparedToolGatewayCall,
+  type ToolGatewayCallLifecycle,
+  type ToolGatewayDefinition,
+} from "@opengeni/tool-gateway";
 
 export type { AttemptToolCatalog, AttemptToolCatalogEntry } from "@opengeni/contracts";
 
@@ -45,6 +54,8 @@ export type AttemptToolExecutionContext = {
 export type AttemptToolDefinition = Omit<AttemptToolCatalogEntryValue, "codemodePath"> & {
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
+  /** In-process execution lifecycle shared by model MCP and Codemode. */
+  lifecycle?: ToolGatewayCallLifecycle;
   execute: (
     args: Record<string, unknown>,
     context: AttemptToolExecutionContext,
@@ -62,6 +73,8 @@ export type CreateAttemptToolEnvironmentInput = {
   definitions: readonly AttemptToolDefinition[];
   createdAt?: Date;
   authorize?: AttemptToolAuthorization;
+  /** Host-only approval projection for one exact model invocation. */
+  confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
 };
 
 export type ModelAttemptToolCall = {
@@ -73,78 +86,40 @@ export type ModelAttemptToolCall = {
   signal?: AbortSignal;
 };
 
-export class AttemptToolCatalogStaleError extends Error {
-  readonly code = "catalog_stale";
-
-  constructor() {
-    super("Codemode catalog is stale for the active execution attempt");
-    this.name = "AttemptToolCatalogStaleError";
-  }
-}
-
-export class AttemptToolNotFoundError extends Error {
-  readonly code = "tool_not_found";
-
-  constructor() {
-    super("Tool is not present in the active execution attempt catalog");
-    this.name = "AttemptToolNotFoundError";
-  }
-}
-
-export class AttemptToolApprovalRequiredError extends Error {
-  readonly code = "approval_required";
-
-  constructor() {
-    super("Tool requires human approval and must be invoked through the agent");
-    this.name = "AttemptToolApprovalRequiredError";
-  }
-}
-
-export class AttemptToolCatalogIntegrityError extends Error {
-  readonly code = "catalog_integrity_failed";
-
-  constructor() {
-    super("Attempt tool catalog digest does not match its authoritative content");
-    this.name = "AttemptToolCatalogIntegrityError";
-  }
-}
-
-export class AttemptToolCatalogTooLargeError extends Error {
-  readonly code = "catalog_too_large";
-
-  constructor() {
-    super("Attempt tool catalog exceeds the maximum serialized size");
-    this.name = "AttemptToolCatalogTooLargeError";
-  }
-}
-
-export class AttemptToolInputValidationError extends Error {
-  readonly code = "invalid_tool_arguments";
-
-  constructor() {
-    super("Tool arguments do not match the attempt catalog input schema");
-    this.name = "AttemptToolInputValidationError";
-  }
-}
-
-export class AttemptToolOutputValidationError extends Error {
-  readonly code = "invalid_tool_result";
-
-  constructor() {
-    super("Tool result does not match the attempt catalog output schema");
-    this.name = "AttemptToolOutputValidationError";
-  }
-}
+export {
+  AttemptToolCatalogStaleError,
+  AttemptToolNotFoundError,
+  AttemptToolApprovalRequiredError,
+  AttemptToolCatalogIntegrityError,
+  AttemptToolCatalogTooLargeError,
+  AttemptToolInputValidationError,
+  AttemptToolOutputValidationError,
+  AttemptToolPathCollisionError,
+};
 
 export class CodemodeTransportError extends Error {
   readonly code = "codemode_transport_error";
+  readonly remoteCode: string | null;
+  readonly retryable: boolean | null;
+  readonly outcomeUnknown: boolean | null;
+  readonly details: Readonly<Record<string, unknown>> | null;
 
   constructor(
     message: string,
     readonly status: number | null = null,
+    options: {
+      code?: string;
+      retryable?: boolean;
+      outcomeUnknown?: boolean;
+      details?: Readonly<Record<string, unknown>>;
+    } = {},
   ) {
     super(message);
     this.name = "CodemodeTransportError";
+    this.remoteCode = options.code ?? null;
+    this.retryable = options.retryable ?? null;
+    this.outcomeUnknown = options.outcomeUnknown ?? null;
+    this.details = options.details ?? null;
   }
 }
 
@@ -171,6 +146,7 @@ export type CodemodeClientOptions = {
 
 export type CodemodeCallOptions = {
   operationId?: string;
+  /** Stops client observation only; it never cancels an already-created server operation. */
   signal?: AbortSignal;
   timeoutMs?: number;
 };
@@ -248,20 +224,33 @@ export class CodemodeClient {
     argumentsValue: Record<string, unknown> = {},
     options: CodemodeCallOptions = {},
   ): Promise<AttemptToolResultValue> {
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    if (
-      !catalog.entries.some(
-        (entry) =>
-          entry.identity.serverId === identity.serverId &&
-          entry.identity.toolName === identity.toolName,
+    return (
+      await this.callResolved(
+        (catalog) =>
+          catalog.entries.find(
+            (entry) =>
+              entry.identity.serverId === identity.serverId &&
+              entry.identity.toolName === identity.toolName,
+          ) ?? null,
+        argumentsValue,
+        options,
       )
-    ) {
-      throw new AttemptToolNotFoundError();
-    }
+    ).result;
+  }
+
+  private async callResolved(
+    resolveEntry: (catalog: AttemptToolCatalogValue) => AttemptToolCatalogEntryValue | null,
+    argumentsValue: Record<string, unknown>,
+    options: CodemodeCallOptions,
+  ): Promise<{ result: AttemptToolResultValue; entry: AttemptToolCatalogEntryValue }> {
+    let catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
+    let entry = resolveEntry(catalog);
+    if (!entry) throw new AttemptToolNotFoundError();
     const operationId = options.operationId ?? randomUUID();
     const deadline =
       Date.now() + boundedPositiveInteger(options.timeoutMs ?? this.timeoutMs, 1_000, 60 * 60_000);
     let submitted = false;
+    let staleRefreshAttempted = false;
     let operation: CodemodeOperationValue | null = null;
     let nextNotifyAt = 0;
     while (true) {
@@ -272,7 +261,9 @@ export class CodemodeClient {
         );
       }
       const shouldNotify =
-        !submitted || (operation?.state === "queued" && Date.now() >= nextNotifyAt);
+        !submitted ||
+        ((operation?.state === "queued" || operation?.state === "running") &&
+          Date.now() >= nextNotifyAt);
       if (shouldNotify) {
         submitted = true;
         nextNotifyAt = Date.now() + 2_000;
@@ -280,25 +271,65 @@ export class CodemodeClient {
           operation = await this.submit(
             operationId,
             catalog.digest,
-            identity,
+            entry.identity,
             argumentsValue,
             options.signal,
           );
         } catch (error) {
-          // The POST may have committed before its response was lost, or an
-          // attempt may have closed between submission and a wake retry. The
-          // caller-owned id is the recovery handle: read before deciding that
-          // another side effect is necessary.
-          try {
-            operation = await this.read(operationId, options.signal);
-          } catch {
-            throw error;
+          if (
+            operation === null &&
+            !staleRefreshAttempted &&
+            error instanceof CodemodeTransportError &&
+            error.remoteCode === "codemode_catalog_stale"
+          ) {
+            staleRefreshAttempted = true;
+            catalog = await this.catalog({
+              refresh: true,
+              ...(options.signal ? { signal: options.signal } : {}),
+            });
+            entry = resolveEntry(catalog);
+            if (!entry) throw new AttemptToolNotFoundError();
+            submitted = false;
+            nextNotifyAt = 0;
+            continue;
           }
+          if (options.signal?.aborted) throw error;
+          if (operation === null && !canReconcileCodemodeSubmission(error)) throw error;
+          // The POST may have committed before its response was lost, or an
+          // already-bound operation may have settled while a later wake
+          // notification failed deterministically. The caller-owned id is the
+          // recovery handle: read and re-prove the exact binding before
+          // deciding that another side effect is necessary.
+          let recovered: CodemodeOperationValue;
+          try {
+            recovered = await this.read(operationId, options.signal);
+          } catch (recoveryError) {
+            if (options.signal?.aborted) throw recoveryError;
+            throw new CodemodeTransportError(
+              `Codemode operation ${operationId} could not be reconciled after its submission response failed`,
+              null,
+              {
+                code: "codemode_operation_recovery_unavailable",
+                retryable: true,
+                outcomeUnknown: true,
+                details: { operationId },
+              },
+            );
+          }
+          assertRecoveredCodemodeOperation(recovered, {
+            operationId,
+            catalog,
+            identity: entry.identity,
+            arguments: argumentsValue,
+          });
+          operation = recovered;
         }
       } else {
         operation = await this.read(operationId, options.signal);
       }
-      if (operation.state === "completed") return AttemptToolResult.parse(operation.result);
+      if (operation.state === "completed") {
+        return { result: AttemptToolResult.parse(operation.result), entry };
+      }
       if (["failed", "outcome_unknown", "cancelled"].includes(operation.state)) {
         throw new CodemodeOperationError(
           operation,
@@ -318,14 +349,13 @@ export class CodemodeClient {
     if (path.length < 2 || path.some((segment) => segment.length === 0)) {
       throw new AttemptToolNotFoundError();
     }
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    const matches = catalog.entries.filter(
-      (entry) =>
-        entry.codemodePath.length === path.length &&
-        entry.codemodePath.every((segment, index) => segment === path[index]),
-    );
-    if (matches.length !== 1) throw new AttemptToolNotFoundError();
-    return await this.call(matches[0]!.identity, argumentsValue, options);
+    return (
+      await this.callResolved(
+        (catalog) => catalogEntryForPath(catalog, path),
+        argumentsValue,
+        options,
+      )
+    ).result;
   }
 
   /** Return structured content when the catalog declares it; otherwise retain the full MCP result. */
@@ -337,15 +367,11 @@ export class CodemodeClient {
     if (path.length < 2 || path.some((segment) => segment.length === 0)) {
       throw new AttemptToolNotFoundError();
     }
-    const catalog = await this.catalog(options.signal ? { signal: options.signal } : {});
-    const matches = catalog.entries.filter(
-      (entry) =>
-        entry.codemodePath.length === path.length &&
-        entry.codemodePath.every((segment, index) => segment === path[index]),
+    const { result, entry } = await this.callResolved(
+      (catalog) => catalogEntryForPath(catalog, path),
+      argumentsValue,
+      options,
     );
-    if (matches.length !== 1) throw new AttemptToolNotFoundError();
-    const entry = matches[0]!;
-    const result = await this.call(entry.identity, argumentsValue, options);
     if (!entry.outputSchema) return result;
     if (result.isError) throw new CodemodeToolCallError(result);
     if (!result.structuredContent) {
@@ -392,24 +418,72 @@ export class CodemodeClient {
       ...init,
       headers: {
         ...Object.fromEntries(new Headers(init.headers).entries()),
-        [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
         authorization: `Bearer ${token}`,
       },
     });
     if (!response.ok) {
       let message = `Codemode request failed with HTTP ${response.status}`;
+      let errorOptions: {
+        code?: string;
+        retryable?: boolean;
+        outcomeUnknown?: boolean;
+        details?: Readonly<Record<string, unknown>>;
+      } = {};
       try {
-        const payload = (await response.json()) as {
-          error?: { message?: unknown };
-        };
-        if (typeof payload.error?.message === "string") message = payload.error.message;
+        const error = parseCodemodeApiError(await response.json());
+        if (error?.message) message = error.message;
+        if (error) {
+          errorOptions = {
+            ...(error.code ? { code: error.code } : {}),
+            ...(error.retryable === undefined ? {} : { retryable: error.retryable }),
+            ...(error.outcomeUnknown === undefined ? {} : { outcomeUnknown: error.outcomeUnknown }),
+            ...(error.details ? { details: error.details } : {}),
+          };
+        }
       } catch {
         // The status is sufficient; never echo an unbounded provider body.
       }
-      throw new CodemodeTransportError(message, response.status);
+      throw new CodemodeTransportError(message, response.status, errorOptions);
     }
     return response;
   }
+}
+
+function canReconcileCodemodeSubmission(error: unknown): boolean {
+  return !(error instanceof CodemodeTransportError) || error.outcomeUnknown === true;
+}
+
+function assertRecoveredCodemodeOperation(
+  operation: CodemodeOperationValue,
+  expected: {
+    operationId: string;
+    catalog: AttemptToolCatalogValue;
+    identity: AttemptToolIdentity;
+    arguments: Record<string, unknown>;
+  },
+): void {
+  const matches =
+    operation.operationId === expected.operationId &&
+    operation.accountId === expected.catalog.accountId &&
+    operation.workspaceId === expected.catalog.workspaceId &&
+    operation.sessionId === expected.catalog.sessionId &&
+    operation.turnId === expected.catalog.turnId &&
+    operation.attemptId === expected.catalog.attemptId &&
+    operation.executionGeneration === expected.catalog.executionGeneration &&
+    operation.catalogDigest === expected.catalog.digest &&
+    operation.identity.serverId === expected.identity.serverId &&
+    operation.identity.toolName === expected.identity.toolName &&
+    digestCanonicalJson(operation.arguments) === digestCanonicalJson(expected.arguments);
+  if (matches) return;
+  throw new CodemodeTransportError(
+    "Codemode operation id is already bound to a different request",
+    409,
+    {
+      code: "codemode_operation_conflict",
+      retryable: false,
+      outcomeUnknown: false,
+    },
+  );
 }
 
 export function compileCodemodeTools(
@@ -438,29 +512,11 @@ export function compileCodemodeTools(
   return root;
 }
 
-type CompiledDefinition = {
-  entry: AttemptToolCatalogEntryValue;
-  execute: AttemptToolDefinition["execute"];
-  validateInput: ValidateFunction<unknown>;
-  validateOutput: ValidateFunction<unknown> | null;
-};
-
 export class AttemptToolEnvironment {
-  readonly catalog: AttemptToolCatalogValue;
-  private readonly byIdentity = new Map<string, CompiledDefinition>();
-  private readonly byModelName = new Map<string, CompiledDefinition>();
-
   constructor(
-    catalog: AttemptToolCatalogValue,
-    definitions: readonly CompiledDefinition[],
-    private readonly authorize: AttemptToolAuthorization | undefined,
-  ) {
-    this.catalog = catalog;
-    for (const definition of definitions) {
-      this.byIdentity.set(identityKey(definition.entry.identity), definition);
-      this.byModelName.set(definition.entry.modelName, definition);
-    }
-  }
+    readonly catalog: AttemptToolCatalogValue,
+    private readonly gateway: ToolGateway,
+  ) {}
 
   async call(
     input: AttemptToolCallValue,
@@ -469,58 +525,22 @@ export class AttemptToolEnvironment {
       signal?: AbortSignal;
     } = {},
   ): Promise<AttemptToolResultValue> {
+    return await (await this.prepareCall(input, context)).execute();
+  }
+
+  async prepareCall(
+    input: AttemptToolCallValue,
+    context: {
+      transportMeta?: Record<string, unknown> | null;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<PreparedToolGatewayCall> {
     const call = AttemptToolCall.parse(input);
-    if (call.catalogDigest !== this.catalog.digest) {
-      throw new AttemptToolCatalogStaleError();
-    }
-    const definition = this.byIdentity.get(identityKey(call.identity));
-    if (!definition) {
-      throw new AttemptToolNotFoundError();
-    }
-    if (call.caller.kind === "codemode" && definition.entry.approval === "human") {
-      throw new AttemptToolApprovalRequiredError();
-    }
-    if (!definition.validateInput(call.arguments)) {
-      throw new AttemptToolInputValidationError();
-    }
-    await this.authorize?.({ call, entry: definition.entry });
-    const result = AttemptToolResult.parse(
-      await definition.execute(call.arguments, {
-        operationId: call.operationId,
-        caller: call.caller,
-        ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),
-        ...(context.signal === undefined ? {} : { signal: context.signal }),
-      }),
-    );
-    if (!result.isError && definition.validateOutput) {
-      const outputMatchesSchema =
-        result.structuredContent !== undefined &&
-        definition.validateOutput(result.structuredContent);
-      // Model overflow replaces the exact tool payload with a compact File
-      // receipt after execute. That handle is not the catalog output schema.
-      if (!outputMatchesSchema && !isToolResultSpilledReceipt(result.structuredContent)) {
-        throw new AttemptToolOutputValidationError();
-      }
-    }
-    return result;
+    return await this.gateway.prepareCall(call, context);
   }
 
   async callModel(input: ModelAttemptToolCall): Promise<AttemptToolResultValue> {
-    const definition = this.byModelName.get(input.modelName);
-    if (!definition) {
-      throw new AttemptToolNotFoundError();
-    }
-    const call = AttemptToolCall.parse({
-      operationId: input.operationId ?? randomUUID(),
-      catalogDigest: this.catalog.digest,
-      identity: definition.entry.identity,
-      arguments: input.arguments,
-      caller: { kind: "model", subjectId: input.subjectId },
-    });
-    return await this.call(call, {
-      ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    return await this.gateway.callModel(input);
   }
 }
 
@@ -528,36 +548,55 @@ export function createAttemptToolEnvironment(
   input: CreateAttemptToolEnvironmentInput,
 ): AttemptToolEnvironment {
   const createdAt = (input.createdAt ?? new Date()).toISOString();
-  const paths = allocateCodemodePaths(input.definitions);
-  const schemaValidators = createSchemaValidators();
-  const compiled = input.definitions.map((definition, index): CompiledDefinition => {
-    const { execute, codemodePath: _path, ...entryInput } = definition;
-    const entry = AttemptToolCatalogEntry.parse({
-      ...entryInput,
-      codemodePath: paths[index],
-    });
-    return {
-      entry,
-      execute,
-      validateInput: compileCatalogSchema(schemaValidators, entry.inputSchema),
-      validateOutput: entry.outputSchema
-        ? compileCatalogSchema(schemaValidators, entry.outputSchema)
-        : null,
-    };
-  });
+  const prepared = prepareToolGatewayDefinitions(
+    input.definitions.map(
+      (definition): ToolGatewayDefinition => ({
+        ...definition,
+        execute: async (argumentsValue, context) =>
+          await definition.execute(argumentsValue, {
+            ...context,
+            caller: AttemptToolCaller.parse(context.caller),
+          }),
+      }),
+    ),
+  );
   const unsigned = {
     version: ATTEMPT_TOOL_CATALOG_VERSION,
     ...input.scope,
     generation: input.generation,
     createdAt,
-    entries: compiled.map(({ entry }) => entry),
+    entries: [...prepared.entries],
   };
   const catalog = AttemptToolCatalog.parse({
     ...unsigned,
     digest: digestAttemptToolCatalog(unsigned),
   });
   assertCatalogSize(catalog);
-  return new AttemptToolEnvironment(catalog, compiled, input.authorize);
+  return new AttemptToolEnvironment(
+    catalog,
+    prepared.create({
+      catalogDigest: catalog.digest,
+      requireApproval: (entry, caller) => caller.kind === "codemode" && entry.approval === "human",
+      ...(input.confirmModelApproval
+        ? {
+            confirmModelApproval: ({ entry, subjectId }) =>
+              input.confirmModelApproval!({
+                modelName: entry.modelName,
+                subjectId,
+              }),
+          }
+        : {}),
+      ...(input.authorize
+        ? {
+            authorize: async ({ call, entry }) =>
+              await input.authorize!({
+                call: AttemptToolCall.parse(call),
+                entry,
+              }),
+          }
+        : {}),
+    }),
+  );
 }
 
 export function digestAttemptToolCatalog(catalog: Omit<AttemptToolCatalogValue, "digest">): string {
@@ -612,124 +651,6 @@ function assertCatalogSize(catalog: AttemptToolCatalogValue): void {
   }
 }
 
-type SchemaCompiler = { compile(schema: object): ValidateFunction<unknown> };
-
-// Validator compilation is structural and independent of attempt identity,
-// executable closures, credentials, and authorization. Reuse only exact
-// content-addressed validators; the attempt environment and catalog remain
-// freshly bound and digested on every execution. The hard cap prevents an
-// untrusted MCP schema stream from turning this process cache into a memory
-// sink.
-const COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES = 512;
-const compiledCatalogSchemaCache = new Map<string, ValidateFunction<unknown>>();
-
-function createSchemaValidators(): {
-  draft7: SchemaCompiler;
-  draft2019: SchemaCompiler;
-  draft2020: SchemaCompiler;
-} {
-  const options = {
-    allErrors: false,
-    coerceTypes: false,
-    strict: false,
-    useDefaults: false,
-    validateFormats: false,
-  } as const;
-  return {
-    draft7: new Ajv(options),
-    draft2019: new Ajv2019(options),
-    draft2020: new Ajv2020(options),
-  };
-}
-
-function compileCatalogSchema(
-  validators: ReturnType<typeof createSchemaValidators>,
-  schema: AttemptToolCatalogEntryValue["inputSchema"],
-): ValidateFunction<unknown> {
-  const dialect = typeof schema.$schema === "string" ? schema.$schema : "";
-  const family = dialect.includes("2020-12")
-    ? "2020-12"
-    : dialect.includes("2019-09")
-      ? "2019-09"
-      : "draft7";
-  const cacheKey = `${family}:${digestCanonicalJson(schema)}`;
-  const cached = compiledCatalogSchemaCache.get(cacheKey);
-  if (cached) {
-    compiledCatalogSchemaCache.delete(cacheKey);
-    compiledCatalogSchemaCache.set(cacheKey, cached);
-    return cached;
-  }
-  const compiled =
-    family === "2020-12"
-      ? validators.draft2020.compile(schema)
-      : family === "2019-09"
-        ? validators.draft2019.compile(schema)
-        : validators.draft7.compile(schema);
-  while (compiledCatalogSchemaCache.size >= COMPILED_CATALOG_SCHEMA_CACHE_MAX_ENTRIES) {
-    const oldest = compiledCatalogSchemaCache.keys().next().value;
-    if (oldest === undefined) break;
-    compiledCatalogSchemaCache.delete(oldest);
-  }
-  compiledCatalogSchemaCache.set(cacheKey, compiled);
-  return compiled;
-}
-
-function allocateCodemodePaths(definitions: readonly AttemptToolDefinition[]): string[][] {
-  const bases = definitions.map((definition) =>
-    (definition.codemodePath?.length
-      ? definition.codemodePath
-      : [definition.identity.serverId, definition.identity.toolName]
-    ).map(safeNamespaceSegment),
-  );
-  const counts = new Map<string, number>();
-  for (const path of bases) {
-    const key = path.join("\u0000");
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  return bases.map((base, index) => {
-    const key = base.join("\u0000");
-    if (counts.get(key) === 1) return base;
-    const suffix = `_${shortIdentityDigest(definitions[index]!.identity)}`;
-    const last = base.at(-1)!;
-    return [...base.slice(0, -1), `${last.slice(0, 128 - suffix.length)}${suffix}`];
-  });
-}
-
-function safeNamespaceSegment(value: string): string {
-  let normalized = value.replace(/[^A-Za-z0-9_$]/gu, "_");
-  if (!/^[A-Za-z_$]/u.test(normalized)) normalized = `_${normalized}`;
-  if (["__proto__", "prototype", "constructor"].includes(normalized)) {
-    normalized = `_${normalized}`;
-  }
-  return normalized.slice(0, 128) || "_";
-}
-
-function shortIdentityDigest(identity: AttemptToolIdentity): string {
-  return createHash("sha256").update(identityKey(identity), "utf8").digest("hex").slice(0, 10);
-}
-
-function identityKey(identity: AttemptToolIdentity): string {
-  return `${identity.serverId}\u0000${identity.toolName}`;
-}
-
-function digestCanonicalJson(value: unknown): string {
-  return createHash("sha256")
-    .update(JSON.stringify(canonicalJsonValue(value)), "utf8")
-    .digest("hex");
-}
-
-function canonicalJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalJsonValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, entry]) => [key, canonicalJsonValue(entry)]),
-    );
-  }
-  return value;
-}
-
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 
 function boundedPositiveInteger(value: number, minimum: number, maximum: number): number {
@@ -757,6 +678,55 @@ function structuredToolError(result: AttemptToolResultValue): {
   };
 }
 
+function catalogEntryForPath(
+  catalog: AttemptToolCatalogValue,
+  path: readonly string[],
+): AttemptToolCatalogEntryValue | null {
+  const matches = catalog.entries.filter(
+    (entry) =>
+      entry.codemodePath.length === path.length &&
+      entry.codemodePath.every((segment, index) => segment === path[index]),
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}
+
+function parseCodemodeApiError(input: unknown): {
+  message?: string;
+  code?: string;
+  retryable?: boolean;
+  outcomeUnknown?: boolean;
+  details?: Readonly<Record<string, unknown>>;
+} | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return null;
+  const root = input as Record<string, unknown>;
+  const nested =
+    root.error && typeof root.error === "object" && !Array.isArray(root.error)
+      ? (root.error as Record<string, unknown>)
+      : root;
+  const details =
+    nested.details && typeof nested.details === "object" && !Array.isArray(nested.details)
+      ? (nested.details as Readonly<Record<string, unknown>>)
+      : undefined;
+  const detailCode = details?.code;
+  const code =
+    typeof detailCode === "string" && /^[a-z0-9_]{1,128}$/u.test(detailCode)
+      ? detailCode
+      : undefined;
+  const message = typeof nested.message === "string" ? nested.message : undefined;
+  const retryable = typeof nested.retryable === "boolean" ? nested.retryable : undefined;
+  const outcomeUnknown =
+    typeof nested.outcomeUnknown === "boolean" ? nested.outcomeUnknown : undefined;
+  return message || code || retryable !== undefined || outcomeUnknown !== undefined || details
+    ? {
+        ...(message ? { message } : {}),
+        ...(code ? { code } : {}),
+        ...(retryable === undefined ? {} : { retryable }),
+        ...(outcomeUnknown === undefined ? {} : { outcomeUnknown }),
+        ...(details ? { details } : {}),
+      }
+    : null;
+}
+
 async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (!signal) {
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
@@ -781,3 +751,4 @@ export * from "./interaction";
 export * from "./artifacts";
 export * from "./structured";
 export * from "./declarations";
+export * from "./site";
