@@ -1000,6 +1000,21 @@ describe("SessionChrome goal pill reasons", () => {
 });
 
 describe("SessionChrome compact actions", () => {
+  test("visibly identifies the goal when its continuation needs attention", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [] })}
+        goal={goal({ continuation: undefined })}
+      />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="goal"]',
+    );
+    expect(chip?.textContent).toBe("Goal · Needs attention");
+    expect(chip?.getAttribute("aria-label")).toBe("Goal · Needs attention");
+  });
+
   test("steers the first queued message without opening the panel", async () => {
     const ids: string[] = [];
     mounted = await renderComponent(
