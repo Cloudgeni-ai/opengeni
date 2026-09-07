@@ -90,7 +90,9 @@ function SessionRailRowMetadataFixture() {
                 <HoverCardContent side="right" collisionPadding={8}>
                   <SessionRowHoverDetails
                     title={
-                      scenario.id === "overflow" ? "Long_unbroken_session_title_".repeat(8) : longTitle
+                      scenario.id === "overflow"
+                        ? "Long_unbroken_session_title_".repeat(8)
+                        : longTitle
                     }
                     createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
                     createdBy={{
