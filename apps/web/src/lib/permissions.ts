@@ -1,6 +1,8 @@
 import { Permission } from "@opengeni/contracts";
 
 import type { AccessContext } from "@/types";
+import type { Workspace } from "@/types";
+import { personalWorkspaceMembership, type ManagedSelfContext } from "./managed-self-context";
 
 const permissionGroupAssignments: Record<Permission, string> = {
   "workspace:read": "Workspace",
@@ -332,5 +334,23 @@ export function hasAccountPermission(
   return Boolean(
     grant &&
     (grant.permissions.includes(permission) || grant.permissions.includes("account:admin")),
+  );
+}
+
+/** UI affordance only. The API independently authenticates Personal ownership. */
+export function canManageWorkspaceSettings(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  selfContext: ManagedSelfContext | null,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "workspace:admin")) return true;
+  return Boolean(
+    context.mode === "managed" &&
+    workspace.kind === "personal" &&
+    selfContext?.identity.subjectId === context.subjectId &&
+    selfContext.identity.subjectId === `user:${selfContext.identity.managedUserId}` &&
+    hasWorkspacePermission(context, workspace.id, "workspace:read") &&
+    personalWorkspaceMembership(workspace, selfContext),
   );
 }

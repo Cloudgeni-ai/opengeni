@@ -12,6 +12,7 @@ import {
 import {
   publishGovernedLearningEventToSlack,
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -122,7 +123,7 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(`${base}/revisions`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     const request = await parseBody(context, CreateWorkspaceLearningPolicyRevisionRequest);
     try {
       return context.json(
@@ -149,7 +150,7 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     const revisionId = z.string().uuid().safeParse(context.req.param("revisionId"));
     if (!revisionId.success) throw new HTTPException(422, { message: "Invalid revision id" });
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     const request = await parseBody(context, ActivateWorkspaceLearningPolicyRevisionRequest);
     try {
       return context.json(
@@ -174,7 +175,7 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.post(`${base}/rollback`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     const request = await parseBody(context, RollbackWorkspaceLearningPolicyRevisionRequest);
     try {
       return context.json(
@@ -206,7 +207,7 @@ export function registerWorkspaceLearningRoutes(app: Hono, deps: ApiRouteDeps): 
     if (!activationReceiptId.success) {
       throw new HTTPException(422, { message: "Invalid activation receipt id" });
     }
-    const grant = await requireAccessGrant(context, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(context, deps, workspaceId);
     const request = await parseBody(context, UndoGovernedLearningActivationHttpRequest);
     try {
       const undo = await undoGovernedLearningActivation(deps.db, {

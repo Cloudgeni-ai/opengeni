@@ -71,6 +71,7 @@ import {
 } from "@/lib/workspace-deletion";
 import {
   apiKeyPermissionGroups,
+  canManageWorkspaceSettings,
   defaultApiKeyPermissions,
   delegableApiKeyPermissions,
   hasWorkspacePermission,
@@ -114,6 +115,11 @@ function OperationalWorkspaceSettingsRoute({
     ? orgLabel(accountId, context.accessContext.accountGrants)
     : "Organization";
   const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
+  const canManageSettings = canManageWorkspaceSettings(
+    context.accessContext,
+    activeWorkspace,
+    context.managedSelfContext,
+  );
 
   const [nameDraft, setNameDraft] = useState(activeWorkspace?.name ?? "");
   const [nameEditing, setNameEditing] = useState(false);
@@ -235,7 +241,7 @@ function OperationalWorkspaceSettingsRoute({
   }
 
   async function toggleWorkspaceControl() {
-    if (!activeWorkspace || !canRename || controlBusy) return;
+    if (!activeWorkspace || !canManageSettings || controlBusy) return;
     const acceptedTransition = context.captureWorkspaceInvocation(workspaceId);
     if (!acceptedTransition) return;
     const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
@@ -450,7 +456,7 @@ function OperationalWorkspaceSettingsRoute({
                     : "Agents can start and continue work in this workspace."}
                 </p>
               </div>
-              {canRename ? (
+              {canManageSettings ? (
                 <Button
                   type="button"
                   variant="secondary"
@@ -484,14 +490,17 @@ function OperationalWorkspaceSettingsRoute({
                 </p>
               </div>
               <div className="divide-y divide-border/70 rounded-lg border border-border px-3">
-                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canRename} />
-                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <MemoryPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
+                <VoiceInputPreferenceRow workspaceId={workspaceId} canManage={canManageSettings} />
                 <VideoGenerationPreferenceRow
                   workspaceId={workspaceId}
-                  canManage={canDeleteWorkspace}
+                  canManage={canManageSettings}
                   refreshKey={gatewayRevision}
                 />
-                <CodexCompactionPreferenceRow workspaceId={workspaceId} canManage={canRename} />
+                <CodexCompactionPreferenceRow
+                  workspaceId={workspaceId}
+                  canManage={canManageSettings}
+                />
               </div>
             </section>
 
@@ -512,7 +521,7 @@ function OperationalWorkspaceSettingsRoute({
         {section === "tools" ? (
           <WorkspaceCapabilityDefaults
             workspaceId={workspaceId}
-            canManage={canRename}
+            canManage={canManageSettings}
             kind="permissions"
           />
         ) : null}
@@ -535,7 +544,7 @@ function OperationalWorkspaceSettingsRoute({
             </section>
             <WorkspaceCapabilityDefaults
               workspaceId={workspaceId}
-              canManage={canRename}
+              canManage={canManageSettings}
               kind="plugins"
             />
           </>
@@ -568,14 +577,14 @@ function OperationalWorkspaceSettingsRoute({
                 <DefaultSessionModelPreferenceRow
                   key={`default-model:${workspaceId}:${gatewayRevision}`}
                   workspaceId={workspaceId}
-                  canManage={canRename}
+                  canManage={canManageSettings}
                 />
               </div>
             </section>
             <ModelAccessPolicySection
               key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
-              canManage={canDeleteWorkspace}
+              canManage={canManageSettings}
             />
             {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
             <CodexSubscriptionsCard
@@ -591,13 +600,13 @@ function OperationalWorkspaceSettingsRoute({
             <AiGatewayConnectionCard
               workspaceId={workspaceId}
               canManageConnection={canManageConnections}
-              canManageCustomModels={canRename}
+              canManageCustomModels={canManageSettings}
               onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
             <OpenRouterConnectionCard
               workspaceId={workspaceId}
               canManageConnection={canManageConnections}
-              canManageCustomModels={canRename}
+              canManageCustomModels={canManageSettings}
               onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
           </>

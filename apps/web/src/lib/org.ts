@@ -67,3 +67,17 @@ export function workspacesInOrg(workspaces: Workspace[], accountId: string): Wor
     .filter((workspace) => workspace.accountId === accountId)
     .sort((a, b) => a.name.localeCompare(b.name));
 }
+
+/** Organization settings remain anchored to an accessible workspace in that organization. */
+export function organizationSettingsWorkspaceId(
+  workspaces: Workspace[],
+  accountId: string,
+  activeWorkspaceId: string,
+): string | null {
+  const candidates = workspacesInOrg(workspaces, accountId);
+  return (
+    candidates.find((workspace) => workspace.id === activeWorkspaceId)?.id ??
+    candidates[0]?.id ??
+    null
+  );
+}
