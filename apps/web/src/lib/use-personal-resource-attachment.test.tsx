@@ -295,6 +295,11 @@ describe("usePersonalResourceAttachment", () => {
     await flush();
     expect(hook.result.current.selected.resourceCount).toBe(1);
     expect(hook.result.current.intent?.mode).toBe("once");
+    const originalIntent = hook.result.current.intent;
+    await actRun(() => hook.result.current.setMode("session"));
+    expect(hook.result.current.intent?.mode).toBe("session");
+    expect(originalIntent?.mode).toBe("once");
+    expect(hook.result.current.requiresDecision).toBe(false);
 
     active = false;
     await actRun(() => hook.result.current.refresh());

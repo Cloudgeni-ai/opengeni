@@ -1,3 +1,4 @@
+import { PersonalResourceScopeChoice } from "./personal-resource-scope-choice";
 import { RefreshCwIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -12,7 +13,12 @@ export function PersonalResourceAttachmentControl(props: {
   const { controller } = props;
   // Healthy selections are already described inside their pickers. Keep the
   // composer-top surface for transient or actionable status only.
+  const showScopeChoice =
+    controller.visibility === "workspace" &&
+    controller.selected.personalResourceCount > 0 &&
+    controller.mode !== null;
   const hasVisibleStatus =
+    showScopeChoice ||
     controller.loading ||
     controller.notice !== null ||
     controller.error !== null ||
@@ -27,6 +33,19 @@ export function PersonalResourceAttachmentControl(props: {
       className={cn("min-w-0 space-y-2", props.compact ? "mt-2" : "mt-4")}
       aria-busy={controller.loading || controller.refreshing}
     >
+      {controller.ongoingResourceNames.length > 0 ? (
+        <p className="text-xs text-fg-muted">
+          Existing ongoing authorization: {controller.ongoingResourceNames.join(", ")}. This is
+          separate from your next-message choice.
+        </p>
+      ) : null}
+      {showScopeChoice ? (
+        <PersonalResourceScopeChoice
+          mode={controller.mode!}
+          onModeChange={controller.setMode}
+          disabled={disabled || controller.requiresDecision}
+        />
+      ) : null}
       {controller.loading ? (
         <p role="status" className="text-xs text-fg-subtle">
           Loading selected personal resources…

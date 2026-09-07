@@ -8,6 +8,7 @@ import {
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { usePersonalResourceScopeChoice } from "./use-personal-resource-scope-choice";
 import type { AuthSession } from "@/types";
 import type { ManagedSelfContext } from "./managed-self-context";
 import {
@@ -15,6 +16,7 @@ import {
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
   personalSelection,
+  ongoingPersonalResourceNames,
   resolvePersonalResourceOwnerScope,
   type FixedPersonalResources,
   type PersonalAttachmentMode,
@@ -44,6 +46,8 @@ export type PersonalResourceAttachmentController = Readonly<{
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
+  ongoingResourceNames: string[];
+  setMode: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
   requiresDecision: boolean;
   intent: PersonalResourceAttachmentIntent | undefined;
@@ -297,8 +301,73 @@ export function usePersonalResourceAttachment(input: {
       ? "private"
       : (input.createVisibility ?? "workspace");
   const expectedAuthorityEpoch = input.session?.tenancy?.authorityEpoch;
-  const mode: PersonalAttachmentMode | null =
-    selected.resourceCount > 0 ? (visibility === "private" ? "session" : "once") : null;
+  const scopeChoice = usePersonalResourceScopeChoice(
+    [scopeKey, input.session?.id ?? "new", selectedIdentity].join(":"),
+    visibility,
+  );
+  const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? scopeChoice.mode : null;
+  const [grantCheckTime, setGrantCheckTime] = useState(Date.now);
+  const catalogAuthorities = catalog
+    ? [
+        ...catalog.variableSetAuthorities,
+        ...catalog.rigAuthorities,
+        ...catalog.connectedMachineAuthorities,
+      ]
+    : [];
+  const nextGrantExpiry = Math.min(
+    ...catalogAuthorities.flatMap((authority) =>
+      authority.grants.flatMap((grant) =>
+        grant.status === "active" &&
+        grant.expiresAt !== null &&
+        Date.parse(grant.expiresAt) > grantCheckTime
+          ? [Date.parse(grant.expiresAt)]
+          : [],
+      ),
+    ),
+  );
+  useEffect(() => {
+    if (!Number.isFinite(nextGrantExpiry)) return;
+    const timer = setTimeout(
+      () => setGrantCheckTime(Date.now()),
+      Math.min(2_147_483_647, Math.max(1, nextGrantExpiry - Date.now() + 1)),
+    );
+    return () => clearTimeout(timer);
+  }, [nextGrantExpiry, grantCheckTime]);
+  const ongoingResourceNames =
+    scope &&
+    input.session?.tenancy &&
+    visibility === "workspace" &&
+    settledCatalogScopeKey === scopeKey &&
+    !loading &&
+    !refreshing &&
+    !error &&
+    !selected.closureUnverified
+      ? ongoingPersonalResourceNames({
+          authorities: catalogAuthorities,
+          resources: [
+            ...selected.variableSets.map((resource) => ({
+              kind: "variable_set" as const,
+              id: resource.id,
+              name: resource.name,
+            })),
+            ...selected.rigs.map((resource) => ({
+              kind: "rig" as const,
+              id: resource.id,
+              name: resource.name,
+            })),
+            ...selected.connectedMachines.map((resource) => ({
+              kind: "connected_machine" as const,
+              id: resource.enrollmentId,
+              name: resource.name,
+            })),
+          ],
+          organizationId: scope.organizationId,
+          workspaceId: scope.targetWorkspaceId,
+          sessionId: input.session.id,
+          authorityEpoch: input.session.tenancy.authorityEpoch,
+          now: Math.max(grantCheckTime, Date.now()),
+        })
+      : [];
   const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
@@ -496,6 +565,8 @@ export function usePersonalResourceAttachment(input: {
     catalog,
     selected,
     mode,
+    setMode: scopeChoice.setMode,
+    ongoingResourceNames,
     visibility,
     requiresDecision,
     intent,

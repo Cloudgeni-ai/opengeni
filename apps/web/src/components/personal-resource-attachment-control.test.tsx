@@ -25,6 +25,8 @@ function controller(
       closureUnverified: false,
     },
     mode: "once",
+    setMode: () => {},
+    ongoingResourceNames: [],
     visibility: "workspace",
     requiresDecision: false,
     intent: undefined,
@@ -36,10 +38,10 @@ function controller(
 }
 
 describe("PersonalResourceAttachmentControl", () => {
-  test("does not add passive personal-resource copy above the composer", () => {
+  test("shows explicit duration choice for selected personal resources", () => {
     expect(
       renderToStaticMarkup(<PersonalResourceAttachmentControl controller={controller()} compact />),
-    ).toBe("");
+    ).toContain("For my ongoing work in this session");
   });
 
   test("keeps actionable recovery states visible", () => {

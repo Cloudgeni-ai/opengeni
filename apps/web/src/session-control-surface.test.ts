@@ -193,7 +193,12 @@ describe("session control surface architecture", () => {
     );
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
-    expect(route).toContain("will be used only for the message you send");
+    expect(route).toContain("PersonalResourceScopeChoice");
+    expect(route).toContain("mode: personalScopeChoice.mode");
+    expect(route).toContain('personalOwnerScope?.identityKey ?? "ineligible"');
+    expect(
+      route.match(/setPersonalScopeGeneration\(\(generation\) => generation \+ 1\)/g),
+    ).toHaveLength(3);
     expect(route).not.toContain("personalResourceSendBlocker");
     expect(route).not.toContain("Confirm private credential or resource use before sending");
     expect(route).not.toContain("PersonalResourceAttachmentControl");
@@ -256,9 +261,7 @@ describe("session control surface architecture", () => {
       "const busy = props.busy || props.goalActive || props.voiceActive",
     );
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
-    expect(establishedPicker).toContain(
-      "Only-me Variable Sets are used only for messages you send.",
-    );
+    expect(establishedPicker).toContain("Only-me Variable Sets are authorized for your own work.");
     expect(establishedControl).not.toContain('value: "once"');
     expect(establishedControl).not.toContain('value: "session"');
     expect(establishedControl).not.toContain('value: "always"');
