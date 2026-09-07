@@ -1,3 +1,4 @@
+import { hasWorkspacePermission } from "@/lib/permissions";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -49,7 +50,6 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -154,6 +154,12 @@ import type {
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+
+const OrganizationOnboardingPanel = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.OrganizationOnboardingPanel,
   })),
 );
 
@@ -565,6 +571,10 @@ export function RootRouteComponent() {
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const accessContextRef = useRef(accessContext);
+  useInsertionEffect(() => {
+    accessContextRef.current = accessContext;
+  }, [accessContext]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
@@ -1546,6 +1556,17 @@ export function RootRouteComponent() {
           acceptedTransition,
           workspaceId,
         ) && personalGitHubRefreshId.current === refreshId;
+      if (!hasWorkspacePermission(accessContextRef.current, workspaceId, "connections:read")) {
+        setPersonalGitHubStatus(null);
+        setPersonalGitHubRepositories([]);
+        setPersonalGitHubSelection(null);
+        setPersonalGitHubAuthorityCache(null);
+        setSelectedPersonalGitHubRepoIds(new Set());
+        setSelectedPersonalGitHubRepoRefs({});
+        setPersonalGitHubCatalogReady(true);
+        setPersonalGitHubBusy(false);
+        return;
+      }
       setPersonalGitHubBusy(true);
       try {
         const status = await client.personalGitHubStatus(workspaceId);
@@ -2760,17 +2781,19 @@ export function RootRouteComponent() {
         onComplete={revalidatePrincipalAccess}
       />
     ) : (
-      <OrganizationOnboardingPanel
-        client={client}
-        activeEmail={authSession?.user.email ?? null}
-        invitation={organizationInvitationContinuation}
-        onUseInvitedAccount={() => {
-          void handleManagedSignOut().catch((error) =>
-            toast.error("Sign out failed", { description: String(error) }),
-          );
-        }}
-        onComplete={revalidatePrincipalAccess}
-      />
+      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+        <OrganizationOnboardingPanel
+          client={client}
+          activeEmail={authSession?.user.email ?? null}
+          invitation={organizationInvitationContinuation}
+          onUseInvitedAccount={() => {
+            void handleManagedSignOut().catch((error) =>
+              toast.error("Sign out failed", { description: String(error) }),
+            );
+          }}
+          onComplete={revalidatePrincipalAccess}
+        />
+      </Suspense>
     )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />
