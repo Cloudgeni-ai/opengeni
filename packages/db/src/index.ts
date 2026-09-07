@@ -43031,6 +43031,9 @@ export async function failSandboxRematerialization(
             and lease_epoch = ${input.expectedEpoch}
           returning *
         `);
+        if (updated[0] && row.rotation_requested_at !== null) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
         return updated[0]
           ? { failed: true, lease: mapLeaseRow(updated[0]) }
           : { failed: false, lease: null };
@@ -43440,6 +43443,9 @@ export async function recordWarmingSandboxCreated(
             and lease_epoch = ${input.expectedEpoch}
           returning *
         `);
+        if (updated[0] && row.rotation_requested_at !== null) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
         return updated[0]
           ? { recorded: true, lease: mapLeaseRow(updated[0]) }
           : { recorded: false, lease: null };
@@ -45279,6 +45285,9 @@ export async function markWarmLeaseInstanceLost(
         if (!updated) {
           throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
         }
+        if (updated && current.rotation_requested_at !== null) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
         return {
           status: "marked" as const,
           lease: mapLeaseRow(updated),
@@ -45597,6 +45606,9 @@ export async function failWarmingToCold(
             and liveness = 'warming'
             and lease_epoch = ${input.expectedEpoch}
         `);
+        if (row.rotation_requested_at !== null) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
       }),
   );
 }
@@ -46443,6 +46455,13 @@ export async function reapStaleLeaseHolders(
             and (reaper_hold_id is null or reaper_hold_until <= now())
           returning id
         `);
+          if (reset.length > 0 && row.rotation_requested_at !== null) {
+            await wakeSandboxLifecycleWaitersTx(tx, {
+              workspaceId: input.workspaceId,
+              sandboxGroupId: row.sandbox_group_id,
+              expectedEpoch: Number(row.lease_epoch),
+            });
+          }
           warmingReset += reset.length;
         }
 
@@ -46450,7 +46469,12 @@ export async function reapStaleLeaseHolders(
         // so do NOT drop it. Bump the epoch and convert to immediately-drainable
         // so the caller's provider terminate path stops the box before the lease
         // goes cold, while late creator callbacks are fenced.
-        const warmingDrain = await tx.execute<{ id: string }>(sql`
+        const warmingDrain = await tx.execute<{
+          id: string;
+          sandbox_group_id: string;
+          lease_epoch: number;
+          rotation_requested_at: Date | null;
+        }>(sql`
         update sandbox_leases set
           liveness = 'draining',
           refcount = 0,
@@ -46468,8 +46492,18 @@ export async function reapStaleLeaseHolders(
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now() and instance_id is not null
           and (reaper_hold_id is null or reaper_hold_until <= now())
-        returning id
+        returning id, sandbox_group_id, lease_epoch, rotation_requested_at
       `);
+
+        for (const lease of warmingDrain) {
+          if (lease.rotation_requested_at !== null) {
+            await wakeSandboxLifecycleWaitersTx(tx, {
+              workspaceId: input.workspaceId,
+              sandboxGroupId: lease.sandbox_group_id,
+              expectedEpoch: Number(lease.lease_epoch) - 1,
+            });
+          }
+        }
 
         // (d) DRAINING-grace elapsed: surface leases whose grace is up AND still
         // idle, with instance_id + epoch, so the caller can issue the provider
@@ -47034,6 +47068,9 @@ export async function confirmDrainCold(
           and archive_capture_id is not distinct from ${input.expectedCaptureId ?? null}::uuid
         returning id
       `);
+        if (rows.length > 0 && row.rotation_requested_at !== null) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
         return { wentCold: rows.length > 0 };
       }),
   );
@@ -50587,8 +50624,21 @@ export async function releaseWorkspaceArchiveCapture(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const rows = await scopedDb.execute<{ id: string }>(sql`
+    async (scopedDb) =>
+      scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const rows = await tx.execute<{ id: string; rotation_requested_at: Date | null }>(sql`
+        with owned as (
+          select id, rotation_requested_at as prior_rotation_requested_at
+          from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+            and lease_epoch = ${input.expectedEpoch}
+            and instance_id = ${input.expectedInstanceId}
+            and archive_capture_id = ${input.captureId}::uuid
+            and archive_capture_published_at is null
+          for update
+        )
         update sandbox_leases set
           archive_capture_id = null,
           archive_capture_operation_id = null,
@@ -50609,16 +50659,19 @@ export async function releaseWorkspaceArchiveCapture(
             else rotation_reason
           end,
           updated_at = now()
-        where workspace_id = ${input.workspaceId}
-          and sandbox_group_id = ${input.sandboxGroupId}
-          and lease_epoch = ${input.expectedEpoch}
-          and instance_id = ${input.expectedInstanceId}
-          and archive_capture_id = ${input.captureId}::uuid
-          and archive_capture_published_at is null
-        returning id
+        from owned
+        where sandbox_leases.id = owned.id
+        returning sandbox_leases.id, owned.prior_rotation_requested_at as rotation_requested_at, sandbox_leases.rotation_requested_at as current_rotation_requested_at
       `);
-      return rows.length === 1;
-    },
+        if (
+          rows.length === 1 &&
+          rows[0]!.rotation_requested_at !== null &&
+          rows[0]!.current_rotation_requested_at === null
+        ) {
+          await wakeSandboxLifecycleWaitersTx(tx, input);
+        }
+        return rows.length === 1;
+      }),
   );
 }
 
@@ -63058,6 +63111,28 @@ export async function claimSessionWorkForAttempt(
             if (input.trigger.kind !== "next") {
               return { action: "unclaimed", reason: "stale-approval" };
             }
+            if (activeTurn.status === "recovering") {
+              const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(activeTurn.metadata);
+              if (lifecycleWait) {
+                const [lease] = await tx
+                  .select({
+                    leaseEpoch: schema.sandboxLeases.leaseEpoch,
+                    liveness: schema.sandboxLeases.liveness,
+                    rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+                  })
+                  .from(schema.sandboxLeases)
+                  .where(
+                    and(
+                      eq(schema.sandboxLeases.workspaceId, workspaceId),
+                      eq(schema.sandboxLeases.sandboxGroupId, lifecycleWait.sandboxGroupId),
+                    ),
+                  )
+                  .limit(1);
+                if (sandboxLifecycleWaitIsPending(lifecycleWait, lease)) {
+                  return { action: "unclaimed", reason: "no-work" };
+                }
+              }
+            }
             if (activeTurn.status === "waiting_capacity") {
               const [codexWaiter] = await tx
                 .select({ id: schema.codexCapacityWaiters.id })
@@ -63104,12 +63179,15 @@ export async function claimSessionWorkForAttempt(
                 temporalWorkflowId: workflowId,
                 executionGeneration: sql`${schema.sessionTurns.executionGeneration} + 1`,
                 activeAttemptId: input.attemptId,
-                metadata: metadataWithTurnDispatchAttempt(activeTurn.metadata, {
-                  id: input.dispatchId,
-                  generation: dispatchGeneration,
-                  triggerEventId: activeTurn.triggerEventId,
-                  pendingUpdateBoundarySequence: session.lastSequence,
-                }),
+                metadata: metadataWithTurnDispatchAttempt(
+                  metadataWithoutSandboxLifecycleWait(activeTurn.metadata),
+                  {
+                    id: input.dispatchId,
+                    generation: dispatchGeneration,
+                    triggerEventId: activeTurn.triggerEventId,
+                    pendingUpdateBoundarySequence: session.lastSequence,
+                  },
+                ),
                 version: sql`${schema.sessionTurns.version} + 1`,
                 startedAt: now,
                 finishedAt: null,
@@ -65282,6 +65360,10 @@ export async function settleSessionAttemptInterruptions(
 
 export type SessionWorkPeek =
   | { kind: "runnable" }
+  | {
+      kind: "sandbox-lifecycle-wait";
+      ref: SandboxLifecycleWait;
+    }
   | { kind: "approval-pending"; triggerEventId: string }
   | {
       kind: "approval-wait";
@@ -65735,6 +65817,26 @@ export async function peekSessionWork(
         );
       }
       if (turn.status === "recovering" || turn.status === "waiting_capacity") {
+        const lifecycleWait = sandboxLifecycleWaitFromTurnMetadata(turn.metadata);
+        if (turn.status === "recovering" && lifecycleWait) {
+          const [lease] = await scopedDb
+            .select({
+              leaseEpoch: schema.sandboxLeases.leaseEpoch,
+              liveness: schema.sandboxLeases.liveness,
+              rotationRequestedAt: schema.sandboxLeases.rotationRequestedAt,
+            })
+            .from(schema.sandboxLeases)
+            .where(
+              and(
+                eq(schema.sandboxLeases.workspaceId, workspaceId),
+                eq(schema.sandboxLeases.sandboxGroupId, lifecycleWait.sandboxGroupId),
+              ),
+            )
+            .limit(1);
+          if (sandboxLifecycleWaitIsPending(lifecycleWait, lease)) {
+            return { kind: "sandbox-lifecycle-wait", ref: lifecycleWait };
+          }
+        }
         return { kind: "runnable" };
       }
       if (turn.status === "requires_action") {
@@ -67469,6 +67571,119 @@ function metadataWithoutTurnDispatchAttempt(
 ): Record<string, unknown> {
   const next = { ...(metadata ?? {}) };
   delete next[TURN_DISPATCH_ATTEMPT_METADATA_KEY];
+  return next;
+}
+
+async function wakeSandboxLifecycleWaitersTx(
+  tx: Database,
+  input: { workspaceId: string; sandboxGroupId: string; expectedEpoch: number },
+): Promise<void> {
+  const lifecycleWaitJson = JSON.stringify({
+    [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: {
+      version: 1,
+      sandboxGroupId: input.sandboxGroupId,
+      leaseEpoch: input.expectedEpoch,
+      reason: "rotation_in_progress",
+    } satisfies SandboxLifecycleWait,
+  });
+  const waiters = await tx
+    .select({
+      accountId: schema.sessions.accountId,
+      sessionId: schema.sessions.id,
+      temporalWorkflowId: schema.sessions.temporalWorkflowId,
+    })
+    .from(schema.sessions)
+    .innerJoin(
+      schema.sessionTurns,
+      and(
+        eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+        eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+      ),
+    )
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.sandboxGroupId, input.sandboxGroupId),
+        eq(schema.sessions.status, "recovering"),
+        eq(schema.sessionTurns.status, "recovering"),
+        sql`${schema.sessionTurns.metadata} @> ${lifecycleWaitJson}::jsonb`,
+      ),
+    )
+    .orderBy(asc(schema.sessions.id));
+  for (const waiter of waiters) {
+    await enqueueSessionWorkflowWakeInTransaction(tx, {
+      accountId: waiter.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: waiter.sessionId,
+      temporalWorkflowId: waiter.temporalWorkflowId ?? `session-${waiter.sessionId}`,
+      reason: "sandbox_lifecycle_advanced",
+    });
+  }
+}
+
+const SANDBOX_LIFECYCLE_WAIT_METADATA_KEY = "sandboxLifecycleWait";
+
+export type SandboxLifecycleWait = {
+  version: 1;
+  sandboxGroupId: string;
+  leaseEpoch: number;
+  reason: "rotation_in_progress";
+};
+
+function sandboxLifecycleWaitFromTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+): SandboxLifecycleWait | null {
+  const value = metadata?.[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY];
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const wait = value as Partial<SandboxLifecycleWait>;
+  if (
+    wait.version !== 1 ||
+    typeof wait.sandboxGroupId !== "string" ||
+    wait.sandboxGroupId.length === 0 ||
+    !Number.isSafeInteger(wait.leaseEpoch) ||
+    (wait.leaseEpoch ?? -1) < 0 ||
+    wait.reason !== "rotation_in_progress"
+  ) {
+    return null;
+  }
+  return wait as SandboxLifecycleWait;
+}
+
+function sandboxLifecycleWaitIsPending(
+  wait: SandboxLifecycleWait,
+  lease:
+    | {
+        leaseEpoch: number;
+        liveness: SandboxLeaseLiveness;
+        rotationRequestedAt: Date | null;
+      }
+    | undefined,
+): boolean {
+  return Boolean(
+    lease &&
+    Number(lease.leaseEpoch) === wait.leaseEpoch &&
+    lease.liveness !== "cold" &&
+    lease.rotationRequestedAt !== null,
+  );
+}
+
+function metadataWithoutSandboxLifecycleWait(
+  metadata: Record<string, unknown> | null | undefined,
+): Record<string, unknown> {
+  const next = { ...(metadata ?? {}) };
+  delete next[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY];
+  return next;
+}
+
+function recoveryTurnMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  lifecycleWait: SandboxLifecycleWait | undefined,
+): Record<string, unknown> {
+  const next = metadataWithoutSandboxLifecycleWait(metadataWithoutTurnDispatchAttempt(metadata));
+  if (lifecycleWait) {
+    next[SANDBOX_LIFECYCLE_WAIT_METADATA_KEY] = lifecycleWait;
+  }
   return next;
 }
 
@@ -69496,6 +69711,7 @@ export type RequestSessionTurnRecoveryInput = {
   attemptId: string;
   reason: string;
   detail?: Record<string, unknown>;
+  sandboxLifecycleWait?: SandboxLifecycleWait;
   providerRecoveryCount?: number;
   fromStatuses?: SessionTurnStatus[];
   providerArtifactInvalidation?: {
@@ -69600,6 +69816,15 @@ export async function requestSessionTurnRecovery(
         (!Number.isSafeInteger(input.providerRecoveryCount) || input.providerRecoveryCount <= 0)
       ) {
         throw new Error("providerRecoveryCount must be a positive safe integer");
+      }
+      if (
+        input.sandboxLifecycleWait &&
+        (!sandboxLifecycleWaitFromTurnMetadata({
+          [SANDBOX_LIFECYCLE_WAIT_METADATA_KEY]: input.sandboxLifecycleWait,
+        }) ||
+          input.sandboxLifecycleWait.sandboxGroupId !== session.sandboxGroupId)
+      ) {
+        throw new Error("sandboxLifecycleWait is invalid for this session");
       }
       let providerArtifactsInvalidated = 0;
       if (input.providerArtifactInvalidation) {
@@ -69751,7 +69976,7 @@ export async function requestSessionTurnRecovery(
           cancelReason: null,
           version: turn.version + 1,
           metadata: {
-            ...metadataWithoutTurnDispatchAttempt(turn.metadata),
+            ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
             ...(input.providerRecoveryCount !== undefined
               ? { providerRecoveryCount: input.providerRecoveryCount }
               : {}),

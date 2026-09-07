@@ -474,6 +474,8 @@ processes therefore cannot make an opted-in viewer, turn, or mutation caller
 abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
 probes remain immediate.
 
+Rotation recovery: [lifecycle](run-lifecycle.md).
+
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
