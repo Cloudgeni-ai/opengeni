@@ -795,7 +795,9 @@ describe("phased new-session draft project provenance migration", () => {
       });
       await lockReady;
 
-      const migrationRun = migrate(ownerUrl).then(
+      // Test this rolling migration family without activating later maintenance
+      // migrations while the deliberately mixed-version app writer is alive.
+      const migrationRun = applyThrough(ownerUrl, validationMigration).then(
         () => null,
         (error: unknown) => error,
       );
@@ -909,7 +911,7 @@ describe("phased new-session draft project provenance migration", () => {
       holder = null;
       heldPromise = null;
 
-      await migrate(ownerUrl);
+      await applyThrough(ownerUrl, validationMigration);
       const [finalState] = await admin<
         Array<{
           legacyRows: number;

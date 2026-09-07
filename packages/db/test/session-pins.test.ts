@@ -275,8 +275,8 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
           and created_by_subject_id = 'user:sparse'
         order by updated_at desc, id desc limit 20`));
     expect(JSON.stringify(plan)).toContain("sessions_workspace_creator_updated_id_idx");
-    const rows = await withWorkspaceSubjectRls(db, workspace.workspaceId, "user:sparse", async (tx) =>
-      await tx.execute(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
+    const rows: Array<{ id: string }> = await withWorkspaceSubjectRls(db, workspace.workspaceId, "user:sparse", async (tx) =>
+      await tx.execute<{ id: string }>(sql`select id from sessions where workspace_id = ${workspace.workspaceId}
         and created_by_kind = 'subject' and created_by_subject_id = 'user:sparse'
         order by updated_at desc, id desc limit 20`));
     expect(rows.map((row) => row.id)).toEqual([target.id]);
