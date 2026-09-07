@@ -3640,12 +3640,24 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         "flex items-start gap-2.5 rounded-og-md border px-3.5 py-2.5 text-og-menu",
         tone,
       )}
-      role="status"
+      role={item.recordedOutcome ? "note" : "status"}
+      data-og-recorded-outcome={item.recordedOutcome ? "wait" : undefined}
     >
       <TriangleAlertIcon
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
       <div className="min-w-0 flex-1">
+        {item.recordedOutcome ? (
+          <p className="mb-1 text-og-control font-medium">
+            Wait recorded{" "}
+            <time dateTime={item.occurredAt}>
+              {new Date(item.occurredAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </time>
+          </p>
+        ) : null}
         <span className="whitespace-pre-wrap break-words">{item.text}</span>
         {item.details ? (
           <details className="mt-2 text-og-control">
