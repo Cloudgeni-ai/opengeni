@@ -4,11 +4,11 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "re
 import { createPortal } from "react-dom";
 import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
-  annotationHasNote,
-  annotationSourceLabel,
-  revealLoadedAnnotationSource,
-} from "./timeline-annotation-shared";
-import type { TimelineAnnotationLike } from "./timeline-annotations";
+  AnnotationAccentRow,
+  AnnotationNoteField,
+  AnnotationQuoteSourceButton,
+  type TimelineAnnotationLike,
+} from "./timeline-annotation-chrome";
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
   return [
@@ -137,15 +137,8 @@ export function TimelineAnnotationsDialog({
       className="og-root fixed z-[75] box-border max-h-[min(32rem,70vh)] w-[min(25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-og-lg border border-og-border bg-og-surface-1 p-3 text-og-fg shadow-xl outline-hidden"
       aria-label={editable ? "Edit quoted notes" : "Quoted notes"}
     >
-      <div className="mb-2.5 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className="text-og-sm font-semibold">{countLabel}</p>
-          <p className="text-og-xs text-og-fg-subtle">
-            {editable
-              ? "Tell the agent what to do with each quote."
-              : "Attached to this message."}
-          </p>
-        </div>
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <p className="min-w-0 pt-0.5 text-og-sm font-medium text-og-fg-muted">{countLabel}</p>
         <button
           type="button"
           className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-muted outline-hidden hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
@@ -155,32 +148,23 @@ export function TimelineAnnotationsDialog({
           <XIcon className="size-3.5" aria-hidden="true" />
         </button>
       </div>
-      <div className="grid gap-2.5">
-        {annotations.map((annotation, index) => {
-          const incomplete = editable && !annotationHasNote(annotation.note);
-          return (
-            <section
-              key={annotation.id}
-              className="rounded-og-md border border-og-border bg-og-surface-2/60 p-2.5"
-              aria-label={`Note ${index + 1}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  className="truncate rounded border-0 bg-transparent text-left text-og-xs font-medium text-og-fg-muted underline-offset-2 outline-hidden hover:text-og-fg hover:underline focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-[44px]"
-                  onClick={() => {
-                    const revealed =
-                      onRevealSource?.(annotation.source) ??
-                      revealLoadedAnnotationSource(annotation.source);
-                    setUnavailableId(revealed ? null : annotation.id);
-                  }}
-                >
-                  {annotationSourceLabel(annotation.source)} · view source
-                </button>
+      <div className="grid gap-3">
+        {annotations.map((annotation, index) => (
+          <section key={annotation.id} aria-label={`Note ${index + 1}`}>
+            <AnnotationAccentRow>
+              <div className="flex items-start gap-1">
+                <div className="min-w-0 flex-1">
+                  <AnnotationQuoteSourceButton
+                    annotation={annotation}
+                    lines={2}
+                    onRevealSource={onRevealSource}
+                    onUnavailable={setUnavailableId}
+                  />
+                </div>
                 {editable && onRemove ? (
                   <button
                     type="button"
-                    className="inline-flex size-8 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
+                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border-0 bg-transparent text-og-fg-subtle outline-hidden hover:bg-og-surface-1 hover:text-og-status-failed focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:size-11"
                     aria-label={`Remove annotation ${index + 1}`}
                     onClick={() => onRemove(annotation.id)}
                   >
@@ -189,42 +173,27 @@ export function TimelineAnnotationsDialog({
                 ) : null}
               </div>
               {unavailableId === annotation.id ? (
-                <p role="status" className="mt-1 text-og-xs text-og-status-waiting">
+                <p role="status" className="text-og-xs text-og-status-waiting">
                   Source is outside the loaded timeline window.
                 </p>
               ) : null}
-              <blockquote className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap border-l-2 border-og-accent/45 pl-2 text-og-sm leading-5 text-og-fg-muted">
-                {annotation.quote}
-              </blockquote>
               {editable && onUpdate ? (
-                <label className="mt-2 block text-og-xs font-medium text-og-fg-muted">
-                  Note
-                  <textarea
-                    ref={(node) => {
-                      if (node) noteRefs.current.set(annotation.id, node);
-                      else noteRefs.current.delete(annotation.id);
-                    }}
-                    value={annotation.note}
-                    rows={2}
-                    maxLength={2048}
-                    placeholder="What should the agent do with this?"
-                    className="mt-1 w-full resize-y rounded-og-sm border border-og-border bg-og-surface-1 px-2.5 py-2 text-og-sm leading-5 text-og-fg outline-hidden placeholder:text-og-fg-subtle focus:border-og-accent focus:ring-1 focus:ring-og-accent"
-                    onInput={(event) => onUpdate(annotation.id, event.currentTarget.value)}
-                  />
-                  {incomplete ? (
-                    <span className="mt-1 block font-normal text-og-status-waiting">
-                      Add a note to send this quote.
-                    </span>
-                  ) : null}
-                </label>
+                <AnnotationNoteField
+                  annotation={annotation}
+                  inputRef={(node) => {
+                    if (node) noteRefs.current.set(annotation.id, node);
+                    else noteRefs.current.delete(annotation.id);
+                  }}
+                  onUpdate={onUpdate}
+                />
               ) : annotation.note ? (
-                <p className="mt-2 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
+                <p className="mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
                   {annotation.note}
                 </p>
               ) : null}
-            </section>
-          );
-        })}
+            </AnnotationAccentRow>
+          </section>
+        ))}
       </div>
     </div>,
     document.body,

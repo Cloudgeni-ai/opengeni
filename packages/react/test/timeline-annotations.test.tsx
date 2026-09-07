@@ -236,9 +236,10 @@ describe("timeline annotations", () => {
     );
     expect(rendered.container.textContent).toContain("Quoted note");
     expect(rendered.container.textContent).toContain("beta");
-    expect(rendered.container.textContent).toContain("Add a note to send this quote.");
+    expect(rendered.container.textContent).not.toContain("Add a note to send this quote.");
     const textarea = rendered.container.querySelector("textarea");
     expect(textarea).not.toBeNull();
+    expect(textarea?.getAttribute("placeholder")).toBe("Add a note…");
     expect(document.activeElement).toBe(textarea);
     await act(async () => {
       if (textarea) {

@@ -161,7 +161,7 @@ export function ChatComposer({
             composer.annotations.length > 0 &&
             composer.updateAnnotation &&
             composer.removeAnnotation ? (
-              <div className="px-3 pt-2 sm:px-4">
+              <div className="px-3.5 pt-2 md:px-4">
                 <TimelineAnnotationDraftList
                   annotations={composer.annotations}
                   focusAnnotationId={composer.annotationReviewTargetId}

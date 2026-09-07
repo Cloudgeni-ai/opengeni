@@ -2,4 +2,4 @@
 "@opengeni/react": patch
 ---
 
-Show quoted notes inline in the composer and sent messages, keep queue chips compact, and explain incomplete notes instead of silently blocking Send.
+Treat timeline annotations as quote-replies: compact accent quotes in the composer and sent messages, notes as the primary field, and incomplete-note guidance only at send.
