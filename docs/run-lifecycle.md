@@ -9,6 +9,12 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 
 ## Turns
 
+Externally owned SDK history preserves retained messages across opaque compaction
+checkpoints in both provider input and returned history. The turn history sink
+checks the identities and order of its durable prefix before advancing its append
+cursor; database position conflicts succeed only for the same turn and exact
+canonical item. Provider dispatch and successful settlement require this check.
+
 A **turn** is one logical unit of agent work inside a session: a waiting
 human/API prompt, an approval or structured-input response, or one coalesced
 internal-update batch is processed until the agent reaches a natural stopping
