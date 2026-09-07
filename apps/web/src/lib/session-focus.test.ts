@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   cancelSessionRowRevealIntent,
+  createSessionFocusCompletion,
   clearSessionComposerFocusIntent,
   consumeSessionComposerFocusIntent,
   consumeSessionRowRevealIntent,
@@ -243,5 +244,39 @@ describe("session pin focus restoration", () => {
         null,
       ),
     ).toBe(false);
+  });
+});
+
+describe("deferred session focus completion", () => {
+  test("retains a settled request until its rollback layout commits", () => {
+    const pending: { current: { operation: number; settled: boolean } | null } = {
+      current: { operation: 1, settled: false },
+    };
+    let committedRow = "optimistic Pin";
+    const restored: string[] = [];
+    const oldFrame = createSessionFocusCompletion(pending, () => restored.push(committedRow));
+
+    // The request settles before React commits its queued rollback. The old
+    // layout frame still targets the optimistic row, which will be removed.
+    pending.current!.settled = true;
+    oldFrame();
+    expect(restored).toEqual(["optimistic Pin"]);
+    expect(pending.current).toEqual({ operation: 1, settled: true });
+
+    committedRow = "rolled-back Unpin";
+    const committedFrame = createSessionFocusCompletion(pending, () => restored.push(committedRow));
+    committedFrame();
+    expect(restored).toEqual(["optimistic Pin", "rolled-back Unpin"]);
+    expect(pending.current).toBeNull();
+  });
+
+  test("an older committed frame cannot clear a newer focus operation", () => {
+    const pending: { current: { operation: number; settled: boolean } | null } = {
+      current: { operation: 1, settled: true },
+    };
+    const oldFrame = createSessionFocusCompletion(pending, () => {});
+    pending.current = { operation: 2, settled: true };
+    oldFrame();
+    expect(pending.current).toEqual({ operation: 2, settled: true });
   });
 });
