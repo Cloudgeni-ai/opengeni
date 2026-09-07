@@ -14543,7 +14543,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // compatibility fallback by omitting this field.
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
     // For an agent-created child, omission inherits the trusted immediate
-    // parent's repository/file context. An explicit array, including [], is
+    // parent's repositories only; files require explicit selection. An explicit
+    // array, including [], is
     // authoritative. Top-level omission remains []. Presence is resolved from
     // the raw request because this Zod default erases absent-vs-empty.
     resources: z.array(ResourceRef).default([]),
