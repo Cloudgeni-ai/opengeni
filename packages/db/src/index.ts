@@ -22083,7 +22083,7 @@ async function lockOrganizationCodexSubscriptionSources(
 ): Promise<string[]> {
   const rows = await scopedDb.execute<{ workspace_id: string }>(sql`
     select workspace_id
-    from list_organization_workspace_ids(${accountId}::uuid)
+    from list_organization_codex_workspace_ids(${accountId}::uuid)
     order by workspace_id
   `);
   const workspaceIds = rows.map((row: { workspace_id: string }) => row.workspace_id);
@@ -25078,7 +25078,7 @@ async function wakeOrganizationCodexCapacityWaitersInTransaction(
   const wakeTargets: CodexCapacityWakeTarget[] = [];
   await setRlsContext(tx, { accountId: input.accountId, workspaceId: null });
   const workspaceRows = await tx.execute<{ workspace_id: string }>(sql`
-    select workspace_id from list_organization_workspace_ids(${input.accountId}::uuid)
+    select workspace_id from list_organization_codex_workspace_ids(${input.accountId}::uuid)
     order by workspace_id
   `);
   for (const { workspace_id: workspaceId } of workspaceRows) {

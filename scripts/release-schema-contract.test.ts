@@ -134,6 +134,12 @@ describe("release schema contract", () => {
     expect(completeSourceContract.latestMigration).toBe(
       "0419_personal_workspace_organization_codex_inheritance.sql",
     );
+    expect(
+      completeSourceContract.migrations.find(
+        (migration) =>
+          migration.path === "0419_personal_workspace_organization_codex_inheritance.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
     const sandboxDeadlineIndex = completeSourceContract.migrations.findIndex(
       (migration) => migration.path === "0397_sandbox_deadline_rotation_preemption.sql",
     );

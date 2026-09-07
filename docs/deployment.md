@@ -306,6 +306,15 @@ role list, deploy the matching release, then restart. Pre-0390 workers do not
 understand the new credential/billing branch. No new environment variable is
 required; the stable environments encryption key protects these credentials.
 
+Migration `0419_personal_workspace_organization_codex_inheritance.sql` is a
+maintenance activation for Personal workspace Codex inheritance. Stop all API,
+control-worker, and turn-worker processes and provide every runtime login in
+`OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Apply the migration, run
+`db:provision-roles`, and start only the matching release. Select
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0419_personal_workspace_organization_codex_inheritance`
+for generated deployment plans. Never restart a pre-0419 binary: its organization
+Codex mutations omit Personal workspace source fences and capacity wakeups.
+
 Bootstrap a new machine in two phases. First install only the persistent
 dependencies and wait until they are healthy:
 
