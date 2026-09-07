@@ -9975,6 +9975,7 @@ export function repositoryCloneCommand(
     '  if ! { git init "$tmp" >/dev/null && git -C "$tmp" remote add origin "$uri" && git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"; }; then',
     '    rm -rf "$tmp"',
     '    echo "Repository resource fetch failed for $target" >&2',
+    '    echo "Check repository access and the requested ref. Use a full commit SHA or an existing branch, tag, or PR ref; an abbreviated commit SHA is not a fetchable remote ref." >&2',
     "    exit 1",
     "  fi",
     // origin/HEAD is best-effort: workspace capture diffs the branch against it
