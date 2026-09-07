@@ -29,6 +29,9 @@ const sandboxDeadlineRotationPreemptionMigrationName =
 const sessionInputWaitMigrationName = "0402_session_input_wait_and_background_command_results.sql";
 const commandTrackingRetirementMigrationName = "0407_connected_command_tracking_retirement.sql";
 const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_index.sql";
+// 0414 patches the producer fence created by withheld 0275; replay them together.
+const scheduledProducerMaterializationMigrationName =
+  "0414_scheduled_generated_producer_materialization.sql";
 const migrationUrl = new URL(`../drizzle/${migrationName}`, import.meta.url);
 const migration0241Url = new URL(
   "../drizzle/0241_atomic_personal_resource_delegation.sql",
@@ -195,7 +198,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           (${sandboxDeadlineRotationPreemptionMigrationName}),
           (${sessionInputWaitMigrationName}),
           (${commandTrackingRetirementMigrationName}),
-          (${scheduledSessionTargetIndexMigrationName})
+          (${scheduledSessionTargetIndexMigrationName}),
+          (${scheduledProducerMaterializationMigrationName})
       `;
       await migrate(databaseUrl);
       // Current session adapters select the complete sessions row while this
@@ -227,7 +231,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sandboxDeadlineRotationPreemptionMigrationName},
           ${sessionInputWaitMigrationName},
           ${commandTrackingRetirementMigrationName},
-          ${scheduledSessionTargetIndexMigrationName}
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName}
         )
       `;
 
@@ -283,7 +288,8 @@ describe("migration 0249 personal-resource delegation authority correction", () 
           ${sandboxDeadlineRotationPreemptionMigrationName},
           ${sessionInputWaitMigrationName},
           ${commandTrackingRetirementMigrationName},
-          ${scheduledSessionTargetIndexMigrationName}
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName}
         )
         order by name
       `;
@@ -305,6 +311,7 @@ describe("migration 0249 personal-resource delegation authority correction", () 
         sessionInputWaitMigrationName,
         commandTrackingRetirementMigrationName,
         scheduledSessionTargetIndexMigrationName,
+        scheduledProducerMaterializationMigrationName,
       ]);
       expect(await countWorkspaceMemberships(sql, ids)).toBe(0);
       await insertAttempt(sql, ids, ids.attemptId);
