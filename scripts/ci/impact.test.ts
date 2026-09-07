@@ -96,6 +96,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.unitTests).toContain("packages/sdk/test/client.test.ts");
     expect(sdk.e2eTests).toEqual([
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/appearance.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",
@@ -332,6 +333,7 @@ describe("fail-closed change impact", () => {
     expect(tests.integration.length).toBeGreaterThan(0);
     expect(tests.e2e).toEqual([
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/appearance.browser.e2e.ts",
       "test/e2e/code-editor.browser.e2e.ts",
       "test/e2e/composer-responsive.browser.e2e.ts",
       "test/e2e/connected-machine-removal.browser.e2e.ts",

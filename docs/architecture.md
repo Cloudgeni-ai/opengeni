@@ -14,8 +14,7 @@
 
 ## 1. Scope
 
-This map covers product shape, invariants, execution paths, repository ownership,
-and canonical-source routing. Exact inventories belong in code and focused docs.
+Product shape, invariants, execution paths, and source ownership. Exact inventories live in code.
 
 ---
 
@@ -638,10 +637,7 @@ packages; it does not own session or authorization semantics. Advanced hosts
 may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
-The stock console owns browser-local appearance in `apps/web/src/lib/appearance.tsx`.
-Both account menus expose Light, Dark, and System; the resolved palette is applied
-to the document for shared React surfaces and portals. The early bootstrap in
-`apps/web/index.html` restores that choice before first paint.
+Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
 
 ---
 
