@@ -63,6 +63,15 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
     });
     client = createDb(roleUrl.toString(), { max: 2, rlsStrategy: "force" });
 
+    // Current bootstrap adapters include these nullable columns. Keep later
+    // migrations held: this test exercises only the 0398 rolling boundary.
+    await admin`alter table workspace_inference_controls
+      add column timer_id uuid,
+      add column timer_action text,
+      add column timer_due_at timestamptz,
+      add column timer_pause_for_seconds integer,
+      add column timer_pause_revision bigint`;
+
     const userId = crypto.randomUUID();
     const subjectId = `user:${userId}`;
     const email = `workspace-admin-${userId}@example.test`;
