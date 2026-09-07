@@ -8342,6 +8342,14 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    commandOutputPage: index("session_events_command_output_page_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        sql`(${table.payload} ->> 'commandId')`,
+        table.sequence,
+      )
+      .where(sql`${table.type} = 'sandbox.command.output.delta'`),
     monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(
@@ -9707,6 +9715,7 @@ export const sessionBackgroundCommands = pgTable(
     settlementReason: text("settlement_reason"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
     reconcileClaimedAt: timestamp("reconcile_claimed_at", {
@@ -9764,6 +9773,10 @@ export const sessionBackgroundCommands = pgTable(
     stateValid: check(
       "session_background_commands_state_check",
       sql`${table.state} in ('running', 'stopping', 'exited', 'lost')`,
+    ),
+    observationValid: check(
+      "session_background_commands_observation_check",
+      sql`${table.completionObservedAt} is null or ${table.state} in ('exited', 'lost')`,
     ),
     providerIdentityValid: check(
       "session_background_commands_provider_identity_check",

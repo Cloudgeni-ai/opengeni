@@ -1,3 +1,4 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
 // Integrations (Slack, GitHub, Google
@@ -17,7 +18,7 @@
 // row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
+import { usePacks, useVariableSets } from "@opengeni/react";
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import {
@@ -272,7 +273,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,

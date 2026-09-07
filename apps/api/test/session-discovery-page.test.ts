@@ -209,11 +209,12 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
     expect(previewBudget).toEqual({
       bytes: 13 * Buffer.byteLength(preview, "utf8"),
       maxBytes: 16_384,
-      omittedCount: 75,
+      omittedCount: 73,
       truncated: true,
       omissionReason: "aggregatePreviewBudget",
       drillDownTool: "session_events",
       drillDownInput: {
+        view: "debug",
         includeTypes: ["user.message", "agent.message.completed"],
         direction: "before",
         limit: 1,
@@ -224,7 +225,7 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
     expect(previewBudget.bytes).toBe(15_600);
     expect(Math.ceil(previewBudget.bytes / 4)).toBe(3_900);
     expect(Math.ceil(previewBudget.maxBytes / 4)).toBe(4_096);
-    expect(result.sessions).toHaveLength(88);
+    expect(result.sessions).toHaveLength(86);
     expect(result.sessions[12]!.latestMessage).toMatchObject({
       preview,
       previewTruncated: false,
@@ -238,6 +239,7 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
       previewDrillDownTool: "session_events",
       previewDrillDownInput: {
         sessionId: uuid(14),
+        view: "debug",
         includeTypes: ["agent.message.completed"],
         direction: "before",
         limit: 1,
@@ -246,8 +248,9 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
       },
     });
     expect(result.sessions[13]!.latestMessage).not.toHaveProperty("text");
-    expect(result.responseTruncated).toBeFalse();
-    expect(result.hasMore).toBeFalse();
+    expect(result.responseTruncated).toBeTrue();
+    expect(result.hasMore).toBeTrue();
+    expect(decodeSessionDiscoveryCursor(result.nextCursor!).id).toBe(uuid(86));
     expect(result.bytes).toBe(Buffer.byteLength(serialized, "utf8"));
     expect(result.bytes).toBeLessThanOrEqual(result.maxBytes);
 

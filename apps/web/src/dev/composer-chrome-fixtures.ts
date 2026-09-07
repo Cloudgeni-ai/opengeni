@@ -724,7 +724,8 @@ export function chromeScenarios(): ChromeScenario[] {
     {
       id: "queued-only",
       title: "Queued messages only",
-      description: "Human prompts waiting ahead of send; no machine inputs or goal.",
+      description:
+        "Human prompts waiting ahead of send; no machine inputs or goal. Idle chrome opens the queue itself.",
       session,
       queue: galleryQueue({
         queue: [
@@ -738,12 +739,13 @@ export function chromeScenarios(): ChromeScenario[] {
       }),
       goal: galleryGoal(null),
       agentNodes: [],
-      defaultActive: "queue",
+      defaultActive: null,
     },
     {
       id: "incoming-and-queued",
       title: "Incoming + queued",
-      description: "Collapsed chips show both counts; open either segment.",
+      description:
+        "Idle chrome opens the queue. Closing it leaves both chips collapsed until you open one.",
       session,
       queue: galleryQueue({
         queue: [galleryTurn(0, "Follow up once the child session is inspected.")],

@@ -1,5 +1,29 @@
 # Compact session monitoring over MCP
 
+## Conversation and execution history
+
+`session_events` defaults to a conversation projection: actual user text and
+completed assistant messages, including completed progress messages. It excludes
+raw deltas, tool bodies, and lifecycle diagnostics. Pagination never implicitly
+changes view or payload detail. Normal pages default to ten messages within a
+16 KiB response budget, preferring fewer complete messages; oversized messages
+expose an explicit continuation rather than silently
+discarding the remainder. Keep the returned cursor and read forward instead of
+repeatedly requesting the whole tail.
+
+The explicit `results` view selects final answers and actionable outcomes without
+duplicating an answer from both message and turn-completion records. `tools`
+provides compact tool receipts, with arguments/output requested explicitly and
+call-ID drill-down for detail. `debug` exposes explicitly requested audit and
+diagnostic records, including retained deltas. The underlying audit records remain
+append-only; these views are read projections, not model-history reconstruction.
+Unclaimed queued prompts must not appear as conversation the agent has processed.
+
+Use `session_get`/`session_wait` for status and joining workers, and
+`command_read`/`command_wait` for command-specific output. `session_events` does
+not mark any command completion observed, even when a diagnostic read includes
+its output or exit event.
+
 `sessions_list` and `session_get` default to `detail: "compact"`. This is a
 model-facing projection change only: REST session/queue reads, SDK session
 objects, topology, and UI defaults keep their existing shapes. The workspace
@@ -64,7 +88,7 @@ Related-work evidence is optional:
 `queuedPromptCount`. No human/API prompt is previewed until its turn has been
 claimed. Previews share a 16,384-byte UTF-8 budget, spent in database result order.
 Omitted previews carry an exact message-type `session_events` drill-down with
-`direction: "before"`, `limit: 1`, `mode: "monitoring"`, and
+`view: "debug"`, `direction: "before"`, `limit: 1`, `mode: "monitoring"`, and
 `payloadMode: "summary"`. No-preview is the default.
 
 The final pretty-printed page is limited to 128,000 bytes. Compact responses
@@ -115,10 +139,10 @@ A goal's `completed` status is not a terminal child result. Join with
 `session_get.lastSequence`: this snapshot watermark can already include an
 unread completion, and the wait reads strictly after its cursor. For an
 already-settled child, retrieve its result-bearing completion with
-`session_events` (filter `includeTypes: ["turn.completed"]` and inspect the
-result-bearing output, not maintenance/segment settlements) or join from the
-last consumed cursor. Use `session_events` for more progress or
-exact retained evidence.
+`session_events` with `view: "results"` or join from the last consumed cursor.
+The results projection omits maintenance/segment settlements. Use the default
+conversation view for completed progress messages and explicit diagnostic views
+for exact retained execution evidence.
 Do not use `session_get` on your own current session to reconstruct conversation
 context.
 
