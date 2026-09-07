@@ -2,7 +2,7 @@
 -- Sites publish signed uploads with optional source and no content hashes.
 -- This changes the exact runtime-posture table/grant/RLS contract. Stop every
 -- API, control worker, and turn worker before applying it, and never restart a
--- pre-0417 image after commit.
+-- pre-0418 image after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -16,14 +16,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0417 site direct uploads requires an explicit application database role list'
+      '0418 site direct uploads requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0417 site direct uploads received a malformed application database role list'
+      '0418 site direct uploads received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -42,7 +42,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0417 site direct uploads received an invalid application database role list'
+      '0418 site direct uploads received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -54,13 +54,14 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0417 site direct uploads requires all configured OpenGeni application database sessions to be stopped'
+      '0418 site direct uploads requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
 $site_direct_uploads_runtime_drain_before$;
 
 ALTER TABLE workspace_artifact_versions DROP CONSTRAINT workspace_artifact_versions_content_chk;
+ALTER TABLE workspace_artifact_events ADD COLUMN request_input jsonb;
 ALTER TABLE workspace_artifact_versions ALTER COLUMN content_sha256 DROP NOT NULL;
 ALTER TABLE workspace_artifact_versions ALTER COLUMN size_bytes TYPE bigint;
 ALTER TABLE workspace_artifact_versions ALTER COLUMN source_size_bytes TYPE bigint;
@@ -143,7 +144,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0417 site direct uploads observed a configured OpenGeni application database session after schema installation'
+      '0418 site direct uploads observed a configured OpenGeni application database session after schema installation'
       USING ERRCODE = '55000';
   END IF;
 END

@@ -12,6 +12,7 @@ import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
 export async function createWorkspaceArtifactUpload(
@@ -666,7 +667,7 @@ function assertCreateReplay(replay: Awaited<ReturnType<typeof replayForOperation
 
 function assertCreateReplayMatchesInput(
   replay: ArtifactOperationReplay,
-  _input: PublishMetadata & {
+  input: PublishMetadata & {
     slug: string;
     title: string;
     description: string | null;
@@ -674,6 +675,11 @@ function assertCreateReplayMatchesInput(
   },
 ): void {
   assertCreateReplay(replay);
+  if (!sameSitePublicationRequest(replay.event.requestInput, input)) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used for different publication input",
+    );
+  }
 }
 
 function assertPublishReplay(
@@ -701,6 +707,11 @@ function assertPublishReplayMatchesInput(
   },
 ): void {
   assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
+  if (!sameSitePublicationRequest(replay.event.requestInput, input)) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used for different publication input",
+    );
+  }
   const expectedRequestedTools = input.requestedTools ?? replay.fromVersion?.requestedTools;
   if (!expectedRequestedTools) {
     throw new WorkspaceArtifactConflictError(
@@ -854,6 +865,7 @@ export async function createWorkspaceArtifact(
               toVersionId: version!.id,
               operationKey: input.operationKey,
               requestDigest: null,
+              requestInput: sitePublicationRequest(input),
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
               sourceAttemptId: input.sourceAttemptId,
@@ -981,6 +993,7 @@ export async function publishWorkspaceArtifactVersion(
               toVersionId: version!.id,
               operationKey: input.operationKey,
               requestDigest: null,
+              requestInput: sitePublicationRequest(input),
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
               sourceAttemptId: input.sourceAttemptId,

@@ -229,6 +229,11 @@ test("direct uploads publish large HTML with optional downloadable source and im
     ).json();
     expect(replay.replayed).toBe(true);
     expect(replay.version.id).toBe(result.version.id);
+    const mismatchedReplay = await requestAsCanonicalLocalHuman(base, {
+      method: "POST",
+      body: JSON.stringify({ ...body, title: "A different publication" }),
+    });
+    expect(mismatchedReplay.status).toBe(409);
     const runtime = await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/html`);
     expect(await runtime.text()).toBe(html);
   }
