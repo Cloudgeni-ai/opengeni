@@ -72862,8 +72862,12 @@ function backgroundCommandTerminalMutation(input: {
       // turn. Their terminal transition has already drained pending machine
       // input, so reopening one here would violate cancellation authority. The
       // exact command event remains durable audit/read truth; live sessions get
-      // the typed model input below.
-      if (session.status === "cancelled" || session.status === "failed") {
+      // the typed model input below unless a terminal read already observed it.
+      if (
+        session.status === "cancelled" ||
+        session.status === "failed" ||
+        command.completionObservedAt
+      ) {
         await tx
           .update(schema.sessions)
           .set({ lastSequence: session.lastSequence + 1, updatedAt: now })

@@ -183,11 +183,12 @@ A temporary transport outage alone preserves tracking. Reconciliation drains
 a fixed due-time frontier in batches, sharing offline observations per instance.
 The historical retirement migration preserves command records without creating
 model input or waking old sessions.
-Exact terminal proof (including confirmed tracking retirement) settles the command row and appends its terminal session
-event in one PostgreSQL transaction. A nonterminal session also receives one
-typed model input and any idle workflow wake in that commit; a failed or
-cancelled session remains terminal and keeps event-only audit rather than
-reopening machine input. Live fanout is post-commit and replaceable.
+Terminal proof atomically settles the command and appends its audit event.
+Unobserved completion creates fallback input for nonterminal sessions. Terminal
+command reads suppress pending notifications, never history; running reads do
+not. Command interaction is separate from conversation-first history and explicit
+diagnostics. Failed/cancelled sessions retain event-only audit. Live fanout is
+post-commit and replaceable.
 
 A long external wait is likewise session state, not workflow memory or goal
 state. `wait_for_input` records the exact declaring turn and an absolute

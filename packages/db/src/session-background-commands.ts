@@ -2,11 +2,13 @@ import type {
   SessionBackgroundCommand,
   SessionBackgroundCommandActivity,
 } from "@opengeni/contracts";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
 import { withRlsContext, withSessionActivityRlsContext } from "./database";
 import * as schema from "./schema";
+import { lockSessionEventWriteRows } from "./session-control";
+import { fromPostgresLosslessJson } from "./lossless-json";
 
 export type ConnectedMachineBackgroundCommandProof = {
   outcome: "exited" | "lost";
@@ -89,6 +91,7 @@ function mapCommand(
     settlementReason: row.settlementReason ?? null,
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
+    completionObservedAt: row.completionObservedAt?.toISOString() ?? null,
     updatedAt: row.updatedAt.toISOString(),
   };
 }
@@ -862,4 +865,232 @@ export async function getSessionBackgroundCommand(
       return row ? mapCommand(row) : null;
     },
   );
+}
+
+export type SessionCommandIdentity = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  commandId: string;
+};
+
+/** Observe terminal state, not output consumption. Native terminal-result adapters
+ * call this after settlement. Session-first ordering serializes settlement and
+ * inbox claiming; already delivered history is never rewritten. */
+export async function observeSessionBackgroundCommandCompletion(
+  db: Database,
+  input: SessionCommandIdentity,
+): Promise<SessionBackgroundCommand | null> {
+  return await withSessionActivityRlsContext(db, input, async (tx) => {
+    const locks = await lockSessionEventWriteRows(tx, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [input.sessionId],
+    });
+    if (locks.sessions[0]?.accountId !== input.accountId) return null;
+    const identity = and(
+      eq(schema.sessionBackgroundCommands.accountId, input.accountId),
+      eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
+      eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+      eq(schema.sessionBackgroundCommands.id, input.commandId),
+    );
+    const [command] = await tx
+      .select()
+      .from(schema.sessionBackgroundCommands)
+      .where(identity)
+      .for("update")
+      .limit(1);
+    if (!command) return null;
+    if (command.state !== "exited" && command.state !== "lost") return mapCommand(command);
+    const observedAt = command.completionObservedAt ?? new Date();
+    await tx
+      .update(schema.sessionBackgroundCommands)
+      .set({ completionObservedAt: observedAt })
+      .where(identity);
+    await tx
+      .update(schema.sessionSystemUpdates)
+      .set({ state: "superseded" })
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.accountId, input.accountId),
+          eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+          eq(schema.sessionSystemUpdates.kind, "background_command_result"),
+          eq(schema.sessionSystemUpdates.sourceId, input.commandId),
+          eq(schema.sessionSystemUpdates.dedupeKey, `background-command-result:${input.commandId}`),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+        ),
+      );
+    return mapCommand({ ...command, completionObservedAt: observedAt });
+  });
+}
+
+export const COMMAND_OUTPUT_DEFAULT_BYTES = 16_384;
+export const COMMAND_OUTPUT_MAX_BYTES = 65_536;
+export const COMMAND_OUTPUT_PAGE_ROWS = 64;
+
+export function parseCommandOutputCursor(cursor: string | undefined, commandId: string) {
+  if (cursor === undefined) return { sequence: 0, offset: 0 };
+  if (cursor.length > 128) throw new Error("Invalid command output cursor");
+  const parts = cursor.split(":");
+  if (
+    parts.length !== 3 ||
+    parts[0] !== commandId ||
+    !/^\d+$/.test(parts[1]!) ||
+    !/^\d+$/.test(parts[2]!)
+  ) {
+    throw new Error("Invalid command output cursor");
+  }
+  const sequence = Number(parts[1]);
+  const offset = Number(parts[2]);
+  if (!Number.isSafeInteger(sequence) || !Number.isSafeInteger(offset))
+    throw new Error("Invalid command output cursor");
+  return { sequence, offset };
+}
+
+export type CommandOutputRow = {
+  sequence: number;
+  payload: unknown;
+  payloadCodecVersion: number | null;
+};
+
+/** Cursor offsets are UTF-16 positions at code-point boundaries; budgets are UTF-8 bytes. */
+export function projectCommandOutputPage(input: {
+  commandId: string;
+  cursor?: string | undefined;
+  maxOutputBytes?: number | undefined;
+  rows: CommandOutputRow[];
+}) {
+  const start = parseCommandOutputCursor(input.cursor, input.commandId);
+  const budget = input.maxOutputBytes ?? COMMAND_OUTPUT_DEFAULT_BYTES;
+  if (!Number.isSafeInteger(budget) || budget < 4 || budget > COMMAND_OUTPUT_MAX_BYTES)
+    throw new Error("maxOutputBytes must be between 4 and 65536");
+  let remaining = budget;
+  let sequence = start.sequence;
+  let offset = start.offset;
+  const chunks: {
+    sequence: number;
+    stream: "stdout" | "stderr";
+    streamFidelity: "separate" | "merged" | "unknown";
+    chunk: string;
+  }[] = [];
+  const gaps: string[] = [];
+  if (start.offset > 0 && input.rows[0]?.sequence !== start.sequence)
+    gaps.push("cursor_output_no_longer_retained");
+  let consumed = 0;
+  for (const row of input.rows.slice(0, COMMAND_OUTPUT_PAGE_ROWS)) {
+    const payload = fromPostgresLosslessJson(row.payload, row.payloadCodecVersion) as Record<
+      string,
+      unknown
+    >;
+    const text = typeof payload?.chunk === "string" ? payload.chunk : "";
+    if (typeof payload?.chunk !== "string") gaps.push("retained_event_has_no_output_chunk");
+    if (payload?.commandReadProjectionGap === true) gaps.push("retained_event_exceeds_read_limit");
+    if (payload?.truncation && typeof payload.truncation === "object")
+      gaps.push("output_truncated_at_retention_boundary");
+    const begin = row.sequence === start.sequence ? start.offset : 0;
+    if (
+      begin > 0 &&
+      begin < text.length &&
+      text.charCodeAt(begin - 1) >= 0xd800 &&
+      text.charCodeAt(begin - 1) <= 0xdbff &&
+      text.charCodeAt(begin) >= 0xdc00 &&
+      text.charCodeAt(begin) <= 0xdfff
+    ) {
+      throw new Error("Invalid command output cursor: offset splits a Unicode code point");
+    }
+    if (begin > text.length) gaps.push("cursor_output_no_longer_retained");
+    let end = Math.min(begin, text.length);
+    for (const character of text.slice(end)) {
+      const bytes = Buffer.byteLength(character, "utf8");
+      if (bytes > remaining) break;
+      remaining -= bytes;
+      end += character.length;
+    }
+    if (end > begin)
+      chunks.push({
+        sequence: row.sequence,
+        stream: payload.stream === "stderr" ? "stderr" : "stdout",
+        streamFidelity:
+          payload.streamFidelity === "merged"
+            ? "merged"
+            : payload.streamFidelity === "separate"
+              ? "separate"
+              : "unknown",
+        chunk: text.slice(begin, end),
+      });
+    if (end < text.length) {
+      sequence = row.sequence;
+      offset = end;
+      break;
+    }
+    sequence = row.sequence + 1;
+    offset = 0;
+    consumed++;
+  }
+  return {
+    chunks,
+    nextCursor: `${input.commandId}:${sequence}:${offset}`,
+    hasMore: consumed < input.rows.length,
+    retention: {
+      source: "retained_session_events" as const,
+      completeness: "unknown" as const,
+      gaps: [...new Set(gaps)],
+    },
+  };
+}
+
+export async function readSessionBackgroundCommandOutput(
+  db: Database,
+  input: SessionCommandIdentity & {
+    cursor?: string | undefined;
+    maxOutputBytes?: number | undefined;
+  },
+) {
+  const cursor = parseCommandOutputCursor(input.cursor, input.commandId);
+  // Validate the budget before any observation mutation.
+  projectCommandOutputPage({ ...input, rows: [] });
+  const command = await getSessionBackgroundCommand(db, input);
+  if (!command) throw new Error("Background command not found in this session");
+  const rows = await withRlsContext(
+    db,
+    input,
+    async (tx) =>
+      await tx
+        .select({
+          sequence: schema.sessionEvents.sequence,
+          // Bound legacy payloads in SQL too: LIMIT alone cannot bound one old event.
+          // Oversized historical rows carry explicit loss rather than allocating an
+          // unbounded JSON value in the API process.
+          payload: sql<unknown>`case when octet_length(${schema.sessionEvents.payload}::text) <= 262144
+      then ${schema.sessionEvents.payload}
+      else jsonb_build_object('commandReadProjectionGap', true) end`,
+          payloadCodecVersion: schema.sessionEvents.payloadCodecVersion,
+        })
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.type, "sandbox.command.output.delta"),
+            sql`${schema.sessionEvents.payload} ->> 'commandId' = ${input.commandId}`,
+            gte(schema.sessionEvents.sequence, cursor.sequence),
+          ),
+        )
+        .orderBy(asc(schema.sessionEvents.sequence))
+        .limit(COMMAND_OUTPUT_PAGE_ROWS + 1),
+  );
+  const page = projectCommandOutputPage({ ...input, rows });
+  // Only observe the terminal state actually used by this read. A finish racing
+  // a running read must leave its notification pending.
+  const terminal = command.state === "exited" || command.state === "lost";
+  const observed = terminal ? await observeSessionBackgroundCommandCompletion(db, input) : command;
+  return {
+    commandId: command.id,
+    state: command.state,
+    exitCode: command.exitCode,
+    terminal,
+    completionObservedAt: observed?.completionObservedAt ?? null,
+    ...page,
+  };
 }
