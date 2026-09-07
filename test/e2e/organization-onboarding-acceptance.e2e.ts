@@ -480,7 +480,7 @@ describe("organization onboarding with real Better Auth / Hono / SDK / PostgreSQ
     );
     await page.getByRole("button", { name: "Create organization" }).click();
     expect((await setupSettled).ok()).toBe(true);
-    await page.getByRole("heading", { name: "Connect a model or buy credits" }).waitFor();
+    await page.getByRole("heading", { name: "Choose how to power your chats" }).waitFor();
     expect(await page.getByLabel("Organization name").count()).toBe(0);
     await page.getByRole("button", { name: "Skip for now" }).click();
 
