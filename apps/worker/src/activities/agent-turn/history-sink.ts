@@ -51,7 +51,7 @@ export type TurnHistorySinkDeps = {
 export class TurnHistorySink {
   private readonly prefix = new HistoryPrefixGuard();
 
-  seedHistory(input: unknown, count: number) {
+  seedHistory(input: string | readonly unknown[] | { readonly history: unknown[] }, count: number) {
     const items =
       typeof input === "string" && count === 0
         ? []
