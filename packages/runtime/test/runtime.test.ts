@@ -354,6 +354,75 @@ test("recovers only rollout-safe first-party MCP setup 404 and statusless Error 
   expect(routeNotReady.message).toContain("secret detail");
 });
 
+test("recovers typed Undici socket loss only at the safe MCP setup boundary", () => {
+  class SocketError extends Error {
+    readonly code = "UND_ERR_SOCKET";
+  }
+  const socketFailure = () =>
+    new TypeError("fetch failed", { cause: new SocketError("other side closed") });
+  const setupError = socketFailure();
+  expect(mcpTransportErrorWithRetryMetadata(setupError, { recoverySafeSetup: true })).toBe(
+    setupError,
+  );
+  expect(isMcpTransportConnectivityError(setupError)).toBe(true);
+  expect(isMcpTransportConnectivityError(mcpTransportErrorWithRetryMetadata(socketFailure()))).toBe(
+    false,
+  );
+  const rejected = Object.assign(socketFailure(), { status: 401 });
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(rejected, { recoverySafeSetup: true }),
+    ),
+  ).toBe(false);
+  expect(
+    isMcpTransportConnectivityError(
+      mcpTransportErrorWithRetryMetadata(new TypeError("invalid protocol"), {
+        recoverySafeSetup: true,
+      }),
+    ),
+  ).toBe(false);
+});
+
+test("preserves socket setup recovery through the MCP lifecycle wrapper", async () => {
+  class SocketError extends Error {
+    readonly code = "UND_ERR_SOCKET";
+  }
+  const exact = new TypeError("fetch failed", { cause: new SocketError("other side closed") });
+  let connects = 0;
+  const inner: MCPServer = {
+    name: "setup-socket",
+    cacheToolsList: false,
+    async connect() {
+      connects += 1;
+      throw exact;
+    },
+    async close() {},
+    async listTools() {
+      return [];
+    },
+    async callTool() {
+      return [];
+    },
+  };
+  const server = new PrefixedMcpServer(
+    inner,
+    "opengeni",
+    undefined,
+    false,
+    undefined,
+    "opengeni",
+    true,
+  );
+  const failure = await server.connect().then(
+    () => undefined,
+    (error: Error) => error,
+  );
+  expect(failure).toBeDefined();
+  expect(server.unwrapLifecycleError(failure!, "connect")).toBe(exact);
+  expect(isMcpTransportConnectivityError(exact)).toBe(true);
+  expect(connects).toBe(1);
+});
+
 describe("structured human-input runtime boundary", () => {
   const interruption = {
     name: HUMAN_INPUT_TOOL_NAME,
