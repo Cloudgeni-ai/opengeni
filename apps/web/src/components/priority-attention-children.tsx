@@ -7,9 +7,11 @@ import { useAppContext } from "@/context";
 export function PriorityAttentionChildren({
   workspaceId,
   rootSessionId,
+  label = "Show waiting agents",
 }: {
   workspaceId: string;
   rootSessionId: string;
+  label?: string;
 }) {
   const { client } = useAppContext();
   const generation = useRef(0);
@@ -71,7 +73,7 @@ export function PriorityAttentionChildren({
           if (!open) void load();
         }}
       >
-        {open ? "Hide waiting agents" : "Show waiting agents"}
+        {open ? "Hide waiting agents" : label}
       </button>
       {open ? (
         <div className="mt-2 grid gap-2 border-l border-border pl-3">

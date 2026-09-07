@@ -466,11 +466,16 @@ function PriorityRow(props: {
             </button>
           ) : null}
         </div>
-        {(session.treeStats?.attentionDescendants ?? 0) > 0 ? (
+        {(session.treeStats?.attentionDescendants ?? 0) > 0 || session.treeStats?.truncated ? (
           <PriorityAttentionChildren
             key={`${props.workspaceId}:${session.id}`}
             workspaceId={props.workspaceId}
             rootSessionId={session.id}
+            label={
+              (session.treeStats?.attentionDescendants ?? 0) > 0
+                ? undefined
+                : "Check waiting agents"
+            }
           />
         ) : null}
       </div>

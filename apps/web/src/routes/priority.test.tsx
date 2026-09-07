@@ -366,6 +366,34 @@ describe("For you broken-session actions", () => {
 });
 
 describe("For you exact waiting agent navigation", () => {
+  test("offers discovery when a truncated tree has no known waiting descendants", async () => {
+    sessions[0]!.treeStats!.attentionDescendants = 0;
+    sessions[0]!.treeStats!.truncated = true;
+    listAgentTopology.mockResolvedValueOnce({
+      sessions: [
+        {
+          id: "late-child",
+          title: "Reviewer beyond summary",
+          status: "requires_action",
+          pause: { state: "active" },
+        },
+      ],
+      nextCursor: null,
+    });
+    const { container, root } = await renderPriorityRoute();
+    try {
+      expect(listAgentTopology).not.toHaveBeenCalled();
+      const check = buttonWithText(container, "Check waiting agents");
+      expect(check).not.toBeNull();
+      await act(async () => check!.click());
+      expect(container.textContent).toContain("Reviewer beyond summary");
+      expect(container.querySelector('a[href$="/sessions/late-child"]')).not.toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
   test("loads authorized child pages on demand while preserving the parent failure", async () => {
     sessions[0]!.treeStats!.attentionDescendants = 2;
     listAgentTopology.mockResolvedValueOnce({
