@@ -324,6 +324,9 @@ the accepted occurrence:
 - warm/existing targets freeze the newest durable `turn.started` execution
   policy, while cold reusable runs use a revision-bound deterministic session
   key and materialization receipt so concurrent runs adopt rather than orphan;
+  rolling migration 0414 also uses the exact source-to-target receipt when the
+  canonical producer row has already advanced during materialization, preserving
+  generated identity checks and later claim-time grant revalidation;
 - deterministic authority, target, spawn, or materialization rejection settles
   the run terminally with no model/tool/sandbox/provider I/O; terminal producer
   replay is a stable zero-I/O result;
