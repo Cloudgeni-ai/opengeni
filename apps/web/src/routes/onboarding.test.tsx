@@ -523,6 +523,51 @@ describe("organization onboarding UI", () => {
     }
   });
 
+  test("Codex authorization keeps Skip disabled while device login is pending", async () => {
+    const codexConnectStart = mock(async () => ({
+      state: "state-a",
+      userCode: "CODE-1234",
+      verificationUri: "https://example.test/authorize",
+      intervalSeconds: 60,
+    }));
+    const client = {
+      codexConnectStart,
+      codexConnectPoll: mock(async () => ({ status: "pending" as const })),
+    };
+    const priorOpen = window.open;
+    window.open = mock(() => null) as typeof window.open;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <ModelAccessOnboardingPanel
+            client={client as never}
+            organizationId="organization-a"
+            workspaceId="personal-workspace"
+            onComplete={() => undefined}
+          />,
+        ),
+      );
+      await act(async () =>
+        container.querySelector<HTMLButtonElement>('button[aria-label="Connect Codex"]')!.click(),
+      );
+      await flush();
+      expect(codexConnectStart).toHaveBeenCalledTimes(1);
+      expect(container.textContent).toContain("Waiting for authorization");
+      expect(
+        Array.from(container.querySelectorAll("button")).find(
+          (button) => button.textContent?.trim() === "Skip for now",
+        )!.disabled,
+      ).toBe(true);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.open = priorOpen;
+    }
+  });
+
   test("terminal organization access shows a bounded unavailable state without a setup gate", async () => {
     const onComplete = mock(() => undefined);
     const container = document.createElement("div");

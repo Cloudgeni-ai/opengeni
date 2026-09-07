@@ -459,7 +459,7 @@ export function ModelAccessOnboardingPanel({
           type="button"
           variant="ghost"
           className="mt-5 w-full text-fg-muted"
-          disabled={busy}
+          disabled={busy || !!pending}
           onClick={onComplete}
         >
           Skip for now
