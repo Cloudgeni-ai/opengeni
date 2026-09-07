@@ -1,3 +1,4 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
@@ -18,7 +19,6 @@ import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
   useChannels,
-  useRigs,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
@@ -275,7 +275,7 @@ function SessionsIndexRouteContent({
     enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
   });
   const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
+  const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;

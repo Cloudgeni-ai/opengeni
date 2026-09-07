@@ -50,7 +50,6 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
-import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -155,6 +154,12 @@ import type {
 const AnalyticsManager = lazy(() =>
   import("@/components/analytics-consent").then((module) => ({
     default: module.AnalyticsManager,
+  })),
+);
+
+const OrganizationOnboardingPanel = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.OrganizationOnboardingPanel,
   })),
 );
 
@@ -2776,17 +2781,19 @@ export function RootRouteComponent() {
         onComplete={revalidatePrincipalAccess}
       />
     ) : (
-      <OrganizationOnboardingPanel
-        client={client}
-        activeEmail={authSession?.user.email ?? null}
-        invitation={organizationInvitationContinuation}
-        onUseInvitedAccount={() => {
-          void handleManagedSignOut().catch((error) =>
-            toast.error("Sign out failed", { description: String(error) }),
-          );
-        }}
-        onComplete={revalidatePrincipalAccess}
-      />
+      <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
+        <OrganizationOnboardingPanel
+          client={client}
+          activeEmail={authSession?.user.email ?? null}
+          invitation={organizationInvitationContinuation}
+          onUseInvitedAccount={() => {
+            void handleManagedSignOut().catch((error) =>
+              toast.error("Sign out failed", { description: String(error) }),
+            );
+          }}
+          onComplete={revalidatePrincipalAccess}
+        />
+      </Suspense>
     )
   ) : accessLoading || !appContext ? (
     <LoadingPanel label="Loading workspace access" />

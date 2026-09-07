@@ -1,8 +1,9 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Rigs: organization-, workspace-, or user-scoped sandbox machine definitions. A rig is the
 // team's machine — a setup/check layer over the platform sandbox image plus
 // default variable sets, versioned and self-healing. This page lists them and
 // creates new ones; the per-rig detail owns versions, changes, and promotion.
-import { useRigs, useVariableSets } from "@opengeni/react";
+import { useVariableSets } from "@opengeni/react";
 import { Link } from "@tanstack/react-router";
 import {
   CheckIcon,
@@ -62,7 +63,7 @@ export function RigsRoute({ workspaceId }: { workspaceId: string }) {
         membership.status === "active" && membership.organizationId === workspace.accountId,
     ),
   );
-  const rigs = useRigs({ enabled: canView });
+  const rigs = useWorkspaceRigs({ enabled: canView });
   const defaultRigId =
     context.workspaces.find((candidate) => candidate.id === workspaceId)?.defaultRigId ?? null;
   const [createOpen, setCreateOpen] = useState(false);

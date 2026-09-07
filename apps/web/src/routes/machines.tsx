@@ -269,7 +269,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             onOpenDetail={(m) => setDetailId(m.sandboxId)}
             now={now}
             onRefresh={() => void machines.refresh()}
-            onEnroll={() => setEnrollOpen(true)}
+            onEnroll={machines.canManage ? () => setEnrollOpen(true) : undefined}
             {...(machines.canUpdateAgent
               ? {
                   onUpdateAgent: (machine: MachineView) => {
@@ -301,7 +301,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         </Notice>
       ) : null}
 
-      <Dialog open={enrollOpen} onOpenChange={setEnrollOpen}>
+      <Dialog open={enrollOpen && machines.canManage} onOpenChange={setEnrollOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Connect a machine</DialogTitle>
@@ -313,12 +313,14 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
           {/* Gated on `enrollOpen` so the body mounts (and mints a fresh token)
               each time the dialog is opened, and unmounts on close — Radix already
               unmounts closed content, this just makes the mint-on-open explicit. */}
-          {enrollOpen ? <EnrollDialogBody workspaceId={workspaceId} origin={origin} /> : null}
+          {enrollOpen && machines.canManage ? (
+            <EnrollDialogBody workspaceId={workspaceId} origin={origin} />
+          ) : null}
         </DialogContent>
       </Dialog>
 
       <ConfirmDialog
-        open={removeTarget !== null}
+        open={removeTarget !== null && machines.canManage}
         onOpenChange={(open) => {
           if (!open) {
             setRemoveTarget(null);
@@ -331,12 +333,15 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
         description="Access will be revoked immediately while the machine is offline. Its session, route, lease, archive, and audit history will be kept; reconnecting later requires a fresh human-approved enrollment."
         confirmLabel={
           removeBlocked?.code === "active_route"
-            ? "Move sessions and remove machine"
+            ? machines.canControl
+              ? "Move sessions and remove machine"
+              : "Close"
             : "Remove machine"
         }
         onConfirm={async () => {
           const target = removeTarget;
-          if (!target?.enrollmentId) return false;
+          if (!target?.enrollmentId || !machines.canManage) return false;
+          if (removeBlocked?.code === "active_route" && !machines.canControl) return true;
           const sessionsToMove =
             removeBlocked?.code === "active_route" ? removeBlocked.dependentSessions : [];
           if (sessionsToMove.length > 0) {
@@ -389,6 +394,11 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
                   : "Never connected"}
               </p>
             </div>
+            {removeBlocked?.code === "active_route" && !machines.canControl ? (
+              <Notice tone="muted">
+                Ask a workspace admin to move the active sessions before removing this machine.
+              </Notice>
+            ) : null}
             {removeMoveError ? (
               <Notice tone="failed" title="Couldn't move every session">
                 {removeMoveError.message}

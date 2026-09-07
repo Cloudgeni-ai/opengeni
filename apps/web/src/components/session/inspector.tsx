@@ -1,8 +1,8 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
-  useRigs,
   useVariableSets,
 } from "@opengeni/react";
 import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
@@ -48,7 +48,7 @@ export function SessionInspector(props: {
   const context = useAppContext();
   const navigate = useNavigate();
   const variableSets = useVariableSets({ workspaceId: props.session.workspaceId });
-  const rigs = useRigs({ workspaceId: props.session.workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId: props.session.workspaceId });
   const sessionVariableSetIds = useMemo(
     () =>
       props.session.variableSetIds ??
