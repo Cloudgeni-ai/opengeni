@@ -61,7 +61,8 @@ are unreleased checkout packages. Skip the registry command above for OpenGeni.
 After ordinary dependencies, install these packages with
 `bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
 Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
-save sandbox archive paths in published source.
+save sandbox archive paths in published source. In this local-development
+exception, use the image's `ogtool` directly: it is built from the same checkout.
 
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
