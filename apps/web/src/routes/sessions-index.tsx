@@ -1,3 +1,4 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
 // THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
@@ -23,7 +24,7 @@ import {
   type ComposerState,
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -273,7 +274,8 @@ function SessionsIndexRouteContent({
   const variableSets = useVariableSets({
     enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
   });
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
+  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -500,7 +502,7 @@ function SessionsIndexRouteContent({
       : [];
   });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
-  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
   const fleetLoadFailed =
@@ -550,7 +552,7 @@ function SessionsIndexRouteContent({
           : canResolveVariableSetAttachments
             ? resolveVariableSetAttachments()
             : Promise.resolve(),
-        rigs.refresh(),
+        canUseRigs ? rigs.refresh() : Promise.resolve(),
       ]);
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
@@ -1912,7 +1914,7 @@ function ComputeTargetControl(props: {
   onComputeChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalResourceAccess: NewSessionPersonalResourceAccess;
-  fleet: ReturnType<typeof useMachines>;
+  fleet: ReturnType<typeof useWorkspaceMachines>;
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];

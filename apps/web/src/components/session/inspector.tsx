@@ -1,10 +1,11 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import {
   SessionStatus as SessionStatusBadge,
   type SessionEventsConnectionState,
   useRigs,
   useVariableSets,
 } from "@opengeni/react";
-import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ChevronDownIcon,
@@ -156,7 +157,7 @@ export function SessionInspector(props: {
   // inspector agrees with the "Run on" header instead of reading "modal" while a
   // selfhosted box runs the turn. Degrades to the home backend when no machine is
   // active (or selfhosted is disabled → the fleet 404s to empty).
-  const fleet = useMachines({
+  const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });

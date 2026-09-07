@@ -1,3 +1,4 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // Machines: the workspace's bring-your-own-compute fleet — enrolled selfhosted
 // machines, each with its connection-status pill, state badges, latest metrics
 // (CPU/load/mem/disk/GPU), and an enroll affordance. The session-scoped attach/
@@ -10,7 +11,6 @@ import {
   MachineDetail,
   MachinesDashboard,
   connectionStatusForState,
-  useMachines,
   MACHINES_DASHBOARD_POLL_MS,
   type DeviceFlowPhase,
   type MetricSample,
@@ -66,7 +66,7 @@ export async function copyToClipboard(text: string, successMessage: string) {
 
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const { client } = useAppContext();
-  const machines = useMachines({ pollIntervalMs: MACHINES_DASHBOARD_POLL_MS });
+  const machines = useWorkspaceMachines({ pollIntervalMs: MACHINES_DASHBOARD_POLL_MS });
   const pageLive = usePageLiveActivity();
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<MachineView | null>(null);
@@ -213,7 +213,12 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
       />
 
       <div className="mt-5">
-        {featureUnavailable ? (
+        {!machines.canRead ? (
+          <Notice tone="muted" title="Machines are managed by your workspace admin">
+            You do not have permission to view connected machines in this workspace. Ask a workspace
+            admin for access.
+          </Notice>
+        ) : featureUnavailable ? (
           <Notice tone="muted">
             Connected machines aren't enabled on this deployment. Sessions run on the managed
             sandbox.
