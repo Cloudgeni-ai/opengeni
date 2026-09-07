@@ -3,6 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 import {
   createDb,
   appendSessionEventsAndUpdateSession,
+  appendSessionEvents,
   createSession,
   grantWorkspaceAccess,
   removeWorkspaceMember,
@@ -144,6 +145,53 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
+  }, 60_000);
+
+  test("renders goal landmarks through the production session chunk graph", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (
+        message.type() === "error" &&
+        /React error|Element type is invalid/.test(message.text())
+      ) {
+        errors.push(message.text());
+      }
+    });
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Goal landmark production proof",
+      );
+      await appendSessionEvents(dbClient.db, workspaceId, session.id, [
+        { type: "goal.set", payload: { text: "Review the candidate" } },
+        { type: "goal.held", payload: { reason: "Waiting for review" } },
+        { type: "goal.continuation", payload: { text: "Review the candidate" } },
+      ]);
+      // A fresh page follows the same lazy route import order as the stock app.
+      // Isolated MessageTimeline builds do not reproduce this chunk cycle.
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
+      await page
+        .getByText("Continuing toward the goal: Review the candidate", { exact: true })
+        .waitFor();
+      expect(await page.getByText("Timeline item unavailable", { exact: true }).count()).toBe(0);
+      expect(errors).toEqual([]);
+      const landmark = page.getByText("Continuing toward the goal: Review the candidate", {
+        exact: true,
+      });
+      expect(await landmark.locator("..").locator("svg").count()).toBe(1);
+    } finally {
+      await context.close();
+    }
   }, 60_000);
 
   test("keeps the selected session grouping after a page refresh", async () => {

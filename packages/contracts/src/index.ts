@@ -7269,6 +7269,8 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /** Absent on legacy drafts; null is explicit provenance for the Default project. */
+  selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
   selectionHistory: NewSessionSelectionHistory.default({ projects: [] }),
   updatedAt: z.string().nullable(),
@@ -7283,6 +7285,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
@@ -14993,6 +14996,67 @@ export const GitHubRepositoriesResponse = z.object({
   repositories: z.array(GitHubRepository),
 });
 export type GitHubRepositoriesResponse = z.infer<typeof GitHubRepositoriesResponse>;
+
+export const GitHubActionPolicyDecision = z.enum(["allow", "ask", "block"]);
+export type GitHubActionPolicyDecision = z.infer<typeof GitHubActionPolicyDecision>;
+
+export const GitHubActionPolicyEffectiveDecision = z.enum([
+  ...GitHubActionPolicyDecision.options,
+  "mixed",
+]);
+export type GitHubActionPolicyEffectiveDecision = z.infer<
+  typeof GitHubActionPolicyEffectiveDecision
+>;
+
+export const GitHubActionPolicyGroup = z.enum(["routine", "review", "merge"]);
+export type GitHubActionPolicyGroup = z.infer<typeof GitHubActionPolicyGroup>;
+
+export const GitHubActionPolicyActor = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workspace_app"),
+    installationId: z.number().int().positive(),
+  }),
+  z.object({
+    kind: z.literal("personal"),
+    connectionId: z.string().trim().min(1).max(512),
+  }),
+]);
+export type GitHubActionPolicyActor = z.infer<typeof GitHubActionPolicyActor>;
+
+const GitHubActionPolicyGroups = z.object({
+  routine: GitHubActionPolicyEffectiveDecision,
+  review: GitHubActionPolicyEffectiveDecision,
+  merge: GitHubActionPolicyEffectiveDecision,
+});
+
+export const GitHubActionPolicyActorState = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("workspace_app"),
+    installationId: z.number().int().positive(),
+    label: z.string().min(1).max(256),
+    groups: GitHubActionPolicyGroups,
+  }),
+  z.object({
+    kind: z.literal("personal"),
+    connectionId: z.string().trim().min(1).max(512),
+    label: z.string().min(1).max(256),
+    groups: GitHubActionPolicyGroups,
+  }),
+]);
+export type GitHubActionPolicyActorState = z.infer<typeof GitHubActionPolicyActorState>;
+
+export const GitHubActionPoliciesResponse = z.object({
+  enabled: z.boolean(),
+  actors: z.array(GitHubActionPolicyActorState).max(128),
+});
+export type GitHubActionPoliciesResponse = z.infer<typeof GitHubActionPoliciesResponse>;
+
+export const UpdateGitHubActionPolicyRequest = z.object({
+  actor: GitHubActionPolicyActor,
+  group: GitHubActionPolicyGroup,
+  decision: GitHubActionPolicyDecision,
+});
+export type UpdateGitHubActionPolicyRequest = z.infer<typeof UpdateGitHubActionPolicyRequest>;
 
 export const ClientAuthConfig = z.discriminatedUnion("mode", [
   z.object({

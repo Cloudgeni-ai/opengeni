@@ -474,6 +474,8 @@ processes therefore cannot make an opted-in viewer, turn, or mutation caller
 abandon a still-valid child whose timeout was frozen earlier. Zero-wait internal
 probes remain immediate.
 
+Rotation recovery: [lifecycle](run-lifecycle.md).
+
 Lease liveness, provider existence, route attachment, archive availability,
 workspace readiness, and operation availability are separate facts. A warm row
 or selected pointer alone is not proof that a command can run.
@@ -1229,6 +1231,15 @@ GitHub App binding keeps account selection explicit whenever owner-authorized
 installations already exist: the owner may choose one of them or enter GitHub's
 new-installation flow for another personal account or organization. Both paths
 retain the same signed-state and exact owner revalidation boundaries.
+
+GitHub write autonomy is a first-class connection policy, not a workspace-wide
+agent mode. `packages/core/src/domain/github-action-policies.ts` groups the
+runtime's exact GitHub write tools into routine work, review submission, and
+merge without widening one group from another. `apps/api/src/routes/github.ts`
+authorizes and serves the policy, and
+`apps/web/src/components/capabilities/use-github-integration.tsx` renders it in
+the shared GitHub integration sheet. The DB connector-policy rows and accepted
+attempt snapshot remain the execution authority.
 
 Canonical: [`capabilities.md`](capabilities.md),
 [`integrations-design.md`](integrations-design.md),

@@ -1050,6 +1050,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
             id: `${pendingWaitOutcome.id}-visible-outcome`,
             tone: "waiting",
             text: waitingOutcomeText(pendingWaitOutcome.reason),
+            recordedOutcome: true,
             occurredAt: pendingWaitOutcome.occurredAt,
           });
         }

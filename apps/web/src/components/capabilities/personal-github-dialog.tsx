@@ -170,7 +170,7 @@ export function PersonalGitHubDialog(props: {
 
         <p className="text-xs leading-5 text-fg-muted">
           GitHub grants account-wide OAuth access. This list is OpenGeni's additional allowlist.
-          Repository writes still follow the task's confirmation policy.
+          Repository writes still follow the GitHub action approvals configured on this integration.
         </p>
 
         <DialogFooter>

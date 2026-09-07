@@ -4854,6 +4854,8 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /** Absent on legacy drafts; null records an explicit Default-project selection. */
+  selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;
@@ -7363,6 +7365,30 @@ export type GitHubAppInfo = {
 
 export type GitHubRepositoriesResponse = {
   repositories: GitHubRepository[];
+};
+
+export type GitHubActionPolicyDecision = "allow" | "ask" | "block";
+export type GitHubActionPolicyEffectiveDecision = GitHubActionPolicyDecision | "mixed";
+export type GitHubActionPolicyGroup = "routine" | "review" | "merge";
+
+export type GitHubActionPolicyActor =
+  | { kind: "workspace_app"; installationId: number }
+  | { kind: "personal"; connectionId: string };
+
+export type GitHubActionPolicyActorState = GitHubActionPolicyActor & {
+  label: string;
+  groups: Record<GitHubActionPolicyGroup, GitHubActionPolicyEffectiveDecision>;
+};
+
+export type GitHubActionPoliciesResponse = {
+  enabled: boolean;
+  actors: GitHubActionPolicyActorState[];
+};
+
+export type UpdateGitHubActionPolicyRequest = {
+  actor: GitHubActionPolicyActor;
+  group: GitHubActionPolicyGroup;
+  decision: GitHubActionPolicyDecision;
 };
 
 export type VerifyPublicGitHubRepositoryRefRequest = {
