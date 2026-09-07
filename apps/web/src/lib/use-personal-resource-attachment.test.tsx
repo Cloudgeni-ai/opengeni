@@ -300,6 +300,33 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.intent?.mode).toBe("session");
     expect(originalIntent?.mode).toBe("once");
     expect(hook.result.current.requiresDecision).toBe(false);
+    const acceptedIntent = hook.result.current.intent!;
+    const acceptedCallback = hook.result.current.onAccepted;
+    await actRun(() => acceptedCallback({ personalResourceAttachment: acceptedIntent }));
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("once");
+    expect(acceptedIntent.mode).toBe("session");
+    await actRun(() => hook.result.current.setMode("session"));
+    await actRun(() =>
+      hook.result.current.onAccepted({ personalResourceAttachment: acceptedIntent }),
+    );
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
+    const delayedIntent = hook.result.current.intent!;
+    await actRun(() => hook.result.current.setMode("once"));
+    await actRun(() => hook.result.current.setMode("session"));
+    await actRun(() =>
+      hook.result.current.onAccepted({ personalResourceAttachment: delayedIntent }),
+    );
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
+    await actRun(() =>
+      hook.result.current.onAccepted({
+        personalResourceAttachment: structuredClone(hook.result.current.intent!),
+      }),
+    );
+    await flush();
+    expect(hook.result.current.intent?.mode).toBe("session");
 
     active = false;
     await actRun(() => hook.result.current.refresh());

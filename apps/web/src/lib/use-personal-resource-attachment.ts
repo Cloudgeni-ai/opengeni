@@ -482,11 +482,21 @@ export function usePersonalResourceAttachment(input: {
         : await load(true),
     [activeSessionAuthorityRecovery, load, recoverSessionAuthority],
   );
+  // Event reconciliation may invoke the latest callback for an older send.
+  // Nested intent identity survives live wire construction; unknown restored
+  // receipts must never consume a newer local choice.
+  const intentConsumers = useRef(new WeakMap<PersonalResourceAttachmentIntent, () => void>());
+  if (intent) {
+    intentConsumers.current.set(intent, () => scopeChoice.consume(intent.mode));
+  }
   const onAccepted = useCallback(
     (acceptedInput: {
       personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
     }) => {
       if (!acceptedInput.personalResourceAttachment) return;
+      const acceptedIntent = acceptedInput.personalResourceAttachment;
+      intentConsumers.current.get(acceptedIntent)?.();
+      intentConsumers.current.delete(acceptedIntent);
       setNotice("Personal-resource use was accepted for this work.");
       void load(true);
     },

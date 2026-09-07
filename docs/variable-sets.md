@@ -126,7 +126,9 @@ Attachment points:
   composers default to message-only authorization and offer an explicit
   “For my ongoing work in this session” option. The choice affects only the
   authorization included with the next human Create/Send/Steer/Continue command;
-  selecting it writes no grant. Existing sessions retain unavailable selected
+  selecting it writes no grant. Acceptance resets that submitted choice to
+  message-only without changing the immutable retry payload or a newer choice.
+  Existing sessions retain unavailable selected
   ids so they can still be removed. A separate cue reports matching ongoing
   authorizations from the owner's current catalog. Choosing message-only does
   not revoke prior grants. The web UI exposes neither `always` nor a new revoke

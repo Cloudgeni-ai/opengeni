@@ -91,6 +91,9 @@ describe("personal resource attachments in Chromium", () => {
     expect(
       await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
     ).toBe(true);
+    expect(
+      await setup.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
+    ).toBe(true);
     await existing.getByRole("radio", { name: "For my ongoing work in this session" }).check();
     expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
       "once",
@@ -109,6 +112,13 @@ describe("personal resource attachments in Chromium", () => {
     expect(
       JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}"),
     ).toMatchObject({ delivery: "continue", mode: "session", expectedAuthorityEpoch: 3 });
+    expect(
+      await existing.getByRole("radio", { name: "This message only", exact: true }).isChecked(),
+    ).toBe(true);
+    await existing.getByRole("button", { name: "Send", exact: true }).click();
+    expect(JSON.parse((await page.getByTestId("send-receipt").textContent()) ?? "{}").mode).toBe(
+      "once",
+    );
     await page.screenshot({
       fullPage: true,
       path: `${process.env.TMPDIR ?? "/tmp"}/personal-scope-mobile.png`,

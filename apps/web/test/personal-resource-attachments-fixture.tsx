@@ -110,7 +110,7 @@ function Fixture() {
           type="button"
           className="mt-3 rounded-md border p-2"
           disabled={!controller.intent}
-          onClick={() =>
+          onClick={() => {
             setCreateReceipt(
               JSON.stringify(
                 newSessionPersonalResourceAttachment({
@@ -119,8 +119,9 @@ function Fixture() {
                   mode: createChoice.mode,
                 }).intent,
               ),
-            )
-          }
+            );
+            createChoice.consume(createChoice.mode);
+          }}
         >
           Create session
         </button>
@@ -136,7 +137,10 @@ function Fixture() {
         <button
           type="button"
           className="mr-2 rounded-md border p-2"
-          onClick={() => setSendReceipt(JSON.stringify(controller.intent))}
+          onClick={() => {
+            setSendReceipt(JSON.stringify(controller.intent));
+            sendChoice.consume(sendChoice.mode);
+          }}
           disabled={!controller.intent}
         >
           Send
@@ -144,9 +148,10 @@ function Fixture() {
         <button
           type="button"
           className="rounded-md border p-2"
-          onClick={() =>
-            setSendReceipt(JSON.stringify({ delivery: "steer", ...controller.intent }))
-          }
+          onClick={() => {
+            setSendReceipt(JSON.stringify({ delivery: "steer", ...controller.intent }));
+            sendChoice.consume(sendChoice.mode);
+          }}
           disabled={!controller.intent}
         >
           Steer
@@ -176,6 +181,7 @@ function Fixture() {
                   }),
                 }),
               );
+              sendChoice.consume(sendChoice.mode);
               return true;
             },
             onChooseModel: () => {},

@@ -35,3 +35,24 @@ test("scope choice defaults to once, is local, and resets across every authority
   expect(hook.result.current.mode).toBe("once");
   await hook.unmount();
 });
+
+test("accepted choice is consumed once without changing newer choices or identities", async () => {
+  const hook = await renderHook(({ key }) => usePersonalResourceScopeChoice(key, "workspace"), {
+    key: "owner:session",
+  });
+  await actRun(() => hook.result.current.setMode("session"));
+  const first = hook.result.current.consume;
+  await actRun(() => first("once"));
+  expect(hook.result.current.mode).toBe("session");
+  await actRun(() => first("session"));
+  expect(hook.result.current.mode).toBe("once");
+  await actRun(() => hook.result.current.setMode("session"));
+  await actRun(() => first("session"));
+  expect(hook.result.current.mode).toBe("session");
+  const second = hook.result.current.consume;
+  await hook.rerender({ key: "other:session" });
+  await actRun(() => hook.result.current.setMode("session"));
+  await actRun(() => second("session"));
+  expect(hook.result.current.mode).toBe("session");
+  await hook.unmount();
+});
