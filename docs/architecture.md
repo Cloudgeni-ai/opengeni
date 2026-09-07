@@ -325,11 +325,7 @@ before navigation, and copies no tenant data from the current organization. A
 subject-scoped database fence limits this self-service lifecycle to ten
 additional organizations per human; invitation memberships do not consume it.
 First-sign-in onboarding and invitation precedence remain a separate one-shot
-path. After the durable organization-name lifecycle succeeds, the stock web
-console may ask the new owner to connect a model or buy OpenGeni credits and
-write that model as the Personal workspace session default. Skip remains
-available. Invitation accept still completes immediately. This is product UI
-only; the 0348 name-only API is unchanged.
+path.
 
 Canonical: `packages/core/src/access/index.ts`,
 `packages/core/src/session-authorization.ts`, `packages/db/src/runtime-posture.ts`,
