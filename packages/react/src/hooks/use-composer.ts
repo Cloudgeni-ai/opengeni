@@ -424,6 +424,8 @@ export type ComposerState = {
   /** Newly captured annotation the review surface should focus. */
   annotationReviewTargetId?: string | null | undefined;
   clearAnnotationReviewTarget?: (() => void) | undefined;
+  /** Focus an annotation, or the first incomplete note when omitted. */
+  requestAnnotationReview?: ((id?: string) => void) | undefined;
   /** Read the current draft synchronously before a destructive replacement. */
   hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
@@ -2458,6 +2460,20 @@ export function useComposer(
     setAnnotationReviewTargetId(null);
   }, []);
 
+  const requestAnnotationReview = useCallback((id?: string) => {
+    const current = annotationsRef.current;
+    if (current.length === 0) {
+      setAnnotationReviewTargetId(null);
+      return;
+    }
+    if (id && current.some((annotation) => annotation.id === id)) {
+      setAnnotationReviewTargetId(id);
+      return;
+    }
+    const incomplete = current.find((annotation) => annotation.note.trim().length === 0);
+    setAnnotationReviewTargetId(incomplete?.id ?? current[0]!.id);
+  }, []);
+
   const updatePolicy = useCallback(
     (next: ComposerPolicy): void => {
       if (targetKeyRef.current !== targetKey) return;
@@ -2643,6 +2659,7 @@ export function useComposer(
     removeAnnotation,
     annotationReviewTargetId: identityMatches ? annotationReviewTargetId : null,
     clearAnnotationReviewTarget,
+    requestAnnotationReview,
     hasDraftContent,
     send,
     optimisticMessages: visibleOptimisticMessages,

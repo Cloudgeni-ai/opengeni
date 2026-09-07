@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { act } from "react";
 import { MessageTimeline } from "../src";
-import { TimelineAnnotationsChip } from "../src/components/timeline-annotations";
+import {
+  TimelineAnnotationDraftList,
+  TimelineAnnotationsChip,
+} from "../src/components/timeline-annotations";
 import type { UserMessageItem } from "../src/timeline";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
@@ -103,12 +106,12 @@ describe("timeline annotations", () => {
     await waitFor(
       () =>
         [...document.body.querySelectorAll("button")].some(
-          (button) => button.textContent?.trim() === "Annotate",
+          (button) => button.textContent?.trim() === "Add note",
         ),
       "annotation action did not appear",
     );
     const action = [...document.body.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Annotate",
+      (button) => button.textContent?.trim() === "Add note",
     );
     expect(action).toBeDefined();
     await act(async () => action?.click());
@@ -146,7 +149,7 @@ describe("timeline annotations", () => {
     await flush();
     expect(
       [...document.body.querySelectorAll("button")].some(
-        (button) => button.textContent?.trim() === "Annotate",
+        (button) => button.textContent?.trim() === "Add note",
       ),
     ).toBe(false);
     await rendered.unmount();
@@ -187,6 +190,104 @@ describe("timeline annotations", () => {
       "source-unavailable feedback did not appear",
     );
     expect(document.body.textContent).toContain("Source is outside the loaded timeline window.");
+    await rendered.unmount();
+  });
+
+  test("lets the focused chip close instead of staying pinned open", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    let consumed = 0;
+    const rendered = await renderComponent(
+      <TimelineAnnotationsChip
+        annotations={[annotation("")]}
+        editable
+        focusAnnotationId="00000000-0000-4000-8000-000000000502"
+        onFocusConsumed={() => {
+          consumed += 1;
+        }}
+        onUpdate={() => undefined}
+        onRemove={() => undefined}
+      />,
+    );
+    expect(document.body.querySelector("textarea")).not.toBeNull();
+    const close = [...document.body.querySelectorAll("button")].find(
+      (button) => button.getAttribute("aria-label") === "Close",
+    );
+    await act(async () => close?.click());
+    await flush();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(consumed).toBeGreaterThan(0);
+    await rendered.unmount();
+  });
+
+  test("shows quoted notes inline in the composer draft list", async () => {
+    let note = "";
+    let removed = "";
+    const rendered = await renderComponent(
+      <TimelineAnnotationDraftList
+        annotations={[annotation("")]}
+        focusAnnotationId="00000000-0000-4000-8000-000000000502"
+        onUpdate={(_id, next) => {
+          note = next;
+        }}
+        onRemove={(id) => {
+          removed = id;
+        }}
+      />,
+    );
+    expect(rendered.container.textContent).toContain("Quoted note");
+    expect(rendered.container.textContent).toContain("beta");
+    expect(rendered.container.textContent).toContain("Add a note to send this quote.");
+    const textarea = rendered.container.querySelector("textarea");
+    expect(textarea).not.toBeNull();
+    expect(document.activeElement).toBe(textarea);
+    await act(async () => {
+      if (textarea) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        setter?.call(textarea, "Keep this exact constraint.");
+        textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+      }
+    });
+    expect(note).toBe("Keep this exact constraint.");
+    const remove = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Remove quoted note 1"]',
+    );
+    await act(async () => remove?.click());
+    expect(removed).toBe("00000000-0000-4000-8000-000000000502");
+    await rendered.unmount();
+  });
+
+  test("keeps the Add note popover through pointerdown so the click can land", async () => {
+    let captured: DraftTimelineAnnotation | null = null;
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+    );
+    await flush();
+    const source = rendered.container.querySelector<HTMLElement>(
+      `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+    );
+    const text = firstTextNode(source!);
+    selectText(text, 6, 10);
+    source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    await waitFor(
+      () =>
+        [...document.body.querySelectorAll("button")].some(
+          (button) => button.textContent?.trim() === "Add note",
+        ),
+      "annotation action did not appear",
+    );
+    const action = [...document.body.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Add note",
+    );
+    action?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    await flush();
+    expect(
+      [...document.body.querySelectorAll("button")].some(
+        (button) => button.textContent?.trim() === "Add note",
+      ),
+    ).toBe(true);
+    await act(async () => action?.click());
+    expect(captured?.quote).toBe("beta");
     await rendered.unmount();
   });
 });

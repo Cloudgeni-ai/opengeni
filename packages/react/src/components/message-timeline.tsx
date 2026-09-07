@@ -117,7 +117,7 @@ import { SESSION_STATUS_META, StatusDot } from "./session-status";
 import { TimelineComputeLabelProvider } from "../timeline/compute-label";
 import { EntranceAnimationProvider, useEntranceAnimation } from "../timeline/entrance";
 import { SeenActivityIdsProvider } from "../timeline/seen-activity-ids";
-import { TimelineAnnotationsChip } from "./timeline-annotations";
+import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
@@ -2996,7 +2996,7 @@ function UserMessageRow({
               </div>
             ) : null}
             {(item.annotations?.length ?? 0) > 0 ? (
-              <TimelineAnnotationsChip
+              <TimelineAnnotationCards
                 annotations={item.annotations ?? []}
                 className={item.text ? "mt-2" : undefined}
               />
