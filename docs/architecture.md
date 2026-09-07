@@ -1629,3 +1629,5 @@ This file should remain an orientation document that can be read in one sitting,
 not an append-only ledger of everything the repository has ever learned.
 
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
+
+Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).

@@ -257,7 +257,7 @@ describe("API component integration", () => {
         body: JSON.stringify({ initialMessage, model: "scripted-model" }),
         headers: { "content-type": "application/json" },
       });
-      expect(response.status).toBe(202);
+      expect(response.status, await response.clone().text()).toBe(202);
       return (await response.json()) as {
         id: string;
         updatedAt: string;
@@ -371,6 +371,13 @@ describe("API component integration", () => {
     );
     expect(currentDateFiltered.status).toBe(200);
     expect((await currentDateFiltered.json()).filtersApplied).toBe(true);
+    for (const name of ["updatedFrom", "updatedBefore", "createdFrom", "createdBefore"]) {
+      const response = await app.request(workspacePath(workspaceId,
+        `/sessions?view=page&${name}=2026-09-04T00%3A00%3A00.000001Z`));
+      expect(response.status).toBe(400);
+      expect(await response.text()).toContain("millisecond precision");
+    }
+
     expect(
       (await app.request(workspacePath(workspaceId, "/sessions?view=page&createdByKind=subject")))
         .status,

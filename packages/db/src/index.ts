@@ -33474,6 +33474,13 @@ export async function listSessionsForSubject(
         }
 
         let pageIds: string[];
+        // Keep each selected row in the same MVCC statement as its filters and
+        // keyset boundary. A second READ COMMITTED hydration can observe a move
+        // or activity change and return content that no longer matches the page.
+        let selectedOrdinaryRows: Array<{
+          session: typeof schema.sessions.$inferSelect;
+          pin: typeof schema.sessionPins.$inferSelect | null;
+        }> | undefined;
         let nextCursor: string | null = null;
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
@@ -33572,7 +33579,7 @@ export async function listSessionsForSubject(
           }
         } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
-            .select({ id: schema.sessions.id })
+            .select({ id: schema.sessions.id, session: schema.sessions, pin: schema.sessionPins })
             .from(schema.sessions)
             .leftJoin(
               schema.sessionPins,
@@ -33586,6 +33593,7 @@ export async function listSessionsForSubject(
             .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
+          selectedOrdinaryRows = ordinaryIdRows;
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
           if (
@@ -33612,6 +33620,8 @@ export async function listSessionsForSubject(
           const ordinaryIdRows = await tx
             .select({
               id: schema.sessions.id,
+              session: schema.sessions,
+              pin: schema.sessionPins,
               sortAt: sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
             })
             .from(schema.sessions)
@@ -33636,6 +33646,7 @@ export async function listSessionsForSubject(
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
+          selectedOrdinaryRows = page;
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
@@ -33669,7 +33680,7 @@ export async function listSessionsForSubject(
         const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
         const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
-          pageIds.length === 0
+          selectedOrdinaryRows ?? (pageIds.length === 0
             ? []
             : await tx
                 .select({ session: schema.sessions, pin: schema.sessionPins })
@@ -33691,7 +33702,7 @@ export async function listSessionsForSubject(
                       : []),
                     ordinaryPinFilter,
                   ),
-                );
+                ));
         const ordinaryById = new Map(ordinaryRows.map((row) => [row.session.id, row]));
         const pageRows = pageIds.flatMap((id) => {
           const row = ordinaryById.get(id);

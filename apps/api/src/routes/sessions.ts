@@ -4757,6 +4757,11 @@ function sessionListQuery(
     if (!parsed.success) {
       throw new HTTPException(400, { message: `${name} must be an ISO-8601 timestamp` });
     }
+    // Date-backed filters must not silently round accepted microseconds to an
+    // earlier boundary. Clients can use any ISO offset with at most 3 decimals.
+    if (/\.\d{4,}/.test(parsed.data)) {
+      throw new HTTPException(400, { message: `${name} supports at most millisecond precision` });
+    }
     return new Date(parsed.data);
   };
   const updatedFrom = parseDateBound("updatedFrom");
