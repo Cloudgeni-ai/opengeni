@@ -66572,6 +66572,11 @@ export type FailSessionWorkBeforeAttemptClaimInput = {
   workflowId: string;
   trigger: SessionWorkTrigger;
   error: string;
+  /** Already-classified admission facts from the failed worker activity. */
+  admissionFailure?: {
+    disposition: "retryable" | "permanent";
+    code: "db_deadlock" | "db_serialization_failure" | "db_failure" | "claim_invariant";
+  };
 };
 
 export type FailSessionWorkBeforeAttemptClaimResult =
@@ -66955,6 +66960,8 @@ export async function failSessionWorkBeforeAttemptClaim(
             payload: {
               status: "failed",
               code: "pre_claim_failure",
+              error: input.error,
+              ...(input.admissionFailure ? { admissionFailure: input.admissionFailure } : {}),
               ...(!turn ? { failedSystemUpdateIds } : {}),
             },
             turnId: turn?.id ?? null,
