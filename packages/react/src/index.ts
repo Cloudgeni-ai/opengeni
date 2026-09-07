@@ -462,6 +462,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 
 // Components
 export { ChatComposer } from "./components/chat-composer";
+export { SessionConversation } from "./components/session-conversation";
+export type { SessionConversationProps } from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {

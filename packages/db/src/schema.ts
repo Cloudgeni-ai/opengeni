@@ -204,6 +204,38 @@ export const workspaceArtifacts = pgTable(
   }),
 );
 
+export const workspaceArtifactUploads = pgTable(
+  "workspace_artifact_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    status: text("status")
+      .$type<"pending" | "published" | "expired">()
+      .notNull()
+      .default("pending"),
+  },
+  (table) => [
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    index("workspace_artifact_uploads_expiry_idx")
+      .on(table.workspaceId, table.expiresAt)
+      .where(sql`${table.status} <> 'published'`),
+    check(
+      "workspace_artifact_uploads_status_check",
+      sql`${table.status} in ('pending', 'published', 'expired')`,
+    ),
+  ],
+);
+
 export const workspaceArtifactVersions = pgTable(
   "workspace_artifact_versions",
   {
@@ -218,11 +250,11 @@ export const workspaceArtifactVersions = pgTable(
     revision: integer("revision").notNull(),
     contentKey: text("content_key").notNull(),
     contentType: text("content_type").$type<"text/html">().notNull().default("text/html"),
-    contentSha256: text("content_sha256").notNull(),
-    sizeBytes: integer("size_bytes").notNull(),
+    contentSha256: text("content_sha256"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     sourceKey: text("source_key"),
     sourceSha256: text("source_sha256"),
-    sourceSizeBytes: integer("source_size_bytes"),
+    sourceSizeBytes: bigint("source_size_bytes", { mode: "number" }),
     requestedTools: jsonb("requested_tools").$type<ToolGatewayIdentity[]>().notNull().default([]),
     operationKey: text("operation_key").notNull(),
     sourceSessionId: uuid("source_session_id"),
@@ -289,6 +321,7 @@ export const workspaceArtifactEvents = pgTable(
     toVersionId: uuid("to_version_id").notNull(),
     operationKey: text("operation_key").notNull(),
     requestDigest: text("request_digest"),
+    requestInput: jsonb("request_input").$type<Record<string, unknown>>(),
     sourceSessionId: uuid("source_session_id"),
     sourceTurnId: uuid("source_turn_id"),
     sourceAttemptId: uuid("source_attempt_id"),
@@ -8342,6 +8375,14 @@ export const sessionEvents = pgTable(
     workspaceTurnType: index("session_events_workspace_turn_type_idx")
       .on(table.workspaceId, table.turnId, table.type)
       .where(sql`${table.turnId} is not null`),
+    commandOutputPage: index("session_events_command_output_page_idx")
+      .on(
+        table.workspaceId,
+        table.sessionId,
+        sql`(${table.payload} ->> 'commandId')`,
+        table.sequence,
+      )
+      .where(sql`${table.type} = 'sandbox.command.output.delta'`),
     monitoringTail: index("session_events_workspace_session_monitoring_tail_idx")
       .on(table.workspaceId, table.sessionId, table.sequence)
       .where(
@@ -9705,8 +9746,11 @@ export const sessionBackgroundCommands = pgTable(
     cancelRequestedBy: text("cancel_requested_by"),
     exitCode: integer("exit_code"),
     settlementReason: text("settlement_reason"),
+    runnerFailure:
+      jsonb("runner_failure").$type<import("@opengeni/contracts").SessionCommandFailure>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
     reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
     reconcileClaimId: uuid("reconcile_claim_id"),
     reconcileClaimedAt: timestamp("reconcile_claimed_at", {
@@ -9730,6 +9774,20 @@ export const sessionBackgroundCommands = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    runnerFailureCheck: check(
+      "session_background_commands_runner_failure_check",
+      sql`
+      ${table.runnerFailure} IS NULL OR (
+        ${table.provider} = 'connected_machine'
+        AND jsonb_typeof(${table.runnerFailure}) = 'object'
+        AND octet_length(${table.runnerFailure}::text) <= 8192
+        AND ${table.runnerFailure} ?& ARRAY['code', 'retryable']
+        AND jsonb_typeof(${table.runnerFailure} -> 'code') = 'string'
+        AND (${table.runnerFailure} ->> 'code') ~ '^[A-Za-z0-9_-]{1,128}$'
+        AND ${table.runnerFailure} -> 'retryable' = 'false'::jsonb
+        AND (NOT (${table.runnerFailure} ? 'detail') OR jsonb_typeof(${table.runnerFailure} -> 'detail') = 'object')
+      )`,
+    ),
     workspaceSession: foreignKey({
       name: "session_background_commands_session_fk",
       columns: [table.workspaceId, table.sessionId],
@@ -9764,6 +9822,10 @@ export const sessionBackgroundCommands = pgTable(
     stateValid: check(
       "session_background_commands_state_check",
       sql`${table.state} in ('running', 'stopping', 'exited', 'lost')`,
+    ),
+    observationValid: check(
+      "session_background_commands_observation_check",
+      sql`${table.completionObservedAt} is null or ${table.state} in ('exited', 'lost')`,
     ),
     providerIdentityValid: check(
       "session_background_commands_provider_identity_check",

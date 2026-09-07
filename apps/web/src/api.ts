@@ -749,7 +749,7 @@ function authHeaders(): Record<string, string> {
   return authHeadersForAccessKey(getStoredAccessKey());
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
   const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
@@ -760,6 +760,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
+  handleApiContractResponse(response);
+  return response;
+}
+
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await requestResponse(path, init);
   if (!response.ok) {
     handleApiContractResponse(response);
     const text = await response.text();
@@ -984,6 +990,15 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
     throw apiErrorFromResponseBody(response.status, await response.text());
   }
   return (await response.json()) as T;
+}
+
+// Request uses the same public auth boundary as sign-in and returns no account
+// existence information. Better Auth sends a link only for an eligible account.
+export async function requestPasswordReset(email: string): Promise<unknown> {
+  return await authRequest<unknown>("/request-password-reset", {
+    method: "POST",
+    body: JSON.stringify({ email, redirectTo: "/reset-password" }),
+  });
 }
 
 // Completes a password reset. `token` comes from the emailed link

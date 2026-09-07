@@ -82,6 +82,7 @@ COPY apps/browser-extension/package.json apps/browser-extension/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
+COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -191,6 +192,61 @@ RUN printf '%s  %s\n' \
       "$(sha256sum /out/opengeni-computer-native | awk '{print $1}')" \
       /usr/local/lib/opengeni/opengeni-computer-native \
       >> /out/SHA256SUMS
+
+FROM node:22.22.0-bookworm-slim AS node-runtime
+
+FROM oven/bun:${BUN_VERSION} AS artifact-runtime-builder
+
+ARG TARGETARCH
+ARG OPENGENI_ARTIFACT_RUNTIME_BUNDLE=.release/artifact-runtime
+ARG OPENGENI_SOURCE_SHA
+
+RUN set -eux; \
+    for attempt in 1 2 3; do \
+      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial/*; \
+      apt-get update \
+      && apt-get install -y --no-install-recommends fonts-liberation \
+      && break; \
+      if [ "$attempt" = "3" ]; then exit 1; fi; \
+      sleep $((attempt * 5)); \
+    done; \
+    rm -rf /var/lib/apt/lists/*; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf; \
+    test -f /usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf
+
+ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
+ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
+
+WORKDIR /src
+COPY . .
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+RUN --mount=type=cache,id=opengeni-sandbox-bun-artifact-runtime-${TARGETARCH},target=/root/.bun/install/cache,sharing=locked \
+    set -eux; \
+    case "$TARGETARCH" in \
+      amd64) expected_target=linux-x64-gnu ;; \
+      arm64) expected_target=linux-arm64-gnu ;; \
+      *) echo "unsupported artifact runtime OCI architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && input="/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE/$TARGETARCH/installation.json" \
+    && if [ -f "$input" ]; then \
+      test "$(node --version)" = "v22.22.0"; \
+      bun install --frozen-lockfile; \
+      bun scripts/verify-artifact-runtime-container-inputs.ts \
+        --root "/src/$OPENGENI_ARTIFACT_RUNTIME_BUNDLE" \
+        --source-sha "$OPENGENI_SOURCE_SHA" \
+        --architecture "$TARGETARCH"; \
+      actual_target="$(bun -e 'const value=await Bun.file(process.argv[1]).json();process.stdout.write(typeof value.target==="string"?value.target:"")' "$input")"; \
+      test "$actual_target" = "$expected_target"; \
+      bun scripts/prepare-artifact-sandbox-runtime.ts \
+        --repository-root /src \
+        --installation-root "$(dirname "$input")" \
+        --output /opt/opengeni/artifact-runtime; \
+    else \
+      mkdir -p /opt/opengeni/artifact-runtime; \
+      touch /opt/opengeni/artifact-runtime/.unavailable; \
+    fi
 
 FROM debian:13-slim
 
@@ -444,6 +500,22 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/ttyd; \
     ttyd --version
 
+# Exact native document/spreadsheet/presentation runtime. Keep this exact-source
+# copy after the source-invariant toolchain so remote BuildKit caches can reuse
+# Terraform, Checkov, Azure CLI, GitHub CLI, and ttyd across source revisions.
+# The builder still pins every byte and runs real DOCX/XLSX/PPTX plus PNG/WebP
+# smoke probes before this copy, and the final image still doctors that runtime.
+COPY --from=artifact-runtime-builder /opt/opengeni/artifact-runtime /opt/opengeni/artifact-runtime
+RUN set -eux; \
+    if [ -f /opt/opengeni/artifact-runtime/installation.json ]; then \
+      ln -s /opt/opengeni/artifact-runtime/opengeni-artifact-runtime.mjs /usr/local/bin/opengeni-artifact-runtime; \
+      OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json \
+        OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs \
+        opengeni-artifact-runtime doctor --json; \
+    else \
+      test -f /opt/opengeni/artifact-runtime/.unavailable; \
+    fi
+
 # ---- Layer 7: the launch scripts (idempotent; invoked by ensureDisplayStack via exec) ----
 COPY docker/desktop/opengeni-desktop-up.sh    /usr/local/bin/opengeni-desktop-up
 COPY docker/desktop/opengeni-desktop-down.sh  /usr/local/bin/opengeni-desktop-down
@@ -508,6 +580,8 @@ ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
 ENV OPENGENI_BROWSERD_COMPUTER_ENVIRONMENT_MODE=isolated_linux
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
+ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
+ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 EXPOSE 6080
 EXPOSE 7681
 EXPOSE 7682

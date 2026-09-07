@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -25786,11 +25787,11 @@ function mapXaiCapacityWaiter(row: typeof schema.xaiCapacityWaiters.$inferSelect
 
 function xaiCapacityNextCheckAt(earliestResetAt: Date | null, now: Date): Date {
   return earliestResetAt && earliestResetAt.getTime() > now.getTime()
-    ? earliestResetAt
+    ? new Date(Math.min(earliestResetAt.getTime(), now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS))
     : new Date(now.getTime() + CODEX_CAPACITY_REFRESH_MIN_MS);
 }
 
-async function resolveXaiWaiterSubject(
+export async function resolveXaiWaiterSubject(
   db: Database,
   workspaceId: string,
   sessionId: string,
@@ -38551,6 +38552,42 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.position,
             ],
           });
+        // A position conflict is idempotent only when the exact conversation
+        // item is already there. Never acknowledge a different item as saved.
+        const saved = await tx
+          .select({
+            position: schema.sessionHistoryItems.position,
+            turnId: schema.sessionHistoryItems.turnId,
+            item: schema.sessionHistoryItems.item,
+            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              inArray(
+                schema.sessionHistoryItems.position,
+                input.items.map((entry) => entry.position),
+              ),
+            ),
+          );
+        const byPosition = new Map(saved.map((row) => [row.position, row]));
+        for (const entry of input.items) {
+          const row = byPosition.get(entry.position);
+          if (
+            !row ||
+            row.turnId !== input.turnId ||
+            !isDeepStrictEqual(
+              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+            )
+          ) {
+            throw new Error(
+              `Conversation history persistence conflict at position ${entry.position}`,
+            );
+          }
+        }
         return true;
       });
     },
@@ -72847,6 +72884,7 @@ function backgroundCommandTerminalMutation(input: {
                 state: command.state,
                 exitCode: command.exitCode,
                 reason,
+                ...(command.failure ? { failure: command.failure } : {}),
                 settledAt: command.settledAt,
                 outputLocator,
               },
@@ -72862,8 +72900,12 @@ function backgroundCommandTerminalMutation(input: {
       // turn. Their terminal transition has already drained pending machine
       // input, so reopening one here would violate cancellation authority. The
       // exact command event remains durable audit/read truth; live sessions get
-      // the typed model input below.
-      if (session.status === "cancelled" || session.status === "failed") {
+      // the typed model input below unless a terminal read already observed it.
+      if (
+        session.status === "cancelled" ||
+        session.status === "failed" ||
+        command.completionObservedAt
+      ) {
         await tx
           .update(schema.sessions)
           .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
@@ -72872,10 +72914,13 @@ function backgroundCommandTerminalMutation(input: {
         return;
       }
       const classification: SystemUpdateClassification =
-        command.state === "exited" && command.exitCode === 0 ? "success" : "failure";
+        command.state === "exited" && command.exitCode === 0 && !command.failure
+          ? "success"
+          : "failure";
       const commandLabel = command.commandPreview || "Background command";
-      const summary =
-        command.state === "lost"
+      const summary = command.failure
+        ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
+        : command.state === "lost"
           ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
           : command.exitCode === 0
             ? `${commandLabel}: completed successfully.`
@@ -72886,6 +72931,7 @@ function backgroundCommandTerminalMutation(input: {
         state: command.state,
         exitCode: command.exitCode,
         reason,
+        ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
       };
       const [insertedUpdate] = await tx
@@ -73026,6 +73072,7 @@ export type SessionBackgroundCommandTerminalSettlement = {
 export async function settleConnectedMachineSessionBackgroundCommand(
   db: Database,
   input: {
+    failure?: SessionBackgroundCommand["failure"];
     accountId: string;
     workspaceId: string;
     sessionId: string;

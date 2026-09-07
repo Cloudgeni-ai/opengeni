@@ -78,6 +78,7 @@ mock.module("@/api", () => ({
     state: "required" as const,
   })),
   sendVerificationEmail: resendVerification,
+  requestPasswordReset: mock(async () => ({ status: true })),
   subscribeManagedActorInvalidation: () => () => undefined,
   subscribeManagedActorMutationBusy: () => () => undefined,
 }));

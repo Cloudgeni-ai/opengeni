@@ -24,12 +24,23 @@ describe("workspace artifact contracts", () => {
     expect(parsed).not.toHaveProperty("type");
   });
 
-  test("enforces the UTF-8 payload ceiling rather than only character count", () => {
-    const multibyte = "😀".repeat(Math.floor(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES / 4) + 1);
-    expect(WorkspaceArtifactHtml.safeParse(multibyte).success).toBe(false);
+  test("allows large HTML and optional-source upload references without allocating the storage ceiling", () => {
+    expect(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES).toBe(5_000_000_000);
+    expect(WorkspaceArtifactHtml.safeParse("😀".repeat(1_100_000)).success).toBe(true);
+    const input = {
+      title: "Uploaded Site",
+      idempotencyKey: "upload",
+      uploadId: crypto.randomUUID(),
+    };
+    expect(CreateWorkspaceArtifactRequest.safeParse(input).success).toBe(true);
     expect(
-      WorkspaceArtifactHtml.safeParse("a".repeat(WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES)).success,
-    ).toBe(true);
+      CreateWorkspaceArtifactRequest.safeParse({ ...input, html: "<h1>Conflicting input</h1>" })
+        .success,
+    ).toBe(false);
+    expect(
+      CreateWorkspaceArtifactRequest.safeParse({ title: "Missing HTML", idempotencyKey: "missing" })
+        .success,
+    ).toBe(false);
   });
 
   test("bounds list pages and makes truncation explicit", () => {

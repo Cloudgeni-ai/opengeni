@@ -34,11 +34,11 @@
     },
     {
       "path": ".github/workflows/publish-canary.yml",
-      "sha256": "5933e981bf99403905c5967adc038a7da1155b15e1813b6dd3bf6caaa383186f"
+      "sha256": "65eda9e447d13bccaecd130c61182fbeddea2c49bda6fcd0529645f5e0eb591e"
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "06c13c4bb0f87e04303e07c1d39082ff3463e19cecc44d60f94496e33cfaade6"
+      "sha256": "91e6afce122cee775b47b8c85f2ee8037f66748f40914ab41dad6542f1ec4385"
     },
     {
       "path": ".github/workflows/publish-packages.yml",

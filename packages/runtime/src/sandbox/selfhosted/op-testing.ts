@@ -199,7 +199,7 @@ export class FakeOpRunner implements ControlRpc {
     // Generation fencing exactly like the runner: only the highest generation
     // seen has any effect; `final` is honored only when it covers the exit.
     const generation = BigInt(ack.attachGeneration);
-    if (generation < run.highestGeneration) {
+    if (generation === 0n || generation !== run.highestGeneration) {
       return;
     }
     run.acks.push(ack);
@@ -338,6 +338,11 @@ export class FakeOpRunner implements ControlRpc {
     }
     run.attachCount += 1;
     const attachGeneration = BigInt(generation);
+    // Rust apply_attach still returns status but refuses replay for generation
+    // zero or an older consumer. Do not make stale clients appear healthy.
+    if (attachGeneration === 0n || attachGeneration < run.highestGeneration) {
+      return statusOnly(requestId, this.statusOf(opId, run));
+    }
     if (attachGeneration > run.highestGeneration) {
       run.highestGeneration = attachGeneration;
     }

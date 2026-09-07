@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
+export { siteSessionPath } from "./site-session-http";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -812,6 +813,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "session_events",
   "session_wait",
   "command_wait",
+  "command_read",
   "session_create",
   "session_send_message",
   "session_pause",
@@ -900,6 +902,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
+  "artifacts_prepare_upload",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
@@ -7739,6 +7742,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       state: z.enum(["exited", "lost"]),
       exitCode: z.number().int().nullable(),
       reason: boundedUtf8String(512),
+      failure: z.lazy(() => SessionCommandFailure).optional(),
       outputLocator: z
         .object({
           eventType: z.literal("sandbox.command.output.delta"),
@@ -7859,7 +7863,7 @@ export function renderSessionSystemUpdateBatch(
   }
   return [
     "[OpenGeni internal updates]",
-    "These platform updates were delivered together for this inference. They are not human prompts.",
+    "These platform updates were delivered together for this inference.",
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,
@@ -11904,6 +11908,20 @@ export const SessionBackgroundCommandActivity = z
   .strict();
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
 
+export const SessionCommandFailure = z
+  .object({
+    code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    detail: z.record(z.string().max(128), z.string().max(2048)).optional(),
+    retryable: z.literal(false),
+  })
+  .refine(
+    (failure) =>
+      Object.keys(failure.detail ?? {}).length <= 32 &&
+      new TextEncoder().encode(JSON.stringify(failure)).byteLength <= 4096,
+    "Command failure metadata exceeds its retained bound",
+  );
+export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -11915,12 +11933,67 @@ export const SessionBackgroundCommand = z
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),
     settlementReason: z.string().nullable(),
+    failure: SessionCommandFailure.optional(),
     startedAt: z.string(),
     settledAt: z.string().nullable(),
+    completionObservedAt: z.string().nullable().optional(),
     updatedAt: z.string(),
   })
   .strict();
 export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
+
+export const CommandReadInput = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      cursor: z.string().max(128).optional(),
+      waitSeconds: z.number().int().min(0).max(50).optional(),
+      maxOutputBytes: z.number().int().min(4).max(65_536).optional(),
+    })
+    .strict())();
+export type CommandReadInput = z.infer<typeof CommandReadInput>;
+
+export const CommandReadResult = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      state: SessionBackgroundCommandState,
+      exitCode: z.number().int().nullable(),
+      settlementReason: z.string().nullable().optional(),
+      // A physical zero exit is not success when runner output delivery failed.
+      failure: SessionCommandFailure.optional(),
+      terminal: z.boolean(),
+      completionObservedAt: z.string().nullable(),
+      freshness: z
+        .object({
+          status: z.literal("refresh_unavailable"),
+          retryable: z.literal(true),
+        })
+        .optional(),
+      chunks: z
+        .array(
+          z.object({
+            sequence: z.number().int().nonnegative(),
+            stream: z.enum(["stdout", "stderr"]),
+            streamFidelity: z.enum(["separate", "merged", "unknown"]),
+            chunk: z.string(),
+          }),
+        )
+        .max(64),
+      nextCursor: z.string(),
+      hasMore: z.boolean(),
+      retention: z.object({
+        source: z.literal("retained_session_events"),
+        completeness: z.literal("unknown"),
+        gaps: z.array(z.string()),
+      }),
+      waitedMs: z.number().nonnegative(),
+      timedOut: z.boolean(),
+      aborted: z.boolean(),
+      liveFanout: z.boolean(),
+    })
+    .strict())();
+export type CommandReadResult = z.infer<typeof CommandReadResult>;
 
 export const SessionBackgroundCommandListResponse = z
   .object({ commands: z.array(SessionBackgroundCommand).max(1000) })

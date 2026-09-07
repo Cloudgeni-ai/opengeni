@@ -1,39 +1,21 @@
 # OpenGeni architecture reference
 
-> **This is the whole-system orientation map, not a second source of truth.**
-> Code and the focused topic docs own exact behavior. This document explains
-> the stable system shape, the boundaries that must not be crossed casually,
-> and where to look before changing a subsystem. For setup and contributor
-> procedure, use [`../AGENTS.md`](../AGENTS.md). For the documentation index,
-> use [`README.md`](README.md).
+> Whole-system orientation; code and focused docs own exact behavior.
+> Setup: [`../AGENTS.md`](../AGENTS.md). Documentation index: [`README.md`](README.md).
 
 ## How to use this document
 
-1. **New to the repository?** Read §2, §3, §4, and skim §6.
-2. **Changing a subsystem?** Start with §13, then read the linked topic doc and
-   canonical source.
-3. **Looking for an exact route, field, permission, setting, table, timeout, or
-   migration rule?** Follow the source links. Do not treat an architecture
-   summary as an inventory.
-4. **Found a stale boundary?** Update this map in the same change. See §14.
+1. **New here?** Read §2–4; skim §6.
+2. **Changing a subsystem?** Start with §13 and its canonical sources.
+3. **Exact behavior?** Follow source links, not this summary.
+4. **Stale boundary?** Update this map; see §14.
 
 ---
 
 ## 1. Scope
 
-This document owns five things:
-
-- the product and process-level shape of OpenGeni;
-- cross-cutting invariants whose violation can cause security, durability, or
-  recovery defects;
-- the major request, event, and execution paths;
-- the repository map and responsibility boundaries; and
-- a routing index from change area to canonical source.
-
-Exact API, schema, configuration, permission, migration, provider, and release
-inventories belong in code, package READMEs, focused topic docs,
-[`../CONTRIBUTING.md`](../CONTRIBUTING.md), or [`../AGENTS.md`](../AGENTS.md).
-Keep migration numbers, timeouts, route lists, and table counts there.
+This map covers product shape, invariants, execution paths, repository ownership,
+and canonical-source routing. Exact inventories belong in code and focused docs.
 
 ---
 
@@ -173,32 +155,35 @@ settlement advances that same outbox row in its settlement transaction. A
 workflow close or writer exit racing reconciliation cannot orphan recovery;
 repeated Pause re-arms a missing quiescence wake.
 
-A background command becomes session-owned only after its exact provider
-identity is durably adopted. Before adoption it remains attempt-owned. After
-adoption, ordinary turn completion and Steer detach from it, while explicit
-command cancellation, Pause, or terminal Cancel control its lifetime.
-An explicitly stopped, revoked, or replaced Connected Machine instance ends
-command tracking as `lost`; this never asserts operating-system process death.
-A temporary transport outage alone preserves tracking. Reconciliation drains
-a fixed due-time frontier in batches, sharing offline observations per instance.
-The historical retirement migration preserves command records without creating
-model input or waking old sessions.
-Exact terminal proof (including confirmed tracking retirement) settles the command row and appends its terminal session
-event in one PostgreSQL transaction. A nonterminal session also receives one
-typed model input and any idle workflow wake in that commit; a failed or
-cancelled session remains terminal and keeps event-only audit rather than
-reopening machine input. Live fanout is post-commit and replaceable.
+A command is attempt-owned until durable adoption of its exact provider identity.
+Thereafter turn completion and Steer detach; command cancellation, Pause, and
+terminal Cancel control its lifetime. Instance stop/revocation/replacement makes
+Connected Machine tracking `lost`, not proof of process death. Temporary outages
+preserve tracking. Reconciliation batches a fixed due-time frontier, sharing
+per-instance offline observations. Historical retirement preserves records without
+input or wakes.
+Terminal proof commits settlement and audit together. Nonterminal sessions receive
+fallback input unless observed. Terminal reads suppress pending notifications,
+never history; running reads do not. Failed/cancelled sessions retain audit only.
+Fanout is replaceable and post-commit. Conversation history remains separate:
+sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
+transfers large message scalars in bounded slices, not whole histories.
 
-A long external wait is likewise session state, not workflow memory or goal
-state. `wait_for_input` records the exact declaring turn and an absolute
-PostgreSQL deadline, then the agent ends its turn. The workflow closes while
-the wait is current and is restarted by durable input or the deadline outbox;
-timeout becomes typed machine input. `session_wait` and `command_wait` remain
-short in-turn reads and never hold an inference indefinitely.
+Docker/local SDK processes expose turn-scoped handles after a bounded wait.
+They remain on the turn cancellation fence and stop before finalization, allowing
+an agent to test a preview server without waiting for it to exit.
+
+Long external waits are session state, not workflow memory or goals.
+`wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
+then ends the turn and workflow. Durable input or the deadline outbox restarts
+it; timeout becomes typed input. `session_wait` and `command_wait` are short
+in-turn reads.
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and
 [`run-lifecycle.md`](run-lifecycle.md).
+
+External SDK history and append verification: [`run-lifecycle.md`](run-lifecycle.md).
 
 ### 3.4 Long runs are bounded by policy and intent, not arbitrary loop caps
 
@@ -1037,6 +1022,7 @@ handlers because its host owns process lifecycle.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `examples/northstar-support` | `@opengeni/example-northstar-support` | Executable standalone-product integration reference with a server-side SDK proxy, authenticated product MCP, React embedding, and independent event streams |
+| `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
 ### 6.4 Rust agent and relay
 
@@ -1171,7 +1157,12 @@ approval still applies at execution. An agent-authored version may retain any
 identity present in its exact attempt catalog. The host
 injects a pre-application bootstrap receiver into the exact iframe document so
 a Site client constructed after `load` can use the retained document port; the
-port and every derived tool-call port are revoked on navigation or replacement.
+port and every derived tool-call port are revoked on document navigation or replacement.
+Multiple SDK clients in the same document retain independent ports; connecting
+one must not cancel another. The same Site client exposes the ordinary session
+SDK for React providers, timelines, and composers. Published requests use the
+viewer-authenticated parent; sandbox previews use the existing attempt-bound
+Codemode HTTP handler, including incremental, cancellable event streams.
 Archived Sites receive no bridge.
 Every immutable version retains its causal session/turn/attempt provenance.
 List projections omit those source identifiers, and artifact detail exposes a
@@ -1256,13 +1247,11 @@ Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
-Static published HTML, retained evidence, Documents/RAG, and editable artifacts
-are different products and must not share mutable truth accidentally. Workspace
-Sites are immutable versions of the existing HTML artifact primitive: one
-self-contained HTML runtime, one retained source bundle, an exact requested-tool
-allowlist, rollback, and recoverable archive/restore. They run in the existing
-opaque-origin iframe; there is no second host, wildcard domain, or compute
-runtime.
+Sites retain immutable HTML, optional source, tool allowlists and rollback;
+they remain separate from Documents and editable artifacts. Agents upload through
+signed URLs and publish upload IDs, without hashes or byte counts. Source JSON
+is capped at 64 MiB; HTML is streamed within storage limits. Retrieval returns
+download URLs; viewing loads HTML into the existing opaque-origin srcDoc frame.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1273,6 +1262,19 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 `@opengeni/sdk` is the framework-neutral client contract. `@opengeni/react`
 adds hooks and UI. `apps/web` is a consumer of those packages and should not
 become a hidden source of domain semantics.
+
+`SessionConversation` is the default complete existing-session embed. It owns
+one event feed, queue projection/actions, durable composer and model policy,
+human-input forms, and timeline history. `ChatComposer` remains the lower-level
+input surface, not an implicit queue or whole conversation. Sites use the same
+component with their standard Site-bound SDK client.
+
+Site authoring installs exact npm package versions from the runtime-generated
+`package-versions.json` beside the skill. Stable defaults come from source
+package manifests; canary deployments set `OPENGENI_SITE_PACKAGE_VERSIONS` to
+their published SDK/React/Codemode version map. Only local development enables
+`OPENGENI_LOCAL_SITE_PACKAGES` and packages dirty checkout source into archives
+at `/opt/opengeni/site-packages`; deployed images do not bake those archives.
 
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE

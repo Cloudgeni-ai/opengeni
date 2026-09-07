@@ -1,10 +1,11 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
 import { LightboxProvider, type WorkspaceTab } from "@opengeni/react";
-import { MACHINES_SESSION_POLL_MS, useMachines } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS } from "@opengeni/react/machines";
 import { HumanInputSurface, MessageTimeline, SessionChrome } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
@@ -1168,7 +1169,7 @@ function SessionChatPane(props: {
 }) {
   const context = useAppContext();
   const modelCatalog = useWorkspaceModelCatalog(props.session.workspaceId);
-  const fleet = useMachines({
+  const fleet = useWorkspaceMachines({
     sessionId: props.session.id,
     pollIntervalMs: MACHINES_SESSION_POLL_MS,
   });

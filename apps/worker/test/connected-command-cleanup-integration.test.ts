@@ -1,8 +1,15 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { bootstrapWorkspace, createDb, createEnrollment, createSession } from "@opengeni/db";
-import { ErrorCode, OpState } from "@opengeni/agent-proto";
-import { SelfhostedControlError, type ControlRpc } from "@opengeni/runtime/sandbox";
+import { ErrorCode, ExecRequest } from "@opengeni/agent-proto";
+import type { OpStreamConnection } from "@opengeni/events";
+import {
+  FakeOpRunner,
+  InMemoryOpStreamTransport,
+  SelfhostedControlError,
+  subjectFor,
+  type ControlRpc,
+} from "@opengeni/runtime/sandbox";
 import { reconcileConnectedMachineBackgroundCommands as reconcile } from "../src/activities/sandbox-lease";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
@@ -69,49 +76,119 @@ const bus = {
 
 test("one sweep settles more than one batch and emits each future completion only once", async () => {
   const sessionId = await seed();
-  let queries = 0;
-  const rpc: ControlRpc = {
-    request: async (_subject, request) => {
-      queries++;
-      const op = request.op!;
-      if (op.$case !== "opQuery") throw new Error("Expected query");
-      return {
-        requestId: request.requestId,
-        error: undefined,
-        result: {
-          $case: "opStatus",
-          opStatus: {
-            opId: op.opQuery.opId,
-            state: OpState.OP_STATE_COMPLETE,
-            nextSeq: "1",
-            lostReason: 0,
-            exit: {
-              exitCode: 0,
-              cancelled: false,
-              timedOut: false,
-              durationMs: "1",
-              digests: {},
-              totals: {},
-              failureCode: "",
-              failureDetail: {},
-            },
+  const commands =
+    await shared.admin`select control_workspace_id,enrollment_id,op_id from session_background_commands where session_id=${sessionId}`;
+  const identity = commands[0]!;
+  const transport = new InMemoryOpStreamTransport();
+  const runner = new FakeOpRunner({
+    workspaceId: identity.control_workspace_id,
+    agentId: identity.enrollment_id,
+    connectionInstanceId: "launch",
+    transport,
+  });
+  const subject = subjectFor(identity.control_workspace_id, identity.enrollment_id, "launch");
+  for (const command of commands) {
+    runner.script(command.op_id, { frames: [{ channel: "stdout", bytes: "retained output" }] });
+    await runner.request(
+      subject,
+      {
+        requestId: command.op_id,
+        epoch: 0,
+        op: {
+          $case: "opStart",
+          opStart: {
+            op: { $case: "exec", exec: ExecRequest.fromPartial({ command: ["work"] }) },
+            windowBytes: "65536",
+            deadlineMs: "0",
+            originId: sessionId,
           },
         },
-      };
+      },
+      { timeoutMs: 1000 },
+    );
+  }
+  const replayBus = {
+    ...bus,
+    getOpStreamConnection: () => opStreamConnectionFor(transport),
+  } as Parameters<typeof reconcile>[3];
+  let queries = 0;
+  let attaches = 0;
+  const rpc: ControlRpc = {
+    request: async (requestSubject, request, options) => {
+      const op = request.op!;
+      if (op.$case === "opQuery") queries++;
+      else if (op.$case === "opAttach") attaches++;
+      else throw new Error("Cleanup must only query or attach existing operations");
+      return await runner.request(requestSubject, request, options);
     },
   };
-  await reconcile(client.db, settings, observability, bus, rpc);
+  await reconcile(client.db, settings, observability, replayBus, rpc);
   expect(warnings).toEqual([]);
   expect(queries).toBe(25);
+  expect(attaches).toBe(25);
+  const [output] =
+    await shared.admin`select count(*)::int n from session_events where session_id=${sessionId} and type='sandbox.command.output.delta'`;
+  expect(output!.n).toBe(25);
+  expect([...runner.runs.values()].every((run) => run.startCount === 1 && !run.finalAcked)).toBe(
+    true,
+  );
   const [row] =
     await shared.admin`select count(*)::int n from session_background_commands where session_id=${sessionId} and state='exited'`;
   expect(row!.n).toBe(25);
   const [updates] =
     await shared.admin`select count(*)::int n from session_system_updates where session_id=${sessionId} and kind='background_command_result'`;
   expect(updates!.n).toBe(25);
-  await reconcile(client.db, settings, observability, bus, rpc);
+  await reconcile(client.db, settings, observability, replayBus, rpc);
   expect(queries).toBe(25);
+  expect(attaches).toBe(25);
 });
+
+/** Same async-iterator adapter as the routing integration fixture: production
+ * NatsOpStreamTransport consumes frames from the canonical fake runner. */
+function opStreamConnectionFor(transport: InMemoryOpStreamTransport): OpStreamConnection {
+  return {
+    subscribe(subject) {
+      const values: Array<{ data: Uint8Array }> = [];
+      const readers: Array<(result: IteratorResult<{ data: Uint8Array }>) => void> = [];
+      let done = false;
+      let release: (() => void) | undefined;
+      void transport
+        .subscribe(subject, (data) => {
+          const reader = readers.shift();
+          if (reader) reader({ done: false, value: { data } });
+          else values.push({ data });
+        })
+        .then((subscription) => {
+          if (done) subscription.unsubscribe();
+          else release = subscription.unsubscribe;
+        });
+      return {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              const value = values.shift();
+              if (value) return Promise.resolve({ done: false as const, value });
+              if (done) return Promise.resolve({ done: true as const, value: undefined });
+              return new Promise<IteratorResult<{ data: Uint8Array }>>((resolve) =>
+                readers.push(resolve),
+              );
+            },
+          };
+        },
+        unsubscribe() {
+          if (done) return;
+          done = true;
+          release?.();
+          for (const reader of readers.splice(0)) reader({ done: true, value: undefined });
+        },
+      };
+    },
+    publish(subject, payload) {
+      void transport.publish(subject, payload);
+    },
+    async flush() {},
+  };
+}
 test("offline commands remain tracked while one sweep shares failed connection observations", async () => {
   const sessionId = await seed();
   let queries = 0;

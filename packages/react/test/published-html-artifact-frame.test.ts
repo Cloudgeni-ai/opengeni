@@ -32,24 +32,27 @@ describe("Site bridge request ownership", () => {
     });
   });
 
-  test("scopes request ids per port and aborts work when the port is replaced", () => {
+  test("keeps concurrent clients independent until document teardown", () => {
     const registry = new SiteBridgeRequestRegistry();
     const firstPort = port();
     const secondPort = port();
-    registry.replacePort(firstPort);
+    registry.addPort(firstPort);
     const first = registry.start(firstPort, "request-1");
     expect(first).not.toBeNull();
     expect(registry.start(firstPort, "request-1")).toBeNull();
 
-    registry.replacePort(secondPort);
-    expect(first?.signal.aborted).toBe(true);
-    expect(firstPort.closeCount).toBe(1);
+    registry.addPort(secondPort);
+    expect(first?.signal.aborted).toBe(false);
+    expect(firstPort.closeCount).toBe(0);
     const second = registry.start(secondPort, "request-1");
     expect(second).not.toBeNull();
 
     registry.cancel(secondPort, "request-1");
     expect(second?.signal.aborted).toBe(true);
+    expect(first?.signal.aborted).toBe(false);
     registry.closeAll();
+    expect(first?.signal.aborted).toBe(true);
+    expect(firstPort.closeCount).toBe(1);
     expect(secondPort.closeCount).toBe(1);
   });
 

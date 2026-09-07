@@ -1,3 +1,4 @@
+import { hasWorkspacePermission } from "@/lib/permissions";
 // Root providers: client config bootstrap, auth (deployment key / configured
 // token / managed session), workspace access, and the cross-route console
 // state (model choice, repo selection, tool toggles). Everything below the
@@ -158,6 +159,12 @@ const AnalyticsManager = lazy(() =>
   })),
 );
 
+const OrganizationOnboardingPanel = lazy(() =>
+  import("@/components/organization-onboarding-panel").then((module) => ({
+    default: module.OrganizationOnboardingPanel,
+  })),
+);
+
 const ManagedAuthPanel = lazy(() =>
   import("@/components/managed-auth-panel").then((module) => ({
     default: module.ManagedAuthPanel,
@@ -191,12 +198,6 @@ const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
 const CreditRequiredPrompt = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.CreditRequiredPrompt,
-  })),
-);
-
-const OrganizationOnboardingPanel = lazy(() =>
-  import("@/components/organization-onboarding-panel").then((module) => ({
-    default: module.OrganizationOnboardingPanel,
   })),
 );
 
@@ -578,6 +579,10 @@ export function RootRouteComponent() {
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
   const [managedAuthBootstrapComplete, setManagedAuthBootstrapComplete] = useState(false);
   const [accessContext, setAccessContext] = useState<AccessContext | null>(null);
+  const accessContextRef = useRef(accessContext);
+  useInsertionEffect(() => {
+    accessContextRef.current = accessContext;
+  }, [accessContext]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [managedSelfContext, setManagedSelfContext] = useState<ManagedSelfContext | null>(null);
   const [slackLinkContinuationWorkspaceId, setSlackLinkContinuationWorkspaceId] = useState<
@@ -1563,6 +1568,17 @@ export function RootRouteComponent() {
           acceptedTransition,
           workspaceId,
         ) && personalGitHubRefreshId.current === refreshId;
+      if (!hasWorkspacePermission(accessContextRef.current, workspaceId, "connections:read")) {
+        setPersonalGitHubStatus(null);
+        setPersonalGitHubRepositories([]);
+        setPersonalGitHubSelection(null);
+        setPersonalGitHubAuthorityCache(null);
+        setSelectedPersonalGitHubRepoIds(new Set());
+        setSelectedPersonalGitHubRepoRefs({});
+        setPersonalGitHubCatalogReady(true);
+        setPersonalGitHubBusy(false);
+        return;
+      }
       setPersonalGitHubBusy(true);
       try {
         const status = await client.personalGitHubStatus(workspaceId);

@@ -1,3 +1,4 @@
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
 // Plugins: the workspace integrations marketplace. A single scrollable
 // page with exactly three sections: Integrations, Connectors, and Bundles.
 // Integrations (Slack, GitHub, Google
@@ -17,9 +18,10 @@
 // row (see `bundles-section.tsx`) instead of three unheaded blocks. Nothing
 // with kind skill, plugin, or pack ever reaches the Connectors Enabled/Browse
 // projections.
-import { usePacks, useRigs, useVariableSets } from "@opengeni/react";
+import { usePacks, useVariableSets } from "@opengeni/react";
 import { PlugIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { CapabilitiesLegacyRedirect } from "@/routes/capabilities-legacy-redirect";
 import {
   Fragment,
   Suspense,
@@ -171,15 +173,22 @@ export function shouldScrollToDeepLinkedBundles(
   return initialSection === "packs" && !loading && !alreadyScrolled;
 }
 
-export function CapabilitiesRoute({
-  workspaceId,
-  initialSection,
-  slackLinkToken,
-}: {
+type CapabilitiesRouteProps = {
   workspaceId: string;
   initialSection?: "packs";
   slackLinkToken?: string;
-}) {
+  legacyRedirect?: boolean;
+};
+
+export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
+  return props.legacyRedirect ? (
+    <CapabilitiesLegacyRedirect workspaceId={props.workspaceId} section={props.initialSection} />
+  ) : (
+    <CapabilitiesBody {...props} />
+  );
+}
+
+function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
@@ -234,7 +243,10 @@ export function CapabilitiesRoute({
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
   // Which integration's detail sheet is open (one sheet, one open id).
-  const [openIntegration, setOpenIntegration] = useState<string | null>(null);
+  const [openIntegration, setOpenIntegration] = useState<string | null>(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("integration") === "slack" || params.has("slack") ? "slack" : null;
+  });
   const [skillRemoval, setSkillRemoval] = useState<{
     item: CapabilityCatalogItem;
     preview: SkillUninstallPreview;
@@ -272,7 +284,7 @@ export function CapabilitiesRoute({
   const [registrySearched, setRegistrySearched] = useState<string | null>(null);
 
   const packs = usePacks({ workspaceId });
-  const rigs = useRigs({ workspaceId });
+  const rigs = useWorkspaceRigs({ workspaceId });
   const variableSets = useVariableSets({ workspaceId });
 
   // The Connectors surface owns exactly MCP servers and API connectors. Skills,

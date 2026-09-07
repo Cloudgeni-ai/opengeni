@@ -263,7 +263,7 @@ describe("capabilities browser e2e", () => {
           await setTheme(page, theme);
           await expectVisible(page.getByLabel("Search connectors"));
           expect(await page.getByLabel("Search connectors").count()).toBe(1);
-          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+          await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
           await page.screenshot({
             path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
             fullPage: true,
@@ -338,7 +338,7 @@ describe("capabilities browser e2e", () => {
       expect(layout.state.right).toBeLessThanOrEqual(layout.tile.right);
       expect(await tile.locator("button").count()).toBe(2);
 
-      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Capabilities"]');
+      await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
       await page.screenshot({
         path: `${evidenceDir}tile-layout-four-column-1440.png`,
         fullPage: true,
@@ -729,7 +729,7 @@ describe("capabilities browser e2e", () => {
         waitUntil: "networkidle",
       });
       await setTheme(mobilePage, "dark");
-      await expectText(mobilePage.getByRole("region", { name: "Capabilities" }), "Needs attention");
+      await expectText(mobilePage.getByRole("region", { name: "Plugins" }), "Needs attention");
       await openMobbinSheet(mobilePage, true);
       await expectText(
         mobilePage.getByRole("dialog"),
@@ -959,6 +959,9 @@ async function installCapabilityApi(
         installations: [],
       });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({
         connections:
@@ -1148,6 +1151,9 @@ async function installLargeCatalogApi(
       await new Promise((resolve) => setTimeout(resolve, catalogDelayMs));
       return json({ items: catalog, installations: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connections/slack-bot/bindings`) {
+      return json({ bindings: [] });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connections`) {
       return json({ connections: [] });
     }
@@ -1264,6 +1270,7 @@ async function installWorkspaceCatalogApi(
       }
       return json({ items: catalogs.get(routeWorkspaceId), installations: [] });
     }
+    if (resource === "connections/slack-bot/bindings") return json({ bindings: [] });
     if (resource === "connections") return json({ connections: [] });
     if (resource === "social/connections") return json([]);
     if (resource === "integrations/definitions") return json({ definitions: [] });

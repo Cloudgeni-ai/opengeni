@@ -71,6 +71,8 @@ import {
   type ConnectedMachineBackgroundCommandProof,
 } from "@opengeni/db/session-background-commands";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
+import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
+import { captureConnectedCommandOutput } from "../sandbox-routing";
 import { sandboxLeaseTelemetryKey } from "@opengeni/observability";
 import {
   // Normal drain teardown builds the client and resumes the envelope directly:
@@ -89,6 +91,10 @@ import {
   isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
   NatsControlRpc,
+  NatsOpStreamTransport,
+  OpStreamExecClient,
+  defaultSelfhostedRetryClock,
+  stripExecBanner,
   parseExecBannerExitCode,
   prepareProviderForTeardownAfterCapture,
   providerWorkspaceCapturePolicy,
@@ -296,6 +302,7 @@ export type RetainedProcessProbeFn = (
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode?: "observe" | "cancel",
+  captureOutput?: (result: unknown, chunkId: string) => Promise<void>,
 ) => Promise<RetainedProcessProbeResult>;
 
 export type HistoricalModalSandboxLifecycleProbeFn = typeof inspectModalSandboxLifecycle;
@@ -1099,6 +1106,45 @@ export async function reconcileConnectedMachineBackgroundCommands(
               RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
             ),
           );
+          // Replay currently retained frames for running as well as completed
+          // commands. This is attach-only and leaves final ACK/observation alone.
+          if (proof?.outcome !== "lost") {
+            if (!bus.getOpStreamConnection)
+              throw new Error("Connected command output transport unavailable");
+            const client = new OpStreamExecClient({
+              workspaceId: claim.controlWorkspaceId,
+              agentId: claim.enrollmentId,
+              connectionInstanceId: claim.connectionInstanceId,
+              epoch: 0,
+              controlRpc,
+              rpcSubject: subjectFor(
+                claim.controlWorkspaceId,
+                claim.enrollmentId,
+                claim.connectionInstanceId,
+              ),
+              transport: new NatsOpStreamTransport(
+                async () => bus.getOpStreamConnection?.() ?? null,
+              ),
+              controlTimeoutMs: Math.min(
+                settings.sandboxSelfhostedControlTimeoutMs,
+                RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+              ),
+              retryClock: defaultSelfhostedRetryClock,
+              journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
+            });
+            const replay = await client.readExisting(
+              claim.opId,
+              proof ? 5_000 : 250,
+              async (frames) => {
+                await captureConnectedCommandOutput(db, claim, bus)(claim.commandId, frames);
+              },
+            );
+            if (proof && replay.status !== "completed" && !replay.terminal) {
+              throw new Error(
+                "Connected command terminal output replay has not reached its exit frontier",
+              );
+            }
+          }
           if (!proof) {
             await deferConnectedCommandClaim(
               db,
@@ -1211,17 +1257,22 @@ export function connectedCommandProofFromStatus(
         throw new Error("Connected command completed without an exit record");
       }
       const failureCode = exit.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
-      const reason = exit.cancelled
-        ? "op_cancelled"
-        : exit.timedOut
-          ? "op_timed_out"
-          : failureCode
-            ? `op_failure_${failureCode}`
+      const reason = failureCode
+        ? `op_failure_${failureCode}`
+        : exit.cancelled
+          ? "op_cancelled"
+          : exit.timedOut
+            ? "op_timed_out"
             : "op_exit";
       return {
         outcome: "exited",
         exitCode: exit.exitCode,
         reason,
+        ...(failureCode
+          ? {
+              failure: { code: failureCode, detail: exit.failureDetail, retryable: false as const },
+            }
+          : {}),
         observedAt,
       };
     }
@@ -1416,6 +1467,27 @@ async function reconcileTerminalRetainedProcesses(
               lease!,
               process,
               claim.ownerState === "background_stopping" ? "cancel" : "observe",
+              async (result, chunkId) => {
+                if (
+                  typeof result !== "string" ||
+                  isExecSessionLostBanner(result, process.providerSessionId)
+                )
+                  return;
+                const events = await appendSessionCommandOutput(db, {
+                  accountId: process.accountId,
+                  workspaceId: process.workspaceId,
+                  sessionId: process.sessionId,
+                  commandId: process.id,
+                  chunkId,
+                  stream: "stdout",
+                  streamFidelity: "merged",
+                  chunk: stripExecBanner(result),
+                });
+                if (events.length && bus)
+                  await bus
+                    .publish(process.workspaceId, process.sessionId, events)
+                    .catch(() => undefined);
+              },
             );
           } catch (error) {
             observability.warn("sandbox reaper: retained-process provider probe failed", {
@@ -1640,11 +1712,30 @@ async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<
   }
 }
 
+/** Consumed SDK output cannot be polled again. Retain the receipt across
+ * persistence retries in this worker; a worker crash remains unreplayable. */
+const pendingRetainedProbeOutput = new Map<string, { result: unknown; chunkId: string }>();
+
+export async function captureRetainedProbeOutput(
+  processId: string,
+  result: unknown,
+  capture: (result: unknown, chunkId: string) => Promise<void>,
+): Promise<void> {
+  const pending = pendingRetainedProbeOutput.get(processId) ?? {
+    result,
+    chunkId: crypto.randomUUID(),
+  };
+  pendingRetainedProbeOutput.set(processId, pending);
+  await capture(pending.result, pending.chunkId);
+  pendingRetainedProbeOutput.delete(processId);
+}
+
 export async function probeRetainedProcessAtProvider(
   settings: ActivityServices["settings"],
   lease: LeaseSnapshot,
   process: SandboxRetainedProcess,
   mode: "observe" | "cancel" = "observe",
+  captureOutput?: (result: unknown, chunkId: string) => Promise<void>,
 ): Promise<RetainedProcessProbeResult> {
   if (
     lease.id !== process.leaseId ||
@@ -1659,6 +1750,12 @@ export async function probeRetainedProcessAtProvider(
   }
   if (!lease.resumeState) {
     return { status: "deferred", reason: "resume_state_missing" };
+  }
+  const pending = pendingRetainedProbeOutput.get(process.id);
+  if (pending) {
+    if (!captureOutput) throw new Error("Pending command output requires its persistence callback");
+    await captureRetainedProbeOutput(process.id, pending.result, captureOutput);
+    return classifyRetainedProcessPollResult(pending.result, process.providerSessionId);
   }
   const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
   if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
@@ -1803,6 +1900,7 @@ export async function probeRetainedProcessAtProvider(
     }
     return { status: "deferred", reason: "provider_error" };
   }
+  if (captureOutput) await captureRetainedProbeOutput(process.id, result, captureOutput);
   const observation = classifyRetainedProcessPollResult(result, process.providerSessionId);
   if (
     observation.status === "deferred" &&
@@ -1821,6 +1919,7 @@ export async function probeRetainedProcessAtProvider(
           maxOutputTokens: 2_000,
         }),
       );
+      if (captureOutput) await captureRetainedProbeOutput(process.id, interrupted, captureOutput);
       return classifyRetainedProcessPollResult(interrupted, process.providerSessionId);
     } catch (error) {
       if (isProviderSandboxNotFoundError(client.backendId, error)) {

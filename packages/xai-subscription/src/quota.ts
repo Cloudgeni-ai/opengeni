@@ -49,8 +49,17 @@ export async function fetchXaiSubscriptionQuota(input: {
         end: dateOrNull(currentPeriod.end),
       }
     : legacyPeriod(config);
+  // The unified credits endpoint uses protobuf JSON: zero scalar usage is
+  // omitted. Only apply that default to a recognized credits-period response,
+  // not null/partial responses or malformed explicit percentages.
+  const omittedUnifiedZero =
+    config?.isUnifiedBillingUser === true &&
+    period?.end !== null &&
+    period?.end !== undefined &&
+    !Object.hasOwn(config, "creditUsagePercent") &&
+    !Object.hasOwn(config, "credit_usage_percent");
   return {
-    usedPercent: directPercent ?? derivedPercent,
+    usedPercent: directPercent ?? derivedPercent ?? (omittedUnifiedZero ? 0 : null),
     period,
     prepaidBalanceCents: cents(config?.prepaidBalance ?? config?.prepaid_balance),
     onDemandCapCents: cents(config?.onDemandCap ?? config?.on_demand_cap),
@@ -76,6 +85,7 @@ function cents(value: unknown): number | null {
 }
 
 function finitePercent(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
   const candidate = Number(value);
   return Number.isFinite(candidate) ? Math.max(0, Math.min(100, candidate)) : null;
 }

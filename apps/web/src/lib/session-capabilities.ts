@@ -104,6 +104,7 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
       tool === "set_session_title" ||
       tool === "set_other_session_title" ||
       tool === "wait_for_input" ||
+      tool === "command_read" ||
       tool === "command_wait" ||
       tool.startsWith("goal_") ||
       tool.startsWith("session_") ||
