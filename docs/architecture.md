@@ -638,6 +638,11 @@ packages; it does not own session or authorization semantics. Advanced hosts
 may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
+The stock console owns browser-local appearance in `apps/web/src/lib/appearance.tsx`.
+Both account menus expose Light, Dark, and System; the resolved palette is applied
+to the document for shared React surfaces and portals. The early bootstrap in
+`apps/web/index.html` restores that choice before first paint.
+
 ---
 
 ## 5. Runtime spine: session → turn → attempt
@@ -1632,13 +1637,4 @@ Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause rea
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
-### Workspace pause durations
-
-Workspace pause timers persist on `workspace_inference_controls` and execute
-under the workspace control fence through the control-worker wake sweep.
-Manual controls cancel pending automation; a timer resumes only its own pause
-revision. The API accepts durations, Postgres owns deadlines, and clients render
-countdowns. Canonical: `packages/db/src/session-control.ts`,
-`apps/worker/src/activities/workflow-wake.ts`, and
-`apps/web/src/components/workspace-runtime-control.tsx`.
-See [workspace pause timers](workspace-pause-timers.md) for behavior and rollout.
+Workspace timers: [implementation and rollout](workspace-pause-timers.md).

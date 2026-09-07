@@ -69,17 +69,12 @@ describe("workspace artifacts migration", () => {
           on conflict do nothing`;
       }
 
-      // Seed the historical schema directly; today's bootstrap references
-      // columns added after this migration (for example workspace timers).
-      const [account] = await admin<{ id: string }[]>`
-        insert into managed_accounts (name) values ('Migration 0149 account') returning id`;
-      const [workspace] = await admin<{ id: string }[]>`
-        insert into workspaces (account_id, name)
-        values (${account!.id}, 'Migration 0149 workspace') returning id`;
-      const grant = { accountId: account!.id, workspaceId: workspace!.id };
-      await admin`
-        insert into workspace_inference_controls (workspace_id, account_id)
-        values (${grant.workspaceId}, ${grant.accountId})`;
+      // Seed the historical schema directly: today's bootstrap includes columns
+      // introduced after this migration and cannot run against this prefix.
+      const grant = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID() };
+      await admin`insert into managed_accounts (id, name) values (${grant.accountId}, 'Migration 0149 account')`;
+      await admin`insert into workspaces (id, account_id, name) values (${grant.workspaceId}, ${grant.accountId}, 'Migration 0149 workspace')`;
+      await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${grant.workspaceId}, ${grant.accountId})`;
       const historicalTools = FIRST_PARTY_MCP_TOOL_NAMES.filter(
         (name) => !name.startsWith("artifacts_"),
       );

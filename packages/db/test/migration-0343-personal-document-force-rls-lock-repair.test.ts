@@ -66,6 +66,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column input_wait_until timestamptz,
       add column input_wait_reason text,
       add column input_wait_set_at timestamptz`;
+    // The current claim adapter also reads timer fields under the workspace
+    // fence. These temporary nullable fields are removed before 0420 runs.
     await admin`
       alter table workspace_inference_controls
       add column timer_id uuid,
@@ -235,19 +237,19 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     expect(await applicationSessionCount()).toBe(0);
     await admin`drop table session_event_cursors`;
     await admin`
-      alter table sessions
-      drop column variable_set_ids,
-      drop column input_wait_turn_id,
-      drop column input_wait_until,
-      drop column input_wait_reason,
-      drop column input_wait_set_at`;
-    await admin`
       alter table workspace_inference_controls
       drop column timer_id,
       drop column timer_action,
       drop column timer_due_at,
       drop column timer_pause_for_seconds,
       drop column timer_pause_revision`;
+    await admin`
+      alter table sessions
+      drop column variable_set_ids,
+      drop column input_wait_turn_id,
+      drop column input_wait_until,
+      drop column input_wait_reason,
+      drop column input_wait_set_at`;
     await migrate(ownerUrl);
     app = openApp();
 
