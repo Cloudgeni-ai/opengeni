@@ -2910,6 +2910,7 @@ describe("input-aware continuation cap and idle backoff", () => {
   }
 
   function childResult(ctx: GoalFixture) {
+    const childSessionId = crypto.randomUUID();
     return addSessionSystemUpdate(client.db, {
       accountId: ctx.grant.accountId,
       workspaceId: ctx.grant.workspaceId!,
@@ -2921,8 +2922,13 @@ describe("input-aware continuation cap and idle backoff", () => {
       summary: "Child finished",
       payload: {
         type: "child_terminal_result",
-        childSessionId: crypto.randomUUID(),
+        childSessionId,
         status: "idle",
+      },
+      lineage: {
+        parentSessionId: ctx.session.id,
+        parentTurnId: ctx.turn.id,
+        childSessionId,
       },
     });
   }

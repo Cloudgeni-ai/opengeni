@@ -266,22 +266,21 @@ export function escapedMcpTimeoutRecoveryFailure(input: {
  * Convert the atomic claim transaction's failure into a small, stable
  * Temporal wire contract. The original error remains in activity diagnostics,
  * but SQL text, parameters, and arbitrary invariant messages never enter
- * workflow history. Contention and operational database unavailability are
- * safe to re-read after backoff because the claim transaction contains no
- * model/tool effects; permanent database and state failures require terminal
- * settlement.
+ * workflow history. Every database failure is safe to re-read after backoff
+ * because the claim transaction contains no model/tool effects. Database
+ * constraints and authorization guards can also be repaired by a deployment or
+ * authority refresh, so they must preserve pending work. Only a non-database
+ * claim invariant is terminal.
  */
 export function preClaimAdmissionFailure(error: unknown): ApplicationFailure {
   const persistenceFailure = isSessionEventPersistenceError(error) ? error : null;
   const retryableCode = retryableDatabaseFailureCode(error);
-  // The database transaction itself retries only the two contention failures
-  // proven safe for immediate replay. Once the activity has failed, the
-  // workflow may also retry operational outages after a durable re-read and
-  // bounded delay. Unknown driver/database failures stay recoverable because
-  // they commonly represent a lost connection; known constraint, auth, and
-  // application SQLSTATEs are permanent and must not create an infinite loop.
+  // The workflow retries after a durable re-read and bounded delay. A
+  // SessionEventPersistenceError proves the failure happened inside the atomic
+  // claim boundary, before provider or tool work; retaining it is safer than
+  // destroying accepted machine input on an application SQLSTATE.
   const detail: PreClaimFailureDetail = {
-    disposition: retryableCode ? "retryable" : "permanent",
+    disposition: persistenceFailure || retryableCode ? "retryable" : "permanent",
     code: retryableCode ?? persistenceFailure?.details.code ?? "claim_invariant",
   };
   return ApplicationFailure.create({
