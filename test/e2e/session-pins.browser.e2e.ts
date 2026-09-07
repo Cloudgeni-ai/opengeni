@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import {
   createDb,
+  appendSessionEventsAndUpdateSession,
   appendSessionEvents,
   createSession,
   grantWorkspaceAccess,
@@ -1303,6 +1304,120 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 120_000);
+
+  test("opens waiting descendants at every depth from a failed parent in For you", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const parent = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Attention failed parent",
+      );
+      const makeChild = (parentSessionId: string, title: string) =>
+        createTitledSession(dbClient.db, {
+          accountId: parent.accountId,
+          workspaceId,
+          initialMessage: title,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          parentSessionId,
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+      const child = await makeChild(parent.id, "Attention direct child");
+      const grandchild = await makeChild(child.id, "Attention nested child");
+      // Fixture lifecycle events use the ordinary scoped event/status adapter.
+      for (const [id, status] of [
+        [parent.id, "failed"],
+        [child.id, "requires_action"],
+        [grandchild.id, "requires_action"],
+      ] as const) {
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          id,
+          [{ type: "session.status.changed", payload: { status } }],
+          { status },
+        );
+      }
+      const evidence = await page.evaluate(
+        async ({
+          apiBaseUrl: fixtureApiUrl,
+          workspaceId: fixtureWorkspaceId,
+          rootId,
+          grandchildId,
+        }) => {
+          const root = `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}`;
+          const pause = await fetch(`${root}/sessions/${grandchildId}/control`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action: "pause", clientEventId: crypto.randomUUID() }),
+          });
+          if (!pause.ok)
+            throw new Error(`Pause fixture failed: ${pause.status} ${await pause.text()}`);
+          const query = new URLSearchParams({
+            rootSessionId: rootId,
+            statuses: "requires_action",
+            limit: "1",
+          });
+          const first = await fetch(`${root}/agent-topology?${query}`).then((r) => r.json());
+          if (!first.nextCursor) throw new Error("Expected a cursor for two waiting depths");
+          query.set("cursor", first.nextCursor);
+          const second = await fetch(`${root}/agent-topology?${query}`).then((r) => r.json());
+          const direct = await fetch(
+            `${root}/agent-topology?${new URLSearchParams({ rootSessionId: rootId, parentSessionId: rootId, statuses: "requires_action" })}`,
+          ).then((r) => r.json());
+          return {
+            all: [...first.sessions, ...second.sessions].map((s) => ({
+              id: s.id,
+              depth: s.nestedAgentDepth,
+              pause: s.pause.state,
+            })),
+            direct: direct.sessions.map((s) => s.id),
+          };
+        },
+        {
+          apiBaseUrl,
+          workspaceId,
+          rootId: parent.id,
+          grandchildId: grandchild.id,
+        },
+      );
+      expect(evidence.all.map((s) => s.id).sort()).toEqual([child.id, grandchild.id].sort());
+      expect(evidence.all.find((s) => s.id === grandchild.id)).toMatchObject({
+        depth: 2,
+        pause: "paused",
+      });
+      expect(evidence.direct).toEqual([child.id]);
+      await page.getByRole("link", { name: /^For you/ }).click();
+      const row = page
+        .getByRole("listitem")
+        .filter({ has: page.getByRole("link", { name: "Attention failed parent", exact: true }) });
+      await row.getByRole("button", { name: "Show waiting agents", exact: true }).click();
+      const nested = row.getByRole("link", { name: "Attention nested child", exact: true });
+      await nested.waitFor();
+      expect(await nested.getAttribute("href")).toBe(
+        `/workspaces/${workspaceId}/sessions/${grandchild.id}`,
+      );
+      await row.getByText("Paused; request still pending", { exact: true }).waitFor();
+      expect(await row.innerText()).toContain("Failed");
+      await page.screenshot({ path: "/tmp/ux-priority-child-routing.png", fullPage: true });
+      await nested.click();
+      await waitFor(() => page.url().endsWith(`/sessions/${grandchild.id}`));
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("renders one truthful queue, goal, and agents stack above the composer", async () => {
     const desktop = await configuredContext(browser, {
