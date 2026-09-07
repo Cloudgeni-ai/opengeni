@@ -150,36 +150,31 @@ export function EmptyCreditsNotice({
 
   if (!empty) return null;
   return (
-    <Notice
-      tone="waiting"
-      title="This model uses OpenGeni credits"
-      action={
-        <div className="flex flex-wrap gap-2">
-          {canBuyCredits ? (
-            <Button asChild type="button" size="sm">
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "billing" }}
-              >
-                <CreditCardIcon className="size-3.5" />
-                Buy credits
-              </Link>
-            </Button>
-          ) : null}
-          <Button asChild type="button" size="sm" variant="secondary">
+    <Notice tone="waiting" title="This model uses OpenGeni credits">
+      The organization has no credits yet. Buy some or connect a model so the first chat can run.
+      <div className="mt-2 flex flex-wrap gap-2">
+        {canBuyCredits ? (
+          <Button asChild type="button" size="sm">
             <Link
-              to="/workspaces/$workspaceId/settings"
+              to="/workspaces/$workspaceId/organization"
               params={{ workspaceId }}
-              search={{ section: "models" }}
+              search={{ section: "billing" }}
             >
-              Connect a model
+              <CreditCardIcon className="size-3.5" />
+              Buy credits
             </Link>
           </Button>
-        </div>
-      }
-    >
-      The organization has no credits yet. Buy some or connect a model so the first chat can run.
+        ) : null}
+        <Button asChild type="button" size="sm" variant="secondary">
+          <Link
+            to="/workspaces/$workspaceId/settings"
+            params={{ workspaceId }}
+            search={{ section: "models" }}
+          >
+            Connect a model
+          </Link>
+        </Button>
+      </div>
     </Notice>
   );
 }

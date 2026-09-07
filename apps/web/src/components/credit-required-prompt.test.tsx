@@ -88,6 +88,10 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("This model uses OpenGeni credits");
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
+    const connect = [...container.querySelectorAll("a")].find((node) =>
+      node.textContent?.includes("Connect a model"),
+    );
+    expect(connect?.closest(".min-w-0")).not.toBeNull();
 
     await act(async () => root!.unmount());
     getBilling.mockResolvedValueOnce({
