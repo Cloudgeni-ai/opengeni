@@ -542,10 +542,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await pageA.goto(targetUrl);
     // Pin from the ordinary list-row action, not just the header. The header
     // must reconcile from the same server-authoritative member relation.
-    const targetActions = pageA.getByRole("button", { name: /^Actions for Master pin target/ });
-    await targetActions.focus();
-    await pageA.keyboard.press("Enter");
-    const pinMenuItem = pageA.getByRole("menuitem", { name: "Pin", exact: true });
+    const pinMenuItem = pageA
+      .locator(`a[data-session-row="${target.id}"]`)
+      .locator("xpath=..")
+      .getByRole("button", { name: "Pin session", exact: true });
     await pinMenuItem.waitFor();
     const initialPinMutation = pageA.waitForResponse(
       (response) => {
@@ -568,19 +568,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       status: initialPinResponse.status(),
       body: await initialPinResponse.text(),
     }).toEqual({ status: 200, body: expect.any(String) });
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     // Session navigation now starts the real capture-backed workbench while the
     // session record is still loading. Keep a bounded render budget that includes
     // that intentional parallel surface instead of measuring the rail alone.
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(72);
     const pinnedA = pageA.getByRole("group", { name: "Pinned" });
     await pinnedA.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
-    await pageA.waitForFunction(() =>
-      document.activeElement?.getAttribute("aria-label")?.startsWith("Actions for Master"),
+    await pageA.waitForFunction(
+      () => document.activeElement?.getAttribute("aria-label") === "Unpin session",
     );
-    expect(
-      await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label")),
-    ).toStartWith("Actions for Master pin target");
+    expect(await pageA.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
+      "Unpin session",
+    );
 
     // A sibling tab in the same browser context must reconcile through the
     // document-scoped invalidation channel without a reload or the 15s poll.
@@ -600,8 +600,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const unpinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.getByRole("button", { name: "Unpin session" }).click();
-    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     await Promise.all([unpinMutation, sameTabUnpinRefresh]);
     await sameTabPinnedTarget.waitFor({ state: "detached" });
 
@@ -612,8 +612,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const repinMutation = pageA.waitForResponse(successfulTargetPinMutation, {
       timeout: 10_000,
     });
-    await pageA.getByRole("button", { name: "Pin session" }).click();
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await Promise.all([repinMutation, sameTabRepinRefresh]);
     await sameTabPinnedTarget.waitFor();
     expect((await reactCommitCount(pageA)) - initialCommits).toBeLessThanOrEqual(128);
@@ -627,10 +627,10 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const pageB = await deviceB.newPage();
     await pageB.goto(targetUrl);
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await createSessionThroughApi(pageB, apiBaseUrl, workspaceId, "Newer unrelated activity");
     await pageB.reload();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     const pinnedB = pageB.getByRole("group", { name: "Pinned" });
     await pinnedB.getByRole("link", { name: /^Open Master pin target/ }).waitFor();
     expect(
@@ -649,7 +649,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     });
     const otherPage = await otherMember.newPage();
     await otherPage.goto(targetUrl);
-    await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Search is server-backed: a matching pin remains in the pin section while
@@ -700,7 +700,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     if (!boundarySessionId) throw new Error("expected a visible boundary session row");
     await boundaryRow.focus();
     await pageB.keyboard.press("Home");
-    const boundaryActions = pageB.locator(`button[data-session-actions="${boundarySessionId}"]`);
+    const boundaryActions = pageB.locator(
+      `button[data-session-actions="${boundarySessionId}"][data-session-actions-mode="quick"]:not([data-session-action="archive"])`,
+    );
     await boundaryActions.focus();
     const boundaryRefresh = pageB.waitForResponse(
       (response) => successfulSessionPageResponse(response, workspaceId),
@@ -759,12 +761,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // online through the same header action succeeds without a second logical
     // pin state or an OCC dead end.
     await deviceB.setOffline(true);
-    await pageB.getByRole("button", { name: "Unpin session" }).click();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
     await pageB.getByText("Couldn't unpin session", { exact: true }).waitFor();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await deviceB.setOffline(false);
-    await pageB.getByRole("button", { name: "Unpin session" }).click();
-    await pageB.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).click();
+    await pageB.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
 
     // A different device has no shared browser channel. Returning focus must
     // trigger a real server reconciliation without reloading the document.
@@ -780,18 +782,18 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     );
     await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
     await crossDeviceRefresh;
-    await pageA.getByRole("button", { name: "Pin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     await pageA.getByRole("group", { name: "Pinned" }).waitFor({ state: "detached" });
     expect(await pageA.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     // Pin from the header as a fresh OCC revision, then prove both the second
     // owner device and the other member reconcile to their respective truths.
-    await pageA.getByRole("button", { name: "Pin session" }).click();
-    await pageA.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageA.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await pageA.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await pageB.reload();
-    await pageB.getByRole("button", { name: "Unpin session" }).waitFor();
+    await pageB.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     await otherPage.reload();
-    await otherPage.getByRole("button", { name: "Pin session" }).waitFor();
+    await otherPage.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     expect(await otherPage.getByRole("group", { name: "Pinned" }).count()).toBe(0);
 
     expect(browserPageErrors.get(deviceA)).toEqual([]);
@@ -803,7 +805,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceA.close();
   }, 150_000);
 
-  test("restores row-actions focus after a failed unpin while allowing authoritative GET", async () => {
+  test("shows pin and archive on hover, opens the full menu on right-click, and restores quick-action focus", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -820,11 +822,39 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, target, true);
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
-      const actions = page.getByRole("button", { name: /^Actions for Failed row-menu rollback/ });
-      await actions.focus();
-      await page.keyboard.press("Enter");
-      const unpin = page.getByRole("menuitem", { name: "Unpin", exact: true });
+      const targetLink = page.locator(`a[data-session-row="${target.id}"]`);
+      const targetRow = targetLink.locator("xpath=..");
+      const quickActions = targetRow.locator(`[data-session-quick-actions="${target.id}"]`);
+      const overflow = targetRow.locator(
+        `button[data-session-actions="${target.id}"][data-session-actions-mode="overflow"]`,
+      );
+      const unpin = targetRow.getByRole("button", { name: "Unpin session", exact: true });
+
+      await targetLink.waitFor();
+      await page.mouse.move(1000, 700);
+      await page.waitForFunction((sessionId) => {
+        const actions = document.querySelector(`[data-session-quick-actions="${sessionId}"]`);
+        return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "0";
+      }, target.id);
+      expect(await quickActions.evaluate((element) => getComputedStyle(element).opacity)).toBe("0");
+      expect(await overflow.evaluate((element) => getComputedStyle(element).display)).toBe("none");
+      await targetLink.hover();
+      await page.waitForFunction((sessionId) => {
+        const actions = document.querySelector(`[data-session-quick-actions="${sessionId}"]`);
+        return actions instanceof HTMLElement && getComputedStyle(actions).opacity === "1";
+      }, target.id);
       await unpin.waitFor();
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      await page.screenshot({
+        path: "/tmp/opengeni-session-row-quick-actions.png",
+        fullPage: true,
+      });
+
+      await targetLink.click({ button: "right" });
+      await page.getByRole("menuitem", { name: "Rename", exact: true }).waitFor();
+      await page.getByRole("menuitem", { name: "Unpin", exact: true }).waitFor();
+      await page.getByRole("menuitem", { name: "Archive", exact: true }).waitFor();
+      await page.keyboard.press("Escape");
       await unpin.focus();
 
       let putAttempts = 0;
@@ -848,13 +878,15 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
 
-      // Route registration yields to background refreshes. Address the menu
-      // item directly so a refresh cannot move focus before keyboard activation.
+      // Route registration yields to background refreshes. Address the direct
+      // action so a refresh cannot move focus before keyboard activation.
       await unpin.press("Enter");
       await page.getByText("Couldn't unpin session", { exact: true }).waitFor();
-      await page.getByRole("button", { name: "Unpin session" }).waitFor();
+      await targetRow.getByRole("button", { name: "Unpin session" }).waitFor();
       await page.waitForFunction(
-        (sessionId) => document.activeElement?.getAttribute("data-session-actions") === sessionId,
+        (sessionId) =>
+          document.activeElement?.getAttribute("data-session-actions") === sessionId &&
+          document.activeElement?.getAttribute("data-session-actions-mode") === "quick",
         target.id,
       );
       expect(putAttempts).toBe(1);
@@ -862,6 +894,31 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       expect(
         await page.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
       ).toBe(target.id);
+      expect(
+        await page.evaluate(() =>
+          document.activeElement?.getAttribute("data-session-actions-mode"),
+        ),
+      ).toBe("quick");
+
+      const archiveUrl = `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/archive`;
+      await page.route(archiveUrl, async (route) => {
+        if (route.request().method() !== "PUT") return route.continue();
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "synthetic archive failure" }),
+        });
+      });
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      await page.getByText("Couldn't archive the chat.", { exact: true }).waitFor();
+      await targetRow.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      await page.waitForFunction(
+        (sessionId) =>
+          document.activeElement?.getAttribute("data-session-actions") === sessionId &&
+          document.activeElement?.getAttribute("aria-label") === "Archive session",
+        target.id,
+        { timeout: 5000 },
+      );
     } finally {
       await context.close();
     }
@@ -1654,11 +1711,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
     // Wait for the session shell before sampling React commits — a cold goto can
     // read the probe at 0 before the first paint registers.
-    await page.getByRole("button", { name: "Pin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Pin session" }).waitFor();
     const initialCommits = await reactCommitCount(page);
     expect(initialCommits).toBeGreaterThan(0);
-    await page.getByRole("button", { name: "Pin session" }).click();
-    await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Pin session" }).click();
+    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
     expect((await reactCommitCount(page)) - initialCommits).toBeLessThanOrEqual(64);
 
     // Stress the compact pinned section with many long rows through the normal
@@ -1677,14 +1734,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     // the responsive assertion from a fresh server projection instead of
     // racing the rail's 15-second background reconciliation interval.
     await page.reload();
-    await page.getByRole("button", { name: "Unpin session" }).waitFor();
+    await page.locator("header").getByRole("button", { name: "Unpin session" }).waitFor();
 
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       for (const theme of ["light", "dark"] as const) {
         await setTheme(page, theme);
         await expectNoPageOverflow(page);
-        const pin = page.getByRole("button", { name: /^(Pin|Unpin) session$/ });
+        const pin = page.locator("header").getByRole("button", { name: /^(Pin|Unpin) session$/ });
         const inspector = page.getByRole("button", { name: /^(Open|Hide) workspace$/ });
         const hamburger = page.getByRole("button", { name: "Open navigation" });
         for (const control of [pin, inspector, hamburger]) {
