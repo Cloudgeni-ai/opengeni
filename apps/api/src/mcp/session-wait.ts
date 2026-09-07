@@ -463,7 +463,7 @@ const SUMMARY_FAILURE_CHARS = 500;
 const SUMMARY_RESULT_CHARS = 1_000;
 
 function truncationMarker(droppedChars: number): string {
-  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events for the exact event]`;
+  return `…[${droppedChars} chars omitted from this session_wait summary; use session_events view=debug payloadMode=full for the exact event]`;
 }
 
 function clampSummaryString(value: string, maxChars: number): string {

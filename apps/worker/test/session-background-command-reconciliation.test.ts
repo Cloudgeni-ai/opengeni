@@ -60,6 +60,28 @@ function rpc(answer: OpStatus) {
 }
 
 describe("Connected Machine background-command reconciliation", () => {
+  test("runner failure remains typed with zero exit even when cancellation or timeout also occurred", () => {
+    for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO"]) {
+      expect(
+        connectedCommandProofFromStatus(
+          status(OpState.OP_STATE_COMPLETE, {
+            exit: {
+              exitCode: 0,
+              cancelled: true,
+              timedOut: true,
+              durationMs: "1",
+              totals: {},
+              digests: {},
+              failureCode,
+              failureDetail: { retained_bytes: "1024" },
+            },
+          }),
+          new Date(),
+        ),
+      ).toMatchObject({ outcome: "exited", exitCode: 0, reason: `op_failure_${failureCode}` });
+    }
+  });
+
   test("running commands query only the immutable launch subject with epoch zero", async () => {
     const { controlRpc, requests } = rpc(status(OpState.OP_STATE_RUNNING));
 

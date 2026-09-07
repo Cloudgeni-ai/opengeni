@@ -4,6 +4,24 @@ import { buildOpenGeniAgent } from "../src/index";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
+  test("separates command observation from conversation and diagnostic reads concisely", () => {
+    const start = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf(
+      "Use `session_events` for conversation history",
+    );
+    const end = OPENGENI_OPERATIONAL_INSTRUCTIONS.indexOf("If the user asks to create", start);
+    const guidance = OPENGENI_OPERATIONAL_INSTRUCTIONS.slice(start, end);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(guidance).toContain("Cursors only paginate");
+    expect(guidance).toContain("Audit reads do not acknowledge command completion");
+    expect(guidance).toContain("`command_read`");
+    expect(guidance).toContain("`command_wait`");
+    expect(guidance).toContain("`command_input` only to send input");
+    expect(guidance).toContain("a running read does not");
+    expect(guidance).toContain("Earlier tool results and delivered messages never change");
+    expect(guidance.length).toBeLessThan(1600);
+  });
+
   test("does not carry Codex-only runtime language", () => {
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("You are Codex");
     expect(OPENGENI_OPERATIONAL_INSTRUCTIONS).not.toContain("GPT-5");

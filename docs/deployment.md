@@ -2026,7 +2026,7 @@ Do not commit real secret values.
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
 
 The same drained rollout procedure below applies to
-`0417_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
+`0418_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
 allows hash-free HTML versions and optional source, and widens stored byte counts.
 Stop old API and both worker roles, supply the complete runtime login list,
 migrate, provision the target roles, then start the matching binary. After this

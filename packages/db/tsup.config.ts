@@ -37,6 +37,8 @@ export default defineConfig({
     "video-generation": "src/video-generation.ts",
     "session-tenancy": "src/session-tenancy.ts",
     "session-background-commands": "src/session-background-commands.ts",
+    "session-command-output": "src/session-command-output.ts",
+    "session-event-slices": "src/session-event-slices.ts",
   },
   format: ["esm"],
   target: "es2022",

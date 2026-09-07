@@ -1,12 +1,13 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The compact "Run on" control in the session header: shows the session's
 // currently-active machine and, on click, opens a dropdown to live-swap the
 // session's active sandbox to any online machine (the session's own box + the
-// enrolled selfhosted machines). Backed by `useMachines({ sessionId })`, whose
+// enrolled selfhosted machines). Backed by `useWorkspaceMachines({ sessionId })`, whose
 // `attach(sandboxId)` performs the swap and re-polls the pointer.
 //
 // Degrades gracefully: when selfhosted is disabled the machines API 404s and
 // `fleet.machines` is empty, so this falls back to a static compute label.
-import { MACHINES_SESSION_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_SESSION_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import type { SandboxBackend } from "@opengeni/sdk";
 import { CheckIcon, ChevronDownIcon, Loader2Icon, ServerIcon } from "lucide-react";
 
@@ -42,7 +43,7 @@ export function SessionSandboxSwitcher({
   sessionId: string;
   sandboxBackend: SandboxBackend;
 }) {
-  const fleet = useMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
+  const fleet = useWorkspaceMachines({ sessionId, pollIntervalMs: MACHINES_SESSION_POLL_MS });
   const machines = fleet.machines;
   const activeMachine = machines.find((machine) => machine.active) ?? null;
   const activeName =

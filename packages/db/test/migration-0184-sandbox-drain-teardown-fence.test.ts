@@ -28,6 +28,7 @@ const withheldMigrationNames = [
   "0407_connected_command_tracking_retirement.sql",
   "0408_scheduled_session_target_index.sql",
   "0414_scheduled_generated_producer_materialization.sql",
+  "0416_scheduled_inherited_tool_admission.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {

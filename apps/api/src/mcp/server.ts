@@ -250,7 +250,15 @@ import {
   type FleetServices,
   type RunOnOp,
 } from "@opengeni/core";
-import { getSessionBackgroundCommand } from "@opengeni/db/session-background-commands";
+import {
+  readSessionBackgroundCommandOutput,
+  COMMAND_OUTPUT_MAX_BYTES,
+} from "@opengeni/db/session-background-commands";
+import {
+  readCommandWithWait,
+  COMMAND_READ_MAX_WAIT_SECONDS,
+  COMMAND_WAIT_DEFAULT_SECONDS,
+} from "./command-read";
 import {
   boundSessionEventCompactResult,
   boundSessionEventMcpPage,
@@ -521,6 +529,7 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   // self target, so the tool exists only for session-scoped grants.
   session_wait: { sessionRequired: true, allOf: ["sessions:read"] },
   command_wait: { sessionRequired: true, allOf: ["sessions:read"] },
+  command_read: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
@@ -4891,9 +4900,14 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Monitoring mode also omits a human/API user.message whose turn was never claimed (still queued, or deleted/edited/cancelled before any claim; waiting work is represented by sessions_list queuedPromptCount); the row appears at its own sequence once the turn is claimed. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads, including unclaimed prompt rows, require mode=forensic or the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read session history. Default view=conversation returns roughly ten complete user/assistant messages, including completed commentary, in a 16 KiB envelope; no token deltas or execution records. Prefer fewer complete messages; a single oversized message has fragment offsets and a lossless nextCursor continuation over retained source text, including large legacy rows. Fragment unit is codepoint for plain text or utf16 for codec text; pass the opaque v2 cursor unchanged (v1 cursors must restart). Pass cursor=nextCursor with sessionId, omitting other selectors; it binds the view, detail and direction. after/nextAfter and before/nextBefore only change position, never view or detail; use nextCursor when present to avoid skipping a message fragment. view=results returns final turn answers and actionable outcomes without duplicate message-completion text. view=tools returns compact call/result identities; includeArguments/includeOutput opt into one text or JSON-encoded value, and callId selects an exact call (sparse scans can return an empty advancing page). sourceExact=false and sourceOmitted identify oversized structured values that were omitted, never partial JSON presented as complete; scalar text remains resumable. Conversation/results/tools omit never-claimed human/API prompts and stale duplicate events. view=debug exposes the existing authorized audit query with explicit type/class filters, mode=monitoring|forensic and payloadMode=none|summary|full; raw deltas and never-claimed prompts require mode=forensic. Explicit legacy audit selectors remain supported without view. latest is an exclusive semantic-class lookup; resultMode=compact requires latest. No read observes commands or changes append-only history. REST behavior is unchanged.",
         inputSchema: {
           sessionId: z4.string().uuid(),
+          view: z4.enum(["conversation", "results", "tools", "debug"]).optional(),
+          cursor: z4.string().max(4096).optional(),
+          callId: z4.string().max(512).optional(),
+          includeArguments: z4.boolean().optional(),
+          includeOutput: z4.boolean().optional(),
           after: z4.number().int().nonnegative().optional(),
           before: z4.number().int().positive().optional(),
           limit: z4.number().int().positive().optional(),
@@ -4901,8 +4915,34 @@ function registerWorkspaceOrchestrationTools(
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
           resultMode: z4.enum(SessionEventResultMode.options).optional(),
-          includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
-          excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
+          includeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types, e.g. turn.completed, user.message, agent.message.completed, agent.toolCall.output. Validated against the canonical event-type registry.",
+            )
+            .optional(),
+          excludeTypes: z4
+            .array(
+              z4
+                .string()
+                .refine(
+                  (value) => SessionEventType.safeParse(value).success,
+                  "Unknown session event type",
+                ),
+            )
+            .max(100)
+            .describe(
+              "Debug audit event types to exclude; validated against the canonical event-type registry.",
+            )
+            .optional(),
           includeClasses: z4
             .array(z4.enum(SessionEventSemanticClass.options))
             .max(SessionEventSemanticClass.options.length)
@@ -4916,6 +4956,11 @@ function registerWorkspaceOrchestrationTools(
       },
       async ({
         sessionId,
+        view,
+        cursor,
+        callId,
+        includeArguments,
+        includeOutput,
         after,
         before,
         limit,
@@ -4923,19 +4968,75 @@ function registerWorkspaceOrchestrationTools(
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
         resultMode: requestedResultMode,
-        includeTypes,
-        excludeTypes,
+        includeTypes: requestedIncludeTypes,
+        excludeTypes: requestedExcludeTypes,
         includeClasses,
         excludeClasses,
         latest,
       }) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        // Keep the model schema compact without weakening either MCP validation
+        // or direct adapter calls: the canonical registry owns accepted types.
+        const includeTypes = requestedIncludeTypes?.map((type) => SessionEventType.parse(type));
+        const excludeTypes = requestedExcludeTypes?.map((type) => SessionEventType.parse(type));
         const latestClass =
           latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
         if (requestedResultMode === "compact" && latestClass === undefined) {
           throw new Error("resultMode=compact requires latest");
         }
         await requireSession(deps.db, grant.workspaceId, sessionId);
+        const auditRequested = [
+          requestedMode,
+          requestedPayloadMode,
+          requestedResultMode,
+          includeTypes,
+          excludeTypes,
+          includeClasses,
+          excludeClasses,
+          latest,
+        ].some((value) => value !== undefined);
+        if (((view !== undefined && view !== "debug") || cursor !== undefined) && auditRequested) {
+          throw new Error(
+            "Audit selectors require view=debug and cannot change a conversation cursor",
+          );
+        }
+        if (view !== "debug" && !auditRequested) {
+          const { readSessionEventView } = await import("./session-event-view");
+          const { listSessionEventSlices } = await import("@opengeni/db/session-event-slices");
+          return json(
+            await readSessionEventView(
+              {
+                sessionId,
+                view,
+                cursor,
+                callId,
+                includeArguments,
+                includeOutput,
+                after,
+                before,
+                direction: requestedDirection,
+                limit,
+              },
+              (options) =>
+                listSessionEventSlices(
+                  deps.db,
+                  grant.workspaceId,
+                  sessionId,
+                  options,
+                  (legacyOptions) =>
+                    listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
+                ),
+            ),
+          );
+        }
+        if (
+          cursor !== undefined ||
+          callId !== undefined ||
+          includeArguments !== undefined ||
+          includeOutput !== undefined
+        ) {
+          throw new Error("cursor/callId/includeArguments/includeOutput require a non-debug view");
+        }
         if (
           latest &&
           [includeTypes, excludeTypes, includeClasses, excludeClasses].some(
@@ -4944,7 +5045,7 @@ function registerWorkspaceOrchestrationTools(
         ) {
           throw new Error("latest cannot be combined with event filters");
         }
-        const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
+        const mode = requestedMode ?? "monitoring";
         const direction = latestClass
           ? "before"
           : (requestedDirection ??
@@ -5003,7 +5104,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "session_wait",
       {
-        description: `Block until a watched session has new durable events after your cursor, until your own session has pending machine input (a child result, an agent message, a steer, or a background-command result), or until maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) elapses. Use this for one short wait inside the current turn instead of sleeping and polling session_events/session_get/sessions_list while a child or peer session works. Do not immediately repeat it after timedOut=true unless new evidence suggests completion within one more window; for long or uncertain waits call wait_for_input once and end the turn. Pass each target's sessionId and afterSequence (its last consumed event cursor, 0 if none). Do not replace a consumed cursor with session_get.lastSequence: that snapshot watermark may already include an unread completion, and this wait reads strictly after its cursor. waitFor=change is the default and returns on turn lifecycle, agent.message.completed, terminal background commands, blocking failures, goal facts, or session status/control changes. waitFor=completion is the child-result join: it ignores progress, completed commentary messages, goal facts, background commands, maintenance turns, and continuation segment settlements and returns only for a result-bearing final turn or a blocking state. A goal.completed event records goal state but is not a terminal child result. Raw deltas, tool receipts, sandbox diagnostics, and unrelated progress never wake either mode. Each changed target returns a bounded compact summary of up to ${SESSION_WAIT_EVENTS_PER_TARGET} exact durable events plus latestSequence (pass it back as the next afterSequence) and hasMore (drill down with session_events after=latestSequence). ownPendingUpdates > 0 means your own session has machine input that is delivered only when your next turn is claimed: finish this turn to receive it, or pass includeOwnPendingUpdates=false to keep waiting on the targets. timedOut=true means nothing changed; liveFanout=false means the live bus was unavailable and the wait relied on the deadline re-check. The whole result is byte-bounded: summaries are shortened first, then newest rows dropped, so a changed target may come back with events=[] and hasMore=true; read those rows with session_events after=latestSequence. The wait cannot exceed ${SESSION_WAIT_MAX_SECONDS} seconds because the MCP client request timeout is 60 seconds.`,
+        description: `Wait once for durable session changes, your pending machine input, or maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}). Pass targets with sessionId and afterSequence: the last consumed cursor, or 0. Never substitute session_get.lastSequence, which may include an unread completion. waitFor=change returns on turn lifecycle, completed messages, terminal commands, blockers, goal facts, or session control. waitFor=completion joins a child result: only a result-bearing final turn or blocker qualifies, not commentary, goal.completed, background commands, maintenance turns, or continuation segments. Neither mode wakes on raw deltas or tool receipts. Each target contains up to ${SESSION_WAIT_EVENTS_PER_TARGET} bounded summaries, latestSequence (the next afterSequence), and hasMore. For omitted rows use session_events view=results after=latestSequence for final outcomes, or view=debug with explicit filters for diagnostics; the default conversation view does not contain execution records. Byte limits can leave events=[] with hasMore=true. ownPendingUpdates > 0 means input will arrive when your next turn is claimed: finish this turn, or use includeOwnPendingUpdates=false to keep waiting. timedOut=true means no matching change; liveFanout=false means the deadline re-check supplied durable truth without the live bus. Do not immediately repeat a timeout without new evidence. For long or uncertain waits call wait_for_input once and end the turn.`,
         inputSchema: {
           targets: z4
             .array(
@@ -5105,124 +5206,53 @@ function registerWorkspaceOrchestrationTools(
     );
 
     if (callerSessionId !== null) {
-      server.registerTool(
-        "command_wait",
-        {
-          description: `Wait briefly for one background command owned by this session to settle, without provider-specific polling or write_stdin loops. The durable command row is authoritative. This returns immediately when the command is already terminal or otherwise waits up to maxWaitSeconds (default ${SESSION_WAIT_DEFAULT_SECONDS}, max ${SESSION_WAIT_MAX_SECONDS}) for its session.command.finished event or other pending input for this session. timedOut=true never cancels the command. Do not immediately repeat command_wait after a timeout unless new evidence suggests completion within one more window; for long or uncertain work call wait_for_input once and end the turn.`,
-          inputSchema: {
-            commandId: z4.string().uuid(),
-            maxWaitSeconds: z4.number().int().min(1).max(SESSION_WAIT_MAX_SECONDS).optional(),
+      for (const toolName of ["command_read", "command_wait"] as const) {
+        server.registerTool(
+          toolName,
+          {
+            description: `${toolName === "command_read" ? "Read retained output immediately, or briefly wait" : "Briefly wait using the same read operation as command_read"} for one command owned by the current session, across sandbox and Connected Machine providers. Returns bounded stdout/stderr chunks, durable state and exitCode, nextCursor and hasMore, plus explicit retention limitations. Pass nextCursor to continue; output remains readable after the process exits. A terminal read observes completion and suppresses only its still-pending inbox notification; running reads and already claimed history are unchanged. waitSeconds is at most 50; command_wait defaults to 45, command_read to 0. For long waits use wait_for_input. Neither tool sends stdin or cancels the command.`,
+            inputSchema: {
+              commandId: z4.string().uuid(),
+              cursor: z4.string().max(128).optional(),
+              waitSeconds: z4.number().int().min(0).max(COMMAND_READ_MAX_WAIT_SECONDS).optional(),
+              maxOutputBytes: z4.number().int().min(4).max(COMMAND_OUTPUT_MAX_BYTES).optional(),
+            },
           },
-        },
-        async ({ commandId, maxWaitSeconds }, extra) => {
-          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
-          const initialSession = await requireSession(deps.db, grant.workspaceId, callerSessionId);
-          let command = await getSessionBackgroundCommand(deps.db, {
-            accountId: grant.accountId,
-            workspaceId: grant.workspaceId,
-            sessionId: callerSessionId,
-            commandId,
-          });
-          if (!command) throw new Error("Background command not found in this session");
-
-          const terminal = () => command?.state === "exited" || command?.state === "lost";
-          let waitResult: Awaited<ReturnType<typeof waitForSessionChanges>> | null = null;
-          if (!terminal()) {
-            waitResult = await waitForSessionChanges({
-              targets: [{ sessionId: callerSessionId, afterSequence: initialSession.lastSequence }],
-              ownSessionId: callerSessionId,
-              maxWaitMs: (maxWaitSeconds ?? SESSION_WAIT_DEFAULT_SECONDS) * 1_000,
-              targetEventTypes: ["session.command.finished"],
-              targetEventMatches: (event) => {
-                const payload = event.payload;
-                return (
-                  payload !== null &&
-                  typeof payload === "object" &&
-                  !Array.isArray(payload) &&
-                  (payload as Record<string, unknown>).commandId === commandId
-                );
-              },
-              signal: extra?.signal,
-              source: {
-                readTargetEvents: async (target) => {
-                  const page = await listSessionEventPage(
-                    deps.db,
-                    grant.workspaceId,
-                    target.sessionId,
-                    {
-                      after: target.afterSequence,
-                      direction: "after",
-                      limit: SESSION_WAIT_EVENTS_PER_TARGET,
-                      payloadMode: "full",
-                      includeTypes: ["session.command.finished"],
-                      maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
-                    },
-                  );
-                  return { events: page.events, hasMore: page.hasMore };
-                },
-                readOwnPendingUpdateKinds: async () =>
-                  (
-                    await listOutstandingSessionSystemUpdates(
-                      deps.db,
-                      grant.workspaceId,
-                      callerSessionId,
-                    )
-                  ).map((update) => update.kind),
-                subscribe: (targetSessionId, onEvents) =>
-                  deps.bus.subscribe(grant.workspaceId, targetSessionId, onEvents),
-              },
-            });
-          }
-
-          command =
-            (await getSessionBackgroundCommand(deps.db, {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId: callerSessionId,
-              commandId,
-            })) ?? command;
-          const isTerminal = terminal();
-          const ownPendingUpdateKinds = (
-            await listOutstandingSessionSystemUpdates(deps.db, grant.workspaceId, callerSessionId)
-          ).map((update) => update.kind);
-          const ownPendingUpdates = ownPendingUpdateKinds.length;
-          if (waitResult) {
-            // A bounded wait may cross a host/session revocation boundary. The
-            // durable command and pending-input reads above are not returned
-            // until the target is authorized again at the response boundary.
+          async ({ commandId, cursor, waitSeconds, maxOutputBytes }, extra) => {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.events.read");
-          }
-          const timedOut =
-            (waitResult?.timedOut ?? false) && !isTerminal && ownPendingUpdates === 0;
-          return json({
-            command,
-            terminal: isTerminal,
-            waitedMs: waitResult?.waitedMs ?? 0,
-            timedOut,
-            aborted: waitResult?.aborted ?? false,
-            liveFanout: waitResult?.liveFanout ?? true,
-            ownPendingUpdates,
-            ownPendingUpdateKinds,
-            ...(isTerminal
-              ? {
-                  outputLocator: {
-                    eventType: "sandbox.command.output.delta",
+            let initialRead = true;
+            return json(
+              await readCommandWithWait({
+                commandId,
+                waitSeconds:
+                  waitSeconds ?? (toolName === "command_wait" ? COMMAND_WAIT_DEFAULT_SECONDS : 0),
+                ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                ...(extra?.signal === undefined ? {} : { signal: extra.signal }),
+                read: async () => {
+                  if (!initialRead)
+                    await authorizeFirstPartySession(
+                      deps,
+                      grant,
+                      callerSessionId,
+                      "session.events.read",
+                    );
+                  initialRead = false;
+                  return await readSessionBackgroundCommandOutput(deps.db, {
+                    accountId: grant.accountId,
+                    workspaceId: grant.workspaceId,
+                    sessionId: callerSessionId,
                     commandId,
-                  },
-                }
-              : {}),
-            nextAction: isTerminal
-              ? ownPendingUpdates > 0
-                ? "End this turn to receive the queued command result or other machine input."
-                : "The command is terminal; inspect output events only if more detail is needed."
-              : ownPendingUpdates > 0
-                ? "End this turn to receive pending machine input."
-                : waitResult?.timedOut
-                  ? "Do not immediately repeat this short wait without new completion evidence; use wait_for_input for a long or uncertain wait."
-                  : "The wait was aborted; follow the newer session control or input.",
-          });
-        },
-      );
+                    ...(cursor === undefined ? {} : { cursor }),
+                    ...(maxOutputBytes === undefined ? {} : { maxOutputBytes }),
+                  });
+                },
+                subscribe: (onEvents) =>
+                  deps.bus.subscribe(grant.workspaceId, callerSessionId, onEvents),
+              }),
+            );
+          },
+        );
+      }
     }
   }
 
@@ -6401,6 +6431,7 @@ const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as co
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
 const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  view: "debug",
   direction: "before",
   limit: 1,
   mode: "monitoring",

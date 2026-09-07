@@ -992,6 +992,15 @@ async function managedBrowserMutation<T>(path: string, body: unknown): Promise<T
   return (await response.json()) as T;
 }
 
+// Request uses the same public auth boundary as sign-in and returns no account
+// existence information. Better Auth sends a link only for an eligible account.
+export async function requestPasswordReset(email: string): Promise<unknown> {
+  return await authRequest<unknown>("/request-password-reset", {
+    method: "POST",
+    body: JSON.stringify({ email, redirectTo: "/reset-password" }),
+  });
+}
+
 // Completes a password reset. `token` comes from the emailed link
 // (`<PUBLIC_BASE_URL>/reset-password?token=…`); Better Auth mounts this at
 // `/v1/auth/reset-password` and expects `{ newPassword, token }`.
