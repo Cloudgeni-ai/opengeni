@@ -1639,13 +1639,4 @@ Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause rea
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
 
-### Workspace pause durations
-
-Workspace pause timers persist on `workspace_inference_controls` and execute
-under the workspace control fence through the control-worker wake sweep.
-Manual controls cancel pending automation; a timer resumes only its own pause
-revision. The API accepts durations, Postgres owns deadlines, and clients render
-countdowns. Canonical: `packages/db/src/session-control.ts`,
-`apps/worker/src/activities/workflow-wake.ts`, and
-`apps/web/src/components/workspace-runtime-control.tsx`.
-See [workspace pause timers](workspace-pause-timers.md) for behavior and rollout.
+Workspace timers: [implementation and rollout](workspace-pause-timers.md).
