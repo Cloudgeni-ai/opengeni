@@ -1805,17 +1805,41 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await incoming.getByRole("button", { name: "View session", exact: true }).count(),
       ).toBe(9);
       expect(await page.getByTestId("failed-session-banner").isVisible()).toBe(true);
-      await page.setViewportSize({ width: 375, height: 812 });
-      await incoming.scrollIntoViewIfNeeded();
-      expect(
-        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
-      ).toBe(true);
-      await page.screenshot({
-        path: `${process.env.TMPDIR ?? "/tmp"}/opengeni-child-results-mobile.png`,
+      const mobileContext = await configuredContext(browser, {
+        viewport: { width: 375, height: 812 },
+        extraHTTPHeaders: ownerHeaders,
       });
-      await incoming.getByRole("button", { name: "View session", exact: true }).last().click();
-      await page.waitForURL(`**/sessions/${child.id}`);
-      expect(new URL(page.url()).pathname.endsWith(child.id)).toBe(true);
+      try {
+        const mobilePage = await mobileContext.newPage();
+        mobilePage.on("pageerror", (error) => errors.push(error.message));
+        await mobilePage.goto(parentUrl);
+        await mobilePage.getByTestId("failed-session-banner").waitFor();
+        await mobilePage.getByRole("button", { name: "Session activity", exact: true }).click();
+        const mobileIncoming = mobilePage.getByRole("list", {
+          name: "Incoming updates",
+          exact: true,
+        });
+        await mobileIncoming.waitFor();
+        await mobilePage
+          .getByText("Waiting to be included in an agent turn.", { exact: true })
+          .scrollIntoViewIfNeeded();
+        expect(
+          await mobilePage.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
+          ),
+        ).toBe(true);
+        await mobilePage.screenshot({
+          path: `${process.env.TMPDIR ?? "/tmp"}/opengeni-child-results-mobile.png`,
+        });
+        await mobileIncoming
+          .getByRole("button", { name: "View session", exact: true })
+          .last()
+          .click();
+        await mobilePage.waitForURL(`**/sessions/${child.id}`);
+        expect(new URL(mobilePage.url()).pathname.endsWith(child.id)).toBe(true);
+      } finally {
+        await mobileContext.close();
+      }
       expect(errors).toEqual([]);
     } finally {
       await context.close();
