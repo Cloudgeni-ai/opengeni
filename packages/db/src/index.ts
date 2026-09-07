@@ -4067,6 +4067,44 @@ export async function findActiveApiKeyByHash(
   });
 }
 
+export async function findActiveWorkspaceApiKeyById(
+  db: Database,
+  input: { accountId: string; workspaceId: string; apiKeyId: string },
+): Promise<(ApiKey & { credentialKind: schema.ApiKeyCredentialKind }) | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.apiKeys)
+        .where(
+          and(
+            eq(schema.apiKeys.id, input.apiKeyId),
+            eq(schema.apiKeys.accountId, input.accountId),
+            sql`${schema.apiKeys.revokedAt} is null`,
+            sql`(${schema.apiKeys.expiresAt} is null or ${schema.apiKeys.expiresAt} > now())`,
+            or(
+              eq(schema.apiKeys.workspaceId, input.workspaceId),
+              isNull(schema.apiKeys.workspaceId),
+            ),
+          ),
+        )
+        .limit(1);
+      if (!row) {
+        return null;
+      }
+      if (row.workspaceId !== null && row.workspaceId !== input.workspaceId) {
+        return null;
+      }
+      return {
+        ...mapApiKey(row),
+        credentialKind: row.credentialKind,
+      };
+    },
+  );
+}
+
 export type GitHubInstallation = {
   id: string;
   accountId: string;
