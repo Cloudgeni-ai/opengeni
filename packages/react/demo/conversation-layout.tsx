@@ -1,9 +1,9 @@
 import { createRoot } from "react-dom/client";
 import { useState } from "react";
 import type { SessionEvent, SessionQueueSnapshot } from "@opengeni/sdk";
-import { SessionConversation } from "../src/components/session-conversation";
+import { SessionConversation } from "@opengeni/react";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "../test/fake-client";
-import "../styles/compiled.css";
+import "@opengeni/react/styles.css";
 
 const control: SessionQueueSnapshot["effectiveControl"] = {
   state: "active",

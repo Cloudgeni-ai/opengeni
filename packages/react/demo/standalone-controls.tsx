@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ChatComposer } from "../src/components/chat-composer";
-import type { ComposerState } from "../src/hooks/use-composer";
-import "../styles/compiled.css";
+import { ChatComposer, type ComposerState } from "@opengeni/react";
+import "@opengeni/react/styles.css";
 import "./standalone-controls.css";
 
 function Fixture() {
