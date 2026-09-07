@@ -4856,6 +4856,8 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /** Absent on legacy drafts; null records an explicit Default-project selection. */
+  selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
   selectionHistory: NewSessionSelectionHistory;
   updatedAt: string | null;

@@ -51,17 +51,10 @@ describe("personal resource attachments in Chromium", () => {
     await Promise.allSettled([browserContext?.close(), browser?.close(), web?.stop()]);
   }, 30_000);
 
-  test("create and Send/Steer use automatic message-only authority plus exact shared warning", async () => {
+  test("create and Send/Steer retain message-only authority without passive composer copy", async () => {
     const control = page.locator("[data-personal-resource-attachment]");
-    expect(await control.first().ariaSnapshot()).toContain("Private deploy keys");
-    expect(await control.first().locator("fieldset").count()).toBe(0);
-    expect(await control.first().getByText("Your resource access").count()).toBe(0);
-    expect(await control.first().getByRole("radiogroup").count()).toBe(0);
-    expect(await control.first().getByRole("radio").count()).toBe(0);
-    expect(await control.first().getByRole("checkbox").count()).toBe(0);
+    expect(await control.count()).toBe(0);
     expect(await page.getByRole("button", { name: "Create session" }).isDisabled()).toBe(false);
-    expect(await control.first().textContent()).toContain("used only for messages you send");
-    expect(await control.first().textContent()).toContain("cannot use your credential");
     await page.getByRole("button", { name: "Create session" }).click();
     expect(JSON.parse((await page.getByTestId("create-receipt").textContent()) ?? "{}")).toEqual({
       mode: "once",

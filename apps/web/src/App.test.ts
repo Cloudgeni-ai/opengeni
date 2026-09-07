@@ -1582,6 +1582,55 @@ describe("summarizeSessionFailure", () => {
     );
   });
 
+  test("reports an unclaimed failure instead of reusing a previous provider rejection", () => {
+    const failure = {
+      ...event(3, "session.status.changed", {
+        status: "failed",
+        code: "pre_claim_failure",
+        failedSystemUpdateIds: ["update-1"],
+      }),
+      turnId: null,
+    };
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", { code: "provider_safety_refusal", error: "Old rejection" }),
+          turnId: "previous-turn",
+        },
+        event(2, "session.status.changed", { status: "queued" }),
+        failure,
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe(
+      "The session failed before a turn could start. No error details were recorded.",
+    );
+    expect(summary.safetyRefusal).toBe(false);
+    expect(summary.failedAt).toBe(failure.occurredAt);
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
+  test("keeps the detailed same-turn failure paired with its pre-claim status", () => {
+    const summary = summarizeSessionFailure(
+      [
+        {
+          ...event(1, "turn.failed", {
+            code: "pre_claim_failure",
+            error: "Database connection lost",
+          }),
+          turnId: "failed-turn",
+        },
+        {
+          ...event(2, "session.status.changed", { status: "failed", code: "pre_claim_failure" }),
+          turnId: "failed-turn",
+        },
+      ],
+      "failed",
+    );
+    expect(summary.reason).toBe("Database connection lost");
+    expect(summary.failedTurnCount).toBe(1);
+  });
+
   test("reports nothing for a clean session", () => {
     expect(summarizeSessionFailure([event(1, "user.message", { text: "hi" })], "failed")).toEqual({
       reason: null,
