@@ -1,6 +1,9 @@
 import {
   ActiveSessionHistoryLimitExceededError,
   ApprovalRunStateLimitExceededError,
+  isDatabasePersistenceFailure,
+  nestedPostgresSqlState,
+  safeDatabaseErrorFacts,
   isRetryableDatabaseTransportFailure,
   isSessionEventPersistenceError,
   SandboxLeaseTransitionError,
@@ -1064,6 +1067,17 @@ export function agentRunFailurePayload(
       };
     }
     return { error: message, code: "provider_unavailable", retryable: true };
+  }
+  if (isDatabasePersistenceFailure(error)) {
+    const database = safeDatabaseErrorFacts(error);
+    const sqlState = nestedPostgresSqlState(error);
+    if (sqlState !== null || Object.keys(database).length > 0) {
+      return {
+        error: message,
+        sqlState,
+        ...(Object.keys(database).length > 0 ? { database } : {}),
+      };
+    }
   }
   return { error: message };
 }
