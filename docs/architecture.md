@@ -1272,7 +1272,8 @@ input surface, not an implicit queue or whole conversation. Sites use the same
 component with their standard Site-bound SDK client.
 
 Site authoring installs exact npm package versions from the runtime-generated
-`package-versions.json` beside the skill. Stable defaults come from source
+`package-versions.json` beside the skill. The manifest carries this generated
+file without writing into the worker's application directory. Stable defaults come from source
 package manifests; canary deployments set `OPENGENI_SITE_PACKAGE_VERSIONS` to
 their published SDK/React/Codemode version map. Only local development enables
 `OPENGENI_LOCAL_SITE_PACKAGES` and packages dirty checkout source into archives
