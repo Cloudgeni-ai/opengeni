@@ -284,7 +284,7 @@ describe("ModelPolicyPicker", () => {
       // React's change-event feature detection runs before Happy DOM is registered.
       // Use the same event seam as human-input.test.ts; browser input is verified live.
       input.value = value;
-      const key = Object.keys(input).find((key) => key.startsWith("__reactProps$"))!;
+      const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;
       const handler = (
         input as unknown as Record<
           string,
