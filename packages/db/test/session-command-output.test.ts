@@ -1,8 +1,26 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { bootstrapWorkspace, createDb, createSession, type DbClient } from "../src";
+import { CommandReadResult } from "@opengeni/contracts";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createSession,
+  settleConnectedMachineSessionBackgroundCommand,
+  settleClaimedConnectedMachineBackgroundCommand,
+  type DbClient,
+} from "../src";
 import { appendSessionCommandOutput } from "../src/session-command-output";
-import { readSessionBackgroundCommandOutput } from "../src/session-background-commands";
+import {
+  readSessionBackgroundCommandOutput,
+  recordConnectedMachineBackgroundCommandProof,
+} from "../src/session-background-commands";
+import { fromPostgresLosslessJson } from "../src/lossless-json";
+import {
+  FakeOpRunner,
+  InMemoryOpStreamTransport,
+} from "../../runtime/src/sandbox/selfhosted/op-testing";
+import { SelfhostedSession } from "../../runtime/src/sandbox/selfhosted/session";
+import { runWithToolCallCorrelation } from "../../runtime/src/sandbox/op-correlation";
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -42,7 +60,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function connected() {
+async function connected(
+  enrollmentId: string = crypto.randomUUID(),
+  opId: string = crypto.randomUUID(),
+) {
   const commandId = crypto.randomUUID();
   await shared.admin`insert into session_background_commands ${shared.admin({
     id: commandId,
@@ -52,12 +73,179 @@ async function connected() {
     provider: "connected_machine",
     state: "running",
     control_workspace_id: workspaceId,
-    enrollment_id: crypto.randomUUID(),
+    enrollment_id: enrollmentId,
     connection_instance_id: "launch",
-    op_id: commandId,
+    op_id: opId,
   })}`;
   return { accountId, workspaceId, sessionId, commandId };
 }
+
+test("native zero-exit failure persists exact details in pending notification and a fresh reader", async () => {
+  for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO"]) {
+    const enrollmentId = crypto.randomUUID();
+    const correlation = crypto.randomUUID();
+    const opId = `${correlation}:0`;
+    const identity = await connected(enrollmentId, opId);
+    const transport = new InMemoryOpStreamTransport();
+    const runner = new FakeOpRunner({
+      transport,
+      workspaceId,
+      agentId: enrollmentId,
+      connectionInstanceId: "launch",
+    });
+    const detail = { retained_bytes: "268435456", stdout_bytes: "7" };
+    runner.script(opId, {
+      live: true,
+      holdUntilCancel: true,
+      frames: [{ channel: "stdout", bytes: "partial" }],
+      exit: { exitCode: 0, failureCode, failureDetail: detail },
+    });
+    const session = new SelfhostedSession({
+      workspaceId,
+      workspaceRoot: "/home/user/project",
+      agentId: enrollmentId,
+      connectionInstanceId: "launch",
+      controlRpc: runner,
+      relay: { host: "relay.test" },
+      timeoutMs: 2000,
+      execTimeoutMs: 5000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      opStream: { transport },
+      adoptBackgroundCommand: async () => ({ commandId: identity.commandId }),
+      captureBackgroundCommandOutput: async (_id, frames) => {
+        for (const frame of frames)
+          await appendSessionCommandOutput(client.db, {
+            ...identity,
+            ...frame,
+            chunkId: `op-frame:${frame.sequence}`,
+          });
+      },
+      settleBackgroundCommand: async (command) => {
+        await settleConnectedMachineSessionBackgroundCommand(client.db, {
+          ...identity,
+          ...command,
+        });
+      },
+    });
+    await runWithToolCallCorrelation(correlation, () =>
+      session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+    );
+    runner.runs.get(opId)!.script.holdUntilCancel = false;
+    await expect(session.refreshOwnedCommand(identity.commandId)).rejects.toMatchObject({
+      detail: { failure_code: failureCode, ...detail },
+    });
+    const [notification] =
+      await shared.admin`select classification, summary, payload, payload_codec_version, state from session_system_updates where session_id=${sessionId} and source_id=${identity.commandId} and kind='background_command_result'`;
+    expect(notification).toMatchObject({ classification: "failure", state: "pending" });
+    expect(notification!.summary).not.toContain("completed successfully");
+    expect(
+      fromPostgresLosslessJson(notification!.payload, notification!.payload_codec_version),
+    ).toMatchObject({ failure: { code: failureCode, detail, retryable: false } });
+    const newClient = createDb(shared.appUrl, { max: 1 });
+    try {
+      const read = await readSessionBackgroundCommandOutput(newClient.db, identity);
+      const parsed = CommandReadResult.parse({
+        ...read,
+        waitedMs: 0,
+        timedOut: false,
+        aborted: false,
+        liveFanout: false,
+      });
+      expect(parsed).toMatchObject({
+        exitCode: 0,
+        terminal: true,
+        failure: { code: failureCode, detail, retryable: false },
+      });
+      expect(parsed.chunks.map((chunk) => chunk.chunk).join("")).toBe("partial");
+    } finally {
+      await newClient.close();
+    }
+  }
+});
+
+test("checkpointed runner details survive settlement recovery and conflicting proof fails closed", async () => {
+  const enrollmentId = crypto.randomUUID();
+  const opId = crypto.randomUUID();
+  const identity = await connected(enrollmentId, opId);
+  const claimId = crypto.randomUUID();
+  await shared.admin`update session_background_commands set reconcile_claim_id=${claimId}, reconcile_claimed_at=now() where id=${identity.commandId}`;
+  const claim = {
+    ...identity,
+    enrollmentId,
+    opId,
+    claimId,
+    state: "running" as const,
+    controlWorkspaceId: workspaceId,
+    connectionInstanceId: "launch",
+    reconcileAttempts: 1,
+    proof: null,
+  };
+  const failure = {
+    code: "OP_OVERFLOW",
+    detail: { retained_bytes: "4096" },
+    retryable: false as const,
+  };
+  const proof = {
+    outcome: "exited" as const,
+    exitCode: 0,
+    reason: "op_failure_OP_OVERFLOW",
+    failure,
+    observedAt: new Date(),
+  };
+  await recordConnectedMachineBackgroundCommandProof(client.db, { claim, proof });
+  await expect(
+    recordConnectedMachineBackgroundCommandProof(client.db, {
+      claim,
+      proof: { ...proof, failure: { ...failure, detail: { retained_bytes: "8192" } } },
+    }),
+  ).rejects.toThrow("conflicts with durable proof");
+  expect(
+    await settleConnectedMachineSessionBackgroundCommand(client.db, {
+      ...identity,
+      controlWorkspaceId: workspaceId,
+      enrollmentId,
+      connectionInstanceId: "launch",
+      opId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: proof.reason,
+      failure: { ...failure, detail: { retained_bytes: "8192" } },
+    }),
+  ).toBeNull();
+  const freshClient = createDb(shared.appUrl, { max: 1 });
+  try {
+    expect(
+      (await settleClaimedConnectedMachineBackgroundCommand(freshClient.db, { claim })).settled,
+    ).toBe(true);
+    const [notification] =
+      await shared.admin`select classification, payload, payload_codec_version from session_system_updates where session_id=${sessionId} and source_id=${identity.commandId} and kind='background_command_result'`;
+    expect(notification!.classification).toBe("failure");
+    expect(
+      fromPostgresLosslessJson(notification!.payload, notification!.payload_codec_version),
+    ).toMatchObject({ failure });
+    expect((await readSessionBackgroundCommandOutput(freshClient.db, identity)).failure).toEqual(
+      failure,
+    );
+  } finally {
+    await freshClient.close();
+  }
+});
+
+test("runner failure storage rejects malformed or oversized metadata without changing command state", async () => {
+  const identity = await connected();
+  for (const failure of [
+    { retryable: false },
+    { code: "OP_OVERFLOW", retryable: true },
+    { code: "OP_OVERFLOW", retryable: false, detail: { bytes: "x".repeat(9000) } },
+  ]) {
+    await expect(
+      (async () => {
+        await shared.admin`update session_background_commands set runner_failure=${JSON.stringify(failure)}::jsonb where id=${identity.commandId}`;
+      })(),
+    ).rejects.toThrow("session_background_commands_runner_failure_check");
+  }
+  expect((await readSessionBackgroundCommandOutput(client.db, identity)).state).toBe("running");
+});
 
 test("captured frames are idempotent, pageable while running, and do not observe completion", async () => {
   const identity = await connected();
@@ -110,6 +298,34 @@ test("unknown and cross-session command identities cannot publish output", async
       chunk: "no",
     }),
   ).rejects.toThrow();
+});
+
+test("already-settled zero-exit runner failures survive durable output read and public parsing", async () => {
+  for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO", ""]) {
+    const identity = await connected();
+    const reason = failureCode ? `op_failure_${failureCode}` : "op_exit";
+    await shared.admin`update session_background_commands set state='exited', exit_code=0, settlement_reason=${reason}, settled_at=now() where id=${identity.commandId}`;
+    await appendSessionCommandOutput(client.db, {
+      ...identity,
+      chunkId: "op-frame:1",
+      stream: "stdout",
+      chunk: "retained partial",
+    });
+    const page = await readSessionBackgroundCommandOutput(client.db, identity);
+    const parsed = CommandReadResult.parse({
+      ...page,
+      waitedMs: 0,
+      timedOut: false,
+      aborted: false,
+      liveFanout: false,
+    });
+    expect(parsed).toMatchObject({ terminal: true, exitCode: 0, settlementReason: reason });
+    expect(parsed.failure).toEqual(
+      failureCode ? { code: failureCode, retryable: false } : undefined,
+    );
+    expect(parsed.chunks.map((chunk) => chunk.chunk).join("")).toBe("retained partial");
+    expect(parsed.completionObservedAt).not.toBeNull();
+  }
 });
 
 test("managed initial output persists before background adoption", async () => {

@@ -9713,6 +9713,8 @@ export const sessionBackgroundCommands = pgTable(
     cancelRequestedBy: text("cancel_requested_by"),
     exitCode: integer("exit_code"),
     settlementReason: text("settlement_reason"),
+    runnerFailure:
+      jsonb("runner_failure").$type<import("@opengeni/contracts").SessionCommandFailure>(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     completionObservedAt: timestamp("completion_observed_at", { withTimezone: true }),
@@ -9739,6 +9741,20 @@ export const sessionBackgroundCommands = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    runnerFailureCheck: check(
+      "session_background_commands_runner_failure_check",
+      sql`
+      ${table.runnerFailure} IS NULL OR (
+        ${table.provider} = 'connected_machine'
+        AND jsonb_typeof(${table.runnerFailure}) = 'object'
+        AND octet_length(${table.runnerFailure}::text) <= 8192
+        AND ${table.runnerFailure} ?& ARRAY['code', 'retryable']
+        AND jsonb_typeof(${table.runnerFailure} -> 'code') = 'string'
+        AND (${table.runnerFailure} ->> 'code') ~ '^[A-Za-z0-9_-]{1,128}$'
+        AND ${table.runnerFailure} -> 'retryable' = 'false'::jsonb
+        AND (NOT (${table.runnerFailure} ? 'detail') OR jsonb_typeof(${table.runnerFailure} -> 'detail') = 'object')
+      )`,
+    ),
     workspaceSession: foreignKey({
       name: "session_background_commands_session_fk",
       columns: [table.workspaceId, table.sessionId],

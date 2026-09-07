@@ -2,6 +2,8 @@ import type {
   SessionBackgroundCommand,
   SessionBackgroundCommandActivity,
 } from "@opengeni/contracts";
+import { SessionCommandFailure } from "@opengeni/contracts";
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, gte, inArray, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -14,6 +16,7 @@ export type ConnectedMachineBackgroundCommandProof = {
   outcome: "exited" | "lost";
   exitCode: number | null;
   reason: string;
+  failure?: SessionCommandFailure;
   observedAt: Date;
 };
 
@@ -79,6 +82,18 @@ function commandPreview(value: string): string {
 function mapCommand(
   row: typeof schema.sessionBackgroundCommands.$inferSelect,
 ): SessionBackgroundCommand {
+  const terminal = row.state === "exited" || row.state === "lost";
+  const legacyFailureCode =
+    row.provider === "connected_machine"
+      ? /^op_failure_([A-Za-z0-9_-]{1,128})$/.exec(row.settlementReason ?? "")?.[1]
+      : undefined;
+  const failure = !terminal
+    ? undefined
+    : row.runnerFailure
+      ? SessionCommandFailure.parse(row.runnerFailure)
+      : legacyFailureCode
+        ? { code: legacyFailureCode, retryable: false as const }
+        : undefined;
   return {
     id: row.id,
     workspaceId: row.workspaceId,
@@ -89,6 +104,7 @@ function mapCommand(
     cancelRequestedAt: row.cancelRequestedAt?.toISOString() ?? null,
     exitCode: row.exitCode ?? null,
     settlementReason: row.settlementReason ?? null,
+    ...(failure ? { failure } : {}),
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
     completionObservedAt: row.completionObservedAt?.toISOString() ?? null,
@@ -388,10 +404,13 @@ export async function recordConnectedMachineBackgroundCommandProof(
     proof: ConnectedMachineBackgroundCommandProof;
   },
 ): Promise<void> {
+  const failure = input.proof.failure ? SessionCommandFailure.parse(input.proof.failure) : null;
   const reason = boundedSessionBackgroundCommandReason(
     input.proof.reason,
     "Connected command proof reason",
   );
+  if (failure && reason !== `op_failure_${failure.code}`)
+    throw new Error("Connected command failure code conflicts with proof reason");
   if (input.proof.outcome === "exited" && input.proof.exitCode === null) {
     throw new Error("Connected command exit proof requires an exit code");
   }
@@ -415,6 +434,7 @@ export async function recordConnectedMachineBackgroundCommandProof(
           current.reconcileProofOutcome !== input.proof.outcome ||
           current.reconcileProofExitCode !== input.proof.exitCode ||
           current.reconcileProofReason !== reason ||
+          !isDeepStrictEqual(current.runnerFailure, failure) ||
           observedAt !== input.proof.observedAt.getTime()
         ) {
           throw new Error("Connected command reconciliation proof conflicts with durable proof");
@@ -427,6 +447,7 @@ export async function recordConnectedMachineBackgroundCommandProof(
           reconcileProofOutcome: input.proof.outcome,
           reconcileProofExitCode: input.proof.exitCode,
           reconcileProofReason: reason,
+          runnerFailure: failure,
           reconcileProofObservedAt: input.proof.observedAt,
           lastReconcileOutcome: `proof_${input.proof.outcome}`,
           updatedAt: new Date(),
@@ -786,13 +807,17 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: SessionCommandFailure | undefined;
   },
   mutateTerminal: SessionBackgroundCommandTerminalMutation,
 ): Promise<SessionBackgroundCommand | null> {
+  const failure = input.failure ? SessionCommandFailure.parse(input.failure) : null;
   const reason = boundedSessionBackgroundCommandReason(
     input.reason,
     "Connected command settlement reason",
   );
+  if (failure && reason !== `op_failure_${failure.code}`)
+    throw new Error("Connected command failure code conflicts with settlement reason");
   if (input.outcome === "exited" && input.exitCode === null) {
     throw new Error("Connected command exit settlement requires an exit code");
   }
@@ -811,6 +836,7 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
           state: input.outcome,
           exitCode: input.outcome === "exited" ? input.exitCode : null,
           settlementReason: reason,
+          runnerFailure: failure,
           settledAt,
           reconcileClaimId: null,
           reconcileClaimedAt: null,
@@ -831,6 +857,10 @@ export async function settleConnectedMachineSessionBackgroundCommandWithMutation
             eq(schema.sessionBackgroundCommands.enrollmentId, input.enrollmentId),
             eq(schema.sessionBackgroundCommands.connectionInstanceId, input.connectionInstanceId),
             eq(schema.sessionBackgroundCommands.opId, input.opId),
+            // A fast owner settlement cannot erase or replace metadata already
+            // checkpointed by the reconciler under the exact command identity.
+            sql`(${schema.sessionBackgroundCommands.runnerFailure} is null or
+              ${schema.sessionBackgroundCommands.runnerFailure} = ${failure ? JSON.stringify(failure) : null}::jsonb)`,
             inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"]),
           ),
         )
@@ -1089,6 +1119,8 @@ export async function readSessionBackgroundCommandOutput(
     commandId: command.id,
     state: command.state,
     exitCode: command.exitCode,
+    settlementReason: command.settlementReason,
+    ...(command.failure ? { failure: command.failure } : {}),
     terminal,
     completionObservedAt: observed?.completionObservedAt ?? null,
     ...page,

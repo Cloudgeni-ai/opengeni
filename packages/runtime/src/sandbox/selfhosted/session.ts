@@ -60,7 +60,12 @@ import {
   notifyDurableOpOwnershipTransferStarted,
   notifyDurableOpOwnershipTransferred,
 } from "../op-correlation";
-import { OpStreamExecClient, type OpStreamJournal, type OpStreamOutputFrame } from "./op-stream";
+import {
+  OpStreamExecClient,
+  runnerFailureToControlError,
+  type OpStreamJournal,
+  type OpStreamOutputFrame,
+} from "./op-stream";
 import { OpStreamUnavailableError, type OpStreamTransport } from "./op-transport";
 import { connectedMachineWorkspaceRootsEqual, resolveConnectedMachinePath } from "./workspace-path";
 
@@ -348,6 +353,7 @@ export interface SelfhostedSessionDeps {
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: import("@opengeni/contracts").SessionCommandFailure;
   }) => void | Promise<void>;
   /** The clock the bounded control-op retry loop drives (sleep + jitter). Injected
    *  so tests are deterministic; defaults to a real timer + `Math.random()`. */
@@ -1030,9 +1036,22 @@ export class SelfhostedSession {
                       opId,
                       outcome: "exited",
                       exitCode: terminal.outcome.response.exitCode,
-                      reason: "op_exit",
+                      reason: terminal.outcome.failure
+                        ? `op_failure_${terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                        : "op_exit",
+                      ...(terminal.outcome.failure
+                        ? {
+                            failure: {
+                              code: terminal.outcome.failure.failureCode,
+                              detail: terminal.outcome.failure.failureDetail,
+                              retryable: false as const,
+                            },
+                          }
+                        : {}),
                     });
                     this.ownedCommandReaders.delete(adopted.commandId);
+                    if (terminal.outcome.failure)
+                      throw runnerFailureToControlError(terminal.outcome.failure);
                   }
                 });
                 notifyDurableOpOwnershipTransferred(opId);
@@ -1053,7 +1072,18 @@ export class SelfhostedSession {
               opId,
               outcome: "exited",
               exitCode: result.terminal.outcome.response.exitCode,
-              reason: "op_exit",
+              reason: result.terminal.outcome.failure
+                ? `op_failure_${result.terminal.outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+                : "op_exit",
+              ...(result.terminal.outcome.failure
+                ? {
+                    failure: {
+                      code: result.terminal.outcome.failure.failureCode,
+                      detail: result.terminal.outcome.failure.failureDetail,
+                      retryable: false as const,
+                    },
+                  }
+                : {}),
             }),
           ).catch(() => undefined);
         }
@@ -1091,7 +1121,18 @@ export class SelfhostedSession {
             opId,
             outcome: "exited",
             exitCode: outcome.response.exitCode,
-            reason: "op_exit",
+            reason: outcome.failure
+              ? `op_failure_${outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128)}`
+              : "op_exit",
+            ...(outcome.failure
+              ? {
+                  failure: {
+                    code: outcome.failure.failureCode,
+                    detail: outcome.failure.failureDetail,
+                    retryable: false as const,
+                  },
+                }
+              : {}),
           }),
         ).catch(() => undefined);
       }

@@ -1,6 +1,9 @@
 import { z } from "zod";
 import type { SessionEvent, SessionEventType } from "@opengeni/contracts";
-import type { ListSessionEventPageOptions, SessionEventPage } from "@opengeni/db";
+import type {
+  SessionEventSliceOptions,
+  SessionEventSlicePage,
+} from "@opengeni/db/session-event-slices";
 
 export const SESSION_EVENT_VIEW_MAX_BYTES = 16 * 1024;
 const selectionSchema = z.object({
@@ -21,10 +24,10 @@ const selectionSchema = z.object({
   before: z.number().int().positive().nullable(),
 });
 const cursorSchema = z.object({
-  v: z.literal(1),
+  v: z.union([z.literal(1), z.literal(2)]),
   selection: selectionSchema,
   sequence: z.number().int().positive().nullable(),
-  offset: z.number().int().nonnegative(),
+  offset: z.number().int().nonnegative().max(2_147_483_647),
 });
 type Selection = z.infer<typeof selectionSchema>;
 export type SessionEventViewInput = {
@@ -43,7 +46,7 @@ type Item = { sequence: number; turnId?: string; role?: string; text?: string } 
   string,
   unknown
 >;
-type ReadPage = (options: ListSessionEventPageOptions) => Promise<SessionEventPage>;
+type ReadPage = (options: SessionEventSliceOptions) => Promise<SessionEventSlicePage>;
 const types: Record<Selection["view"], SessionEventType[]> = {
   conversation: ["user.message", "agent.message.completed"],
   // Final turn output is authoritative: do not repeat message.completed text.
@@ -55,8 +58,8 @@ const record = (value: unknown): Record<string, unknown> =>
     ? (value as Record<string, unknown>)
     : {};
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value, null, 2), "utf8");
-const encode = (selection: Selection, sequence: number | null = null, offset = 0) =>
-  Buffer.from(JSON.stringify({ v: 1, selection, sequence, offset })).toString("base64url");
+const encode = (selection: Selection, sequence: number | null = null, offset = 0, v = 2) =>
+  Buffer.from(JSON.stringify({ v, selection, sequence, offset })).toString("base64url");
 
 /** A cursor is a bounded selector, never authority. The caller reauthorizes every read. */
 export function resolveSessionEventView(input: SessionEventViewInput) {
@@ -107,6 +110,14 @@ export function resolveSessionEventView(input: SessionEventViewInput) {
   ) {
     throw new Error("callId/includeArguments/includeOutput require view=tools");
   }
+  if (
+    continuation &&
+    ((continuation.sequence === null && continuation.offset !== 0) ||
+      (continuation.sequence !== null &&
+        (continuation.sequence <= selection.after ||
+          (selection.before !== null && continuation.sequence >= selection.before))))
+  )
+    throw new Error("Invalid session_events cursor position");
   return { selection, continuation };
 }
 
@@ -140,6 +151,7 @@ function project(event: SessionEvent, selection: Selection): Item | null {
     callId,
     kind: output ? "result" : "call",
     ...(typeof p.name === "string" ? { name: p.name } : {}),
+    ...(p.identityOmitted === true ? { identityOmitted: true } : {}),
     ...(p.isError === true || record(value).isError === true ? { isError: true } : {}),
     ...((output ? selection.includeOutput : selection.includeArguments) && value !== undefined
       ? {
@@ -167,6 +179,7 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
   let nextCursor: string | null = null;
   let sourceExact = true;
   let edge: number | null = null;
+  let legacyActive = continuation?.v === 1 && continuation.sequence !== null;
   const page = () => ({
     view: selection.view,
     direction: selection.direction,
@@ -179,10 +192,10 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
     ...(!sourceExact
       ? {
           sourceLoss: {
-            reason: "database_read_projection" as const,
+            reason: "structured_value_exceeds_budget" as const,
             completeTextAvailable: false as const,
             message:
-              "The database returned bounded audit previews for oversized legacy rows. Original text is unavailable through this read; conversation omits previews rather than presenting them as complete messages. Debug view can inspect the retained preview.",
+              "An oversized structured value was omitted. Scalar text remains retrievable through continuation; omitted structured values are not complete JSON results.",
           },
         }
       : {}),
@@ -190,30 +203,50 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
   });
   const resume = (sequence: number, offset = 0) => {
     hasMore = true;
-    nextCursor = encode({ ...selection, after, before }, sequence, offset);
+    nextCursor = encode(
+      { ...selection, after, before },
+      sequence,
+      offset,
+      legacyActive && sequence === continuation?.sequence ? 1 : 2,
+    );
   };
   // Bound work even when a sparse exact callId lookup matches nothing. The
   // returned cursor advances the scan without claiming the lookup is exhausted.
-  for (let scan = 0; scan < 8; scan += 1) {
+  for (let scan = 0; scan < 64; scan += 1) {
     const source = await read({
       after,
       ...(before === null ? {} : { before }),
       direction: selection.direction,
-      limit: 64,
+      limit: 8,
       includeTypes: types[selection.view],
       payloadMode: "full",
       excludeUnclaimedHumanPrompts: true,
       maxBytes: 1024 * 1024,
+      legacyUtf16: legacyActive,
+      view: selection.view,
+      includeArguments: selection.includeArguments,
+      includeOutput: selection.includeOutput,
+      ...(continuation?.sequence
+        ? { sourceSequence: continuation.sequence, sourceOffset: continuation.offset }
+        : {}),
     });
     sourceExact &&= source.fullPayloadsExact;
     const ordered = selection.direction === "before" ? [...source.events].reverse() : source.events;
     for (const event of ordered) {
+      const slice = source.slices?.[event.sequence];
       const item = project(event, selection);
       if (item) {
         const offset = continuation?.sequence === event.sequence ? continuation.offset : 0;
-        if (offset > (item.text?.length ?? 0))
+        if (slice?.omitted) {
+          delete item.text;
+          item.sourceOmitted = { reason: "structured_value_exceeds_budget", complete: false };
+        }
+        const advance = (text: string) =>
+          slice?.unit === "codepoint" ? Array.from(text).length : text.length;
+        if (!slice && offset > (item.text?.length ?? 0))
           throw new Error("Invalid message continuation offset");
         if (
+          !slice &&
           offset > 0 &&
           item.text &&
           /[\uD800-\uDBFF]/.test(item.text[offset - 1]!) &&
@@ -221,13 +254,13 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
         ) {
           throw new Error("Invalid message continuation offset: splits a surrogate pair");
         }
-        if (offset > 0 && item.text) item.text = item.text.slice(offset);
+        if (!slice && offset > 0 && item.text) item.text = item.text.slice(offset);
         events.push(item);
         // Reserve enough for the bounded cursor and fragment facts.
         if (bytes(page()) > SESSION_EVENT_VIEW_MAX_BYTES - 4096) {
           events.pop();
           if (events.length > 0) {
-            resume(event.sequence);
+            resume(event.sequence, offset);
             if (selection.direction === "before") events.reverse();
             return page();
           }
@@ -247,15 +280,33 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
           events.push({
             ...item,
             text: text.slice(0, low),
-            fragment: { offset, nextOffset: offset + low, complete: false },
+            fragment: {
+              offset,
+              nextOffset: offset + advance(text.slice(0, low)),
+              complete: false,
+              unit: slice?.unit ?? "utf16",
+            },
           });
-          resume(event.sequence, offset + low);
+          resume(event.sequence, offset + advance(text.slice(0, low)));
+          return page();
+        }
+        const nextOffset = offset + advance(item.text ?? "");
+        if (slice && !slice.omitted && nextOffset < slice.total) {
+          item.fragment = { offset, nextOffset, complete: false, unit: slice.unit };
+          resume(event.sequence, nextOffset);
+          if (selection.direction === "before") events.reverse();
           return page();
         }
         if (offset > 0)
-          item.fragment = { offset, nextOffset: offset + (item.text?.length ?? 0), complete: true };
+          item.fragment = {
+            offset,
+            nextOffset,
+            complete: true,
+            unit: slice?.unit ?? "utf16",
+          };
       }
       edge = event.sequence;
+      legacyActive = false;
       if (selection.direction === "after") after = event.sequence;
       else before = event.sequence;
       if (events.length >= limit) {
@@ -264,6 +315,12 @@ export async function readSessionEventView(input: SessionEventViewInput, read: R
         if (selection.direction === "before") events.reverse();
         return page();
       }
+    }
+    // Metadata selection can advance over stale/duplicate rows without a
+    // projected payload. Use its covered edge rather than repeating the page.
+    if (source.coveredSequence) {
+      if (selection.direction === "after") after = Math.max(after, source.coveredSequence.last);
+      else before = Math.min(before ?? Infinity, source.coveredSequence.first);
     }
     if (!source.hasMore) {
       hasMore = false;

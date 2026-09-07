@@ -72884,6 +72884,7 @@ function backgroundCommandTerminalMutation(input: {
                 state: command.state,
                 exitCode: command.exitCode,
                 reason,
+                ...(command.failure ? { failure: command.failure } : {}),
                 settledAt: command.settledAt,
                 outputLocator,
               },
@@ -72913,10 +72914,13 @@ function backgroundCommandTerminalMutation(input: {
         return;
       }
       const classification: SystemUpdateClassification =
-        command.state === "exited" && command.exitCode === 0 ? "success" : "failure";
+        command.state === "exited" && command.exitCode === 0 && !command.failure
+          ? "success"
+          : "failure";
       const commandLabel = command.commandPreview || "Background command";
-      const summary =
-        command.state === "lost"
+      const summary = command.failure
+        ? `${commandLabel}: output delivery failed (${command.failure.code}); process exit code ${command.exitCode ?? "unknown"} is not a successful command result.`
+        : command.state === "lost"
           ? `${commandLabel}: result unavailable. Its exit status could not be confirmed.`
           : command.exitCode === 0
             ? `${commandLabel}: completed successfully.`
@@ -72927,6 +72931,7 @@ function backgroundCommandTerminalMutation(input: {
         state: command.state,
         exitCode: command.exitCode,
         reason,
+        ...(command.failure ? { failure: command.failure } : {}),
         outputLocator,
       };
       const [insertedUpdate] = await tx
@@ -73067,6 +73072,7 @@ export type SessionBackgroundCommandTerminalSettlement = {
 export async function settleConnectedMachineSessionBackgroundCommand(
   db: Database,
   input: {
+    failure?: SessionBackgroundCommand["failure"];
     accountId: string;
     workspaceId: string;
     sessionId: string;

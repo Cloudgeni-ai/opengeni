@@ -913,6 +913,7 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
@@ -1182,6 +1183,7 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
@@ -1557,6 +1559,7 @@ export async function establishSelfhostedTurnSession(
         outcome: command.outcome,
         exitCode: command.exitCode,
         reason: command.reason,
+        ...(command.failure ? { failure: command.failure } : {}),
       });
       if (settlement && bus) {
         await bus

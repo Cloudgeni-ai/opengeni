@@ -1257,17 +1257,22 @@ export function connectedCommandProofFromStatus(
         throw new Error("Connected command completed without an exit record");
       }
       const failureCode = exit.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
-      const reason = exit.cancelled
-        ? "op_cancelled"
-        : exit.timedOut
-          ? "op_timed_out"
-          : failureCode
-            ? `op_failure_${failureCode}`
+      const reason = failureCode
+        ? `op_failure_${failureCode}`
+        : exit.cancelled
+          ? "op_cancelled"
+          : exit.timedOut
+            ? "op_timed_out"
             : "op_exit";
       return {
         outcome: "exited",
         exitCode: exit.exitCode,
         reason,
+        ...(failureCode
+          ? {
+              failure: { code: failureCode, detail: exit.failureDetail, retryable: false as const },
+            }
+          : {}),
         observedAt,
       };
     }

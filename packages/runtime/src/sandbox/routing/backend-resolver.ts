@@ -134,6 +134,7 @@ export interface ActiveBackendResolverDeps {
     outcome: "exited" | "lost";
     exitCode: number | null;
     reason: string;
+    failure?: import("@opengeni/contracts").SessionCommandFailure;
   }) => void | Promise<void>;
   /**
    * The run's declared sandbox environment — the SAME `Record<string,string>` the

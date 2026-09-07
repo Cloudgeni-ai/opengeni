@@ -7740,6 +7740,7 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       state: z.enum(["exited", "lost"]),
       exitCode: z.number().int().nullable(),
       reason: boundedUtf8String(512),
+      failure: z.lazy(() => SessionCommandFailure).optional(),
       outputLocator: z
         .object({
           eventType: z.literal("sandbox.command.output.delta"),
@@ -11905,6 +11906,20 @@ export const SessionBackgroundCommandActivity = z
   .strict();
 export type SessionBackgroundCommandActivity = z.infer<typeof SessionBackgroundCommandActivity>;
 
+export const SessionCommandFailure = z
+  .object({
+    code: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    detail: z.record(z.string().max(128), z.string().max(2048)).optional(),
+    retryable: z.literal(false),
+  })
+  .refine(
+    (failure) =>
+      Object.keys(failure.detail ?? {}).length <= 32 &&
+      new TextEncoder().encode(JSON.stringify(failure)).byteLength <= 4096,
+    "Command failure metadata exceeds its retained bound",
+  );
+export type SessionCommandFailure = z.infer<typeof SessionCommandFailure>;
+
 export const SessionBackgroundCommand = z
   .object({
     id: z.string().uuid(),
@@ -11916,6 +11931,7 @@ export const SessionBackgroundCommand = z
     cancelRequestedAt: z.string().nullable(),
     exitCode: z.number().int().nullable(),
     settlementReason: z.string().nullable(),
+    failure: SessionCommandFailure.optional(),
     startedAt: z.string(),
     settledAt: z.string().nullable(),
     completionObservedAt: z.string().nullable().optional(),
@@ -11941,8 +11957,17 @@ export const CommandReadResult = /* @__PURE__ */ (() =>
       commandId: z.string().uuid(),
       state: SessionBackgroundCommandState,
       exitCode: z.number().int().nullable(),
+      settlementReason: z.string().nullable().optional(),
+      // A physical zero exit is not success when runner output delivery failed.
+      failure: SessionCommandFailure.optional(),
       terminal: z.boolean(),
       completionObservedAt: z.string().nullable(),
+      freshness: z
+        .object({
+          status: z.literal("refresh_unavailable"),
+          retryable: z.literal(true),
+        })
+        .optional(),
       chunks: z
         .array(
           z.object({

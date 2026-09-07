@@ -173,29 +173,25 @@ settlement advances that same outbox row in its settlement transaction. A
 workflow close or writer exit racing reconciliation cannot orphan recovery;
 repeated Pause re-arms a missing quiescence wake.
 
-A background command becomes session-owned only after its exact provider
-identity is durably adopted. Before adoption it remains attempt-owned. After
-adoption, ordinary turn completion and Steer detach from it, while explicit
-command cancellation, Pause, or terminal Cancel control its lifetime.
-An explicitly stopped, revoked, or replaced Connected Machine instance ends
-command tracking as `lost`; this never asserts operating-system process death.
-A temporary transport outage alone preserves tracking. Reconciliation drains
-a fixed due-time frontier in batches, sharing offline observations per instance.
-The historical retirement migration preserves command records without creating
-model input or waking old sessions.
-Terminal proof atomically settles the command and appends its audit event.
-Unobserved completion creates fallback input for nonterminal sessions. Terminal
-command reads suppress pending notifications, never history; running reads do
-not. Command interaction is separate from conversation-first history and explicit
-diagnostics. Failed/cancelled sessions retain event-only audit. Live fanout is
-post-commit and replaceable.
+A command is attempt-owned until durable adoption of its exact provider identity.
+Thereafter turn completion and Steer detach; command cancellation, Pause, and
+terminal Cancel control its lifetime. Instance stop/revocation/replacement makes
+Connected Machine tracking `lost`, not proof of process death. Temporary outages
+preserve tracking. Reconciliation batches a fixed due-time frontier, sharing
+per-instance offline observations. Historical retirement preserves records without
+input or wakes.
+Terminal proof commits settlement and audit together. Nonterminal sessions receive
+fallback input unless observed. Terminal reads suppress pending notifications,
+never history; running reads do not. Failed/cancelled sessions retain audit only.
+Fanout is replaceable and post-commit. Conversation history remains separate:
+sequence cursors bound traversal, and `packages/db/src/session-event-slices.ts`
+transfers large message scalars in bounded slices, not whole histories.
 
-A long external wait is likewise session state, not workflow memory or goal
-state. `wait_for_input` records the exact declaring turn and an absolute
-PostgreSQL deadline, then the agent ends its turn. The workflow closes while
-the wait is current and is restarted by durable input or the deadline outbox;
-timeout becomes typed machine input. `session_wait` and `command_wait` remain
-short in-turn reads and never hold an inference indefinitely.
+Long external waits are session state, not workflow memory or goals.
+`wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
+then ends the turn and workflow. Durable input or the deadline outbox restarts
+it; timeout becomes typed input. `session_wait` and `command_wait` are short
+in-turn reads.
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

@@ -1470,6 +1470,27 @@ calls and Codemode use this path; third-party lookalike tools do not. Outside
 that owning context, native reads and background reconciliation refresh the
 stored snapshot. An empty running snapshot can therefore precede capture of
 bytes already produced by the process.
+If a live refresh encounters a recognized temporary transport failure, the
+runtime reauthorizes and rereads the API instead of discarding retained output.
+A still-running result reports `freshness.status: "refresh_unavailable"` and
+`retryable: true`; this is a freshness warning, not proof of command failure or
+completion. No provider operation is retried by this fallback. Authorization,
+consent, fencing, integrity, and unclassified errors still fail closed.
+
+Typed runner failures are distinct from the process exit code: a runner may
+report an output/spool failure alongside exit code zero. Migration 0417 adds
+bounded `runner_failure` metadata to the command row so later reads and
+completion notifications preserve that distinction after the live reader is
+gone. Apply this rolling migration before starting readers that select the new
+field; do not infer successful completion from exit code alone.
+
+Repeated reads by the same live command client retain only an in-memory replay
+frontier, incremental integrity state, and UTF-8 decoder state after successful
+capture. They do not retain the full output prefix. Failed capture discards that
+optimization and permits replay of retained truth; it grants no runner garbage
+collection authority. A fresh client, including a new reconciliation claim,
+still replays the retained prefix and performs idempotent capture. Its work is
+proportional to retained command output, not bounded by the API output-page size.
 
 Connected Machine capture preserves stream identity. SDK native readers can
 return merged output; those retained chunks explicitly report merged stream
