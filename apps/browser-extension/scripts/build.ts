@@ -57,8 +57,12 @@ for (const file of installFiles) {
 }
 const storeManifest = JSON.parse(await readFile(resolve(output, "manifest.json"), "utf8"));
 delete storeManifest.key;
-await Bun.write(resolve(storeOutput, "manifest.json"), `${JSON.stringify(storeManifest, null, 2)}\n`);
-const zip = Bun.spawnSync([
-  "zip", "-q", "-X", resolve(output, "opengeni-browser-extension-store.zip"), ...installFiles,
-], { cwd: storeOutput });
+await Bun.write(
+  resolve(storeOutput, "manifest.json"),
+  `${JSON.stringify(storeManifest, null, 2)}\n`,
+);
+const zip = Bun.spawnSync(
+  ["zip", "-q", "-X", resolve(output, "opengeni-browser-extension-store.zip"), ...installFiles],
+  { cwd: storeOutput },
+);
 if (zip.exitCode !== 0) throw new Error(`Store ZIP failed: ${zip.stderr.toString()}`);
