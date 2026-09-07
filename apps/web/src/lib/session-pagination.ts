@@ -39,11 +39,19 @@ export function applySessionArchiveProjection(current: Session, updated: Session
     archived: updated.archived,
     archivedAt: updated.archivedAt,
     archiveVersion: updated.archiveVersion,
-    pinned: updated.pinned,
-    pinnedAt: updated.pinnedAt,
-    pinVersion: updated.pinVersion,
-    activelyWorking: updated.activelyWorking,
-    attentionVersion: updated.attentionVersion,
+    ...((current.pinVersion ?? 0) <= (updated.pinVersion ?? 0)
+      ? {
+          pinned: updated.pinned,
+          pinnedAt: updated.pinnedAt,
+          pinVersion: updated.pinVersion,
+        }
+      : {}),
+    ...((current.attentionVersion ?? 0) <= (updated.attentionVersion ?? 0)
+      ? {
+          activelyWorking: updated.activelyWorking,
+          attentionVersion: updated.attentionVersion,
+        }
+      : {}),
   };
 }
 
@@ -54,19 +62,22 @@ export function projectSessionArchiveMembership(
   archived: boolean,
   workspaceId: string,
 ): Session[] {
-  const rows = new Map(
-    sessions
-      .filter((session) => Boolean(session.archived) === archived)
-      .map((session) => [session.id, session]),
-  );
+  const rows = new Map(sessions.map((session) => [session.id, session]));
   for (const [id, override] of overrides) {
     if (override.workspaceId !== workspaceId) continue;
     const current = rows.get(id);
-    const projected = current ? applySessionArchiveProjection(current, override) : override;
-    if (Boolean(projected.archived) === archived) rows.set(id, projected);
-    else rows.delete(id);
+    rows.set(id, current ? applySessionArchiveProjection(current, override) : override);
   }
-  return [...rows.values()];
+  return [...rows.values()].flatMap((session) => {
+    // A cached descendant follows its root instead of becoming an orphan row.
+    const root = rows.get(session.rootSessionId ?? session.id);
+    if (Boolean(root?.archived ?? session.archived) !== archived) return [];
+    return [
+      root && root.id !== session.id
+        ? { ...session, archived: root.archived, archivedAt: root.archivedAt }
+        : session,
+    ];
+  });
 }
 
 export function sessionPageKey(workspaceId: string, search: string): string {

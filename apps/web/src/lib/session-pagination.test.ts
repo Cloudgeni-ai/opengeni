@@ -19,6 +19,85 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("keeps cached descendants with their root across archive and restore", () => {
+    const root = {
+      ...row("root"),
+      rootSessionId: "root",
+      archived: false,
+      archiveVersion: 1,
+    } as Session;
+    const child = {
+      ...row("child"),
+      rootSessionId: "root",
+      parentSessionId: "root",
+      archived: false,
+    } as Session;
+    const archived = { ...root, archived: true, archiveVersion: 2 };
+    expect(
+      projectSessionArchiveMembership(
+        [root, child],
+        new Map([[root.id, archived]]),
+        true,
+        "workspace-a",
+      ).find((session) => session.id === child.id)?.archived,
+    ).toBe(true);
+    expect(
+      projectSessionArchiveMembership(
+        [root, child],
+        new Map([[root.id, archived]]),
+        false,
+        "workspace-a",
+      ),
+    ).toEqual([]);
+    const staleArchivedChild = { ...child, archived: true };
+    const restored = { ...root, archiveVersion: 3 };
+    expect(
+      projectSessionArchiveMembership(
+        [archived, staleArchivedChild],
+        new Map([[root.id, restored]]),
+        false,
+        "workspace-a",
+      ).find((session) => session.id === child.id)?.archived,
+    ).toBe(false);
+    expect(
+      projectSessionArchiveMembership(
+        [archived, staleArchivedChild],
+        new Map([[root.id, restored]]),
+        false,
+        "workspace-a",
+      ).map((session) => session.id),
+    ).toEqual(["root", "child"]);
+  });
+
+  test("archive receipts preserve independently newer pin and attention state", () => {
+    const current = {
+      ...row("root"),
+      archived: false,
+      archiveVersion: 1,
+      pinned: true,
+      pinVersion: 9,
+      activelyWorking: true,
+      attentionVersion: 7,
+    } as Session;
+    const receipt = {
+      ...current,
+      archived: true,
+      archiveVersion: 2,
+      pinned: false,
+      pinVersion: 8,
+      activelyWorking: false,
+      attentionVersion: 6,
+    } as Session;
+    expect(applySessionArchiveProjection(current, receipt)).toMatchObject({
+      archived: true,
+      archiveVersion: 2,
+      pinned: true,
+      pinVersion: 9,
+      activelyWorking: true,
+      attentionVersion: 7,
+    });
+  });
+
   test("projects successful archive moves across stale active and archived pages", () => {
     const active = {
       ...row("active"),
