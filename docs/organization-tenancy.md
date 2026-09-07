@@ -608,6 +608,16 @@ organization membership at all; one that already has memberships is refused,
 because granting owner there would be a privilege event rather than a repair.
 No migration-time backfill over a FORCE-RLS table is needed.
 
+The stock web console may then show a skippable product step to connect a
+model or buy OpenGeni credits. Connecting selects the model in the human’s
+actor-private new-session draft with its expected revision, preserving the
+other draft fields. It never writes workspace settings or requires
+`workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
+accept still complete immediately. The step does not widen
+`POST /v1/auth/organization-onboarding`, invitation accept, or any worker
+surface. Empty OpenGeni-credit create and failed-session paths prompt the
+owner to buy credits or connect a model instead of a dead-end toast.
+
 ### Additional organization creation (0399)
 
 Migration `0399_additional_managed_organization_creation.sql` adds a separate
@@ -782,9 +792,9 @@ Better Auth handler and Hono API, migrates PostgreSQL through a dedicated
 `opengeni_app`, drives public operations through the SDK, and completes the
 human paths in a production-built web bundle under Chromium. Its process-local
 mail capture is count- and TTL-bounded, one-time readable, and never persists a
-bearer or rendered body. The lane proves ordinary named signup, the exact
-Personal-only owner graph, immediate private-session creation, unregistered
-setup, registered invitation choice, shared grant/revoke, stale and
+bearer or rendered body. The lane proves ordinary named signup, the skippable post-create model-access
+step, the exact Personal-only owner graph, immediate private-session creation,
+unregistered setup, registered invitation choice, shared grant/revoke, stale and
 cross-organization rejection, password reset, delivery refusal/ambiguity, RLS
 posture, accessibility, responsive layout, and browser-error cleanliness.
 

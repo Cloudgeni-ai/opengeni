@@ -239,6 +239,56 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.id).not.toBe(a.id);
   }, 60_000);
 
+  test("child resource defaults exclude parent uploads and preserve explicit overrides", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "parent with repository",
+        resources: [
+          { kind: "repository", uri: "https://github.com/acme/project.git", ref: "main" },
+        ],
+      },
+    );
+    const file = { kind: "file" as const, fileId: crypto.randomUUID() };
+    // Seed an existing upload reference without an object-storage fixture. An
+    // implicit child must not resolve it or require storage to be configured.
+    await admin`update sessions set resources = ${JSON.stringify([...parent.resources, file])}::jsonb where id = ${parent.id}`;
+    for (const sandbox of [undefined, "new"] as const) {
+      const child = await createSessionForRequest(
+        deps(bus),
+        grant(accountId, workspaceId, parent.id),
+        workspaceId,
+        { initialMessage: "child", ...(sandbox ? { sandbox } : {}) },
+      );
+      expect(child.resources).toEqual(parent.resources);
+      const messages = (await listSessionEvents(db, workspaceId, child.id)).filter(
+        (event) => event.type === "user.message",
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]!.payload.resources).toEqual(parent.resources);
+    }
+    const empty = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no resources", resources: [] },
+    );
+    expect(empty.resources).toEqual([]);
+    // Explicit file selection still enters normal file validation, rather than
+    // being silently filtered by the repository-only inheritance policy.
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "explicit upload",
+        resources: [file],
+      }),
+    ).rejects.toThrow("object storage is not configured");
+  }, 60_000);
+
   test("a child inherits omitted mixed-provider repositories, tools, and encrypted MCP context", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();

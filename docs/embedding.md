@@ -775,7 +775,7 @@ disable it for embedded products that require a narrower model-visible surface.
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+`resources` (repositories only), `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
 parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential

@@ -90,7 +90,7 @@ import {
   oauthConnectionRef,
 } from "@/lib/capabilities";
 import { startMcpOAuthWithTimeout } from "@/lib/mcp-oauth";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import {
   isTerminalSessionStatus,
@@ -1790,6 +1790,9 @@ function SessionChatPane(props: {
       )?.permissions ?? [],
     [context.accessContext.workspaceGrants, props.session.workspaceId],
   );
+  const workspaceAccountId = context.workspaces.find(
+    (candidate) => candidate.id === props.session.workspaceId,
+  )?.accountId;
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -1855,6 +1858,20 @@ function SessionChatPane(props: {
                   failure={props.failure}
                   creditExhausted={props.creditExhausted}
                   workspaceId={props.session.workspaceId}
+                  canBuyCredits={
+                    context.clientConfig.billingMode === "stripe" &&
+                    Boolean(workspaceAccountId) &&
+                    hasAccountPermission(
+                      context.accessContext,
+                      workspaceAccountId ?? "",
+                      "billing:manage",
+                    )
+                  }
+                  canConnectModel={hasWorkspacePermission(
+                    context.accessContext,
+                    props.session.workspaceId,
+                    "connections:write",
+                  )}
                   actions={{
                     failureId: props.failure.failureEventId,
                     composerBlocker: composerSendBlocker(),
@@ -2027,6 +2044,7 @@ function SessionChatPane(props: {
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
             compact
+            onOpenSession={props.onOpenSession}
             queue={props.queue}
             composer={terminal ? undefined : composer}
             goal={props.goal}

@@ -14545,7 +14545,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // compatibility fallback by omitting this field.
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
     // For an agent-created child, omission inherits the trusted immediate
-    // parent's repository/file context. An explicit array, including [], is
+    // parent's repositories only; files require explicit selection. An explicit
+    // array, including [], is
     // authoritative. Top-level omission remains []. Presence is resolved from
     // the raw request because this Zod default erases absent-vs-empty.
     resources: z.array(ResourceRef).default([]),
@@ -16509,6 +16510,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
+    billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),

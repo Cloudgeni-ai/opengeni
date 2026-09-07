@@ -67619,6 +67619,7 @@ export async function settleSessionIdleWithParentOutbox(
       action: "settled";
       changed: boolean;
       episodeKey: string;
+      notifyParent: boolean;
       events: SessionEvent[];
     }
   | { action: "stale"; episodeKey: null; events: [] }
@@ -67714,11 +67715,30 @@ export async function settleSessionIdleWithParentOutbox(
       // notification to the newest non-status event, not to the idle status
       // event this settlement just appended (or a prior identical idle event).
       const episodeKey = String(Number(episodeSequence));
-      if (!session.parentSessionId) {
+      // Workflow closure is not work completion. Input waits (including a
+      // due timeout not yet materialized) and active goals retain obligations
+      // even while their workflow run truthfully parks the session as idle.
+      const waitState = await sessionInputWaitStateTx(tx, workspaceId, sessionId, session);
+      const [goal] = await tx
+        .select({ status: schema.sessionGoals.status })
+        .from(schema.sessionGoals)
+        .where(
+          and(
+            eq(schema.sessionGoals.workspaceId, workspaceId),
+            eq(schema.sessionGoals.sessionId, sessionId),
+          ),
+        )
+        .limit(1);
+      const ongoingWork =
+        waitState.disposition === "held" ||
+        waitState.disposition === "timeout" ||
+        goal?.status === "active";
+      if (!session.parentSessionId || ongoingWork) {
         return {
           action: "settled",
           changed: events.length > 0,
           episodeKey,
+          notifyParent: false,
           events,
         } as const;
       }
@@ -67738,6 +67758,7 @@ export async function settleSessionIdleWithParentOutbox(
         action: "settled",
         changed: events.length > 0,
         episodeKey,
+        notifyParent: true,
         events,
       } as const;
     });
