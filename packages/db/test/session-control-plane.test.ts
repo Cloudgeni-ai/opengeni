@@ -6908,13 +6908,32 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    const capabilityWrite = {
+      ...call("connector-capability-write", "unmanaged"),
+      approvalMode: "connector_write" as const,
+    };
     expect(
-      await prepareConnectorActionApproval(client.db, firstIdentity, {
-        ...call("connector-write-default", "unmanaged_write"),
-        approvalMode: "connector_write",
-      }),
-    ).toMatchObject({ managed: true, decision: "ask" });
-
+      await prepareConnectorActionApproval(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    const capabilityWriteAdmission = await beginConnectorActionExecution(
+      client.db,
+      firstIdentity,
+      capabilityWrite,
+    );
+    expect(capabilityWriteAdmission).toMatchObject({ allowed: true, managed: true });
+    if (!capabilityWriteAdmission.allowed || !capabilityWriteAdmission.managed) {
+      throw new Error("capability-authorized write was denied");
+    }
+    await completeConnectorActionExecution(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      requestId: capabilityWriteAdmission.requestId,
+      attemptId: firstAttemptId,
+      outcome: "completed",
+    });
+    expect(
+      await beginConnectorActionExecution(client.db, firstIdentity, capabilityWrite),
+    ).toMatchObject({ allowed: false, reason: "already_executed" });
     const allowCall = call("connector-allow", "read");
     expect(await prepareConnectorActionApproval(client.db, firstIdentity, allowCall)).toMatchObject(
       {

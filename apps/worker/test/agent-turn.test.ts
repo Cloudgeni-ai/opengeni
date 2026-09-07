@@ -65,6 +65,7 @@ import {
   credentialSubjectIdForTurnInitiator,
   xaiCatalogReadinessAuthority,
   classifyMcpTransportTimeoutError,
+  classifyCodexCredentialFailure,
   clearAttemptCredentialsWithSettledFence,
   codexCredentialLeaseDeadlineExpired,
   completedToolCallFromSdkEvent,
@@ -798,6 +799,24 @@ describe("turn exact-content boundaries", () => {
     const streamCompletionAuthority = source.indexOf(
       "await assertSuccessfulAgentStreamCompletion({",
     );
+    expect(source).toContain(
+      "const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();",
+    );
+    const closedStreamAdmission = source.indexOf("closeStreamWaitAdmission?.();");
+    const streamFailureCatch = source.lastIndexOf("} catch (error) {", closedStreamAdmission);
+    expect(streamFailureCatch).toBeGreaterThan(-1);
+    expect(source.slice(streamFailureCatch, closedStreamAdmission)).not.toContain("await ");
+    const streamFailurePublication = source.indexOf(
+      "await eventing.publish!([",
+      closedStreamAdmission,
+    );
+    expect(closedStreamAdmission).toBeGreaterThan(-1);
+    expect(streamFailurePublication).toBeGreaterThan(closedStreamAdmission);
+    expect(streamCompletionAuthority).toBeGreaterThan(streamFailurePublication);
+    const sealedWaitAdmission = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -811,7 +830,7 @@ describe("turn exact-content boundaries", () => {
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
-      "String(requireAgentStreamFinalOutput(eventing.stream.finalOutput))",
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
       interruptionPath,
     );
     const mandatoryBarrier = source.indexOf(
@@ -820,12 +839,29 @@ describe("turn exact-content boundaries", () => {
     );
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
-    expect(postCompactionRecovery).toBeGreaterThan(streamCompletionAuthority);
+    expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
+    expect(source).toContain(
+      "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
+    );
+    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
+
+    const runSource = await Bun.file(
+      new URL("../src/activities/agent-turn/run.ts", import.meta.url),
+    ).text();
+    const closedFailureAdmission = runSource.indexOf(
+      "eventing.preparedTools?.inputWaitYield?.closeAdmission();",
+    );
+    expect(closedFailureAdmission).toBeGreaterThan(-1);
+    expect(runSource.indexOf("return await settleTurnFailure({")).toBeGreaterThan(
+      closedFailureAdmission,
+    );
 
     const failureSource = await Bun.file(
       new URL("../src/activities/agent-turn/failure-settlement.ts", import.meta.url),
@@ -4183,6 +4219,18 @@ describe("worker shutdown preemption", () => {
     await Bun.sleep(0);
   });
 
+  test("a completed activity never waits forever for hung finalizer housekeeping", async () => {
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    await expect(waitForTurnFinalizerStep(hung, undefined, 10)).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
   test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
     const controller = new AbortController();
     let rejectFlush: ((error: Error) => void) | undefined;
@@ -5142,7 +5190,20 @@ describe("transient provider error classifier", () => {
       database: { constraint: "session_turn_attempts_pkey" },
     });
     expect(preClaimAdmissionFailure(constraint)).toMatchObject({
-      details: [{ disposition: "permanent", code: "db_failure" }],
+      details: [{ disposition: "retryable", code: "db_failure" }],
+    });
+    const authorizationGuard = new SessionEventPersistenceError({
+      code: "db_failure",
+      sqlState: "42501",
+      stage: "session_attempts.claim",
+      eventTypes: ["session.turn.attempt_claimed"],
+      correlationId: "corr-authorization-guard",
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: {},
+    });
+    expect(preClaimAdmissionFailure(authorizationGuard)).toMatchObject({
+      details: [{ disposition: "retryable", code: "db_failure" }],
     });
     expect(preClaimAdmissionFailure(new Error("SECRET malformed metadata"))).toMatchObject({
       type: "OpenGeniPreClaimFailure",
@@ -5264,6 +5325,42 @@ describe("transient provider error classifier", () => {
     expect(JSON.stringify(payload)).not.toContain(syntheticValue);
     expect(JSON.stringify(payload)).not.toContain(source.query);
     expect((error as SessionEventPersistenceError).cause).toBe(source);
+  });
+
+  test("safety refusals outrank transient status and do not rotate credentials", () => {
+    const message =
+      "This request was blocked by our safety systems. Reason: Potentially unintended activity.";
+    for (const status of [403, 429, 500, 502, 503]) {
+      const error = Object.assign(new Error(message), {
+        status,
+        headers: new Headers({ "x-opengeni-codex-transport-error": "1" }),
+      });
+      expect(isTransientProviderError(error)).toBe(false);
+      expect(classifyCodexCredentialFailure(error)).toBeNull();
+      expect(
+        classifyXaiCredentialFailure(
+          Object.assign(new Error(message), {
+            status,
+            headers: new Headers({ [XAI_SUBSCRIPTION_TRANSPORT_ERROR_HEADER]: "1" }),
+          }),
+        ),
+      ).toBeNull();
+      expect(agentRunFailurePayload(error)).toMatchObject({
+        code: "provider_safety_refusal",
+        retryable: false,
+        detail: message,
+      });
+    }
+    const wrapped = Object.assign(new Error("Service unavailable"), {
+      status: 503,
+      cause: { error: { code: "content_policy_violation" } },
+    });
+    expect(isTransientProviderError(wrapped)).toBe(false);
+    expect(agentRunFailurePayload(wrapped)).toMatchObject({
+      code: "provider_safety_refusal",
+      retryable: false,
+      detail: "content_policy_violation",
+    });
   });
 
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
@@ -5874,8 +5971,26 @@ describe("transient provider error classifier", () => {
 });
 
 describe("structuredToolTransportForTurn", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi = "responses") =>
-    ({ provider: { kind, api } }) as Parameters<typeof structuredToolTransportForTurn>[0];
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi = "responses",
+    options: {
+      id?: string;
+      wireProfile?: "openai" | "azure-openai";
+      builtin?: boolean;
+      baseUrl?: string;
+    } = {},
+  ) =>
+    ({
+      provider: {
+        id: options.id ?? "registry",
+        kind,
+        api,
+        wireProfile: options.wireProfile ?? "openai",
+        builtin: options.builtin ?? false,
+        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+      },
+    }) as Parameters<typeof structuredToolTransportForTurn>[0];
 
   test("keeps OpenAI-hosted tool types off connected subscriptions and Gateway paths", () => {
     expect(structuredToolTransportForTurn(resolved("codex-subscription"))).toBe(false);
@@ -5889,10 +6004,32 @@ describe("structuredToolTransportForTurn", () => {
     expect(structuredToolTransportForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 
-  test("preserves hosted tool types for real Responses providers and the legacy path", () => {
-    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(true);
-    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(true);
+  test("preserves hosted tool types only for native OpenAI/Azure Responses providers", () => {
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { id: "openai", builtin: true }),
+      ),
+    ).toBe(true);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", { wireProfile: "azure-openai" }),
+      ),
+    ).toBe(true);
     expect(structuredToolTransportForTurn(null)).toBe(true);
+  });
+
+  test("keeps hosted apply_patch off OpenAI-compatible Responses endpoints", () => {
+    expect(structuredToolTransportForTurn(resolved("anonymous"))).toBe(false);
+    expect(structuredToolTransportForTurn(resolved("api-key"))).toBe(false);
+    expect(
+      structuredToolTransportForTurn(
+        resolved("api-key", "responses", {
+          id: "openai",
+          builtin: true,
+          baseUrl: "https://proxy.example.test/v1",
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

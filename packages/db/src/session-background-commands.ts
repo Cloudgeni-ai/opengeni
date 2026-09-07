@@ -132,7 +132,7 @@ export async function backgroundCommandActivityForSessions(
 
 export async function listSessionBackgroundCommands(
   db: Database,
-  input: { accountId: string; workspaceId: string; sessionId: string },
+  input: { accountId: string; workspaceId: string; sessionId: string; activeOnly?: boolean },
 ): Promise<SessionBackgroundCommand[]> {
   return await withRlsContext(
     db,
@@ -145,6 +145,9 @@ export async function listSessionBackgroundCommands(
           and(
             eq(schema.sessionBackgroundCommands.workspaceId, input.workspaceId),
             eq(schema.sessionBackgroundCommands.sessionId, input.sessionId),
+            ...(input.activeOnly
+              ? [inArray(schema.sessionBackgroundCommands.state, ["running", "stopping"])]
+              : []),
           ),
         )
         .orderBy(
@@ -284,7 +287,7 @@ export async function insertConnectedMachineSessionBackgroundCommandInTransactio
  * claim expiry is coordination recovery only and never implies command loss. */
 export async function claimConnectedMachineSessionBackgroundCommands(
   db: Database,
-  input: { claimId: string; limit: number; claimTtlMs: number },
+  input: { claimId: string; limit: number; claimTtlMs: number; dueBefore?: Date },
 ): Promise<ConnectedMachineBackgroundCommandClaim[]> {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
     throw new Error("Connected command reconciliation limit must be between 1 and 100");
@@ -313,7 +316,8 @@ export async function claimConnectedMachineSessionBackgroundCommands(
       reconcile_proof_reason as "reconcileProofReason",
       reconcile_proof_observed_at as "reconcileProofObservedAt"
     from opengeni_private.claim_connected_machine_background_commands(
-      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+      ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint,
+      ${(input.dueBefore ?? new Date()).toISOString()}::timestamptz
     )
   `);
   return rows.map((row: ConnectedMachineBackgroundCommandClaimRow) => {

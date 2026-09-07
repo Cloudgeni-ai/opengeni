@@ -1048,7 +1048,8 @@ describe("Temporal workflow integration", () => {
       const runs: WorkflowTestTurn[] = [];
       const controls: unknown[] = [];
       let cancellationWaitAttemptId: string | null = null;
-      let cancellationWaitPeeks = 0;
+      let reconciliationStarted = false;
+      let receiptWakeSent = false;
       let allowFirstRunToFinish = false;
       let wakeWorkflow: (() => Promise<void>) | null = null;
       const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
@@ -1063,6 +1064,7 @@ describe("Temporal workflow integration", () => {
           // the same transaction's outbox now wakes this workflow.
           cancellationWaitAttemptId = null;
           await wakeWorkflow?.();
+          receiptWakeSent = true;
         }
         return { status: "idle" };
       });
@@ -1071,7 +1073,6 @@ describe("Temporal workflow integration", () => {
         ...admission.activities,
         peekSessionWork: async () => {
           if (cancellationWaitAttemptId) {
-            cancellationWaitPeeks += 1;
             return {
               kind: "cancellation-wait" as const,
               attemptId: cancellationWaitAttemptId,
@@ -1086,10 +1087,14 @@ describe("Temporal workflow integration", () => {
           cancellationWaitAttemptId = input.attemptId;
           return { action: "continue" as const };
         },
-        reconcileSessionAttemptQuiescence: async () =>
-          cancellationWaitAttemptId
-            ? { action: "pending" as const }
-            : { action: "quiesced" as const },
+        reconcileSessionAttemptQuiescence: async () => {
+          if (!cancellationWaitAttemptId) return { action: "quiesced" as const };
+          reconciliationStarted = true;
+          // Hold an old pending result until the receipt wake has already been
+          // accepted. The workflow must not swallow that wake on activity return.
+          await waitFor(() => receiptWakeSent, { timeoutMs: temporalWorkflowTestTimeoutMs });
+          return { action: "pending" as const };
+        },
       });
       const run = worker.run();
       try {
@@ -1107,7 +1112,7 @@ describe("Temporal workflow integration", () => {
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
-        await waitFor(() => cancellationWaitPeeks > 0, {
+        await waitFor(() => reconciliationStarted, {
           timeoutMs: temporalWorkflowTestTimeoutMs,
           describe: () => "workflow did not observe the durable cancellation-wait boundary",
         });

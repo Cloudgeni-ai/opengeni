@@ -61,6 +61,15 @@ export class CodemodeCatalogNotReadyError extends Error {
   }
 }
 
+export class CodemodeCatalogStaleError extends Error {
+  readonly code = "codemode_catalog_stale";
+
+  constructor() {
+    super("Codemode tool catalog is stale for the active execution attempt");
+    this.name = "CodemodeCatalogStaleError";
+  }
+}
+
 export function codemodeAuthorityForGrant(grant: AccessGrant): CodemodeGrantAuthority | null {
   const metadata = grant.metadata;
   if (
@@ -153,6 +162,7 @@ export async function submitAndDispatchCodemodeCall(
 ): Promise<CodemodeCallSubmissionValue> {
   const request = CodemodeCallRequest.parse(rawRequest);
   const { authority, catalog } = await requireActiveCodemodeCatalog(deps, grant);
+  if (request.catalogDigest !== catalog.digest) throw new CodemodeCatalogStaleError();
   const submitted = await submitCodemodeOperation(deps.db, {
     ...authority,
     call: {
@@ -166,7 +176,7 @@ export async function submitAndDispatchCodemodeCall(
     : operation.state === "running"
       ? "already_running"
       : "unavailable";
-  if (operation.state === "queued") {
+  if (codemodeOperationNeedsDispatch(operation)) {
     try {
       const reply = await deps.bus.request(
         codemodeDispatchSubject(authority.workspaceId, authority.attemptId),
@@ -181,19 +191,24 @@ export async function submitAndDispatchCodemodeCall(
     } catch {
       dispatch = "unavailable";
     }
-    operation =
-      (await getCodemodeOperation(deps.db, {
+    operation = await refreshAdmittedCodemodeOperation(operation, () =>
+      getCodemodeOperation(deps.db, {
         accountId: authority.accountId,
         workspaceId: authority.workspaceId,
         attemptId: authority.attemptId,
         operationId: operation.operationId,
-      })) ?? operation;
+      }),
+    );
     if (terminal(operation)) dispatch = "terminal";
     else if (operation.state === "running" && dispatch === "unavailable") {
       dispatch = "already_running";
     }
   }
   return CodemodeCallSubmission.parse({ operation, dispatch });
+}
+
+export function codemodeOperationNeedsDispatch(operation: CodemodeOperation): boolean {
+  return operation.state === "queued" || operation.state === "running";
 }
 
 export async function readCodemodeOperation(
@@ -213,4 +228,18 @@ export async function readCodemodeOperation(
 
 function terminal(operation: CodemodeOperation): boolean {
   return ["completed", "failed", "outcome_unknown", "cancelled"].includes(operation.state);
+}
+
+export async function refreshAdmittedCodemodeOperation(
+  admitted: CodemodeOperation,
+  read: () => Promise<CodemodeOperation | null>,
+): Promise<CodemodeOperation> {
+  try {
+    return (await read()) ?? admitted;
+  } catch {
+    // Admission is already durable. Returning the known row lets the client
+    // continue with the same operation id instead of turning a refresh outage
+    // into an unmarked post-commit failure.
+    return admitted;
+  }
 }

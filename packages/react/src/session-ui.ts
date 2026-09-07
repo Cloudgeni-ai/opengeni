@@ -38,3 +38,4 @@ export type {
   SessionChromeSignalId,
   SessionChromeSignalTone,
 } from "./components/session-chrome";
+export { SessionCommandsPanel } from "./components/session-commands-panel";

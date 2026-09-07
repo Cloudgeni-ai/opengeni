@@ -106,6 +106,7 @@ export * from "./application/composer-submit";
 export * from "./application/session-commands";
 export * from "./application/session-tenancy";
 export * from "./application/user-resource-grants";
+export * from "./application/api-integration-servers";
 
 // Durable editable-artifact live broker, ticket, ports, and projection types.
 export * from "./editable-artifact-live";

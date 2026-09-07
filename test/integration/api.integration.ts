@@ -1012,7 +1012,7 @@ describe("API component integration", () => {
     }>(mcp, "wait_for_input", waitArgs);
     expect(held).toMatchObject({ status: "waiting_for_input", replay: false });
     expect(new Date(held.deadlineAt).getTime()).toBeGreaterThan(Date.now() + 800_000);
-    expect(held.nextAction).toContain("End your turn now");
+    expect(held.nextAction).toContain("runtime yields this turn");
     const heldReplay = await callMcpTool<{ replay: boolean; deadlineAt: string }>(
       mcp,
       "wait_for_input",
@@ -1060,6 +1060,22 @@ describe("API component integration", () => {
       outcome: "applied",
     });
 
+    const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
+    const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+    expect(alreadyActive).toMatchObject({ changed: false, resource: { state: "active" } });
+
+    for (const pausedReason of ["user_pause", "api", "agent", "limits", "max_auto_continuations"]) {
+      await setSessionGoalStatus(dbClient.db, baseGrant.workspaceId, session.id, {
+        status: "paused",
+        pausedReason,
+      });
+      const resumed = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
+      expect(resumed).toMatchObject({ changed: true, resource: { state: "active" } });
+      const goal = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+      expect(goal).toMatchObject({ autoContinuations: 0, noProgressStreak: 0, pausedReason: null });
+    }
+
     const completedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_complete", {
       evidence: "CI green for 3 consecutive runs",
     });
@@ -1097,6 +1113,7 @@ describe("API component integration", () => {
       "goal.progress",
       "goal.paused",
       "goal.updated",
+      ...Array(6).fill("goal.resumed"),
       "goal.completed",
       "goal.set",
     ]);
@@ -8466,7 +8483,7 @@ describe("API component integration", () => {
       model: string;
       temporalWorkflowId: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id });
+    }>(mcp, "session_get", { sessionId: createdReceipt.resource.id, detail: "full" });
     expect(created.status).toBe("queued");
     expect(created.model).toBe("scripted-model");
     expect(created.temporalWorkflowId).toBe(`session-${created.id}`);
@@ -8483,9 +8500,17 @@ describe("API component integration", () => {
     const fetched = await callMcpTool<{
       id: string;
       environmentId: string | null;
-    }>(mcp, "session_get", { sessionId: created.id });
+    }>(mcp, "session_get", { sessionId: created.id, detail: "full" });
     expect(fetched.id).toBe(created.id);
     expect(fetched.environmentId).toBeNull();
+    const compact = await callMcpTool<{ id: string; goal: { status: string; summary: string } }>(
+      mcp,
+      "session_get",
+      { sessionId: created.id },
+    );
+    expect(compact.goal).toEqual({ status: "active", summary: "staging deployed" });
+    expect(compact).not.toHaveProperty("effectiveToolPolicy");
+    expect(compact).not.toHaveProperty("initialMessage");
     await expect(
       callMcpTool(mcp, "session_get", { sessionId: crypto.randomUUID() }),
     ).rejects.toThrow("session not found");
@@ -9604,6 +9629,33 @@ describe("API component integration", () => {
     });
     expect(catalogResponse.status).toBe(200);
     expect(await catalogResponse.json()).toEqual(environment.catalog);
+
+    const staleOperationId = crypto.randomUUID();
+    const stale = await app.request(`${base}/calls`, {
+      method: "POST",
+      headers: { authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        operationId: staleOperationId,
+        catalogDigest: "f".repeat(64),
+        identity: { serverId: "crm", toolName: "search_documents" },
+        arguments: { query: "stale catalog" },
+      }),
+    });
+    expect(stale.status).toBe(409);
+    expect(await stale.json()).toMatchObject({
+      error: {
+        code: "conflict",
+        retryable: true,
+        details: { code: "codemode_catalog_stale" },
+      },
+    });
+    expect(
+      (
+        await app.request(`${base}/calls/${staleOperationId}`, {
+          headers: { authorization },
+        })
+      ).status,
+    ).toBe(404);
 
     const operationId = crypto.randomUUID();
     const request = {
