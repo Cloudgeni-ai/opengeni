@@ -1294,12 +1294,12 @@ human-input forms, and timeline history. `ChatComposer` remains the lower-level
 input surface, not an implicit queue or whole conversation. Sites use the same
 component with their standard Site-bound SDK client.
 
-The stock sandbox build runs `scripts/pack-sandbox-site-packages.ts` from its
-checkout and ships Bun-installable source archives at `/opt/opengeni/site-packages`.
-SDK, React, Codemode and their internal dependencies resolve to that same set;
-projects install these after ordinary dependencies with `bun add --no-save`.
-Local image builds include dirty worktree source. Registry canaries and the
-fallback module path are not the deployment-matching mechanism.
+Site authoring installs exact npm package versions from the runtime-generated
+`package-versions.json` beside the skill. Stable defaults come from source
+package manifests; canary deployments set `OPENGENI_SITE_PACKAGE_VERSIONS` to
+their published SDK/React/Codemode version map. Only local development enables
+`OPENGENI_LOCAL_SITE_PACKAGES` and packages dirty checkout source into archives
+at `/opt/opengeni/site-packages`; deployed images do not bake those archives.
 
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE

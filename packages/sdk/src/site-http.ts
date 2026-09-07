@@ -11,8 +11,8 @@ export type SiteHttpRequest = {
   body?: string;
 };
 
-import { siteSessionPath } from "@opengeni/contracts";
-export { siteSessionPath } from "@opengeni/contracts";
+import { siteSessionPath } from "@opengeni/contracts/site-session-http";
+export { siteSessionPath } from "@opengeni/contracts/site-session-http";
 
 export function isSiteHttpRequest(value: unknown): value is SiteHttpRequest {
   if (!value || typeof value !== "object") return false;

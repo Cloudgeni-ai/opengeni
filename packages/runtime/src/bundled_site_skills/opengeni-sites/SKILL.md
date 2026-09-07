@@ -41,18 +41,25 @@ bun test
 bun build --compile --target=browser ./index.html --outdir=dist
 ```
 
-Stock sandboxes provide deployment-matched package archives. After installing
-the project's ordinary dependencies, install the matching OpenGeni packages:
+Install OpenGeni packages from the npm registry using the exact versions in
+`package-versions.json` beside this skill. Do not use `latest`, `canary`, or
+version ranges. First check for the local-development exception below.
+Otherwise, from the project directory:
 
 ```bash
-bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz
+bun add --exact $(bun -e 'const pins=await Bun.file("/workspace/.agents/opengeni-sites/package-versions.json").json(); console.log(Object.entries(pins).map(([name,version])=>name+"@"+version).join(" "))')
 ```
 
-These archives include matching internal OpenGeni dependencies. Remove stale
-OpenGeni registry overrides before installing; do not substitute a registry
-canary or remove a component when the expected export is missing. Keep normal
-package dependencies in saved source; `--no-save` keeps sandbox archive paths
-out of the manifest. Repeat the local archive install after `bun install`.
+Use the skill's actual location if different. Keep these exact dependencies
+in saved source. Missing expected exports indicate a package mismatch, not a
+reason to replace the standard conversation component with custom wiring.
+
+Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
+are unreleased checkout packages. Skip the registry command above for OpenGeni.
+After ordinary dependencies, install these packages with
+`bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
+Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
+save sandbox archive paths in published source.
 
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
@@ -111,6 +118,11 @@ Site complete from compilation alone.
 - Inside the published opaque-origin iframe, create the workspace-bound client
   with `@opengeni/sdk/site`. The parent host owns credentials and workspace
   identity; Site code receives neither.
+
+Published Sites have no browser localStorage/sessionStorage. Do not rely on
+them for startup or session selection; use React state and the SDK's durable
+session/draft APIs. A sandbox-local page having storage does not prove the
+published iframe does.
 
 ```ts
 import { createOpenGeniSiteClient } from "@opengeni/sdk/site";

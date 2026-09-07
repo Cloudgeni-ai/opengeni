@@ -1230,6 +1230,16 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 ## Verified public release
 
 `main` is the daily integration branch and remains GitHub's default branch.
+
+Site authoring installs exact registry versions. Stable builds use their source
+SDK/React/Codemode manifest versions. Before a canary rollout, publish packages
+from the same source using `publish-canary.yml`, then set
+`OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
+`site-package-versions-<sha>` artifact. The runtime includes these pins beside
+the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
+sandbox images do not include Site package archives; the local development
+image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
+
 `production` is the official source pointer in this repository; it is not a
 live-cluster deploy. Staging is a manual pin of already-baked
 `canary-sha-<commit>` images from any `main` SHA
