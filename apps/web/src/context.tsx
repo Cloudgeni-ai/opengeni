@@ -49,6 +49,7 @@ import {
   startManagedSocialSignIn,
 } from "@/api";
 import { LoadingPanel, ProblemPanel } from "@/components/common";
+import { CreditRequiredPrompt } from "@/components/credit-required-prompt";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { SecureContextWarning } from "@/components/secure-context-warning";
 import { Button } from "@/components/ui/button";
@@ -79,6 +80,8 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
+import { isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -575,6 +578,10 @@ export function RootRouteComponent() {
   >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
+  const [creditRequired, setCreditRequired] = useState<{
+    workspaceId: string;
+    accountId: string | null;
+  } | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -1955,9 +1962,17 @@ export function RootRouteComponent() {
             outcomeUnknown,
           });
         }
-        toast.error("Failed to start session", {
-          description: composerSubmissionErrorMessage(problem),
-        });
+        if (isPaymentRequiredError(problem)) {
+          const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+          setCreditRequired({
+            workspaceId,
+            accountId: workspace?.accountId ?? null,
+          });
+        } else {
+          toast.error("Failed to start session", {
+            description: composerSubmissionErrorMessage(problem),
+          });
+        }
       }
       return null;
     } finally {
@@ -2782,6 +2797,20 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />
+      {creditRequired ? (
+        <CreditRequiredPrompt
+          open
+          workspaceId={creditRequired.workspaceId}
+          accountId={creditRequired.accountId}
+          canBuyCredits={
+            Boolean(creditRequired.accountId) &&
+            hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
+          }
+          onOpenChange={(open) => {
+            if (!open) setCreditRequired(null);
+          }}
+        />
+      ) : null}
       {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
         <TanStackRouterDevtools position="bottom-right" />
       ) : null}

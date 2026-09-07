@@ -344,7 +344,40 @@ describe("organization onboarding UI", () => {
       expect(container.textContent).toContain("Create your organization");
       expect(container.textContent).toContain("Organization name");
       expect(container.textContent).not.toContain("Workspace name");
+      expect(container.textContent).not.toContain("Connect a model or buy credits");
       expect(container.querySelectorAll("input")).toHaveLength(1);
+      expect(onComplete).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+
+  test("after organization create, the model-access step stays until skip", async () => {
+    const onComplete = mock(() => undefined);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () =>
+        root.render(
+          <OrganizationOnboardingPanel previewState="required" onComplete={onComplete} />,
+        ),
+      );
+      await enter(container.querySelector("#organization-onboarding-name")!, "Northwind Research");
+      await act(async () => container.querySelector<HTMLFormElement>("form")!.requestSubmit());
+      await flush();
+      expect(completeSelfServiceSetup).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("Connect a model or buy credits");
+      expect(container.textContent).toContain("Connect Codex");
+      expect(container.textContent).toContain("Buy OpenGeni credits");
+      expect(onComplete).not.toHaveBeenCalled();
+      await act(async () =>
+        Array.from(container.querySelectorAll("button"))
+          .find((button) => button.textContent?.trim() === "Skip for now")!
+          .click(),
+      );
+      expect(onComplete).toHaveBeenCalledTimes(1);
     } finally {
       await act(async () => root.unmount());
       container.remove();

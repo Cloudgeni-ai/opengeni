@@ -2,6 +2,7 @@ import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
 import { ManagedAuthPanel } from "@/components/managed-auth-panel";
+import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { OrganizationOnboardingPanel } from "@/components/organization-onboarding-panel";
 import { CreateOrganizationDialog } from "@/components/rail/create-organization-dialog";
 import { OrganizationSwitcherLine } from "@/components/rail/switcher-block";
@@ -80,6 +81,15 @@ export function OnboardingPreviewRoute() {
   }
   if (view === "organization") {
     return <OrganizationOnboardingPanel previewState="required" onComplete={() => undefined} />;
+  }
+  if (view === "models") {
+    return (
+      <ModelAccessOnboardingPanel
+        organizationId="preview-organization"
+        workspaceId="preview-workspace"
+        onComplete={() => undefined}
+      />
+    );
   }
   return <ManagedAuthPanel initialMode="signup" onSubmit={async () => undefined} />;
 }

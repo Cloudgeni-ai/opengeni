@@ -8,6 +8,7 @@ import {
   getSelfServiceOrganizationOnboardingStatus,
   type SelfServiceOrganizationOnboardingState,
 } from "@/api";
+import { ModelAccessOnboardingPanel } from "@/components/model-access-onboarding";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -45,11 +46,16 @@ export function OrganizationOnboardingPanel({
     "matched" | "wrong_account" | "unavailable" | null
   >(null);
   const [acceptingInvitationId, setAcceptingInvitationId] = useState<string | null>(null);
+  const [createdSetup, setCreatedSetup] = useState<{
+    organizationId: string;
+    personalWorkspaceId: string;
+  } | null>(null);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
 
   useEffect(() => {
     if (previewState) return;
+    if (createdSetup) return;
     let active = true;
     void getSelfServiceOrganizationOnboardingStatus()
       .then((result) => {
@@ -69,7 +75,7 @@ export function OrganizationOnboardingPanel({
     return () => {
       active = false;
     };
-  }, [previewState, onComplete]);
+  }, [createdSetup, previewState, onComplete]);
 
   useEffect(() => {
     if ((state !== "invitation_pending" && !invitation) || !client) return;
@@ -144,12 +150,20 @@ export function OrganizationOnboardingPanel({
     setBusy(true);
     try {
       if (!previewState) {
-        await completeSelfServiceOrganizationSetup({
+        const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
         });
-        onComplete();
+        setCreatedSetup({
+          organizationId: created.organizationId,
+          personalWorkspaceId: created.personalWorkspaceId,
+        });
+        return;
       }
+      setCreatedSetup({
+        organizationId: "preview-organization",
+        personalWorkspaceId: "preview-workspace",
+      });
     } catch (error) {
       toast.error("Organization setup failed", {
         description: error instanceof Error ? error.message : String(error),
@@ -265,6 +279,17 @@ export function OrganizationOnboardingPanel({
           )}
         </div>
       </section>
+    );
+  }
+
+  if (createdSetup) {
+    return (
+      <ModelAccessOnboardingPanel
+        client={client}
+        organizationId={createdSetup.organizationId}
+        workspaceId={createdSetup.personalWorkspaceId}
+        onComplete={onComplete}
+      />
     );
   }
 

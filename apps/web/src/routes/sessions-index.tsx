@@ -61,6 +61,7 @@ import {
 import { toast } from "sonner";
 
 import { BillingClassMark } from "@/components/billing-class-mark";
+import { EmptyCreditsNotice } from "@/components/credit-required-prompt";
 import { ChannelCreateDialog } from "@/components/rail/channel-create-dialog";
 import { ConsoleComposer, useDraftAttachments } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
@@ -113,7 +114,7 @@ import {
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
   newSessionFixedResourceCatalogFailed,
@@ -1216,6 +1217,20 @@ function SessionsIndexRouteContent({
               This installed Skill will be frozen onto this session only. Other workspace sessions
               will not receive it.
             </Notice>
+          </div>
+        ) : null}
+
+        {selectedPolicyRow?.billingClass === "opengeni_credits" ? (
+          <div className="mt-6">
+            <EmptyCreditsNotice
+              workspaceId={workspaceId}
+              accountId={workspace?.accountId ?? null}
+              canBuyCredits={hasAccountPermission(
+                context.accessContext,
+                workspace?.accountId ?? "",
+                "billing:manage",
+              )}
+            />
           </div>
         ) : null}
 
