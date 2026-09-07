@@ -1294,8 +1294,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         );
       }
       const evidence = await page.evaluate(
-        async ({ apiBaseUrl, workspaceId, rootId, childId, grandchildId }) => {
-          const root = `${apiBaseUrl}/v1/workspaces/${workspaceId}`;
+        async ({
+          apiBaseUrl: fixtureApiUrl,
+          workspaceId: fixtureWorkspaceId,
+          rootId,
+          grandchildId,
+        }) => {
+          const root = `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}`;
           const pause = await fetch(`${root}/sessions/${grandchildId}/control`, {
             method: "POST",
             headers: { "content-type": "application/json" },
@@ -1328,7 +1333,6 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
           apiBaseUrl,
           workspaceId,
           rootId: parent.id,
-          childId: child.id,
           grandchildId: grandchild.id,
         },
       );
