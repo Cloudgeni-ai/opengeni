@@ -1042,7 +1042,9 @@ export class SelfhostedSession {
                       ...(terminal.outcome.failure
                         ? {
                             failure: {
-                              code: terminal.outcome.failure.failureCode,
+                              code: terminal.outcome.failure.failureCode
+                                .replace(/[^A-Za-z0-9_-]/g, "_")
+                                .slice(0, 128),
                               detail: terminal.outcome.failure.failureDetail,
                               retryable: false as const,
                             },
@@ -1078,7 +1080,9 @@ export class SelfhostedSession {
               ...(result.terminal.outcome.failure
                 ? {
                     failure: {
-                      code: result.terminal.outcome.failure.failureCode,
+                      code: result.terminal.outcome.failure.failureCode
+                        .replace(/[^A-Za-z0-9_-]/g, "_")
+                        .slice(0, 128),
                       detail: result.terminal.outcome.failure.failureDetail,
                       retryable: false as const,
                     },
@@ -1127,7 +1131,7 @@ export class SelfhostedSession {
             ...(outcome.failure
               ? {
                   failure: {
-                    code: outcome.failure.failureCode,
+                    code: outcome.failure.failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128),
                     detail: outcome.failure.failureDetail,
                     retryable: false as const,
                   },

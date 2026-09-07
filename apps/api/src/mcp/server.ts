@@ -4987,7 +4987,15 @@ function registerWorkspaceOrchestrationTools(
                 direction: requestedDirection,
                 limit,
               },
-              (options) => listSessionEventSlices(deps.db, grant.workspaceId, sessionId, options),
+              (options) =>
+                listSessionEventSlices(
+                  deps.db,
+                  grant.workspaceId,
+                  sessionId,
+                  options,
+                  (legacyOptions) =>
+                    listSessionEventPage(deps.db, grant.workspaceId, sessionId, legacyOptions),
+                ),
             ),
           );
         }

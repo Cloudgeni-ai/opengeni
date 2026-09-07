@@ -81,7 +81,13 @@ async function connected(
 }
 
 test("native zero-exit failure persists exact details in pending notification and a fresh reader", async () => {
-  for (const failureCode of ["OP_OVERFLOW", "OP_PIPE_IO", "OP_SPOOL_IO"]) {
+  for (const failureCode of [
+    "OP_OVERFLOW",
+    "OP_PIPE_IO",
+    "OP_SPOOL_IO",
+    "OP.BAD:" + "x".repeat(140),
+  ]) {
+    const persistedCode = failureCode.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 128);
     const enrollmentId = crypto.randomUUID();
     const correlation = crypto.randomUUID();
     const opId = `${correlation}:0`;
@@ -140,7 +146,7 @@ test("native zero-exit failure persists exact details in pending notification an
     expect(notification!.summary).not.toContain("completed successfully");
     expect(
       fromPostgresLosslessJson(notification!.payload, notification!.payload_codec_version),
-    ).toMatchObject({ failure: { code: failureCode, detail, retryable: false } });
+    ).toMatchObject({ failure: { code: persistedCode, detail, retryable: false } });
     const newClient = createDb(shared.appUrl, { max: 1 });
     try {
       const read = await readSessionBackgroundCommandOutput(newClient.db, identity);
@@ -154,12 +160,34 @@ test("native zero-exit failure persists exact details in pending notification an
       expect(parsed).toMatchObject({
         exitCode: 0,
         terminal: true,
-        failure: { code: failureCode, detail, retryable: false },
+        failure: { code: persistedCode, detail, retryable: false },
       });
       expect(parsed.chunks.map((chunk) => chunk.chunk).join("")).toBe("partial");
     } finally {
       await newClient.close();
     }
+  }
+});
+
+test("restored failure detail outside the application contract does not hide retained output", async () => {
+  for (const detail of [{ count: 7 }, { text: "x".repeat(3000) }]) {
+    const identity = await connected();
+    await appendSessionCommandOutput(client.db, {
+      ...identity,
+      chunkId: "retained",
+      stream: "stdout",
+      chunk: "kept",
+    });
+    await shared.admin`update session_background_commands set state='exited', exit_code=0, settled_at=now(),
+      runner_failure=${shared.admin.json({ code: "OP_OVERFLOW", retryable: false, detail })}
+      where id=${identity.commandId}`;
+    const result = await readSessionBackgroundCommandOutput(client.db, identity);
+    expect(result?.failure).toMatchObject({
+      code: "OP_OVERFLOW",
+      retryable: false,
+      detail: { metadata_error: expect.any(String) },
+    });
+    expect(result?.chunks.map((part) => part.chunk).join("")).toBe("kept");
   }
 });
 

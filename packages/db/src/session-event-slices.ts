@@ -1,8 +1,8 @@
 import { and, asc, desc, eq, gt, inArray, lt, notInArray, sql, type SQL } from "drizzle-orm";
 import { resolveSessionEventTypeFilters, type SessionEvent } from "@opengeni/contracts";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
-import type { ListSessionEventPageOptions, SessionEventPage } from "./index";
-import { listSessionEventPage } from "./index";
+type ListSessionEventPageOptions = import("./index").ListSessionEventPageOptions;
+type SessionEventPage = import("./index").SessionEventPage;
 import { fromPostgresLosslessJson, LOSSLESS_JSON_STRING_PREFIX } from "./lossless-json";
 import * as schema from "./schema";
 
@@ -37,15 +37,18 @@ export async function listSessionEventSlices(
   workspaceId: string,
   sessionId: string,
   options: SessionEventSliceOptions,
+  legacyRead?: (options: ListSessionEventPageOptions) => Promise<SessionEventPage>,
 ): Promise<SessionEventSlicePage> {
   // Finish an already-issued UTF-16 cursor using its original bounded reader.
   // New messages use source slices; no cursor offset is silently reinterpreted.
-  if (options.legacyUtf16)
-    return listSessionEventPage(db, workspaceId, sessionId, {
+  if (options.legacyUtf16) {
+    if (!legacyRead) throw new Error("Legacy continuation requires its original bounded reader");
+    return legacyRead({
       ...options,
       limit: 1,
       maxBytes: 1024 * 1024,
     });
+  }
   const offset = options.sourceOffset ?? 0;
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2_147_483_647)
     throw new Error("Invalid message continuation offset");

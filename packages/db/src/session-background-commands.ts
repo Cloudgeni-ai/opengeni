@@ -87,10 +87,26 @@ function mapCommand(
     row.provider === "connected_machine"
       ? /^op_failure_([A-Za-z0-9_-]{1,128})$/.exec(row.settlementReason ?? "")?.[1]
       : undefined;
+  // Application writes validate exact detail bounds. Older/restored rows may
+  // meet the wider storage envelope without meeting that contract: preserve
+  // failure truth and readable output rather than throwing on every read.
+  const storedFailure = row.runnerFailure
+    ? SessionCommandFailure.safeParse(row.runnerFailure)
+    : null;
   const failure = !terminal
     ? undefined
     : row.runnerFailure
-      ? SessionCommandFailure.parse(row.runnerFailure)
+      ? storedFailure?.success
+        ? storedFailure.data
+        : {
+            code: /^[A-Za-z0-9_-]{1,128}$/.test(row.runnerFailure.code)
+              ? row.runnerFailure.code
+              : "INVALID_RUNNER_FAILURE",
+            detail: {
+              metadata_error: "Stored runner failure details do not match the retained contract.",
+            },
+            retryable: false as const,
+          }
       : legacyFailureCode
         ? { code: legacyFailureCode, retryable: false as const }
         : undefined;

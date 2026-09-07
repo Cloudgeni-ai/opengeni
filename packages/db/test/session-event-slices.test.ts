@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { bootstrapWorkspace, createDb, createSession } from "../src";
+import { bootstrapWorkspace, createDb, createSession, listSessionEventPage } from "../src";
 import { listSessionEventSlices } from "../src/session-event-slices";
 import { LOSSLESS_JSON_STRING_PREFIX, toPostgresLosslessJson } from "../src/lossless-json";
 import {
@@ -61,7 +61,13 @@ async function insert(
     values (${accountId}, ${workspaceId}, ${sessionId}, ${sequence}, ${type}, ${shared.admin.json(payload as never)}, ${version})`;
 }
 const read = async (options: Parameters<typeof listSessionEventSlices>[3]) => {
-  const page = await listSessionEventSlices(client.db, workspaceId, sessionId, options);
+  const page = await listSessionEventSlices(
+    client.db,
+    workspaceId,
+    sessionId,
+    options,
+    (legacyOptions) => listSessionEventPage(client.db, workspaceId, sessionId, legacyOptions),
+  );
   expect(Buffer.byteLength(JSON.stringify(page))).toBeLessThan(512 * 1024);
   return page;
 };
