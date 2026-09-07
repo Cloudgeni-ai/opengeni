@@ -4304,6 +4304,13 @@ export const sessions = pgTable(
       table.updatedAt.desc(),
       table.id.desc(),
     ),
+    workspaceCreatorUpdatedId: index("sessions_workspace_creator_updated_id_idx").on(
+      table.workspaceId,
+      table.createdByKind,
+      table.createdBySubjectId,
+      table.updatedAt.desc(),
+      table.id.desc(),
+    ),
     workspaceActivityRevision: index("sessions_workspace_activity_revision_idx").on(
       table.workspaceId,
       table.activityRevision.desc(),
