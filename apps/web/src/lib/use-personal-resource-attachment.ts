@@ -16,7 +16,6 @@ import {
   isPersonalAttachmentConflict,
   loadPersonalResourceCatalog,
   personalSelection,
-  ongoingPersonalResourceNames,
   resolvePersonalResourceOwnerScope,
   type FixedPersonalResources,
   type PersonalAttachmentMode,
@@ -46,7 +45,12 @@ export type PersonalResourceAttachmentController = Readonly<{
   catalog: PersonalResourceCatalog | null;
   selected: ReturnType<typeof personalSelection>;
   mode: PersonalAttachmentMode | null;
-  ongoingResourceNames: string[];
+  ongoingScope: {
+    organizationId: string;
+    workspaceId: string;
+    sessionId: string;
+    authorityEpoch: number;
+  } | null;
   setMode: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
   requiresDecision: boolean;
@@ -306,34 +310,7 @@ export function usePersonalResourceAttachment(input: {
     visibility,
   );
   const mode: PersonalAttachmentMode | null = selected.resourceCount > 0 ? scopeChoice.mode : null;
-  const [grantCheckTime, setGrantCheckTime] = useState(Date.now);
-  const catalogAuthorities = catalog
-    ? [
-        ...catalog.variableSetAuthorities,
-        ...catalog.rigAuthorities,
-        ...catalog.connectedMachineAuthorities,
-      ]
-    : [];
-  const nextGrantExpiry = Math.min(
-    ...catalogAuthorities.flatMap((authority) =>
-      authority.grants.flatMap((grant) =>
-        grant.status === "active" &&
-        grant.expiresAt !== null &&
-        Date.parse(grant.expiresAt) > grantCheckTime
-          ? [Date.parse(grant.expiresAt)]
-          : [],
-      ),
-    ),
-  );
-  useEffect(() => {
-    if (!Number.isFinite(nextGrantExpiry)) return;
-    const timer = setTimeout(
-      () => setGrantCheckTime(Date.now()),
-      Math.min(2_147_483_647, Math.max(1, nextGrantExpiry - Date.now() + 1)),
-    );
-    return () => clearTimeout(timer);
-  }, [nextGrantExpiry, grantCheckTime]);
-  const ongoingResourceNames =
+  const ongoingScope =
     scope &&
     input.session?.tenancy &&
     visibility === "workspace" &&
@@ -342,32 +319,13 @@ export function usePersonalResourceAttachment(input: {
     !refreshing &&
     !error &&
     !selected.closureUnverified
-      ? ongoingPersonalResourceNames({
-          authorities: catalogAuthorities,
-          resources: [
-            ...selected.variableSets.map((resource) => ({
-              kind: "variable_set" as const,
-              id: resource.id,
-              name: resource.name,
-            })),
-            ...selected.rigs.map((resource) => ({
-              kind: "rig" as const,
-              id: resource.id,
-              name: resource.name,
-            })),
-            ...selected.connectedMachines.map((resource) => ({
-              kind: "connected_machine" as const,
-              id: resource.enrollmentId,
-              name: resource.name,
-            })),
-          ],
+      ? {
           organizationId: scope.organizationId,
           workspaceId: scope.targetWorkspaceId,
           sessionId: input.session.id,
           authorityEpoch: input.session.tenancy.authorityEpoch,
-          now: Math.max(grantCheckTime, Date.now()),
-        })
-      : [];
+        }
+      : null;
   const acknowledged = visibility === "workspace" && selected.resourceCount > 0;
   const fixedResourceCount =
     (input.fixed.variableSetIds?.length ?? Number(input.fixed.variableSetId !== null)) +
@@ -566,7 +524,7 @@ export function usePersonalResourceAttachment(input: {
     selected,
     mode,
     setMode: scopeChoice.setMode,
-    ongoingResourceNames,
+    ongoingScope,
     visibility,
     requiresDecision,
     intent,

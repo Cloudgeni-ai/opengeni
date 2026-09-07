@@ -26,7 +26,7 @@ function controller(
     },
     mode: "once",
     setMode: () => {},
-    ongoingResourceNames: [],
+    ongoingScope: null,
     visibility: "workspace",
     requiresDecision: false,
     intent: undefined,

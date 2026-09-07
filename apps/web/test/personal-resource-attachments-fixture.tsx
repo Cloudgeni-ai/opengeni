@@ -73,7 +73,7 @@ function Fixture() {
       },
       mode: resourceCount > 0 ? sendChoice.mode : null,
       setMode: sendChoice.setMode,
-      ongoingResourceNames: [],
+      ongoingScope: null,
       visibility: "workspace",
       requiresDecision: sourceLost || authorityUnavailable,
       intent,

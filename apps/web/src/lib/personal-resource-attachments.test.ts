@@ -1,3 +1,4 @@
+import { ongoingPersonalResourceNames } from "./personal-resource-ongoing-access";
 import { describe, expect, test } from "bun:test";
 import { OpenGeniApiError, type Session, type UserResourceAuthoritySummary } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -9,7 +10,6 @@ import {
   loadPersonalResourceCatalog,
   newSessionFixedResourceCatalogFailed,
   newSessionPersonalResourceAttachment,
-  ongoingPersonalResourceNames,
   newSessionVariableSetResolutionSource,
   personalResourceSelectionIdentityKey,
   personalSelection,
