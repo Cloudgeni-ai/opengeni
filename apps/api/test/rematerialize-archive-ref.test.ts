@@ -340,3 +340,27 @@ test("API cold spawner records a corrupt object archive restore failure", async 
     "archive_hash_mismatch",
   );
 }, 120_000);
+
+test("API cold spawner refuses a malformed durable archive locator", async () => {
+  const fixture = await setupColdArchiveLease();
+  await admin!`update sandbox_leases set resume_state = jsonb_set(
+    resume_state, '{sessionState,workspaceArchiveRef,key}', '"malformed-key"'::jsonb
+  ) where sandbox_group_id = ${fixture.groupId}`;
+  fixture.acquired.lease = (await readLease(db!, fixture.workspaceId, fixture.groupId))!;
+  const storage = objectStorageFor(fixture.ref, fixture.archive.bytes);
+  let failure: unknown;
+  try {
+    const result = await establishArchiveFixture(fixture, storage.objectStorage);
+    seeded.push(result.established);
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toMatchObject({
+    name: "WorkspaceArchiveIntegrityError",
+    code: "archive_metadata_invalid",
+  });
+  expect(storage.reads()).toBe(0);
+  const after = await readLease(db!, fixture.workspaceId, fixture.groupId);
+  expect(after?.liveness).toBe("cold");
+  expect(after?.instanceId).toBeNull();
+});

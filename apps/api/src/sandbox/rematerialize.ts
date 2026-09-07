@@ -60,7 +60,13 @@ async function materializeArchiveObjectRef(
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   if (!sessionState) return envelope;
-  if (!parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) return envelope;
+  if (sessionState.workspaceArchiveRef == null) return envelope;
+  if (!parseWorkspaceArchiveObjectRef(sessionState.workspaceArchiveRef)) {
+    throw new WorkspaceArchiveIntegrityError(
+      "archive_metadata_invalid",
+      "workspace archive object reference is malformed",
+    );
+  }
   if (!objectStorage) {
     throw new WorkspaceArchiveIntegrityError(
       "archive_base64_invalid",
