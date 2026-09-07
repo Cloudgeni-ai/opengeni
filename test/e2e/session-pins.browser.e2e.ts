@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
 import {
+  appendSessionEventsAndUpdateSession,
   createDb,
   createSession,
   grantWorkspaceAccess,
@@ -926,17 +927,52 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const workspaceId = await workspaceFromPage(page);
       const batch = `Expired cursor batch ${Date.now()}`;
       let sentinel: BrowserSession | null = null;
-      for (let index = 0; index < 106; index += 1) {
-        const created = await createSessionThroughApi(
-          page,
-          apiBaseUrl,
+      // Bootstrap authority through the public API, then seed the remaining
+      // fixture rows through the normal DB lifecycle. Listing, pagination and
+      // mutations remain real API operations.
+      sentinel = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Pagination sentinel prompt",
+      );
+      // Search also matches the immutable initial prompt. Give this root a
+      // matching title only, so a later rename really removes its membership.
+      const namedSentinel = await page.request.patch(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel.id}`,
+        { data: { title: `${batch} oldest sentinel` } },
+      );
+      expect(namedSentinel.ok()).toBe(true);
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        sentinel.id,
+        [{ type: "agent.updated", payload: { source: "pagination fixture settled" } }],
+        { status: "idle" },
+      );
+      for (let index = 1; index < 106; index += 1) {
+        const seeded = await createTitledSession(dbClient.db, {
+          accountId: sentinel.accountId,
           workspaceId,
-          `${batch} ${index === 0 ? "oldest sentinel" : `row ${index + 1}`}`,
+          initialMessage: `${batch} row ${index + 1}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          seeded.id,
+          [{ type: "agent.updated", payload: { source: "pagination fixture settled" } }],
+          { status: "idle" },
         );
-        if (index === 0) sentinel = created;
       }
 
-      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions`);
+      // Stay in the mounted workspace; search performs the real list refresh.
       const search = page.getByRole("searchbox", { name: "Search sessions" });
       await search.waitFor();
       await page.locator("[data-sessionpin-session-list] a[data-session-row]").first().waitFor({
@@ -967,7 +1003,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
             successfulSessionPageResponse(response, workspaceId, {
               search: batch,
               cursor: null,
-            }) && url.searchParams.has("updatedFrom")
+            }) &&
+            url.searchParams.has("updatedFrom") &&
+            !url.searchParams.has("updatedBefore")
           );
         },
         { timeout: 10_000 },
@@ -981,6 +1019,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const retainedId = filteredFirstPage.sessions[0]!.id;
       const visibleRows = page.locator("[data-sessionpin-session-list] a[data-session-row]");
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll("[data-sessionpin-session-list] a[data-session-row]").length ===
+          100,
+      );
       expect(await visibleRows.count()).toBe(100);
 
       // A generic 500 is not treated as cursor expiry: loaded rows stay put and
@@ -1009,6 +1052,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       });
       await retryOlder.waitFor({ timeout: 10_000 });
       expect(injectedFailure).toBe(true);
+      await page.waitForFunction(
+        () =>
+          document.querySelectorAll("[data-sessionpin-session-list] a[data-session-row]").length ===
+          100,
+      );
       expect(await visibleRows.count()).toBe(100);
       await page.locator(`a[data-session-row="${retainedId}"]`).waitFor();
 
@@ -1039,6 +1087,19 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       expect(visibleIds).toHaveLength(106);
       expect(new Set(visibleIds).size).toBe(106);
+      // A write from another device can change membership outside page one.
+      // The exhausted group must revalidate its loaded window on the ordinary
+      // poll, without requiring navigation or discarding the other 105 rows.
+      const rename = await page.request.patch(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${sentinel!.id}`,
+        { data: { title: "Moved outside the current search" } },
+      );
+      expect(rename.ok()).toBe(true);
+      await page.locator(`a[data-session-row="${sentinel!.id}"]`).waitFor({
+        state: "detached",
+        timeout: 30_000,
+      });
+      expect(await visibleRows.count()).toBe(105);
     } finally {
       await context.close();
     }
@@ -2067,6 +2128,109 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close().catch(() => undefined);
     }
   }, 60_000);
+  test("discovers older active roots and active descendants through explicit Active pagination", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    let workspaceId = "";
+    const activatedIds: string[] = [];
+    try {
+      await page.goto(webBaseUrl);
+      workspaceId = await workspaceFromPage(page);
+      const bootstrap = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Active discovery bootstrap",
+      );
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        bootstrap.id,
+        [{ type: "agent.updated", payload: { source: "active pagination fixture settled" } }],
+        { status: "idle" },
+      );
+      const seed = async (title: string, parentSessionId?: string) => {
+        const seeded = await createTitledSession(dbClient.db, {
+          accountId: bootstrap.accountId,
+          workspaceId,
+          initialMessage: title,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          reasoningEffort: "medium",
+          latencyMode: "standard",
+          sandboxBackend: "none",
+          ...(parentSessionId ? { parentSessionId } : {}),
+          createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+        });
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          seeded.id,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture settled" } }],
+          { status: "idle" },
+        );
+        return seeded;
+      };
+      const activeRoot = await seed("Older active root");
+      const ancestor = await seed("Older root with active child");
+      const activeChild = await seed("Older active child", ancestor.id);
+      for (const session of [activeRoot, activeChild]) {
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          session.id,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture" } }],
+          { status: "running" },
+        );
+        activatedIds.push(session.id);
+      }
+      for (let index = 0; index < 60; index += 1) await seed(`Newer idle root ${index}`);
+      const discoveryPage = page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          successfulSessionPageResponse(response, workspaceId) &&
+          url.searchParams.get("limit") === "50" &&
+          url.searchParams.get("parentSessionId") === "null" &&
+          !url.searchParams.has("archivedOnly")
+        );
+      });
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      const discovery = (await (await discoveryPage).json()) as BrowserSessionPage;
+      expect(
+        discovery.sessions.some((row) => row.id === activeRoot.id || row.id === ancestor.id),
+      ).toBe(false);
+      expect(discovery.nextCursor).toBeTruthy();
+      await page.getByRole("button", { name: "Session filters", exact: true }).click();
+      await page.getByRole("menuitemradio", { name: "Creator", exact: true }).click();
+      const activeGroup = page.getByRole("group", { name: "Active", exact: true });
+      const discoverOlder = activeGroup.getByRole("button", {
+        name: "Load older sessions in Active",
+        exact: true,
+      });
+      await discoverOlder.waitFor();
+      expect(await activeGroup.locator("a[data-session-row]").count()).toBe(0);
+      await discoverOlder.click();
+      await activeGroup.locator(`a[data-session-row="${activeRoot.id}"]`).waitFor();
+      await activeGroup.locator(`a[data-session-row="${ancestor.id}"]`).waitFor();
+      // Other scenarios in this shared workspace can also leave active roots.
+      expect(await activeGroup.locator("a[data-session-row]").count()).toBeGreaterThanOrEqual(2);
+    } finally {
+      for (const sessionId of activatedIds) {
+        await appendSessionEventsAndUpdateSession(
+          dbClient.db,
+          workspaceId,
+          sessionId,
+          [{ type: "agent.updated", payload: { source: "active pagination fixture cleanup" } }],
+          { status: "idle" },
+        );
+      }
+      await context.close();
+    }
+  }, 90_000);
 });
 
 type BrowserSession = {
