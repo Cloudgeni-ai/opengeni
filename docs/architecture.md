@@ -462,7 +462,7 @@ probes remain immediate.
 Turn recovery does not poll or repeatedly provision while that rotation remains
 owned by the same lease epoch. The active recovering turn carries an exact
 lifecycle marker; the session workflow parks at its database work peek, and the
-draining-to-cold commit durably wakes only matching group/epoch waiters. This
+authoritative rotation-ending or epoch-advancing commit durably wakes only matching group/epoch waiters. This
 keeps healthy sandbox admission unchanged while moving rotation waiting off the
 turn-worker pool.
 

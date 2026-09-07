@@ -1200,7 +1200,7 @@ A recovering turn fenced by an active sandbox rotation persists one exact
 `(sandbox group, lease epoch)` lifecycle-wait marker. The session workflow sees
 that marker during its ordinary database work peek and closes after the bounded
 signal race window instead of reserving another turn-worker slot or repeating
-sandbox provisioning. The authoritative draining-to-cold transaction enqueues a
+sandbox provisioning. Every authoritative rotation-ending or epoch-advancing transaction enqueues a
 durable workflow wake only for recovering sessions whose active turn carries the
 matching marker. The next claim removes the marker and either rematerializes the
 successor or reports the already-durable restore blocker. Non-rotation capture
