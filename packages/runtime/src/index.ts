@@ -6878,6 +6878,9 @@ export async function prepareRunInput(
     });
   }
   const state = await restoreInterruptedRunState(agent, compatibleRunState.serializedRunState);
+  // Pre-fix serialized states have no ownership field. Establish application
+  // ownership before reading history and choosing the durable append boundary.
+  state._historyOwnership = "external";
   const interruptions = state.getInterruptions();
   const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
   const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
