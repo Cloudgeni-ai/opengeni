@@ -38,6 +38,29 @@ function bounded(page: unknown) {
 }
 
 describe("session event content views", () => {
+  for (const direction of ["after", "before"] as const) {
+    test(`whole-message continuation visits every event once (${direction})`, async () => {
+      const rows = Array.from({ length: 25 }, (_, n) =>
+        event(n + 1, "agent.message.completed", { text: `message ${n}` }),
+      );
+      const seen: number[] = [];
+      let page = await readSessionEventView({ sessionId, direction, limit: 4 }, reader(rows));
+      for (let pages = 0; ; pages++) {
+        expect(pages).toBeLessThan(10);
+        seen.push(...page.events.map((item) => item.sequence));
+        if (!page.hasMore) break;
+        expect(
+          JSON.parse(Buffer.from(page.nextCursor!, "base64url").toString()).sequence,
+        ).toBeNull();
+        page = await readSessionEventView(
+          { sessionId, cursor: page.nextCursor!, limit: 4 },
+          reader(rows),
+        );
+      }
+      expect(seen.length).toBe(25);
+      expect([...seen].sort((a, b) => a - b)).toEqual(rows.map((item) => item.sequence));
+    });
+  }
   test("rejects a crafted continuation offset inside a surrogate pair", async () => {
     const read = reader([event(1, "agent.message.completed", { text: "🙂".repeat(10000) })]);
     const page = await readSessionEventView({ sessionId }, read);

@@ -11924,46 +11924,48 @@ export const SessionBackgroundCommand = z
   .strict();
 export type SessionBackgroundCommand = z.infer<typeof SessionBackgroundCommand>;
 
-export const CommandReadInput = z
-  .object({
-    commandId: z.string().uuid(),
-    cursor: z.string().max(128).optional(),
-    waitSeconds: z.number().int().min(0).max(50).optional(),
-    maxOutputBytes: z.number().int().min(4).max(65_536).optional(),
-  })
-  .strict();
+export const CommandReadInput = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      cursor: z.string().max(128).optional(),
+      waitSeconds: z.number().int().min(0).max(50).optional(),
+      maxOutputBytes: z.number().int().min(4).max(65_536).optional(),
+    })
+    .strict())();
 export type CommandReadInput = z.infer<typeof CommandReadInput>;
 
-export const CommandReadResult = z
-  .object({
-    commandId: z.string().uuid(),
-    state: SessionBackgroundCommandState,
-    exitCode: z.number().int().nullable(),
-    terminal: z.boolean(),
-    completionObservedAt: z.string().nullable(),
-    chunks: z
-      .array(
-        z.object({
-          sequence: z.number().int().nonnegative(),
-          stream: z.enum(["stdout", "stderr"]),
-          streamFidelity: z.enum(["separate", "merged", "unknown"]),
-          chunk: z.string(),
-        }),
-      )
-      .max(64),
-    nextCursor: z.string(),
-    hasMore: z.boolean(),
-    retention: z.object({
-      source: z.literal("retained_session_events"),
-      completeness: z.literal("unknown"),
-      gaps: z.array(z.string()),
-    }),
-    waitedMs: z.number().nonnegative(),
-    timedOut: z.boolean(),
-    aborted: z.boolean(),
-    liveFanout: z.boolean(),
-  })
-  .strict();
+export const CommandReadResult = /* @__PURE__ */ (() =>
+  z
+    .object({
+      commandId: z.string().uuid(),
+      state: SessionBackgroundCommandState,
+      exitCode: z.number().int().nullable(),
+      terminal: z.boolean(),
+      completionObservedAt: z.string().nullable(),
+      chunks: z
+        .array(
+          z.object({
+            sequence: z.number().int().nonnegative(),
+            stream: z.enum(["stdout", "stderr"]),
+            streamFidelity: z.enum(["separate", "merged", "unknown"]),
+            chunk: z.string(),
+          }),
+        )
+        .max(64),
+      nextCursor: z.string(),
+      hasMore: z.boolean(),
+      retention: z.object({
+        source: z.literal("retained_session_events"),
+        completeness: z.literal("unknown"),
+        gaps: z.array(z.string()),
+      }),
+      waitedMs: z.number().nonnegative(),
+      timedOut: z.boolean(),
+      aborted: z.boolean(),
+      liveFanout: z.boolean(),
+    })
+    .strict())();
 export type CommandReadResult = z.infer<typeof CommandReadResult>;
 
 export const SessionBackgroundCommandListResponse = z

@@ -177,12 +177,12 @@ test("already claimed notification and history remain byte-for-byte unchanged", 
   const history =
     await shared.admin`select row_to_json(h) as value from session_history_items h where id=${historyId}`;
   await observe(client.db, command);
-  expect(
-    await shared.admin`select row_to_json(u) as value from session_system_updates u where source_id=${command.commandId}`,
-  ).toEqual(before);
-  expect(
-    await shared.admin`select row_to_json(h) as value from session_history_items h where id=${historyId}`,
-  ).toEqual(history);
+  const after =
+    await shared.admin`select row_to_json(u) as value from session_system_updates u where source_id=${command.commandId}`;
+  const afterHistory =
+    await shared.admin`select row_to_json(h) as value from session_history_items h where id=${historyId}`;
+  expect(Array.from(after)).toEqual(Array.from(before));
+  expect(Array.from(afterHistory)).toEqual(Array.from(history));
 });
 
 test("running read racing a blocked finish leaves the later completion pending", async () => {

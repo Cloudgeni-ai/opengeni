@@ -4,6 +4,7 @@
 "@opengeni/db": minor
 "@opengeni/runtime": minor
 "@opengeni/worker-bundle": minor
+"@opengeni/sdk": minor
 ---
 
 Separate command interaction from session history. Add bounded retained-output command reads and use the same operation for command waits. Terminal reads observe completion and suppress only still-pending completion notifications; running reads, claimed notifications, and historical tool results remain unchanged.
