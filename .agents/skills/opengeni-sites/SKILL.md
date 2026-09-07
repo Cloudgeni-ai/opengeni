@@ -53,6 +53,8 @@ bun add --exact $(bun -e 'const pins=await Bun.file("/workspace/.agents/opengeni
 Use the skill's actual location if different. Keep these exact dependencies
 in saved source. Missing expected exports indicate a package mismatch, not a
 reason to replace the standard conversation component with custom wiring.
+The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this
+project for discovery and calls; a sandbox-global CLI can predate the deployment.
 
 Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
 are unreleased checkout packages. Skip the registry command above for OpenGeni.
@@ -182,10 +184,10 @@ identities. Friendly names are never authority.
 
 ## Request the smallest tool set
 
-1. Find relevant tools with `ogtool list --query <keyword> --limit 10`, then
-   inspect selected tools with `ogtool show <path>`. Do not dump the full
+1. Find relevant tools with `bun run ogtool list --query <keyword> --limit 10`, then
+   inspect selected tools with `bun run ogtool show <path>`. Do not dump the full
    catalog into model context. Generate local types with
-   `ogtool declarations <path>` and read only the relevant declarations.
+   `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
    identity in the Site's `requestedTools` publish field.
 3. Do not request tools the Site does not call. A Site with no direct workspace

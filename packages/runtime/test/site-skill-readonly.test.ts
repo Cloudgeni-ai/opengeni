@@ -14,6 +14,7 @@ test("Site skill composition needs no writable application directory", () => {
       "@opengeni/sdk": "3.7.1-canary.2",
       "@opengeni/react": "3.7.1-canary.2",
       "@opengeni/codemode": "0.4.28-canary.2",
+      "@opengeni/ogtool": "0.3.31-canary.2",
     };
     const result = Bun.spawnSync(
       [

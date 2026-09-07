@@ -1261,22 +1261,18 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 
 ### 7.6 SDK, React, web, and embedding
 
-`@opengeni/sdk` is the framework-neutral client contract. `@opengeni/react`
-adds hooks and UI. `apps/web` is a consumer of those packages and should not
-become a hidden source of domain semantics.
+`@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
+`apps/web` consumes them, never owns hidden domain semantics.
 
-`SessionConversation` is the default complete existing-session embed. It owns
-one event feed, queue projection/actions, durable composer and model policy,
-human-input forms, and timeline history. `ChatComposer` remains the lower-level
-input surface, not an implicit queue or whole conversation. Sites use the same
-component with their standard Site-bound SDK client.
+`SessionConversation` is the complete embed: event feed, queue/actions, durable
+composer, model policy, human-input forms, and history. `ChatComposer` is input
+only. Sites use the same component with their Site-bound client.
 
-Site authoring installs exact npm versions from `package-versions.json`, generated
-in the skill manifest without worker-directory writes. Stable defaults use source
-manifests; canaries set `OPENGENI_SITE_PACKAGE_VERSIONS` to their published
-SDK/React/Codemode versions. Only local development enables
-`OPENGENI_LOCAL_SITE_PACKAGES` and packages dirty checkout source into archives
-at `/opt/opengeni/site-packages`; deployed images do not bake those archives.
+Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
+`package-versions.json`: source-manifest defaults or canary
+`OPENGENI_SITE_PACKAGE_VERSIONS`. No worker-directory writes. Only local
+`OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
+`/opt/opengeni/site-packages`; deployed images do not.
 
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE
@@ -1290,13 +1286,10 @@ the residual correction after browser anchoring. Corrections cannot resume
 tip-follow, and continued upward input permits bounded sequential older-page
 loads even when collapsed content adds no scroll range.
 
-The stock web console imports the browser-focused `@opengeni/sdk/browser`
-entry. Operator-only Document-authority and tenancy-backfill methods live in
-the optional `@opengeni/sdk/document-authority` entry, while the root and
-`core` clients retain their compatibility surface. New SDK methods that the web
-does not call belong in a focused optional entry so they add nothing to the
-direct-session browser graph; bundle-boundary and browser-surface tests pin that
-separation.
+Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
+backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
+Keep non-web methods in optional entries, outside the direct-session bundle;
+bundle-boundary and browser-surface tests enforce this.
 
 Most product integrations use the standalone service through a server-side SDK
 proxy and optional React surfaces. Advanced in-process embedding may bind host

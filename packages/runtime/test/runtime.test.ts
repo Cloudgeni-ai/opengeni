@@ -11120,6 +11120,7 @@ describe("runtime Skill activation", () => {
     const packagePins = JSON.parse(siteSource.children["package-versions.json"].content);
     expect(Object.keys(packagePins).sort()).toEqual([
       "@opengeni/codemode",
+      "@opengeni/ogtool",
       "@opengeni/react",
       "@opengeni/sdk",
     ]);
