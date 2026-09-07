@@ -46,7 +46,11 @@ describe("Appearance in Chromium", () => {
   }, 30_000);
 
   async function openAppearance() {
-    const trigger = page.getByRole("button", { name: "Jorge", exact: true, includeHidden: true });
+    const trigger = page.getByRole("button", {
+      name: "Example user",
+      exact: true,
+      includeHidden: true,
+    });
     if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
     await page.getByRole("menuitemradio", { name: "Light", exact: true }).waitFor();
   }

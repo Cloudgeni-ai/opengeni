@@ -21,7 +21,7 @@ createRoot(document.getElementById("root")!).render(
         <div className="mt-auto">
           <DropdownMenu>
             <DropdownMenuTrigger className="min-h-11 w-full rounded-md p-2 text-left text-sm hover:bg-surface-2">
-              Jorge
+              Example user
             </DropdownMenuTrigger>
             <DropdownMenuContent
               side="top"
@@ -29,8 +29,8 @@ createRoot(document.getElementById("root")!).render(
               className="w-[min(18rem,calc(100vw-1rem))]"
             >
               <DropdownMenuLabel>
-                Jorge
-                <span className="block text-xs font-normal text-fg-subtle">jorge@example.com</span>
+                Example user
+                <span className="block text-xs font-normal text-fg-subtle">user@example.test</span>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               <AppearanceMenu />
