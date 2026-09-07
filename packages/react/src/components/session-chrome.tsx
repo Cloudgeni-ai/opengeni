@@ -1,3 +1,4 @@
+import { ChildSessionLink } from "./child-session-link";
 /**
  * SessionChrome — compact merged session signals above the composer.
  *
@@ -105,6 +106,8 @@ export type SessionChromeProps = {
    * (and the gallery) may still pass a handler so the action is visible.
    */
   onDismissIncoming?: ((inputId: string) => void) | undefined;
+  /** Open a typed child update's source through the host's normal authorized route. */
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   readOnly?: boolean | undefined;
   className?: string | undefined;
   /** Controlled active segment; omit for uncontrolled. */
@@ -419,6 +422,7 @@ export function SessionChrome({
   commandsCount = 0,
   agentsSignal,
   onDismissIncoming,
+  onOpenSession,
   readOnly = false,
   className,
   active: activeControlled,
@@ -751,7 +755,11 @@ export function SessionChrome({
 
   const panelBody =
     active === "incoming" ? (
-      <IncomingPanel inputs={incoming} onDismiss={onDismissIncoming} />
+      <IncomingPanel
+        inputs={incoming}
+        onDismiss={onDismissIncoming}
+        onOpenSession={onOpenSession}
+      />
     ) : active === "queue" ? (
       <QueuePanel
         turns={queuedTurns}
@@ -1221,47 +1229,59 @@ export function SessionChrome({
 function IncomingPanel({
   inputs,
   onDismiss,
+  onOpenSession,
 }: {
   inputs: SessionPendingInputPreview[];
   onDismiss?: ((inputId: string) => void) | undefined;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
 }) {
   return (
-    <ul
-      className="flex flex-col gap-0.5"
-      aria-label="Incoming updates"
-      data-og-session-chrome-panel="incoming"
-    >
-      {inputs.map((input) => (
-        <li
-          key={input.id}
-          className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
-        >
-          <span
-            className={cn(
-              "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
-              input.classification === "action_required" || input.classification === "failure"
-                ? "bg-og-status-waiting/12 text-og-status-waiting"
-                : "bg-og-surface-3/80 text-og-fg-muted",
-            )}
+    <div>
+      <p className="mb-2 text-og-xs text-og-fg-subtle">Waiting to be included in an agent turn.</p>
+      <ul
+        className="flex flex-col gap-0.5"
+        aria-label="Incoming updates"
+        data-og-session-chrome-panel="incoming"
+      >
+        {inputs.map((input) => (
+          <li
+            key={input.id}
+            className="group flex items-start gap-1.5 rounded-og-sm px-1.5 py-1 transition-colors hover:bg-[var(--_og-session-chrome-row-hover)]"
           >
-            {pendingKindLabel(input.kind)}
-          </span>
-          <p className="min-w-0 flex-1 text-og-xs leading-4 text-og-fg">{input.summary}</p>
-          {onDismiss ? (
-            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-              <IconAction
-                label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
-                tip="Dismiss"
-                onClick={() => onDismiss(input.id)}
-                danger
-              >
-                <Trash2Icon className="size-3" />
-              </IconAction>
+            <span
+              className={cn(
+                "mt-px shrink-0 rounded px-1 py-px text-[10px] font-medium leading-4",
+                input.classification === "action_required" || input.classification === "failure"
+                  ? "bg-og-status-waiting/12 text-og-status-waiting"
+                  : "bg-og-surface-3/80 text-og-fg-muted",
+              )}
+            >
+              {pendingKindLabel(input.kind)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="break-words text-og-xs leading-4 text-og-fg">{input.summary}</p>
+              <ChildSessionLink
+                kind={input.kind}
+                sourceId={input.sourceId}
+                onOpenSession={onOpenSession}
+              />
             </div>
-          ) : null}
-        </li>
-      ))}
-    </ul>
+            {onDismiss ? (
+              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                <IconAction
+                  label={`Dismiss incoming ${pendingKindLabel(input.kind)}`}
+                  tip="Dismiss"
+                  onClick={() => onDismiss(input.id)}
+                  danger
+                >
+                  <Trash2Icon className="size-3" />
+                </IconAction>
+              </div>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
