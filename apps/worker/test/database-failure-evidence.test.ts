@@ -55,7 +55,6 @@ test("database transport failures add no raw driver cause or automatic retry", (
   expect(agentRunFailurePayload(failure)).toEqual({ error: failure.message });
 });
 
-
 test("five-character application codes do not become database diagnostics", () => {
   const domain = Object.assign(new Error("External domain failure"), { code: "E1234" });
   expect(agentRunFailurePayload(domain)).toEqual({ error: domain.message });
