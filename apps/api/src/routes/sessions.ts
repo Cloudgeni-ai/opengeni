@@ -5075,9 +5075,11 @@ export function agentTopologyQuery(query: Record<string, string>): {
     throw new HTTPException(400, { message: "query cannot be combined with an exact subject" });
   }
   const relevanceRequested = Boolean(searchQuery || subject);
+  // An explicit root scopes the whole workstream; only an explicit parent
+  // narrows it to one level. Ordinary browse still defaults to root sessions.
   const parentSessionId =
     rawParent === undefined
-      ? relevanceRequested
+      ? relevanceRequested || Boolean(rootSessionId)
         ? undefined
         : null
       : rawParent === "null"
