@@ -322,7 +322,7 @@ export function ModelAccessOnboardingPanel({
               type="button"
               variant="secondary"
               className="justify-start"
-              disabled={!client || busy}
+              disabled={busy}
               onClick={() => setKeyProvider(keyProvider === "gateway" ? null : "gateway")}
             >
               <KeyRoundIcon className="size-3.5" />
@@ -332,7 +332,7 @@ export function ModelAccessOnboardingPanel({
               type="button"
               variant="secondary"
               className="justify-start"
-              disabled={!client || busy}
+              disabled={busy}
               onClick={() => setKeyProvider(keyProvider === "openrouter" ? null : "openrouter")}
             >
               <KeyRoundIcon className="size-3.5" />
