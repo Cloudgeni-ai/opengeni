@@ -79,6 +79,8 @@ import {
   retainCreateSessionAttemptAfterFailure,
   type PendingCreateAttempt,
 } from "@/lib/session-create";
+import { isPaymentRequiredError } from "@/lib/model-access-onboarding";
+import { hasAccountPermission } from "@/lib/permissions";
 import {
   applySessionPinProjection,
   notifySessionPinChanged,
@@ -190,6 +192,12 @@ const BrowserAccountsLoadingGate = lazy(() =>
 const BrowserAccountsOrganizationOnboardingPanel = lazy(() =>
   import("@/components/browser-accounts-runtime").then((module) => ({
     default: module.BrowserAccountsOrganizationOnboardingPanel,
+  })),
+);
+
+const CreditRequiredPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -585,6 +593,10 @@ export function RootRouteComponent() {
   >(bootstrappedInvalidSlackLinkQueryWorkspaceId);
   const [accessLoading, setAccessLoading] = useState(false);
   const [accessError, setAccessError] = useState<BootstrapErrorPresentation | null>(null);
+  const [creditRequired, setCreditRequired] = useState<{
+    workspaceId: string;
+    accountId: string | null;
+  } | null>(null);
   const [model, setModel] = useState("gpt-5.6-sol");
   const [reasoningEffort, setReasoningEffort] = useState<IntelligenceEffort>("low");
   const [latencyMode, setLatencyMode] = useState<LatencyMode>("standard");
@@ -1976,9 +1988,17 @@ export function RootRouteComponent() {
             outcomeUnknown,
           });
         }
-        toast.error("Failed to start session", {
-          description: composerSubmissionErrorMessage(problem),
-        });
+        if (isPaymentRequiredError(problem)) {
+          const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+          setCreditRequired({
+            workspaceId,
+            accountId: workspace?.accountId ?? null,
+          });
+        } else {
+          toast.error("Failed to start session", {
+            description: composerSubmissionErrorMessage(problem),
+          });
+        }
       }
       return null;
     } finally {
@@ -2776,6 +2796,11 @@ export function RootRouteComponent() {
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
         client={client}
+        billingMode={clientConfig.billingMode ?? "disabled"}
+        codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
+        supergrokEnabled={clientConfig.models.some(
+          (catalogModel) => catalogModel.source === "supergrok",
+        )}
         activeEmail={authSession?.user.email ?? null}
         invitation={organizationInvitationContinuation}
         onComplete={revalidatePrincipalAccess}
@@ -2784,6 +2809,11 @@ export function RootRouteComponent() {
       <Suspense fallback={<LoadingPanel label="Loading organization setup" />}>
         <OrganizationOnboardingPanel
           client={client}
+          billingMode={clientConfig.billingMode ?? "disabled"}
+          codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
+          supergrokEnabled={clientConfig.models.some(
+            (catalogModel) => catalogModel.source === "supergrok",
+          )}
           activeEmail={authSession?.user.email ?? null}
           invitation={organizationInvitationContinuation}
           onUseInvitedAccount={() => {
@@ -2805,6 +2835,22 @@ export function RootRouteComponent() {
   ) : (
     <AppContext.Provider value={appContext}>
       <Outlet />
+      {creditRequired ? (
+        <Suspense fallback={null}>
+          <CreditRequiredPrompt
+            open
+            workspaceId={creditRequired.workspaceId}
+            accountId={creditRequired.accountId}
+            canBuyCredits={
+              Boolean(creditRequired.accountId) &&
+              hasAccountPermission(accessContext, creditRequired.accountId ?? "", "billing:manage")
+            }
+            onOpenChange={(open) => {
+              if (!open) setCreditRequired(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
       {import.meta.env.DEV && import.meta.env.VITE_OPENGENI_ROUTER_DEVTOOLS === "true" ? (
         <TanStackRouterDevtools position="bottom-right" />
       ) : null}
