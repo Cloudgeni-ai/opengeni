@@ -175,6 +175,74 @@ describe("GitHub action approval controls", () => {
     }
   });
 
+  test("ignores a saved actor from the previous workspace", async () => {
+    const actor = {
+      kind: "workspace_app" as const,
+      installationId: 71,
+      label: "Shared installation",
+      groups: { routine: "block" as const, review: "block" as const, merge: "block" as const },
+    };
+    let resolveSave!: (value: typeof actor) => void;
+    const pending = new Promise<typeof actor>((resolve) => {
+      resolveSave = resolve;
+    });
+    const rendered = await renderAdapter(
+      appContext(
+        ["github:manage"],
+        mock(() => pending),
+      ),
+    );
+    try {
+      await act(async () => {
+        choice(rendered.model(), "-routine").onChange("block");
+      });
+      await rendered.rerender(OTHER_WORKSPACE_ID);
+      await act(async () => {
+        resolveSave(actor);
+        await pending;
+      });
+      expect(choice(rendered.model(), "-routine").value).toBe("ask");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("serializes actor snapshot saves even for same-frame changes to different groups", async () => {
+    const actor = {
+      kind: "workspace_app" as const,
+      installationId: 71,
+      label: "Shared installation",
+      groups: { routine: "allow" as const, review: "ask" as const, merge: "ask" as const },
+    };
+    let resolveSave!: (value: typeof actor) => void;
+    const pending = new Promise<typeof actor>((resolve) => {
+      resolveSave = resolve;
+    });
+    const update = mock(() => pending);
+    const rendered = await renderAdapter(appContext(["github:manage"], update));
+    try {
+      await act(async () => {
+        choice(rendered.model(), "-routine").onChange("allow");
+        choice(rendered.model(), "-merge").onChange("block");
+      });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(choice(rendered.model(), "-merge").disabled).toBe(true);
+      await act(async () => {
+        resolveSave(actor);
+        await pending;
+      });
+      expect(choice(rendered.model(), "-routine").value).toBe("allow");
+      expect(choice(rendered.model(), "-merge").disabled).toBe(false);
+      await act(async () => {
+        choice(rendered.model(), "-merge").onChange("block");
+        await pending;
+      });
+      expect(update).toHaveBeenCalledTimes(2);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("shows the policy read-only without GitHub management authority", async () => {
     const rendered = await renderAdapter(
       appContext(

@@ -73,6 +73,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   const [actionPolicyFailed, setActionPolicyFailed] = useState(false);
   const [actionPolicyBusy, setActionPolicyBusy] = useState<string | null>(null);
   const actionPolicyRequest = useRef(0);
+  const actionPolicyMutation = useRef<number | null>(null);
   const installations = status?.installations ?? [];
   const busy = context.githubAppBusy || disconnecting;
 
@@ -114,9 +115,13 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
   }, [context.client, workspaceId]);
 
   useEffect(() => {
+    setActionPolicies(null);
+    setActionPolicyBusy(null);
+    actionPolicyMutation.current = null;
     void refreshActionPolicies();
     return () => {
       actionPolicyRequest.current += 1;
+      actionPolicyMutation.current = null;
     };
   }, [actionPolicyActorKey, refreshActionPolicies]);
 
@@ -125,6 +130,11 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
     group: GitHubActionPolicyGroup,
     decision: GitHubActionPolicyDecision,
   ) {
+    // The endpoint returns the whole actor. Permit one save at a time so older
+    // snapshots cannot overwrite another group, including same-frame changes.
+    if (actionPolicyMutation.current !== null) return;
+    const request = ++actionPolicyRequest.current;
+    actionPolicyMutation.current = request;
     const key = githubActionPolicyOptionId(actor, group);
     setActionPolicyBusy(key);
     try {
@@ -136,6 +146,7 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
         group,
         decision,
       });
+      if (actionPolicyRequest.current !== request) return;
       setActionPolicies((current) =>
         current
           ? {
@@ -147,11 +158,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
           : current,
       );
     } catch (error) {
+      if (actionPolicyRequest.current !== request) return;
       toast.error("Could not update GitHub action approvals", {
         description: error instanceof Error ? error.message : "Try again.",
       });
     } finally {
-      setActionPolicyBusy((current) => (current === key ? null : current));
+      if (actionPolicyMutation.current === request) {
+        actionPolicyMutation.current = null;
+        setActionPolicyBusy(null);
+      }
     }
   }
 
@@ -337,7 +352,9 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
                 { value: "allow", label: "Allow" },
                 { value: "block", label: "Block" },
               ],
-              disabled: actor.kind === "workspace_app" ? !canManage : !canManagePersonal,
+              disabled:
+                actionPolicyBusy !== null ||
+                (actor.kind === "workspace_app" ? !canManage : !canManagePersonal),
               busy: actionPolicyBusy === optionId,
               onChange: (next: string) => {
                 if (next === "allow" || next === "ask" || next === "block") {
