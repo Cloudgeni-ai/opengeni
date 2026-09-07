@@ -1,3 +1,4 @@
+import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
@@ -57,7 +58,6 @@ import {
 import { MarkdownText } from "@/components/markdown";
 import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
 import {
-  FailedSessionBanner,
   TerminalSessionArchive,
   TerminalSessionBanner,
   UserMessageBody,
@@ -148,6 +148,14 @@ import {
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import type { LineageNode, SessionRealtimeModel } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const FAILURE_CONTINUATION_MESSAGE =
+  "Continue from the last failure. Check current progress before repeating work.";
+const LazyFailedSessionBanner = lazy(() =>
+  import("@/components/session/failed-session-banner").then((module) => ({
+    default: module.FailedSessionBanner,
+  })),
+);
 
 const LazySessionInspector = lazy(() =>
   import("@/components/session/inspector").then(({ SessionInspector }) => ({
@@ -459,18 +467,21 @@ export function SessionRoute({
     sessionId,
     workspaceId,
   ]);
+  const acknowledgementSessionId = session?.id ?? null;
+  const acknowledgementEligible = shouldAcknowledgeActiveSession({
+    activeSessionId: sessionId,
+    workspaceId,
+    session: routeUnreadProjection,
+    ...foreground,
+  });
+  // Same-value list/focus projections must not invalidate an in-flight retry.
   useEffect(() => {
     const projectionKey = activeReadProjectionKey;
     if (
-      !session ||
+      !acknowledgementSessionId ||
       !projectionKey ||
       acknowledgedProjectionRef.current === projectionKey ||
-      !shouldAcknowledgeActiveSession({
-        activeSessionId: sessionId,
-        workspaceId,
-        session: routeUnreadProjection,
-        ...foreground,
-      })
+      !acknowledgementEligible
     ) {
       return;
     }
@@ -479,7 +490,7 @@ export function SessionRoute({
     if (!acceptedTransition) return;
     acknowledgedProjectionRef.current = projectionKey;
     void client
-      .updateSessionAttention(workspaceId, session.id, {
+      .updateSessionAttention(workspaceId, acknowledgementSessionId, {
         unread: false,
         acknowledgedThroughSequence: readThroughSequence,
       })
@@ -518,17 +529,15 @@ export function SessionRoute({
       active = false;
     };
   }, [
+    acknowledgementEligible,
+    acknowledgementSessionId,
     attentionRetryRevision,
     activeReadProjectionKey,
     captureWorkspaceInvocation,
     client,
-    foreground,
     ownsWorkspaceInvocation,
     projectSessionAttention,
     readThroughSequence,
-    routeUnreadProjection,
-    session,
-    sessionId,
     workspaceId,
   ]);
   useEffect(() => {
@@ -1181,9 +1190,28 @@ function SessionChatPane(props: {
     () => createWorkspaceRetainedVideoLoader(context.client, props.session.workspaceId),
     [context.client, props.session.workspaceId],
   );
+  const failureFallback = props.failure ? (
+    <div
+      role="alert"
+      className="mx-auto my-2 w-full max-w-3xl rounded-lg border border-status-failed/30 bg-status-failed/10 p-3 text-sm text-status-failed"
+    >
+      <p>
+        {props.creditExhausted
+          ? "This workspace is out of OpenGeni credits."
+          : "This session failed."}{" "}
+        {props.failure.reason ?? "No failure detail was recorded."}
+      </p>
+      <p className="mt-1 text-xs text-fg-muted">
+        {props.creditExhausted
+          ? "The conversation is preserved. Add credits in organization settings before continuing."
+          : "The conversation is preserved. You can keep working in the composer below."}
+      </p>
+    </div>
+  ) : null;
   const terminal = isTerminalSessionStatus(props.session.status);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
   const [composerFocusSignal, setComposerFocusSignal] = useState(0);
+  const [modelPickerSession, setModelPickerSession] = useState<string | null>(null);
   useEffect(() => {
     const onFocusRequest = (event: Event) => {
       const detail = (event as CustomEvent<SessionComposerFocusIntent>).detail;
@@ -1816,11 +1844,43 @@ function SessionChatPane(props: {
           {props.failure &&
           (props.session.status === "failed" ||
             (props.creditExhausted && props.session.status === "idle")) ? (
-            <FailedSessionBanner
-              failure={props.failure}
-              creditExhausted={props.creditExhausted}
-              workspaceId={props.session.workspaceId}
-            />
+            <FailureRecoveryBoundary key={props.session.id} fallback={failureFallback}>
+              <Suspense fallback={failureFallback}>
+                <LazyFailedSessionBanner
+                  key={props.session.id}
+                  failure={props.failure}
+                  creditExhausted={props.creditExhausted}
+                  workspaceId={props.session.workspaceId}
+                  actions={{
+                    failureId: props.failure.failureEventId,
+                    onContinue: () =>
+                      composer.hasDraftContent()
+                        ? Promise.resolve(false)
+                        : composer.send(FAILURE_CONTINUATION_MESSAGE),
+                    continueBlockedReason:
+                      composer.hasDraftContent() ||
+                      attachments.readyResources.length > 0 ||
+                      repositories.pendingResources.length > 0
+                        ? "Send your draft below to continue."
+                        : failedOptimisticMessageCount > 0
+                          ? "Retry or remove the unsent message below before continuing."
+                          : (optimisticMessages ?? []).some(
+                                (message) => !acceptedClientEventIds.has(message.clientEventId),
+                              )
+                            ? "A message is being delivered below. Check its delivery status."
+                            : props.session.activeTurnId !== null || props.queue.queue.length > 0
+                              ? "Work is already queued or running. Check the activity controls below."
+                              : composer.sending || composer.draftLoading || !hasComposerPolicy
+                                ? "Wait for the composer to finish loading or sending."
+                                : attachments.hasUnresolved
+                                  ? "Wait for the upload below to finish, or remove it."
+                                  : null,
+                    onChooseModel: () => setModelPickerSession(props.session.id),
+                    modelDisabled: composer.sending || composer.draftLoading || !hasComposerPolicy,
+                  }}
+                />
+              </Suspense>
+            </FailureRecoveryBoundary>
           ) : null}
           <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
             <MessageTimeline
@@ -2094,6 +2154,8 @@ function SessionChatPane(props: {
             controls={
               <div className="flex min-w-0 items-center gap-1.5 max-sm:min-w-0 max-sm:flex-nowrap">
                 <ModelPicker
+                  open={modelPickerSession === props.session.id}
+                  onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}
                   model={model}
                   effort={reasoningEffort}
