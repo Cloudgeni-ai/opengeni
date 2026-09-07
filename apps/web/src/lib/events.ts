@@ -65,6 +65,8 @@ export type SessionFailureSummary = {
   safetyRefusal?: boolean;
   /** When the most recent failure happened. */
   failedAt: string | null;
+  /** Exact durable event identity; independent of history hydration or clock precision. */
+  failureEventId?: string | null;
   /** Same-turn recovery attempts recorded by the control plane. */
   recoveryCount: number;
   /** Total failed turns in the log — > 1 means the session failed before and was revived. */
@@ -82,6 +84,7 @@ export function summarizeSessionFailure(
   let reason: string | null = null;
   let safetyRefusal = false;
   let failedAt: string | null = null;
+  let failureEventId: string | null = null;
   let recoveryCount = 0;
   let failedTurnCount = 0;
   let latestFailedTurnId: string | null = null;
@@ -100,6 +103,7 @@ export function summarizeSessionFailure(
       reason = presentation.reason;
       safetyRefusal = presentation.safetyRefusal;
       failedAt = event.occurredAt;
+      failureEventId = event.id;
     }
     if (event.type === "session.status.changed") {
       const payload = event.payload as Record<string, unknown>;
@@ -117,10 +121,11 @@ export function summarizeSessionFailure(
           "The session failed before a turn could start. No error details were recorded.";
         safetyRefusal = presentation.safetyRefusal;
         failedAt = event.occurredAt;
+        failureEventId = event.id;
       }
     }
   }
-  return { reason, safetyRefusal, failedAt, recoveryCount, failedTurnCount };
+  return { reason, safetyRefusal, failedAt, failureEventId, recoveryCount, failedTurnCount };
 }
 
 export function reasoningSummaryText(payload: unknown): string {

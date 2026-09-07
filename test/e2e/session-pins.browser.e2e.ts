@@ -3,7 +3,6 @@ import AxeBuilder from "@axe-core/playwright";
 import {
   appendSessionEventsAndUpdateSession,
   createDb,
-  appendSessionEventsAndUpdateSession,
   appendSessionEvents,
   createSession,
   grantWorkspaceAccess,
@@ -465,6 +464,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const targetRow = page.locator(`a[data-session-row="${target.id}"]`);
       await targetRow.waitFor({ state: "visible", timeout: 10_000 });
       expect(await targetRow.getAttribute("aria-label")).not.toContain("unread");
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.waitForTimeout(100);
       releaseFirstAcknowledgement();
       const firstAcknowledgementResponse = await firstAcknowledgement;
       const firstReadThrough = Number(
@@ -543,6 +544,115 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 60_000);
+
+  for (const transition of ["frontier", "workspace"] as const) {
+    test(`does not retry an obsolete attention frontier after a ${transition} change`, async () => {
+      const context = await configuredContext(browser, {
+        viewport: { width: 1280, height: 800 },
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const page = await context.newPage();
+      let release = () => {};
+      try {
+        await page.goto(webBaseUrl);
+        const workspaceId = await workspaceFromPage(page);
+        const target = await createSessionThroughApi(
+          page,
+          apiBaseUrl,
+          workspaceId,
+          `Attention ${transition} fence`,
+        );
+        let nextWorkspaceId = workspaceId;
+        if (transition === "workspace") {
+          const response = await fetch(`${apiBaseUrl}/v1/workspaces`, {
+            method: "POST",
+            headers: { ...ownerHeaders, "content-type": "application/json" },
+            body: JSON.stringify({ name: "Attention alternate workspace" }),
+          });
+          expect(response.status).toBe(201);
+          nextWorkspaceId = (await response.json()).id;
+        }
+        const attentionPath = `/v1/workspaces/${workspaceId}/sessions/${target.id}/attention`;
+        let markStarted = () => {};
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const attempts: number[] = [];
+        await page.route(`**${attentionPath}`, async (route) => {
+          attempts.push(Number(route.request().postDataJSON().acknowledgedThroughSequence));
+          if (attempts.length === 1) {
+            markStarted();
+            await released;
+            await route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ message: "held acknowledgement failure" }),
+            });
+          } else await route.continue();
+        });
+        await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+        await started;
+        const firstSequence = attempts[0]!;
+        const firstFailure = page.waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            new URL(response.url()).pathname === attentionPath &&
+            response.status() === 503,
+        );
+        if (transition === "frontier") {
+          const newer = page.waitForResponse(
+            (response) =>
+              response.request().method() === "PUT" &&
+              new URL(response.url()).pathname === attentionPath &&
+              response.ok() &&
+              Number(response.request().postDataJSON().acknowledgedThroughSequence) > firstSequence,
+          );
+          const message = await fetch(
+            `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}/events`,
+            {
+              method: "POST",
+              headers: { ...ownerHeaders, "content-type": "application/json" },
+              body: JSON.stringify({
+                type: "user.message",
+                clientEventId: crypto.randomUUID(),
+                payload: { text: "A newer visible frontier" },
+              }),
+            },
+          );
+          expect(message.status).toBe(202);
+          await newer;
+        } else {
+          const documentMarker = await page.evaluate(() => {
+            const marker = crypto.randomUUID();
+            (window as Window & { __attentionFenceDocument?: string }).__attentionFenceDocument =
+              marker;
+            return marker;
+          });
+          await page.getByRole("button", { name: /Switch workspace/ }).click();
+          await page
+            .getByRole("menuitem", { name: "Attention alternate workspace", exact: true })
+            .click();
+          await page.waitForURL(`**/workspaces/${nextWorkspaceId}/sessions`);
+          expect(
+            await page.evaluate(
+              () =>
+                (window as Window & { __attentionFenceDocument?: string }).__attentionFenceDocument,
+            ),
+          ).toBe(documentMarker);
+        }
+        release();
+        expect((await firstFailure).status()).toBe(503);
+        await page.waitForTimeout(300);
+        expect(attempts.filter((sequence) => sequence === firstSequence)).toHaveLength(1);
+      } finally {
+        release();
+        await context.close();
+      }
+    }, 60_000);
+  }
 
   test("keeps a rapidly viewed chat read after switching to another chat", async () => {
     const context = await configuredContext(browser, {
@@ -1478,6 +1588,120 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await context.close();
     }
   }, 120_000);
+
+  test("continues a failed session through normal Send and opens the constrained model picker", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const owner = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Failure fixture owner",
+      );
+      const failed = await createTitledSession(dbClient.db, {
+        accountId: owner.accountId,
+        workspaceId,
+        initialMessage: "Failed session actions",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId: "sessionpin-owner" },
+      });
+      await appendSessionEventsAndUpdateSession(
+        dbClient.db,
+        workspaceId,
+        failed.id,
+        [
+          {
+            type: "session.status.changed",
+            payload: { status: "failed", code: "pre_claim_failure" },
+          },
+        ],
+        { status: "failed" },
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${failed.id}`);
+      const banner = page.getByTestId("failed-session-banner");
+      const chooseModel = banner.getByRole("button", { name: "Choose another model", exact: true });
+      await chooseModel.waitFor();
+      await waitFor(async () => !(await chooseModel.isDisabled()));
+      await chooseModel.click();
+      await page.getByRole("menu").waitFor();
+      await page.keyboard.press("Escape");
+      const continueButton = banner.getByRole("button", { name: "Continue", exact: true });
+      await waitFor(async () => !(await continueButton.isDisabled()));
+      let submissions = 0;
+      await page.route(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${failed.id}/composer-draft/submit`,
+        async (route) => {
+          submissions++;
+          if (submissions === 1)
+            await route.fulfill({
+              status: 503,
+              contentType: "application/json",
+              body: JSON.stringify({ error: "Fixture temporarily unavailable" }),
+            });
+          else await route.continue();
+        },
+      );
+      const submission = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().includes("/composer-draft/submit"),
+      );
+      await continueButton.click();
+      const receipt = await submission;
+      expect(receipt.status()).toBe(503);
+      const retry = page.getByRole("button", { name: "Retry", exact: true });
+      await retry.waitFor();
+      expect(
+        await banner.getByRole("button", { name: "Continue requested", exact: true }).isDisabled(),
+      ).toBe(true);
+      await page.setViewportSize({ width: 375, height: 812 });
+      await banner
+        .getByText("Retry or remove the unsent message below before continuing.")
+        .waitFor();
+      expect(await banner.getByRole("button", { name: "Continue", exact: true }).isDisabled()).toBe(
+        true,
+      );
+      const retryReceipt = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.url().includes("/composer-draft/submit"),
+      );
+      await retry.click();
+      expect((await retryReceipt).ok()).toBe(true);
+      expect(submissions).toBe(2);
+      const text = "Continue from the last failure. Check current progress before repeating work.";
+      await page.getByText(text, { exact: true }).waitFor();
+      const evidence = await page.evaluate(
+        async ({ apiBaseUrl: fixtureApiUrl, workspaceId: fixtureWorkspaceId, id }) => {
+          const response = await fetch(
+            `${fixtureApiUrl}/v1/workspaces/${fixtureWorkspaceId}/sessions/${id}/events`,
+          );
+          if (!response.ok) throw new Error(`events failed: ${response.status}`);
+          return await response.json();
+        },
+        { apiBaseUrl, workspaceId, id: failed.id },
+      );
+      expect(
+        evidence.filter(
+          (event: { type: string; payload: { text?: string } }) =>
+            event.type === "user.message" && event.payload.text === text,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("opens waiting descendants at every depth from a failed parent in For you", async () => {
     const context = await configuredContext(browser, {
