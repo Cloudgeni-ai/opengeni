@@ -175,8 +175,8 @@ A recoverable activity shutdown creates a transactional workflow-wake
 obligation in Postgres. Delivery remains unacknowledged until the exact closed
 attempt has durable quiescence, and every attempt-owned retained-process
 settlement advances that same outbox row in its settlement transaction. A
-workflow close or a writer exit racing the final reconciliation check therefore
-cannot orphan a session in recovery.
+workflow close or writer exit racing reconciliation cannot orphan recovery;
+repeated Pause re-arms a missing quiescence wake.
 
 A background command becomes session-owned only after its exact provider
 identity is durably adopted. Before adoption it remains attempt-owned. After
