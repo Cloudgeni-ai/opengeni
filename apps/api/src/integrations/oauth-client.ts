@@ -191,6 +191,13 @@ class OAuthStartStageError extends Error {
   }
 }
 
+class OAuthMetadataUpstreamError extends Error {
+  constructor(readonly upstreamStatus: number) {
+    super(`OAuth metadata endpoint returned HTTP ${upstreamStatus}`);
+    this.name = "OAuthMetadataUpstreamError";
+  }
+}
+
 class OAuthStartDeadline {
   readonly signal: AbortSignal;
   private readonly controller = new AbortController();
@@ -928,7 +935,7 @@ async function fetchOAuthMetadata(
   }
   if (!response.ok) {
     await cancelResponseBody(response);
-    throw new Error(`OAuth metadata endpoint returned HTTP ${response.status}`);
+    throw new OAuthMetadataUpstreamError(response.status);
   }
   const payload = await readResponseJsonBounded<unknown>(
     response,
@@ -1711,6 +1718,9 @@ function logOAuthStartFailure(
 function oauthStartFailureReason(error: unknown): string {
   if (error instanceof RequestDeadlineError) return "timeout";
   if (error instanceof DestinationPolicyError) return error.reason;
+  if (error instanceof OAuthMetadataUpstreamError) {
+    return `upstream_http_${error.upstreamStatus}`;
+  }
   if (error instanceof HTTPException) return `http_${error.status}`;
   if (error instanceof SyntaxError) return "invalid_response";
   return "request_failed";
@@ -1754,15 +1764,29 @@ function isDatabaseStatementTimeout(error: unknown): boolean {
 
 function oauthStartApiError(error: OAuthStartStageError): ApiHttpError {
   const timeout = error.reason === "timeout";
-  const status = timeout ? 408 : error.cause instanceof HTTPException ? error.cause.status : 422;
+  const metadataUpstream = error.cause instanceof OAuthMetadataUpstreamError ? error.cause : null;
+  const status = timeout
+    ? 408
+    : metadataUpstream
+      ? 502
+      : error.cause instanceof HTTPException
+        ? error.cause.status
+        : 422;
   return new ApiHttpError(status, {
     code: timeout || status >= 500 ? "upstream_unavailable" : "validation_failed",
-    retryable: timeout || status === 429 || status >= 500,
+    retryable:
+      timeout ||
+      status === 429 ||
+      (metadataUpstream
+        ? metadataUpstream.upstreamStatus === 429 || metadataUpstream.upstreamStatus >= 500
+        : status >= 500),
     message: timeout
       ? oauthStartTimeoutMessage(error.stage)
-      : error.cause instanceof HTTPException
-        ? error.cause.message
-        : `Connection setup failed during ${oauthStartStageLabel(error.stage)}.`,
+      : metadataUpstream
+        ? `OAuth provider returned HTTP ${metadataUpstream.upstreamStatus} during ${oauthStartStageLabel(error.stage)}.`
+        : error.cause instanceof HTTPException
+          ? error.cause.message
+          : `Connection setup failed during ${oauthStartStageLabel(error.stage)}.`,
     details: {
       oauthStage: error.stage,
       oauthReason: error.reason,

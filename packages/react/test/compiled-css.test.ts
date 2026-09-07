@@ -177,6 +177,7 @@ describe("compiled CSS contract", () => {
 
   test("keeps outline-hidden focus utilities safe in forced-colors mode", () => {
     expect(selectorsForUtility("outline-none")).toEqual([]);
+    expect(selectorsForUtility("focus-visible:outline-none")).toEqual([]);
     expect(hasForcedColorsOutlineFallback("outline-hidden")).toBe(true);
     expect(hasForcedColorsOutlineFallback("focus:outline-hidden")).toBe(true);
     expect(hasForcedColorsOutlineFallback("focus-visible:outline-hidden")).toBe(true);

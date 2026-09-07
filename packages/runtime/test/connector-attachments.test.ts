@@ -13,6 +13,7 @@ import {
   configureRuntimeMetricsHooks,
   prepareAgentTools,
   projectConnectorAttachmentTransfers,
+  type ConnectorActionPolicyHooks,
   type ConnectorAttachmentMaterializationRequest,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -42,6 +43,11 @@ const sandboxPath = connectorAttachmentSandboxPath(
   { serverId: "connector", connectionId },
   attachment,
 );
+const unmanagedConnectorActionPolicy: ConnectorActionPolicyHooks = {
+  prepare: async () => ({ managed: false, decision: "unmanaged" }),
+  begin: async () => ({ allowed: true, managed: false }),
+  complete: async () => {},
+};
 
 function transferResult(overrides: Record<string, unknown> = {}) {
   return {
@@ -219,6 +225,7 @@ describe("connector attachment MCP projection", () => {
           materialized.push(request);
           return matchingReceipt(request);
         },
+        connectorActionPolicy: unmanagedConnectorActionPolicy,
       },
     );
     try {
@@ -477,6 +484,7 @@ describe("connector attachment MCP projection", () => {
           materialized.push(request);
           return matchingReceipt(request);
         },
+        connectorActionPolicy: unmanagedConnectorActionPolicy,
       },
     );
     try {

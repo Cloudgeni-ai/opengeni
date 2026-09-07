@@ -107,10 +107,28 @@ async function freezeRequest(
     allowSkip?: boolean;
     optionalText?: boolean;
     queueEditPrompt?: boolean;
+    initialUpdate?: boolean;
   } = {},
 ) {
   const { grant, session } = await createFixture();
   await send(grant, session.id, "continue with my decision");
+  const initialUpdate = options.initialUpdate
+    ? await addSessionSystemUpdate(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        kind: "agent_message",
+        classification: "info",
+        sourceId: crypto.randomUUID(),
+        dedupeKey: `initial-update-${crypto.randomUUID()}`,
+        summary: "INITIAL-ACK",
+        payload: {
+          type: "agent_message",
+          text: "INITIAL-ACK",
+          operationId: crypto.randomUUID(),
+        },
+      })
+    : null;
   const queuedPrompt = options.queueEditPrompt
     ? await send(grant, session.id, "revise this queued prompt later")
     : null;
@@ -211,6 +229,7 @@ async function freezeRequest(
     requestId,
     parallelRequestId,
     questions,
+    initialUpdate,
   };
 }
 
@@ -321,8 +340,16 @@ describe("durable structured human input", () => {
     });
   });
 
-  test("attaches machine input after the resumed open suffix without creating a second turn", async () => {
-    const frozen = await freezeRequest();
+  test("retains distinct machine-input batches across interruption and idempotent resume", async () => {
+    const frozen = await freezeRequest({ initialUpdate: true });
+    if (!frozen.initialUpdate?.added) throw new Error("initial update was not added");
+    const firstBatch = await listSessionSystemUpdatesForTurn(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+      frozen.turn.id,
+    );
+    expect(firstBatch.map((update) => update.id)).toEqual([frozen.initialUpdate.update.id]);
     const followUp = await addSessionSystemUpdate(client.db, {
       accountId: frozen.grant.accountId,
       workspaceId: frozen.grant.workspaceId!,
@@ -449,16 +476,20 @@ describe("durable structured human input", () => {
       action: "claimed",
       turn: { id: resumed.turn.id, executionGeneration: resumed.turn.executionGeneration },
     });
-    expect(
-      (
-        await listSessionSystemUpdatesForTurn(
-          client.db,
-          frozen.grant.workspaceId!,
-          frozen.session.id,
-          resumed.turn.id,
-        )
-      ).map((update) => update.id),
-    ).toEqual([followUp.update.id]);
+    const delivered = await listSessionSystemUpdatesForTurn(
+      client.db,
+      frozen.grant.workspaceId!,
+      frozen.session.id,
+      resumed.turn.id,
+    );
+    expect(resumed.turn.id).toBe(frozen.turn.id);
+    expect(delivered.map((update) => update.id)).toEqual([
+      frozen.initialUpdate.update.id,
+      followUp.update.id,
+    ]);
+    expect(new Set(delivered.map((update) => update.deliveredHistoryItemId)).size).toBe(2);
+    expect(delivered[0]?.deliveredHistoryItemId).toBe(firstBatch[0]?.deliveredHistoryItemId);
+    expect(delivered.every((update) => update.deliveredHistoryItemId)).toBe(true);
     expect(
       (
         await listOutstandingSessionSystemUpdates(
@@ -479,6 +510,12 @@ describe("durable structured human input", () => {
       "message",
     ]);
     expect(JSON.stringify(history.at(-1)?.item)).toContain("FOLLOWUP-ACK");
+    expect(history.filter((row) => JSON.stringify(row.item).includes("INITIAL-ACK"))).toHaveLength(
+      1,
+    );
+    expect(history.filter((row) => JSON.stringify(row.item).includes("FOLLOWUP-ACK"))).toHaveLength(
+      1,
+    );
 
     // Simulate an exact-attempt retry across a rolling deployment: the old
     // worker claimed the resume before pendingUpdateBoundarySequence existed.

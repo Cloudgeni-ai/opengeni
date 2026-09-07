@@ -3,10 +3,11 @@ import path from "node:path";
 
 import {
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  wholeKibEnvelope,
   KIB as kib,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_FILE_COUNT,
   PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
-} from "./web-bundle-budget-policy";
+} from "./web-bundle-budget-unified-tool-gateway";
 
 type ManifestEntry = {
   file: string;
@@ -412,6 +413,14 @@ const budgets = {
   // 637,436 gzip bytes across 30 files on Linux/arm64 Bun 1.4. Advance only
   // the raw policy envelope to 2,230 KiB, retaining 1,847 bytes of headroom;
   // gzip and every other cap remain fixed.
+  // Merging that session lifecycle with the unified Tool Gateway and Sites
+  // graph measures 2,290,677 raw bytes on Linux/x64 Bun 1.4. Advance only the
+  // PR-specific raw policy envelope to 2,238 KiB, retaining 1,035 bytes of
+  // headroom; gzip and every other cap remain fixed.
+  // The shared active-work action marker merged on protected main with failing
+  // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
+  // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
+  // headroom; gzip and every unrelated cap remain fixed.
   directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
@@ -419,7 +428,9 @@ const budgets = {
   lazyChunkGzip: 240 * kib,
   // Member roster and permission-editor selectors bring the single compiled
   // stylesheet to 32,221 gzip bytes. Keep the next whole-KiB envelope.
-  cssGzip: 32 * kib,
+  // Main 52ff56a94 is already 33,660 gzip bytes; the scroll-control gutter
+  // adds 14. Preserve the measured whole-KiB envelope and 1-KiB headroom.
+  cssGzip: wholeKibEnvelope(33_674),
 } as const;
 
 // The canonical sensitive-preview policy measures 626,021 gzip bytes across
@@ -432,7 +443,14 @@ const effectiveBudgets = {
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
-    625 * kib,
+    // Untouched main 0f3dc9a02 measures 640,863 gzip bytes on macOS/arm64;
+    // the instruction-save head measures 640,920 locally and 640,937 in the
+    // configured Linux/x64 acceptance build. Use the established whole-KiB
+    // envelope with at least 1 KiB headroom; all other limits stay fixed.
+    627 * kib,
+    // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
+    // history anchoring + keyboard/touch demand adds 964, with no new chunk.
+    wholeKibEnvelope(644_833, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

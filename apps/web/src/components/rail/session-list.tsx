@@ -13,7 +13,6 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ChevronRightIcon,
-  CircleDashedIcon,
   Clock3Icon,
   EllipsisIcon,
   FolderIcon,
@@ -45,6 +44,7 @@ import {
 
 import { useRail } from "@/components/rail/rail-context";
 import {
+  ActiveWorkMark,
   RailTrailingMetadata,
   SessionRowHoverDetails,
   SessionRowContent,
@@ -145,7 +145,6 @@ import {
   mergeSessionForRail,
   normalizeSessionBrowseCreator,
   relativeTimeLabel,
-  scheduledTaskIdOf,
   sessionBrowseResultCount,
   selectedDescendantNode,
   sessionCreatorLabelMap,
@@ -3009,7 +3008,7 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={Boolean(scheduledTaskIdOf(props.session))}
+          scheduled={props.session.hasSchedules === true}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -3112,7 +3111,7 @@ function SessionRow(props: {
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={Boolean(scheduledTaskIdOf(props.session))}
+                  scheduled={props.session.hasSchedules === true}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
                   creator={creator}
                 />
@@ -3190,7 +3189,7 @@ function SessionRow(props: {
                 })
               }
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {props.session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </ContextMenuItem>
           </>
@@ -3342,7 +3341,7 @@ function RowActionsMenu({
               }
               onClick={(event) => event.stopPropagation()}
             >
-              <CircleDashedIcon className="size-4" />
+              <ActiveWorkMark className="size-4" />
               {session.activelyWorking ? "Stop actively working" : "Mark as actively working"}
             </DropdownMenuItem>
           </>

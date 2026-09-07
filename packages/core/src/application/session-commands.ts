@@ -555,7 +555,7 @@ export async function controlAgentSessionWorkstream(
           wakeRevision: result.workflowWake.wakeRevision,
           shouldSignal: true,
           interruptionCount: result.interruptionCount,
-          controlRequested: true,
+          controlRequested: input.action === "pause",
         });
       },
     },
@@ -928,7 +928,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
           wakeRevision: result.workflowWake.wakeRevision,
           shouldSignal: true,
           interruptionCount: result.interruptionCount,
-          controlRequested: true,
+          controlRequested: input.action === "pause",
         });
       },
     },

@@ -2054,6 +2054,93 @@ describe("connections routes", () => {
     }
   });
 
+  test.each([
+    ["protected_resource_metadata", 403, false],
+    ["protected_resource_metadata", 429, true],
+    ["protected_resource_metadata", 503, true],
+    ["authorization_server_metadata", 401, false],
+    ["authorization_server_metadata", 403, false],
+    ["authorization_server_metadata", 503, true],
+  ] as const)(
+    "oauth start reports %s HTTP %s (retryable: %s)",
+    async (stage, status, retryable) => {
+      if (!available) return;
+      const workspace = await freshWorkspace();
+      let origin = "";
+      const requestedPaths: string[] = [];
+      const source = Bun.serve({
+        port: 0,
+        fetch(request) {
+          const path = new URL(request.url).pathname;
+          requestedPaths.push(path);
+          if (path === "/mcp") {
+            return new Response(null, {
+              status: 401,
+              headers: {
+                "www-authenticate": `Bearer resource_metadata="${origin}/prm"`,
+              },
+            });
+          }
+          if (path === "/prm") {
+            if (stage === "authorization_server_metadata") {
+              return Response.json({ authorization_servers: [origin] });
+            }
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          if (path === "/.well-known/oauth-authorization-server") {
+            return new Response("provider challenge private diagnostic", { status });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${source.port}`;
+      try {
+        const response = await app({ environment: "test" }).request(
+          `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+          {
+            method: "POST",
+            headers: {
+              authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              providerDomain: "denied.example.test",
+              mcpUrl: `${origin}/mcp`,
+            }),
+          },
+        );
+        const body = (await response.json()) as {
+          error: {
+            code: string;
+            message: string;
+            retryable: boolean;
+            details?: Record<string, string>;
+          };
+        };
+
+        expect(response.status).toBe(502);
+        expect(body.error).toMatchObject({
+          code: "upstream_unavailable",
+          message: `OAuth provider returned HTTP ${status} during ${stage === "protected_resource_metadata" ? "protected-resource" : "authorization-server"} discovery.`,
+          retryable,
+          details: {
+            oauthStage: stage,
+            oauthReason: `upstream_http_${status}`,
+          },
+        });
+        expect(JSON.stringify(body)).not.toContain(origin);
+        expect(JSON.stringify(body)).not.toContain("private diagnostic");
+        expect(requestedPaths).toEqual(
+          stage === "protected_resource_metadata"
+            ? ["/mcp", "/prm"]
+            : ["/mcp", "/prm", "/.well-known/oauth-authorization-server"],
+        );
+      } finally {
+        source.stop(true);
+      }
+    },
+  );
+
   test("oauth uses protected-resource metadata resource as token audience while connecting to the MCP endpoint", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

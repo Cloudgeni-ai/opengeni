@@ -11,7 +11,7 @@ export type BatchedBackfillTransactionLocalSetting = {
 export function batchedBackfillTransactionLocalSetting(
   file: string,
 ): BatchedBackfillTransactionLocalSetting | null {
-  if (file === "0406_new_session_draft_project_provenance_backfill.sql") {
+  if (file === "0411_new_session_draft_project_provenance_backfill.sql") {
     return {
       guc: "opengeni.new_session_draft_project_provenance_backfill_v1",
       value: "1",

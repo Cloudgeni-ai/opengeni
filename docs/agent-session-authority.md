@@ -15,6 +15,17 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+`session_get({})` resolves only the session in the authenticated exact agent
+attempt claims, then performs the same live-attempt and target authorization as
+an explicit ID. A child reads itself, never its parent or root. Sessionless,
+human, and operator callers must provide `sessionId`; session-like metadata on
+a non-agent grant is not a current-agent context. Explicit IDs retain ordinary
+private-session and host restrictions. Both compact and full projections remain
+bounded; self reads inspect state, not conversation history. REST/SDK session
+reads still require explicit IDs. Attempt catalogs and their generated Codemode
+declarations derive the optional field from the first-party MCP schema; an
+already-frozen catalog does not change in place.
+
 ## Relationship policy
 
 The server reconstructs the exact live caller attempt. Caller-supplied lineage

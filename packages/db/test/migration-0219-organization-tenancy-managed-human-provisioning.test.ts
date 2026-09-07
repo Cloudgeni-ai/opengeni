@@ -8,6 +8,8 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import postgres from "postgres";
 import {
   createDb,
+  acceptOrganizationInvitation,
+  createOrganizationInvitation,
   ensureManagedAccessForUser,
   ensureManagedAccessForUserWithOrganizationMemberships,
   getSelfServiceOrganizationOnboardingState,
@@ -344,6 +346,101 @@ describe("migration 0219 managed-human organization provisioning", () => {
     expect(defaultAccess).toEqual({ count: 1 });
     expect(authorityCount).toEqual({ count: 0 });
     expect(grantCount).toEqual({ count: 0 });
+  });
+
+  test.each([false, true])(
+    "excludes orphaned memberships (already provisioned: %s)",
+    async (alreadyProvisioned) => {
+      if (!shared || !client) return;
+
+      const userId = `orphaned-workspace-${crypto.randomUUID()}`;
+      const subjectId = `user:${userId}`;
+      const input = {
+        userId,
+        email: `${userId}@example.test`,
+        name: "Managed human with legacy membership",
+      };
+      if (alreadyProvisioned) await ensureManagedAccessForUser(client.db, input);
+      const orphanedAccountId = crypto.randomUUID();
+      const orphanedWorkspaceId = crypto.randomUUID();
+
+      await shared.admin`
+      insert into managed_accounts (id, name, external_source, external_id)
+      values (
+        ${orphanedAccountId}, 'Orphaned legacy organization', 'test', ${crypto.randomUUID()}
+      )`;
+      await shared.admin`
+      insert into workspaces (id, account_id, name, external_source, external_id)
+      values (
+        ${orphanedWorkspaceId}, ${orphanedAccountId}, 'Orphaned legacy workspace',
+        'test', ${crypto.randomUUID()}
+      )`;
+      await shared.admin`
+      insert into workspace_inference_controls (account_id, workspace_id)
+      values (${orphanedAccountId}, ${orphanedWorkspaceId})`;
+      await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${orphanedAccountId}, ${orphanedWorkspaceId}, ${subjectId}, 'member')`;
+
+      const projected = await ensureManagedAccessForUser(client.db, input);
+      const activeAccountId = projected.defaultAccountId!;
+
+      expect(projected.accountGrants.map((grant) => grant.accountId)).toEqual([activeAccountId]);
+      expect(projected.workspaceGrants).toHaveLength(2);
+      expect(projected.workspaceGrants[0]?.workspaceId).toBe(projected.defaultWorkspaceId!);
+      expect(
+        projected.workspaceGrants.some((grant) => grant.workspaceId === orphanedWorkspaceId),
+      ).toBe(false);
+      expect(projected.workspaceGrants.every((grant) => grant.accountId === activeAccountId)).toBe(
+        true,
+      );
+      expect(await ensureManagedAccessForUser(client.db, input)).toEqual(projected);
+    },
+  );
+
+  test("projects each shared membership once across multiple active organizations", async () => {
+    if (!shared || !client) return;
+    const userId = `multi-org-${crypto.randomUUID()}`;
+    const input = { userId, email: `${userId}@example.test`, name: userId };
+    const initial = await ensureManagedAccessForUser(client.db, input);
+    const ownerId = `other-owner-${crypto.randomUUID()}`;
+    const other = await ensureManagedAccessForUser(client.db, {
+      userId: ownerId,
+      email: `${ownerId}@example.test`,
+      name: ownerId,
+    });
+    const organizationId = other.defaultAccountId!;
+    const invitation = await createOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: other.subjectId,
+      operationId: crypto.randomUUID(),
+      targetSubjectId: initial.subjectId,
+      targetEmail: input.email,
+      role: "member",
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+    await acceptOrganizationInvitation(client.db, {
+      organizationId,
+      actorSubjectId: initial.subjectId,
+      operationId: crypto.randomUUID(),
+      invitationId: invitation.id,
+      expectedRevision: invitation.revision,
+    });
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role)
+      values (${organizationId}, ${other.defaultWorkspaceId!}, ${initial.subjectId}, 'member')`;
+    const projected = await ensureManagedAccessForUser(client.db, input);
+    expect(projected.accountGrants).toHaveLength(2);
+    expect(projected.workspaceGrants).toHaveLength(4);
+    expect(new Set(projected.workspaceGrants.map((grant) => grant.workspaceId)).size).toBe(4);
+    expect(
+      projected.workspaceGrants.filter((grant) => grant.workspaceId === other.defaultWorkspaceId),
+    ).toHaveLength(1);
+    for (const grant of projected.workspaceGrants) {
+      expect(
+        projected.accountGrants.filter((account) => account.accountId === grant.accountId),
+      ).toHaveLength(1);
+    }
   });
 
   test("keeps the capability narrow and fails closed for fabricated, foreign, and terminal authority", async () => {

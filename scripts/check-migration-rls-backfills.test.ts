@@ -249,13 +249,13 @@ UPDATE new_session_drafts SET id = new_session_drafts.id FROM candidates
 WHERE new_session_drafts.id = candidates.id RETURNING new_session_drafts.id;
 `;
     const accepted = fixture({
-      "0404_new_session_draft_project_provenance.sql": policy,
-      "0406_new_session_draft_project_provenance_backfill.sql": backfill,
+      "0409_new_session_draft_project_provenance.sql": policy,
+      "0411_new_session_draft_project_provenance_backfill.sql": backfill,
     });
     expect(analyzeMigrationRlsBackfills(accepted)).toHaveLength(0);
 
     const wrongFile = fixture({
-      "0404_new_session_draft_project_provenance.sql": policy,
+      "0409_new_session_draft_project_provenance.sql": policy,
       "0408_unrelated_backfill.sql": backfill,
     });
     expect(analyzeMigrationRlsBackfills(wrongFile)).toHaveLength(1);

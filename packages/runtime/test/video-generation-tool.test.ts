@@ -61,6 +61,7 @@ describe("video generation runtime surface", () => {
     const disabled = composeRuntimeSkills([]).lazySource;
     const enabled = composeRuntimeSkills([], {
       editableArtifacts: false,
+      sites: false,
       videoGeneration: true,
     }).lazySource;
     expect(disabled.getIndex?.(manifest, ".agents")?.map((entry) => entry.name)).not.toContain(

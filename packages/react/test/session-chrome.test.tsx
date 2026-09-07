@@ -936,9 +936,9 @@ describe("SessionChrome goal pill reasons", () => {
         lastError: null,
       },
     }).goal;
-    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Scheduled");
+    expect(sessionChromeGoalPillLabel("scheduled", record)).toBe("Waiting");
     expect(sessionChromeGoalPillExplanation("scheduled", record)).toBe(
-      `Next goal check at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
+      `Continues at ${formatClockTime("2026-08-22T14:05:00.000Z")}.`,
     );
   });
 
@@ -987,4 +987,155 @@ describe("SessionChrome goal pill reasons", () => {
       panel?.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
     ).toContain("New input");
   });
+});
+
+describe("SessionChrome compact actions", () => {
+  test("steers the first queued message without opening the panel", async () => {
+    const ids: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        composer={composer()}
+        queue={queue({
+          steerTurn: async (id) => {
+            ids.push(id);
+            return true;
+          },
+        })}
+      />,
+    );
+    const action = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Steer first queued message"]',
+    )!;
+    expect(action.closest("button")).toBe(action);
+    await act(async () => action.click());
+    expect(ids).toEqual(["11111111-1111-4111-8111-111111111111"]);
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("goal pause/resume and clear do not open the panel", async () => {
+    const calls: string[] = [];
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        goal={{
+          ...goal({ status: "paused" }),
+          resume: async () => {
+            calls.push("resume");
+            return null;
+          },
+          deleteGoal: async () => {
+            calls.push("clear");
+          },
+        }}
+      />,
+    );
+    await act(async () =>
+      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Resume goal"]')!.click(),
+    );
+    await act(async () =>
+      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Clear goal"]')!.click(),
+    );
+    expect(calls).toEqual(["resume", "clear"]);
+    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
+  });
+
+  test("read-only chrome has no compact mutation actions", async () => {
+    mounted = await renderComponent(
+      <SessionChrome queue={queue()} composer={composer()} goal={goal()} readOnly />,
+    );
+    expect(mounted.container.querySelector('[aria-label="Pause goal"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Clear goal"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Steer first queued message"]')).toBeNull();
+  });
+
+  test("command body mounts only while opened", async () => {
+    let mounts = 0;
+    function Body() {
+      mounts += 1;
+      return <p>Active command details</p>;
+    }
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} commandsCount={2} commandsPanel={<Body />} />,
+    );
+    expect(mounts).toBe(0);
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .click(),
+    );
+    expect(mounts).toBeGreaterThan(0);
+    expect(mounted.container.textContent).toContain("Active command details");
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-commands"]')!
+        .click(),
+    );
+    expect(mounted.container.textContent).not.toContain("Active command details");
+  });
+});
+
+describe("compact activity navigation", () => {
+  test("activity opens content, selected tab stays open, and queue hides activity navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        queue={queue({ queue: [fakeTurn()] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    const activity = mounted.container.querySelector<HTMLButtonElement>(
+      '[aria-label="Session activity"]',
+    )!;
+    await act(async () => activity.click());
+    expect(activity.getAttribute("aria-expanded")).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+    const tab = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("1 command"),
+    )!;
+    await act(async () => tab.click());
+    expect(tab.getAttribute("aria-expanded")).toBe("true");
+    await act(async () =>
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-testid="session-chrome-queue"]')!
+        .click(),
+    );
+    expect(activity.getAttribute("aria-expanded")).toBe("false");
+    expect(mounted.container.textContent).not.toContain("Command body");
+  });
+  test("default command panel includes its navigation", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        compact
+        defaultActive="commands"
+        queue={queue({ queue: [] })}
+        commandsCount={1}
+        commandsPanel={<div>Command body</div>}
+      />,
+    );
+    expect(
+      mounted.container
+        .querySelector('[aria-label="Session activity"]')
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(mounted.container.textContent).toContain("Command body");
+  });
+});
+
+test("controlled compact command selection exposes activity navigation", async () => {
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      active="commands"
+      queue={queue({ queue: [] })}
+      commandsCount={1}
+      commandsPanel={<div>Controlled command body</div>}
+    />,
+  );
+  expect(
+    mounted.container
+      .querySelector('[aria-label="Session activity"]')
+      ?.getAttribute("aria-expanded"),
+  ).toBe("true");
+  expect(mounted.container.textContent).toContain("Controlled command body");
 });

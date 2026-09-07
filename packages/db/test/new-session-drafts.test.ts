@@ -31,9 +31,9 @@ import { parseBatchedBackfillMigration } from "../src/migrate";
 import * as schema from "../src/schema";
 
 const projectProvenanceBackfill = parseBatchedBackfillMigration(
-  "0406_new_session_draft_project_provenance_backfill.sql",
+  "0411_new_session_draft_project_provenance_backfill.sql",
   await Bun.file(
-    new URL("../drizzle/0406_new_session_draft_project_provenance_backfill.sql", import.meta.url),
+    new URL("../drizzle/0411_new_session_draft_project_provenance_backfill.sql", import.meta.url),
   ).text(),
 );
 if (!projectProvenanceBackfill) throw new Error("project provenance backfill is not governed");
@@ -180,7 +180,7 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
-  test("0406 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
+  test("0411 backfills the short-lived JSON provenance and strips it from old exact-create options", async () => {
     const context = await fixture();
     const projectId = crypto.randomUUID();
     const compute = {

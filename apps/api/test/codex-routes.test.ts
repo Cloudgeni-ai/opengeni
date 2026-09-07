@@ -182,6 +182,12 @@ describe("Codex status readiness semantics", () => {
         chatgptAccountId: active.chatgptAccountId,
       },
       accountCount: 1,
+      models: [
+        { id: "codex/gpt-5.6-sol" },
+        { id: "codex/gpt-5.6-terra" },
+        { id: "codex/gpt-5.6-luna" },
+        { id: "codex/gpt-6-astra", label: "GPT-6 Astra" },
+      ],
     });
   });
 });

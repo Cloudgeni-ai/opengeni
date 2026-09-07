@@ -333,10 +333,14 @@ const workspaceSchedulesRoute = createRoute({
   path: "schedules",
   validateSearch: (
     search: Record<string, unknown>,
-  ): { sourceSessionId?: string; taskId?: string } => ({
+  ): { sourceSessionId?: string; taskId?: string; targetSessionId?: string } => ({
     ...(typeof search.sourceSessionId === "string" &&
     SCHEDULES_SEARCH_UUID.test(search.sourceSessionId)
       ? { sourceSessionId: search.sourceSessionId }
+      : {}),
+    ...(typeof search.targetSessionId === "string" &&
+    SCHEDULES_SEARCH_UUID.test(search.targetSessionId)
+      ? { targetSessionId: search.targetSessionId }
       : {}),
     // Set when arriving from a session that a schedule started, so the page can
     // reveal that one task instead of leaving the reader to find it.
@@ -633,17 +637,20 @@ function CapabilitiesLegacyRedirect() {
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return (
+    <LazyCapabilitiesRoute key={workspaceId} workspaceId={workspaceId} initialSection={section} />
+  );
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  const { sourceSessionId, taskId } = workspaceSchedulesRoute.useSearch();
+  const { sourceSessionId, taskId, targetSessionId } = workspaceSchedulesRoute.useSearch();
   return (
     <LazySchedulesRoute
       workspaceId={workspaceId}
       sourceSessionId={sourceSessionId}
       focusTaskId={taskId}
+      targetSessionId={targetSessionId}
     />
   );
 }

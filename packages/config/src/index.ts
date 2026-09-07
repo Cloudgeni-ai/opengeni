@@ -273,6 +273,10 @@ export const McpServerConnectionRefSchema = z
   });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
+/** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
+export const DEFAULT_MODAL_IMAGE_REF =
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:c3bd17b8841de1bff9bb2777aad422cf8c75de78e2c30f9ac81d0cd6810a1b78";
+
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
   environment: z.string().default("local"),
@@ -337,6 +341,12 @@ const SettingsSchema = z.object({
     .regex(/^G-[A-Z0-9]+$/u)
     .optional(),
   publicBaseUrl: z.string().url().optional(),
+  // Standards-based OAuth authorization server for external workspace MCP
+  // clients. Opt-in because it creates a new public authentication surface.
+  mcpOauthEnabled: EnvBoolean.default(false),
+  // Forwarded client addresses are ignored by default. Operators may trust an
+  // exact number of proxy hops only when direct access to the API is blocked.
+  mcpOauthTrustedProxyHops: z.coerce.number().int().min(0).max(16).default(0),
   // Browser origin when the web app and API use separate origins in local
   // development. Production normally leaves this unset and uses publicBaseUrl.
   webBaseUrl: z.string().url().optional(),
@@ -2862,6 +2872,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     analyticsPosthogHost: optional("OPENGENI_ANALYTICS_POSTHOG_HOST"),
     analyticsGa4MeasurementId: optional("OPENGENI_ANALYTICS_GA4_MEASUREMENT_ID"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
+    mcpOauthEnabled: optional("OPENGENI_MCP_OAUTH_ENABLED"),
+    mcpOauthTrustedProxyHops: optional("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS"),
     webBaseUrl: optional("OPENGENI_WEB_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
@@ -3042,7 +3054,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
     dockerWorkspaceBaseDir: optional("OPENGENI_DOCKER_WORKSPACE_BASE_DIR"),
     modalAppName: optional("OPENGENI_MODAL_APP_NAME"),
-    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF"),
+    modalImageRef: optional("OPENGENI_MODAL_IMAGE_REF") ?? DEFAULT_MODAL_IMAGE_REF,
     modalImageId: optional("OPENGENI_MODAL_IMAGE_ID"),
     modalImageRegistrySecret: optional("OPENGENI_MODAL_IMAGE_REGISTRY_SECRET"),
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
@@ -3296,7 +3308,10 @@ export function allowedFirstPartyMcpToolsForSession(
 ): FirstPartyMcpToolNameType[] {
   const policy = resolveFirstPartyMcpToolPolicy(settings);
   const allowed = new Set(policy.allowed);
-  return [...(selected ?? policy.default)].filter((tool) => allowed.has(tool));
+  const tools = new Set(selected ?? policy.default);
+  // Existing sessions with pause authority also receive its resume counterpart.
+  if (tools.has("goal_pause")) tools.add("goal_resume");
+  return [...tools].filter((tool) => allowed.has(tool));
 }
 
 /**
@@ -4184,6 +4199,8 @@ export function productShortLabelForModelId(modelId: string): string | null {
       return "5.6 Terra";
     case "gpt-5.6-luna":
       return "5.6 Luna";
+    case "gpt-6-astra":
+      return "6 Astra";
     default:
       return null;
   }
@@ -4219,7 +4236,11 @@ function builtinLatencyModesForModel(modelId: string): Array<{
   runnable: boolean;
   billingMultiplierBps?: number;
 }> {
-  if (isBuiltinGpt56ModelId(modelId) || modelId.startsWith("codex/gpt-5.6-")) {
+  if (
+    isBuiltinGpt56ModelId(modelId) ||
+    modelId.startsWith("codex/gpt-5.6-") ||
+    modelId === "codex/gpt-6-astra"
+  ) {
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -4598,7 +4619,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
         ...legacyModelCapabilities(settings, {
           reasoningEffort: true,
           hostedWebSearch: true,
-          vision: slug.startsWith("gpt-5.6-"),
+          vision: slug.startsWith("gpt-5.6-") || slug === "gpt-6-astra",
         }),
         ...(builtinPromptCachingForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`)
           ? {
@@ -6426,6 +6447,24 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL must use https when managed social authentication is configured outside local/test",
+      );
+    }
+  }
+  if (settings.mcpOauthEnabled) {
+    if (settings.productAccessMode === "configured") {
+      throw new Error(
+        "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+      );
+    }
+    const publicOrigin = canonicalPublicOrigin(settings.publicBaseUrl);
+    if (!publicOrigin) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_MCP_OAUTH_ENABLED=true",
+      );
+    }
+    if (!publicOrigin.startsWith("https://") && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must use https when OPENGENI_MCP_OAUTH_ENABLED=true outside local/test",
       );
     }
   }

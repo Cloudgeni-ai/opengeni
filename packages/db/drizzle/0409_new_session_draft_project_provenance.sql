@@ -86,7 +86,7 @@ BEGIN
   -- table, then compare the canonical catalog representation. This avoids a
   -- formatting-sensitive text guard while refusing a same-name CHECK with
   -- weaker or otherwise different semantics. Validation state is deliberately
-  -- excluded: 0404 creates NOT VALID and 0407 may already have validated it.
+  -- excluded: 0409 creates NOT VALID and 0412 may already have validated it.
   EXECUTE pg_catalog.format(
     $ddl$
       ALTER TABLE %I.%I

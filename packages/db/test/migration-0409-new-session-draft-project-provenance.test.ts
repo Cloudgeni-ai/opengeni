@@ -14,10 +14,10 @@ import {
 } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const fenceMigration = "0404_new_session_draft_project_provenance.sql";
-const indexMigration = "0405_new_session_draft_project_provenance_index.sql";
-const backfillMigration = "0406_new_session_draft_project_provenance_backfill.sql";
-const validationMigration = "0407_new_session_draft_project_provenance_validation.sql";
+const fenceMigration = "0409_new_session_draft_project_provenance.sql";
+const indexMigration = "0410_new_session_draft_project_provenance_index.sql";
+const backfillMigration = "0411_new_session_draft_project_provenance_backfill.sql";
+const validationMigration = "0412_new_session_draft_project_provenance_validation.sql";
 const capabilityGuc = "opengeni.new_session_draft_project_provenance_backfill_v1";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 setDefaultTimeout(900_000);
@@ -256,7 +256,7 @@ describe("phased new-session draft project provenance migration", () => {
     expect(validation).not.toContain("NO FORCE ROW LEVEL SECURITY");
   });
 
-  test("replays a committed 0404 body without its ledger and rejects same-name semantic drift", async () => {
+  test("replays a committed 0409 body without its ledger and rejects same-name semantic drift", async () => {
     if (!owned) return;
     const { admin, ownerUrl } = owned;
     const owner = postgres(ownerUrl, { max: 1, prepare: false, onnotice: () => undefined });
@@ -330,8 +330,8 @@ describe("phased new-session draft project provenance migration", () => {
         ) as ledgered`;
       expect(correctReplay).toEqual({ ledgered: true });
 
-      // 0407 may already have validated the exact constraint before an
-      // operator repairs a missing 0404 ledger row. The replay guard accepts
+      // 0412 may already have validated the exact constraint before an
+      // operator repairs a missing 0409 ledger row. The replay guard accepts
       // that stronger state and never returns it to NOT VALID.
       await owner.unsafe(`
         ALTER TABLE "new_session_drafts"
@@ -425,10 +425,10 @@ describe("phased new-session draft project provenance migration", () => {
     await admin.begin(async (transaction) => {
       await transaction`
         insert into managed_accounts (id, name)
-        values (${accountId}, '0404 phased migration account')`;
+        values (${accountId}, '0409 phased migration account')`;
       await transaction`
         insert into workspaces (id, account_id, name)
-        values (${workspaceId}, ${accountId}, '0404 phased migration workspace')`;
+        values (${workspaceId}, ${accountId}, '0409 phased migration workspace')`;
       await transaction.unsafe(
         `insert into new_session_drafts (
           id, account_id, workspace_id, subject_id, revision, text, resources,

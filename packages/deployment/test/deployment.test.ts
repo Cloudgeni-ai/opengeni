@@ -6,7 +6,9 @@ import {
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
+  MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
+  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
   SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
   missingRuntimeEnvVars,
   parseDeploymentContract,
@@ -15,10 +17,10 @@ import {
   SANDBOX_REQUIRED_ENV,
   SANDBOX_LIFECYCLE_PASSTHROUGH_ENV,
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
-  SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   HOST_MCP_AUTHORITY_SOURCE_ADMISSION_PASSTHROUGH_ENV,
+  MCP_OAUTH_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
   SecretDeliveryMode,
   stackPlanFor,
@@ -300,6 +302,51 @@ describe("deployment contract", () => {
     expect(vars).toContain("OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING");
   });
 
+  test("renders MCP OAuth settings and requires its canonical public origin when enabled", () => {
+    const enabledEnv = {
+      OPENGENI_MCP_OAUTH_ENABLED: "true",
+      OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2",
+      OPENGENI_PUBLIC_BASE_URL: "http://localhost:8000",
+    };
+    const enabledVars = requiredRuntimeEnvVars(deploymentProfiles["local-kubernetes"], enabledEnv);
+    for (const key of MCP_OAUTH_PASSTHROUGH_ENV) {
+      expect(enabledVars).toContain(key);
+    }
+    expect(enabledVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const enabled = generateRuntimeArtifacts(
+      deploymentProfiles["local-kubernetes"],
+      {},
+      enabledEnv,
+    );
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(enabled.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS=2");
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_ENABLED: "true"');
+    expect(enabled.helmValuesYaml).toContain('OPENGENI_MCP_OAUTH_TRUSTED_PROXY_HOPS: "2"');
+    expect(enabled.missingEnvVars).not.toContain("OPENGENI_PUBLIC_BASE_URL");
+
+    const missingOrigin = generateRuntimeArtifacts(
+      deploymentProfiles["local-compose"],
+      {},
+      {
+        OPENGENI_MCP_OAUTH_ENABLED: "true",
+      },
+    );
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_MCP_OAUTH_ENABLED=true");
+    expect(missingOrigin.runtimeEnv).toContain("OPENGENI_PUBLIC_BASE_URL=");
+    expect(missingOrigin.missingEnvVars).toContain("OPENGENI_PUBLIC_BASE_URL");
+  });
+
+  test("rejects MCP OAuth artifacts for configured product-access deployments", () => {
+    const env = { OPENGENI_MCP_OAUTH_ENABLED: "true" };
+    expect(() => requiredRuntimeEnvVars(deploymentProfiles["azure-managed"], env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
+    expect(() => generateRuntimeArtifacts(deploymentProfiles["azure-managed"], {}, env)).toThrow(
+      "OPENGENI_MCP_OAUTH_ENABLED=true requires managed or local product access mode",
+    );
+  });
+
   test("lists native cloud storage environment variables without static key assumptions", () => {
     const awsVars = requiredRuntimeEnvVars(deploymentProfiles["aws-existing-services"]);
     const gcpVars = requiredRuntimeEnvVars(deploymentProfiles["gcp-existing-services"]);
@@ -458,6 +505,7 @@ describe("deployment contract", () => {
       SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER,
       SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER,
       CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
+      MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
     ]) {
       const plan = stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
         OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
@@ -482,6 +530,14 @@ describe("deployment contract", () => {
       if (cutover === CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER) {
         expect(plan.notes.join("\n")).toContain("migration 0403");
       }
+      if (cutover === MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER) {
+        expect(plan.notes.join("\n")).toContain("migrations 0404 and 0405");
+      }
+      expect(() =>
+        stackPlanFor(deploymentProfiles["gcp-managed"], "none", {
+          OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER: cutover,
+        }),
+      ).toThrow("OPENGENI_DEPLOYMENT_MAINTENANCE_PREFLIGHT_CONFIRMED=true");
     }
 
     const rollingPlan = stackPlanFor(deploymentProfiles["gcp-managed"]);

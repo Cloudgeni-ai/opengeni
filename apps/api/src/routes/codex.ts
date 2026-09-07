@@ -7,7 +7,7 @@
 // is added to isAuthExempt. Secrets never leave the server: status/usage read the
 // decrypted token only to call the codex backend; the token is never returned.
 
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { environmentsEncryptionKeyBytes, productLabelForModelId } from "@opengeni/config";
 import {
   accessTokenExpiry,
   buildCodexUsageWindowFromCache,
@@ -193,21 +193,16 @@ function codexUsageJson(payload: CodexUsagePayload): {
   return { status: payload.status, usage: payload };
 }
 
-export function codexModelsForPicker(liveSlugs: readonly string[]): Array<{
+export function codexModelsForPicker(): Array<{
   id: string;
   label: string;
   provider: string;
   providerLabel: string;
   api: "responses";
 }> {
-  const available = new Set(liveSlugs);
-  const missing = CODEX_FALLBACK_MODEL_SLUGS.filter((slug) => !available.has(slug));
-  if (missing.length > 0) {
-    throw new Error(`Codex catalog is missing required models: ${missing.join(", ")}`);
-  }
   return CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
     id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
-    label: slug.replace(/^gpt-/, "GPT-"),
+    label: productLabelForModelId(slug),
     provider: CODEX_PROVIDER_ID,
     providerLabel: CODEX_PROVIDER_LABEL,
     api: "responses" as const,
@@ -1287,7 +1282,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       now: new Date(),
     });
     let valid = false;
-    let models: ReturnType<typeof codexModelsForPicker> = [];
+    const models = codexModelsForPicker();
     let catalogError: string | null = null;
     try {
       const cred = status?.credentialId
@@ -1301,7 +1296,6 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
           clientVersion: CODEX_CLIENT_VERSION,
         });
         if (live.ok) {
-          models = codexModelsForPicker(live.slugs);
           valid = true;
         } else {
           catalogError = `Codex models request failed with status ${live.status}`;

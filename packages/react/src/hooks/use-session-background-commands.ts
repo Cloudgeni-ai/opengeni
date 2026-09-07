@@ -1,5 +1,5 @@
 import type { SessionBackgroundCommand } from "@opengeni/sdk";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { usePolledValue } from "./internal";
@@ -23,28 +23,39 @@ export function useSessionBackgroundCommands(
 ): UseSessionBackgroundCommandsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const load = useCallback(async () => {
-    if (!sessionId) return { commands: [] };
-    if (!client.listSessionBackgroundCommands) {
-      throw new Error("The configured OpenGeni client does not support background commands");
-    }
-    return await client.listSessionBackgroundCommands(workspaceId, sessionId);
-  }, [client, workspaceId, sessionId]);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!sessionId) return { commands: [] };
+      if (!client.listSessionBackgroundCommands) {
+        throw new Error("The configured OpenGeni client does not support background commands");
+      }
+      return await client.listSessionBackgroundCommands(workspaceId, sessionId, { signal });
+    },
+    [client, workspaceId, sessionId],
+  );
   const state = usePolledValue(load, {
     enabled,
     pollIntervalMs: options.pollIntervalMs,
   });
   const refresh = state.refresh;
+  const generation = useRef(0);
+  useEffect(() => {
+    generation.current += 1;
+    return () => {
+      generation.current += 1;
+    };
+  }, [client, workspaceId, sessionId, enabled]);
   const cancel = useCallback(
     async (commandId: string): Promise<void> => {
       if (!sessionId) return;
       if (!client.cancelSessionBackgroundCommand) {
         throw new Error("The configured OpenGeni client does not support background commands");
       }
+      const ticket = generation.current;
       await client.cancelSessionBackgroundCommand(workspaceId, sessionId, commandId);
-      await refresh();
+      if (enabled && ticket === generation.current) await refresh();
     },
-    [client, workspaceId, sessionId, refresh],
+    [client, workspaceId, sessionId, refresh, enabled],
   );
   return {
     commands: state.data?.commands ?? [],

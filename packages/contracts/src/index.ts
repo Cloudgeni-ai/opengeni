@@ -32,11 +32,13 @@ export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
 export * from "./tool-catalog";
+export * from "./mcp-oauth";
 export * from "./tool-result-spill";
 export * from "./interaction";
 export * from "./sandbox-file-artifacts";
 export * from "./permissions";
 export * from "./session-titles";
+export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
@@ -45,6 +47,7 @@ export {
   CreateWorkspaceArtifactRequest,
   PublishWorkspaceArtifactVersionRequest,
   RollbackWorkspaceArtifactRequest,
+  SetWorkspaceArtifactStatusRequest,
   WorkspaceArtifact,
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
@@ -54,7 +57,11 @@ export {
   WorkspaceArtifactListQuery,
   WorkspaceArtifactListResponse,
   WorkspaceArtifactMutationResponse,
+  WorkspaceArtifactRequestedTools,
   WorkspaceArtifactSlug,
+  WorkspaceArtifactSourceBundle,
+  WorkspaceArtifactSourceFile,
+  WorkspaceArtifactSourcePath,
   WorkspaceArtifactStatus,
   WorkspaceArtifactVersion,
   WORKSPACE_ARTIFACT_CURSOR_MAX_CHARS,
@@ -62,6 +69,9 @@ export {
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_LIST_DEFAULT,
   WORKSPACE_ARTIFACT_LIST_MAX,
+  WORKSPACE_ARTIFACT_REQUESTED_TOOLS_MAX,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_FILES,
+  WORKSPACE_ARTIFACT_SOURCE_MAX_UTF8_BYTES,
   WORKSPACE_ARTIFACT_TITLE_MAX_CHARS,
   normalizeWorkspaceArtifactSlug,
 } from "./artifacts";
@@ -763,6 +773,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "wait_for_input",
   "goal_complete",
   "goal_pause",
+  "goal_resume",
   "memory_search",
   "memory_save",
   "memory_correct",
@@ -892,6 +903,8 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
+  "artifacts_archive",
+  "artifacts_restore",
   "sandbox_file_publish",
   "editable_artifact_list",
   "editable_artifact_create",
@@ -11930,6 +11943,8 @@ export const Session = z.object({
   status: SessionStatus,
   /** Additive list projection. Detail reads may omit it. */
   backgroundCommandActivity: SessionBackgroundCommandActivity.optional(),
+  /** Current non-deleted schedules targeting this session, including paused schedules. */
+  hasSchedules: z.boolean().optional(),
   initialMessage: z.string(),
   title: z.string().nullable(),
   titleSource: z.enum(["user", "agent"]).nullable(),
@@ -12141,6 +12156,8 @@ export const LineageNode: z.ZodType<LineageNode> = z.lazy(() =>
 );
 
 export const SessionLineageResponse = z.object({
+  /** Current schedule relationship for the requested session. */
+  sessionHasSchedules: z.boolean().optional(),
   ancestors: z.array(Session),
   children: z.array(LineageNode),
   truncated: z.boolean().default(false),
