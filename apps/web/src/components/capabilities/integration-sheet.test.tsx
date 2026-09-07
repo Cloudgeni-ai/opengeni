@@ -66,6 +66,50 @@ async function render(node: React.ReactNode) {
   };
 }
 
+test("compact settings keep maintenance and diagnostics behind native disclosures", async () => {
+  const route = mock(() => {});
+  const reconnect = mock(() => {});
+  const rendered = await render(
+    <Sheet open>
+      <IntegrationSheetBody
+        model={model({
+          presentation: {
+            summary: { title: "Acme HQ", description: "One connection for your organization." },
+            routing: {
+              description: "Channels ask once.",
+              action: { label: "Choose channel workspaces", onClick: route },
+            },
+            diagnostics: [{ label: "Bot", value: "B123" }],
+          },
+          footer: { kind: "connected", onReconnect: reconnect, onDisconnect: () => {} },
+        })}
+      />
+    </Sheet>,
+  );
+  try {
+    const details = [...rendered.container.querySelectorAll("details")];
+    expect(details.map((detail) => detail.querySelector("summary")?.textContent)).toEqual([
+      "Where work starts",
+      "More options",
+      "Connection details",
+    ]);
+    expect(details.every((detail) => !detail.open)).toBe(true);
+    const button = [...rendered.container.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Reconnect",
+    )!;
+    expect(button.closest("details")).toBe(details[1]!);
+    details[1]!.open = true;
+    await act(async () => button.click());
+    expect(reconnect).toHaveBeenCalledTimes(1);
+    details[0]!.open = true;
+    await act(async () => [...details[0]!.querySelectorAll("button")][0]!.click());
+    expect(route).toHaveBeenCalledTimes(1);
+    expect(rendered.container.querySelectorAll("dl")).toHaveLength(1);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
 describe("IntegrationRow", () => {
   test("uses provider logos when available and the shared monogram fallback otherwise", async () => {
     const rendered = await render(
