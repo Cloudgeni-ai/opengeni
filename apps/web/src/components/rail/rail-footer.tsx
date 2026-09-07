@@ -72,7 +72,9 @@ export function RailFooter() {
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      <div className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}>
+      <div
+        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
+      >
         {browserAccounts ? (
           <div className={rail.collapsed ? undefined : "min-w-0 flex-1"}>
             <Suspense
@@ -162,7 +164,10 @@ export function RailFooter() {
                     Sign out
                   </DropdownMenuItem>
                 ) : context.keyAuthRequired ? (
-                  <DropdownMenuItem variant="destructive" onSelect={() => context.forgetAccessKey()}>
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => context.forgetAccessKey()}
+                  >
                     <LockIcon className="size-4" />
                     Clear access key
                   </DropdownMenuItem>

@@ -25,5 +25,7 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
   // September 6, Bun 1.4 macOS/arm64: main 52ff56a94 measures 2,309,542
   // raw bytes; history anchoring and input handling measure 2,312,535.
-  wholeKibEnvelope(2_312_535),
+  // Pending organization-invitation chrome on the always-loaded rail footer
+  // measures 2,314,567 raw bytes on Linux/x64 CI.
+  wholeKibEnvelope(2_314_567),
 );

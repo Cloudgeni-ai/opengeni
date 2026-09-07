@@ -381,6 +381,17 @@ describe("global organization invitations", () => {
         }),
       ]),
     ).toBe("2 organization invitations");
+    expect(
+      organizationInvitationNoticeLabel([
+        invitation({
+          id: "inv_unnamed",
+          organizationId: "org_unnamed",
+          organizationName: "   ",
+          status: "pending",
+          revision: 1,
+        }),
+      ]),
+    ).toBe("Review organization invitation");
   });
 
   test("does not render a count badge until invitations are pending", async () => {
@@ -395,9 +406,9 @@ describe("global organization invitations", () => {
         pendingRoot.render(<OrganizationInvitationCountBadge pendingCount={2} />),
       );
       expect(idle.querySelector('[data-slot="organization-invitation-count"]')).toBeNull();
-      expect(pending.querySelector('[data-slot="organization-invitation-count"]')?.textContent).toBe(
-        "2",
-      );
+      expect(
+        pending.querySelector('[data-slot="organization-invitation-count"]')?.textContent,
+      ).toBe("2");
     } finally {
       await act(async () => {
         idleRoot.unmount();
@@ -405,6 +416,23 @@ describe("global organization invitations", () => {
       });
       idle.remove();
       pending.remove();
+    }
+  });
+
+  test("caps the count badge at 9+", async () => {
+    const capped = document.createElement("div");
+    document.body.append(capped);
+    const cappedRoot = createRoot(capped);
+    try {
+      await act(async () =>
+        cappedRoot.render(<OrganizationInvitationCountBadge pendingCount={10} />),
+      );
+      expect(capped.querySelector('[data-slot="organization-invitation-count"]')?.textContent).toBe(
+        "9+",
+      );
+    } finally {
+      await act(async () => cappedRoot.unmount());
+      capped.remove();
     }
   });
 
