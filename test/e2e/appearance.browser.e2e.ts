@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
@@ -45,7 +46,11 @@ describe("Appearance in Chromium", () => {
   }, 30_000);
 
   async function openAppearance() {
-    const trigger = page.getByRole("button", { name: "Jorge", exact: true, includeHidden: true });
+    const trigger = page.getByRole("button", {
+      name: "Example user",
+      exact: true,
+      includeHidden: true,
+    });
     if ((await trigger.getAttribute("aria-expanded")) !== "true") await trigger.click();
     await page.getByRole("menuitemradio", { name: "Light", exact: true }).waitFor();
   }
@@ -106,6 +111,10 @@ describe("Appearance in Chromium", () => {
       for (const colorScheme of ["light", "dark"] as const) {
         await page.emulateMedia({ colorScheme });
         await page.goto(`${baseUrl}/test/appearance.html`);
+        const accessibility = await new AxeBuilder({ page })
+          .withRules(["color-contrast"])
+          .analyze();
+        expect(accessibility.violations).toEqual([]);
         await openAppearance();
         const menu = page.getByRole("menuitemradio", { name: "System", exact: true });
         const box = (await menu.boundingBox())!;
