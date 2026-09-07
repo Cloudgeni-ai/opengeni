@@ -3952,13 +3952,9 @@ export async function prepareAgentTools(
             // The upstream transport logger receives raw thrown errors, whose
             // messages may contain response bodies, URLs, headers, or echoed
             // credentials. Keep its diagnostic surface structural only.
-            logger: mcpTransportLogger(config.id, {
-              // Codex Apps setup is a read-only initialize/tools-list handshake.
-              // A statusless transport failure is safe to retry, while auth
-              // responses remain non-retryable and publish their specific
-              // reconnect reason through codexAppsAuthFetch.
-              recoverySafeSetup: isCodexAppsMcpServer(config),
-            }),
+            // This logger spans tool invocation as well as setup. Only the
+            // connect/list lifecycle wrappers may add setup-safe recovery facts.
+            logger: mcpTransportLogger(config.id),
             // codex_apps returns connector tools with empty `outputSchema: {}` that the
             // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
             // sanitize the response on the wire before validation. The namespace Set
@@ -5766,7 +5762,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
   return exactError;
 }
 
-function mcpTransportLogger(serverId: string, options: McpTransportErrorOptions = {}) {
+function mcpTransportLogger(serverId: string) {
   const logFailure = (_message: string, ...args: unknown[]) => {
     let error: unknown;
     for (let index = args.length - 1; index >= 0; index -= 1) {
@@ -5777,7 +5773,7 @@ function mcpTransportLogger(serverId: string, options: McpTransportErrorOptions 
     }
     console.warn(
       "[mcp] transport operation failed",
-      mcpErrorFields(error, "mcp_transport_failed", serverId, options),
+      mcpErrorFields(error, "mcp_transport_failed", serverId),
     );
   };
   return {
