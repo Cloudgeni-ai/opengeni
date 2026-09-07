@@ -833,12 +833,11 @@ custom row, so they do not enter this fence. Custom-model retirement holds the
 exclusive counterpart; already accepted work, exact occurrence replay,
 same-model/existing-session continuations, and administrative-only task,
 trigger, or binding edits use retained definitions instead of reopening
-fresh-selection authority. A committed keyed session shell is also replayed as
-retained before active-only catalog checks so initialization remains repairable.
+fresh-selection authority. Committed keyed session shells replay before
+active-only catalog checks, preserving repairable initialization.
 
-Preference snapshots skip service-only turns; continuations and legacy subject
-turns retain their frozen human. Command and wait-timeout successors preserve
-exact causal turns, immutable receipts, separate claims, and live personal-grant
+Human preferences require frozen causal identity. Command/timeout successors
+preserve immutable receipts, separate causal claims and live personal-grant
 admission; see [run lifecycle](run-lifecycle.md).
 
 Tool disclosure is progressive, but authority is not. A tool may be eager or
