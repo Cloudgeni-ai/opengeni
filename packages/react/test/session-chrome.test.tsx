@@ -1469,3 +1469,43 @@ test("controlled compact command selection exposes activity navigation", async (
   ).toBe("true");
   expect(mounted.container.textContent).toContain("Controlled command body");
 });
+
+test("a failed session blocks only active goal presentation", () => {
+  const continuation = goal().goal!.continuation;
+  const failedState = sessionChromeGoalPillState("active", continuation, "failed");
+  expect(sessionChromeGoalPillLabel(failedState, goal().goal)).toBe("Blocked by session failure");
+  expect(sessionChromeGoalPillExplanation(failedState, goal().goal)).toContain("Continue");
+  expect(sessionChromeGoalPillState("completed", continuation, "failed")).toBe("completed");
+  expect(sessionChromeGoalPillState("paused", continuation, "failed")).toBe("paused");
+  expect(sessionChromeGoalPillState("active", continuation, "idle")).toBe(
+    sessionChromeGoalPillState("active", continuation),
+  );
+});
+
+test("failed-session goal chip and panel explain the block without changing the goal", async () => {
+  const activeGoal = goal({
+    continuation: {
+      state: "scheduled",
+      reason: "wake_pending",
+      wakeRevision: 3,
+      observedRevision: 2,
+      nextAttemptAt: null,
+      lastError: null,
+    },
+  });
+  mounted = await renderComponent(
+    <SessionChrome
+      compact
+      sessionStatus="failed"
+      queue={queue({ queue: [] })}
+      goal={activeGoal}
+      defaultActive="goal"
+    />,
+  );
+  expect(mounted.container.textContent).toContain("Goal · Blocked by session failure");
+  expect(
+    mounted.container.querySelector("[data-og-session-chrome-goal-explanation]")?.textContent,
+  ).toContain("use Continue or send a message");
+  expect(mounted.container.textContent).not.toContain("Waiting to continue automatically");
+  expect(activeGoal.goal?.status).toBe("active");
+});

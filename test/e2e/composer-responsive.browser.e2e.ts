@@ -50,6 +50,42 @@ describe("container-responsive public composer demo", () => {
     await Promise.allSettled([demo?.stop(), browser?.close()]);
   }, 30_000);
 
+  test("desktop measurement does not widen the document after a mobile resize", async () => {
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      reducedMotion: "reduce",
+    });
+    try {
+      const page = await context.newPage();
+      await page.goto(`${baseUrl}/composer-responsive.html?width=768`, {
+        waitUntil: "networkidle",
+      });
+      const textarea = page.getByRole("textbox", { name: "Message the agent" });
+      await textarea.fill("A multiline draft that creates a desktop measurement. ".repeat(30));
+      await textarea.fill("Short draft");
+      await page.setViewportSize({ width: 375, height: 812 });
+      await page.waitForFunction(
+        () =>
+          (document.querySelector("[data-composer-panel]")?.getBoundingClientRect().width ??
+            Infinity) <= innerWidth,
+      );
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        375,
+      );
+      const shortHeight = await textarea.evaluate((node) => node.getBoundingClientRect().height);
+      await textarea.fill("A multiline draft remains editable after resizing. ".repeat(30));
+      expect(
+        await textarea.evaluate((node) => node.getBoundingClientRect().height),
+      ).toBeGreaterThan(shortHeight);
+      await textarea.fill("Short again");
+      expect(
+        await textarea.evaluate((node) => node.getBoundingClientRect().height),
+      ).toBeLessThanOrEqual(shortHeight + 1);
+    } finally {
+      await context.close();
+    }
+  }, 30_000);
+
   test("a wide viewport follows the child panel across the full width matrix", async () => {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 1000 },
