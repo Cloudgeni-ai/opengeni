@@ -180,3 +180,18 @@ export function shouldRestoreSessionFocus(
   }
   return belongsToSession(active, sessionId);
 }
+
+/** Completes only the focus obligation represented by this committed layout. */
+export function createSessionFocusCompletion(
+  pending: { current: { operation: number; settled: boolean } | null },
+  restore: () => void,
+): () => void {
+  const operation = pending.current?.operation;
+  const settled = pending.current?.settled;
+  return () => {
+    restore();
+    if (pending.current?.operation === operation && settled) {
+      pending.current = null;
+    }
+  };
+}

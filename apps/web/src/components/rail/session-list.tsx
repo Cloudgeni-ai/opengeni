@@ -125,6 +125,7 @@ import {
   shouldRecordSessionRowFocusIntent,
   shouldMoveSessionRowFocus,
   shouldRestoreSessionFocus,
+  createSessionFocusCompletion,
   type SessionFocusTarget,
 } from "@/lib/session-focus";
 import {
@@ -1917,13 +1918,7 @@ export function SessionList() {
         }
       }
     };
-    const finish = () => {
-      restore();
-      const current = pendingSessionFocus.current;
-      if (current?.operation === operation && current.settled) {
-        pendingSessionFocus.current = null;
-      }
-    };
+    const finish = createSessionFocusCompletion(pendingSessionFocus, restore);
 
     // Layout handles the optimistic/rollback commit. The microtask lets
     // Radix finish its close bookkeeping, and rAF handles the post-animation
