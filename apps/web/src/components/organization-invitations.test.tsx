@@ -399,8 +399,10 @@ describe("global organization invitations", () => {
         "2",
       );
     } finally {
-      idleRoot.unmount();
-      pendingRoot.unmount();
+      await act(async () => {
+        idleRoot.unmount();
+        pendingRoot.unmount();
+      });
       idle.remove();
       pending.remove();
     }
