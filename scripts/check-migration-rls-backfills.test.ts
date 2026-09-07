@@ -256,7 +256,7 @@ WHERE new_session_drafts.id = candidates.id RETURNING new_session_drafts.id;
 
     const wrongFile = fixture({
       "0409_new_session_draft_project_provenance.sql": policy,
-      "0408_unrelated_backfill.sql": backfill,
+      "0413_unrelated_backfill.sql": backfill,
     });
     expect(analyzeMigrationRlsBackfills(wrongFile)).toHaveLength(1);
   });
