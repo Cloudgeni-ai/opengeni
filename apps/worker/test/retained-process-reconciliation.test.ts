@@ -38,11 +38,13 @@ import {
 } from "@opengeni/db";
 import {
   listSessionBackgroundCommands,
+  readSessionBackgroundCommandOutput,
   requestSessionBackgroundCommandCancellation,
 } from "@opengeni/db/session-background-commands";
 import { createObservability, type Observability } from "@opengeni/observability";
 import {
   classifyRetainedProcessPollResult,
+  captureRetainedProbeOutput,
   createSandboxLeaseActivities,
   probeRetainedProcessAtProvider,
   RETAINED_PROCESS_BINDING_QUARANTINE_AFTER_ATTEMPTS,
@@ -494,6 +496,72 @@ afterAll(async () => {
 }, 180_000);
 
 describe("retained-process terminal-owner reconciliation", () => {
+  test("failed destructive probe capture retries the same receipt before touching the provider", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed" });
+    const lease = await readLease(db, fixture.workspaceId, fixture.groupId);
+    const chunkIds: string[] = [];
+    const result = "Process exited with code 0\n\nOutput:\nnonreplayable tail";
+    await expect(
+      captureRetainedProbeOutput(fixture.process.id, result, async (_result, chunkId) => {
+        chunkIds.push(chunkId);
+        throw new Error("database unavailable");
+      }),
+    ).rejects.toThrow("database unavailable");
+    const recovered = await probeRetainedProcessAtProvider(
+      SETTINGS,
+      lease!,
+      fixture.process,
+      "observe",
+      async (output, chunkId) => {
+        expect(output).toBe(result);
+        chunkIds.push(chunkId);
+      },
+    );
+    expect(recovered).toMatchObject({ status: "proved", proof: { exitCode: 0 } });
+    expect(new Set(chunkIds).size).toBe(1);
+  }, 60_000);
+
+  test("running and terminal reaper output is retained without observing completion", async () => {
+    if (!available) return;
+    const fixture = await promoteTurnProcess({ outcome: "completed", backgroundCommand: "work" });
+    const identity = {
+      accountId: fixture.accountId,
+      workspaceId: fixture.workspaceId,
+      sessionId: fixture.sessionId,
+      commandId: fixture.process.id,
+    };
+    await runReaper(async (_settings, _lease, process, mode, capture) => {
+      expect(process.id).toBe(fixture.process.id);
+      expect(mode).toBe("observe");
+      await capture?.(
+        `Process running with session ID ${process.providerSessionId}\n\nOutput:\nprogress\n`,
+        "running-reaper-chunk",
+      );
+      return { status: "deferred", reason: "provider_running" };
+    });
+    const running = await readSessionBackgroundCommandOutput(db, identity);
+    expect(running.chunks.map((item) => item.chunk).join("")).toBe("progress\n");
+    expect(running.completionObservedAt).toBeNull();
+    await admin`update sandbox_retained_processes set reconcile_after=now() where id=${fixture.process.id}`;
+    await runReaper(async (_settings, _lease, _process, _mode, capture) => {
+      await capture?.("Process exited with code 0\n\nOutput:\ndone\n", "terminal-reaper-chunk");
+      return {
+        status: "proved",
+        proof: { outcome: "exited", exitCode: 0, reason: "provider_exit_banner" },
+      };
+    });
+    const [command] =
+      await admin`select completion_observed_at from session_background_commands where id=${fixture.process.id}`;
+    expect(command!.completion_observed_at).toBeNull();
+    const terminal = await readSessionBackgroundCommandOutput(db, {
+      ...identity,
+      cursor: running.nextCursor,
+    });
+    expect(terminal.chunks.map((item) => item.chunk).join("")).toBe("done\n");
+    expect(terminal.terminal).toBe(true);
+  }, 60_000);
+
   test("managed process retention does not background until exact-attempt adoption", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess();

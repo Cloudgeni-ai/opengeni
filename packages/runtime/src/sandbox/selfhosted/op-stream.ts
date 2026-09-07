@@ -176,7 +176,10 @@ export type OpStreamYieldOptions = {
   /** Durable ownership transfer. It runs while the exact consumer is still
    * attached; returning a running result is forbidden until this resolves. */
   onYield: () => void | Promise<void>;
+  captureOutput?: (frames: OpStreamOutputFrame[]) => Promise<void>;
 };
+
+export type OpStreamOutputFrame = { sequence: string; stream: "stdout" | "stderr"; chunk: string };
 
 export type ExactSelfhostedOpControlInput = {
   controlRpc: ControlRpc;
@@ -257,6 +260,7 @@ export class OpStreamExecClient {
   private readonly deps: OpStreamExecClientDeps;
   private readonly settled: SettledOp[] = [];
   private readonly inFlight = new Set<string>();
+  private lastReadGeneration = 0n;
 
   constructor(deps: OpStreamExecClientDeps) {
     this.deps = deps;
@@ -264,6 +268,21 @@ export class OpStreamExecClient {
 
   private generation(): string {
     return this.deps.journal?.attachGeneration() ?? "1";
+  }
+
+  /** Adopted-command reads are new consumers, not recovery of the launching
+   * activity. Use the same epoch-millisecond generation domain as reconciliation
+   * so a later owning-runtime read can follow a reaper attach. Execution and
+   * its recovery continue to use the immutable journal generation. Equal
+   * generations are accepted by the runner; never decrease within this client. */
+  private readGeneration(): string {
+    const journal = BigInt(this.generation());
+    const now = BigInt(Date.now());
+    this.lastReadGeneration = [this.lastReadGeneration, journal, now].reduce(
+      (highest, generation) => (generation > highest ? generation : highest),
+      1n,
+    );
+    return this.lastReadGeneration.toString();
   }
 
   /**
@@ -359,6 +378,33 @@ export class OpStreamExecClient {
     }
   }
 
+  /** Observe an already-adopted operation. Never issues OpStart, cancellation,
+   * final ACK, or terminal model-observation acknowledgment. */
+  async readExisting(
+    opId: string,
+    yieldMs: number,
+    captureOutput: (frames: OpStreamOutputFrame[]) => Promise<void>,
+  ): Promise<OpStreamExecResult> {
+    const consumer = new OpConsumer(this.deps, opId, this.readGeneration());
+    try {
+      const result = await consumer.run(
+        null,
+        0,
+        Math.max(yieldMs + this.deps.controlTimeoutMs, 1000),
+        {
+          yieldMs: Math.max(1, yieldMs),
+          onYield: () => {},
+          captureOutput,
+        },
+      );
+      return result.status === "completed"
+        ? { status: "completed", outcome: result.outcome }
+        : result;
+    } finally {
+      consumer.teardown();
+    }
+  }
+
   /**
    * The turn-end durability hook (the hard gate's ordering): for every op whose
    * result the turn has durably consumed — (1) already true when this runs —
@@ -410,6 +456,8 @@ class OpConsumer {
     stdout: [],
     stderr: [],
   };
+  private readonly outputFrames: OpStreamOutputFrame[] = [];
+  private readonly outputDecoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
   private receivedPayloadBytes = 0n;
   private creditAtLastAck = 0n;
   private exit: OpExit | undefined;
@@ -453,7 +501,7 @@ class OpConsumer {
   }
 
   async run(
-    exec: ExecRequest,
+    exec: ExecRequest | null,
     deadlineMs: number,
     wallMs: number,
     yieldOptions: OpStreamYieldOptions | null,
@@ -485,7 +533,7 @@ class OpConsumer {
       (payload) => this.onFramePayload(payload),
     );
 
-    const startRetries = await this.startOp(exec, deadlineMs);
+    const startRetries = exec === null ? 0 : await this.startOp(exec, deadlineMs);
 
     // The universal begin (B2): attach from our contiguous frontier under the
     // initial window — for a FRESH op that is seq 0 (replay nothing, start live
@@ -527,6 +575,7 @@ class OpConsumer {
           if (this.exitSeq === undefined) {
             await this.sendBackgroundCredit();
             const partial = this.snapshotOutput();
+            await yieldOptions.captureOutput?.(this.outputFrames.splice(0));
             return {
               status: "running",
               opId: this.opId,
@@ -551,10 +600,11 @@ class OpConsumer {
     // Settled: the exit frame and every frame before it are applied.
     const exit = this.exit as OpExit;
     const exitSeq = this.exitSeq as bigint;
-    if (exit.failureCode) {
+    if (exit.failureCode && exec !== null) {
       throw runnerFailureToControlError(exit);
     }
     const { stdout, stderr } = this.assembleAndVerify(exit);
+    if (adopted || exec === null) await yieldOptions?.captureOutput?.(this.outputFrames.splice(0));
     const outcome: OpStreamExecOutcome = {
       response: {
         exitCode: exit.exitCode,
@@ -870,6 +920,8 @@ class OpConsumer {
         const channel = OP_CHANNEL_NAMES[body.data.channel];
         if (channel) {
           this.chunks[channel].push(body.data.bytes);
+          const chunk = this.outputDecoders[channel].decode(body.data.bytes, { stream: true });
+          if (chunk) this.outputFrames.push({ sequence: frame.seq, stream: channel, chunk });
         }
         this.receivedPayloadBytes += BigInt(body.data.bytes.byteLength);
         break;
@@ -879,6 +931,10 @@ class OpConsumer {
         void this.sendAck();
         break;
       case "exit":
+        for (const stream of ["stdout", "stderr"] as const) {
+          const chunk = this.outputDecoders[stream].decode();
+          if (chunk) this.outputFrames.push({ sequence: frame.seq, stream, chunk });
+        }
         this.exit = body.exit;
         this.exitSeq = BigInt(frame.seq);
         break;

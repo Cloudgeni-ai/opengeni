@@ -12,7 +12,11 @@ import type { ControlRpc } from "../src/sandbox/selfhosted/control-rpc";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
-import type { OpStreamJournal } from "../src/sandbox/selfhosted/op-stream";
+import {
+  OpStreamExecClient,
+  type OpStreamJournal,
+  type OpStreamOutputFrame,
+} from "../src/sandbox/selfhosted/op-stream";
 import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 
 const WORKSPACE = "ws-1";
@@ -45,6 +49,10 @@ function buildRig(
       exitCode: number | null;
       reason: string;
     }) => Promise<void>;
+    captureBackgroundCommandOutput?: (
+      commandId: string,
+      frames: OpStreamOutputFrame[],
+    ) => Promise<void>;
   } = {},
 ) {
   const connectionInstanceId = opts.connectionInstanceId ?? CONNECTION_INSTANCE;
@@ -78,6 +86,9 @@ function buildRig(
     ...(opts.settleBackgroundCommand
       ? { settleBackgroundCommand: opts.settleBackgroundCommand }
       : {}),
+    ...(opts.captureBackgroundCommandOutput
+      ? { captureBackgroundCommandOutput: opts.captureBackgroundCommandOutput }
+      : {}),
     ...(opts.memoryMaxBytes !== undefined
       ? {
           operationResourcePolicy: { memoryMaxBytes: opts.memoryMaxBytes },
@@ -97,6 +108,235 @@ function buildRig(
 }
 
 describe("op-stream exec (fake runner)", () => {
+  test("owner read uses a fresh attach after the reaper and stale consumers cannot replay", async () => {
+    const captured: string[] = [];
+    const settled: string[] = [];
+    const { runner, transport, session, requests } = buildRig({
+      journal: { attachGeneration: () => "7", persistSettled: () => {} },
+      adoptBackgroundCommand: async () => ({ commandId: "owner-after-reaper" }),
+      captureBackgroundCommandOutput: async (_id, frames) => {
+        captured.push(...frames.map((frame) => frame.chunk));
+      },
+      settleBackgroundCommand: async ({ commandId }) => {
+        settled.push(commandId);
+      },
+    });
+    runner.script("after_reaper:0", {
+      frames: [
+        { channel: "stdout", bytes: "prefix" },
+        { channel: "stderr", bytes: "tail" },
+      ],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("after_reaper", () =>
+      session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+    );
+    const run = runner.runs.get("after_reaper:0")!;
+    expect(run.highestGeneration).toBe(7n);
+    const rpcSubject = `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`;
+    const reaper = new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      epoch: 0,
+      rpcSubject,
+      controlRpc: runner,
+      transport,
+      controlTimeoutMs: 1000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+      journal: { attachGeneration: () => String(Date.now()), persistSettled: () => {} },
+    });
+    expect((await reaper.readExisting("after_reaper:0", 5, async () => {})).status).toBe("running");
+    const reaperGeneration = run.highestGeneration;
+    expect(reaperGeneration).toBeGreaterThan(7n);
+    // Output becomes available after the reaper left. A stale launch-generation
+    // attach must NOT trigger live emission or replay, just as in Rust.
+    run.script.holdUntilCancel = false;
+    for (const attachGeneration of ["0", "7"]) {
+      await runner.request(
+        rpcSubject,
+        {
+          requestId: crypto.randomUUID(),
+          epoch: 0,
+          op: {
+            $case: "opAttach",
+            opAttach: {
+              opId: "after_reaper:0",
+              fromSeq: "0",
+              attachGeneration,
+              windowBytes: "65536",
+            },
+          },
+        },
+        { timeoutMs: 1000 },
+      );
+      expect(run.liveEmitted).toBe(false);
+      expect(run.highestGeneration).toBe(reaperGeneration);
+    }
+    expect(await session.refreshOwnedCommand("owner-after-reaper")).toBe(true);
+    expect(captured).toEqual(["prefix", "tail"]);
+    expect(settled).toEqual(["owner-after-reaper"]);
+    expect(run.highestGeneration).toBeGreaterThanOrEqual(reaperGeneration);
+    const ownerAttaches = requests.filter((request) => request.op?.$case === "opAttach");
+    expect(ownerAttaches).toHaveLength(2);
+    expect(run.startCount).toBe(1);
+    expect(run.exit.cancelled).toBe(false);
+    expect(run.finalAcked).toBe(false);
+  });
+
+  test("live owner refresh attaches to adopted command and persists before terminal settlement", async () => {
+    const events: string[] = [];
+    const { runner, session, requests } = buildRig({
+      adoptBackgroundCommand: async () => ({ commandId: "owned-refresh" }),
+      captureBackgroundCommandOutput: async (_id, frames) => {
+        if (frames.length) events.push("capture");
+      },
+      settleBackgroundCommand: async () => {
+        events.push("settle");
+      },
+    });
+    runner.script("owner_refresh:0", {
+      frames: [{ channel: "stdout", bytes: "retained-tail" }],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("owner_refresh", () =>
+      session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+    );
+    expect(await session.refreshOwnedCommand("other-owner")).toBe(false);
+    // Simulate an independently requested stop, then read its durable replay.
+    await session.cancelExecCommand("owner_refresh:0");
+    events.length = 0;
+    const before = requests.length;
+    await Promise.all([
+      session.refreshOwnedCommand("owned-refresh"),
+      session.refreshOwnedCommand("owned-refresh"),
+    ]);
+    expect(events).toEqual(["capture", "settle"]);
+    expect(requests.slice(before).map((request) => request.op?.$case)).not.toContain("opStart");
+    expect(requests.slice(before).map((request) => request.op?.$case)).not.toContain("opCancel");
+    expect(await session.refreshOwnedCommand("owned-refresh")).toBe(false);
+  });
+
+  test("attach-only command reads replay exact UTF-8 frames without starting, cancelling, or final-acking", async () => {
+    const { runner, transport, session } = buildRig({
+      adoptBackgroundCommand: async () => ({ commandId: "live-command" }),
+    });
+    const bytes = new TextEncoder().encode("🙂done");
+    runner.script("read_existing:0", {
+      frames: [
+        { channel: "stdout", bytes: bytes.slice(0, 2) },
+        { channel: "stdout", bytes: bytes.slice(2) },
+        { channel: "stderr", bytes: "warning" },
+      ],
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("read_existing", () => session.execCommand({ cmd: "work" }));
+    const calls: string[] = [];
+    let replayDelayMs = 0;
+    const reader = new OpStreamExecClient({
+      workspaceId: WORKSPACE,
+      agentId: AGENT,
+      connectionInstanceId: CONNECTION_INSTANCE,
+      epoch: 0,
+      rpcSubject: `agent.${WORKSPACE}.${AGENT}.connection.${CONNECTION_INSTANCE}.rpc`,
+      controlRpc: {
+        request: async (subject, request, opts) => {
+          calls.push(request.op?.$case ?? "none");
+          return await runner.request(subject, request, opts);
+        },
+      },
+      transport: {
+        subscribe: async (subject, handler) =>
+          transport.subscribe(subject, (payload) => {
+            if (replayDelayMs) setTimeout(() => handler(payload), replayDelayMs);
+            else handler(payload);
+          }),
+        publish: (subject, payload) => transport.publish(subject, payload),
+      },
+      controlTimeoutMs: 1000,
+      retryClock: { sleep: async () => {}, jitter: () => 0.5 },
+    });
+    const pages: OpStreamOutputFrame[][] = [];
+    for (let repeat = 0; repeat < 2; repeat++) {
+      expect(
+        (
+          await reader.readExisting("read_existing:0", 5, async (frames) => {
+            pages.push(frames);
+          })
+        ).status,
+      ).toBe("completed");
+    }
+    expect(pages[0]).toEqual(pages[1]);
+    expect(pages[0]!.map((frame) => frame.chunk).join("")).toBe("🙂donewarning");
+    expect(calls).not.toContain("opStart");
+    expect(calls).not.toContain("opCancel");
+    replayDelayMs = 350;
+    const partial = await reader.readExisting("read_existing:0", 250, async () => {});
+    expect(partial.status).toBe("running");
+    expect("terminal" in partial && partial.terminal).toBeFalsy();
+    const delayedFrames: OpStreamOutputFrame[] = [];
+    const complete = await reader.readExisting("read_existing:0", 1000, async (frames) => {
+      delayedFrames.push(...frames);
+    });
+    expect(complete.status).toBe("completed");
+    expect(delayedFrames.map((frame) => frame.chunk).join("")).toBe("🙂donewarning");
+    replayDelayMs = 0;
+    const exit = runner.runs.get("read_existing:0")!.exit;
+    const originalDigest = exit.digests.stdout;
+    exit.digests.stdout = "invalid";
+    const invalidFrames: OpStreamOutputFrame[] = [];
+    await expect(
+      reader.readExisting("read_existing:0", 1000, async (frames) => {
+        invalidFrames.push(...frames);
+      }),
+    ).rejects.toThrow("digest mismatch");
+    expect(invalidFrames).toEqual([]);
+    exit.digests.stdout = originalDigest!;
+    expect(runner.runs.get("read_existing:0")!.startCount).toBe(1);
+    expect(transport.decodedAcks().some((ack) => ack.final)).toBe(false);
+    await expect(reader.readExisting("missing", 5, async () => {})).rejects.toThrow();
+    expect(calls).not.toContain("opStart");
+    runner.script("read_live:0", { frames: [], live: true, holdUntilCancel: true });
+    await runWithToolCallCorrelation("read_live", () =>
+      session.execCommand({ cmd: "live", yieldTimeMs: 0 }),
+    );
+    expect((await reader.readExisting("read_live:0", 5, async () => {})).status).toBe("running");
+    expect(runner.runs.get("read_live:0")!.exit.cancelled).toBe(false);
+    expect(calls).not.toContain("opStart");
+    expect(calls).not.toContain("opCancel");
+  });
+
+  test("adoption captures output with its durable UUID even when exit races the adoption transaction", async () => {
+    const saved: { commandId: string; frames: OpStreamOutputFrame[] }[] = [];
+    let session!: SelfhostedSession;
+    const rig = buildRig({
+      adoptBackgroundCommand: async ({ opId }) => {
+        await session.cancelExecCommand(opId);
+        return { commandId: "captured-command" };
+      },
+      captureBackgroundCommandOutput: async (commandId, frames) => {
+        saved.push({ commandId, frames });
+      },
+    });
+    session = rig.session;
+    rig.runner.script("capture_adoption:0", {
+      frames: [{ channel: "stdout", bytes: "retained" }],
+      live: true,
+      holdUntilCancel: true,
+    });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    await runWithToolCallCorrelation("capture_adoption", () =>
+      session.execCommand({ cmd: "work", yieldTimeMs: 1 }),
+    );
+    expect(saved).toHaveLength(1);
+    expect(saved[0]!.commandId).toBe("captured-command");
+    expect(saved[0]!.frames.map((frame) => frame.chunk).join("")).toBe("retained");
+  });
+
   test("execCommand durably adopts a live command before returning its exact locator", async () => {
     const adoptions: Array<{
       controlWorkspaceId: string;
