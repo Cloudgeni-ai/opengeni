@@ -328,3 +328,35 @@ one transaction without changing history. A failed, paused, recovered, or
 superseded attempt cannot lose the request or publish a current compaction
 result; only an authoritatively recorded terminal summarization failure consumes
 the request as described above.
+
+### Portable Responses identity regression
+
+Portable Responses checkpoints detach optional provider response-item `id`
+fields from messages, function calls/results, patch calls/results, and
+client-executed tool search. Opaque reasoning is omitted during checkpoint
+preparation; retaining a dependent message's stored response id can otherwise
+make the provider require that omitted reasoning even with complete inline
+content. The temporary projection removes both the SDK item id and its
+`providerData.id` override. It preserves call/result correlation, payload ids,
+ordering, plaintext reasoning, and required hosted-tool/approval/program ids.
+Normal inference and remote-v2 compaction do not use this projection.
+Responses checkpoints also set `tool_choice: "none"`: empty tool schemas alone
+do not prevent a provider from returning a historical tool call instead of
+summary text. Such a response still fails the existing empty-summary guard.
+
+The known missing-reasoning rejection is classified as
+`missing_required_reasoning_item` without retaining the provider message or its
+referenced item ids. Unknown provider messages remain excluded. Provider
+failures and empty summaries still fail closed without changing active history.
+
+Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for
+SDK wire conversion and history-preservation regression coverage. For a live
+synthetic long-history check, configure the Azure provider settings and run
+`bun scripts/verify-portable-compaction.ts --live --durable`. The durable mode
+uses the disposable PostgreSQL test harness and the real fenced compaction
+activity, then verifies archival, the committed checkpoint event, and cleared
+token/request state. It checks compaction followed
+by a correlated tool call/result and remembered checkpoint facts; it never
+reads or modifies a customer session. Omit `--durable` for provider-only verification; the receipt distinguishes the
+two modes. Database settlement/fencing remains
+covered by `apps/worker/test/context-compaction-activity.test.ts`.

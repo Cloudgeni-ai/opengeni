@@ -1007,9 +1007,11 @@ export async function summarizeForCompaction(
   // items without flattening tool history into a fake user transcript.
   const request: ModelRequest = {
     systemInstructions: options.systemInstructions ?? "",
-    input: input as AgentInputItem[],
+    input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
     modelSettings: {
       maxTokens,
+      // Historical tool records remain input, but a checkpoint must be text.
+      toolChoice: "none",
       // Azure rejects store:false; the Codex subscription transport enforces
       // it independently. The OpenAI platform path remains explicitly storeless.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
@@ -1041,6 +1043,49 @@ export async function summarizeForCompaction(
     throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
   }
   return summary;
+}
+
+/**
+ * Portable checkpoints carry inline history, not references to stored Responses
+ * items. An assistant/tool item's provider id can require its original reasoning
+ * item even when the full message is supplied. The portable preparation removes
+ * opaque reasoning, so retaining those dependent ids makes Azure reject the
+ * checkpoint. Remove only provider item identity from this request-local copy;
+ * callId/call_id, tool payloads, order, and canonical history stay unchanged.
+ */
+const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
+  "message",
+  "function_call",
+  "function_call_result",
+  "function_call_output",
+  "apply_patch_call",
+  "apply_patch_call_output",
+]);
+
+function detachCompactionResponseItemIdentity(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  const providerData = item.providerData;
+  const provider = providerData as Record<string, unknown> | undefined;
+  const clientToolSearch =
+    (item.type === "tool_search_call" || item.type === "tool_search_output") &&
+    provider?.execution === "client" &&
+    typeof (provider.call_id ?? provider.callId) === "string";
+  if (!DETACHABLE_COMPACTION_ITEM_TYPES.has(String(item.type)) && !clientToolSearch) return item;
+  const hasProviderId =
+    providerData !== null &&
+    typeof providerData === "object" &&
+    !Array.isArray(providerData) &&
+    Object.hasOwn(providerData, "id");
+  if (!Object.hasOwn(item, "id") && !hasProviderId) return item;
+  const projected = { ...item };
+  delete projected.id;
+  if (hasProviderId) {
+    const projectedProviderData = { ...(providerData as Record<string, unknown>) };
+    delete projectedProviderData.id;
+    projected.providerData = projectedProviderData;
+  }
+  return projected;
 }
 
 /**
@@ -1280,11 +1325,13 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let type: string | null = null;
   let requestId: string | null = null;
   let eventType: string | null = null;
+  let rejectionReason: "missing_required_reasoning_item" | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
+    rejectionReason ??= compactionRejectionReason(record);
     if (!errorName && current instanceof Error) {
       errorName = boundCompactionDiagnosticField(current.name);
     }
@@ -1335,6 +1382,7 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
+      rejectionReason ??= compactionRejectionReason(nested);
       if (code === null && typeof nested.code === "string") {
         code = boundCompactionDiagnosticField(nested.code);
       }
@@ -1365,7 +1413,22 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     type,
     requestId,
     ...(eventType ? { eventType } : {}),
+    ...(rejectionReason ? { rejectionReason } : {}),
   };
+}
+
+function compactionRejectionReason(
+  record: Record<string, unknown>,
+): "missing_required_reasoning_item" | null {
+  // Classify the known provider protocol rejection without persisting the
+  // message, referenced item ids, or arbitrary provider-owned fields.
+  return typeof record.message === "string" &&
+    record.message.length <= 1024 &&
+    /^Item '[A-Za-z0-9_-]+' of type '[a-z_]+' was provided without its required 'reasoning' item: '[A-Za-z0-9_-]+'\.$/.test(
+      record.message,
+    )
+    ? "missing_required_reasoning_item"
+    : null;
 }
 
 const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
