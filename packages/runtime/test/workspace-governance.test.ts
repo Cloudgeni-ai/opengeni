@@ -145,6 +145,23 @@ function preferenceSnapshot(
 }
 
 describe("exact-attempt workspace governance prompt", () => {
+  test("shared Skill reading removes the duplicate preference index without weakening policy", () => {
+    const governance = renderWorkspaceGovernanceContext(
+      {
+        instructionPolicy: policySnapshot([
+          policyEntry({ kind: "policy", scope: "global", content: "GLOBAL_POLICY_SENTINEL" }),
+        ]),
+        preferences: preferenceSnapshot([descriptor("workspace", "LEGACY_SKILL")]),
+      },
+      { sharedSkillReader: true },
+    );
+    expect(governance).toContain("GLOBAL_POLICY_SENTINEL");
+    expect(governance).toContain("shared Skill index and skill_read");
+    expect(governance).not.toContain("LEGACY_SKILL");
+    expect(governance).not.toContain("preference_registry_get");
+    expect(governance).not.toContain("lane=preference");
+    expect(governance).not.toContain("Skill snapshot evidence");
+  });
   test("orders fixed authorities before session/task state and bounded memory", () => {
     const governance = renderWorkspaceGovernanceContext({
       companyProfile: companyProfileSnapshot(),

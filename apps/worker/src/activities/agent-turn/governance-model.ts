@@ -254,6 +254,7 @@ export async function prepareGovernanceAndModel(
     },
     {
       includeCompanyProfile: companyProfileIncluded,
+      sharedSkillReader: true,
     },
   );
   const structuredWorkspacePolicyActive =
