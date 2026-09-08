@@ -300,16 +300,40 @@ BEGIN
   END LOOP;
 END $backfill$;
 
--- An old single-text editor cannot silently drop a bound Skill's supporting files.
+-- Once a head adopts unified folders, old single-text writes cannot discard them.
+-- Keep historical rows/hashes unchanged; explicit restore creates a new folder revision.
 CREATE FUNCTION skill_guard_legacy_revision() RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
-  IF NEW.skill_files IS NULL AND EXISTS(SELECT 1 FROM skill_source_bindings b WHERE b.preference_id=NEW.preference_id) THEN
-    RAISE EXCEPTION 'Installed Skill saves require the unified file lifecycle' USING ERRCODE='55000';
+  IF NEW.skill_files IS NULL AND (
+    EXISTS(SELECT 1 FROM skill_source_bindings b WHERE b.account_id=NEW.account_id AND b.preference_id=NEW.preference_id)
+    OR EXISTS(SELECT 1 FROM preference_registry_revisions r
+      WHERE r.account_id=NEW.account_id AND r.preference_id=NEW.preference_id AND r.skill_files IS NOT NULL)
+  ) THEN
+    RAISE EXCEPTION 'Skill folder saves require the unified file lifecycle' USING ERRCODE='55000';
   END IF;
   RETURN NEW;
 END $$;
 CREATE TRIGGER skill_guard_legacy_revision BEFORE INSERT ON preference_registry_revisions
 FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_revision();
+
+-- INSERT protection alone cannot stop legacy activation of a pre-cutover revision.
+CREATE FUNCTION skill_guard_legacy_activation() RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+BEGIN
+  IF NEW.active_revision_id IS NOT NULL AND NEW.active_revision_id IS DISTINCT FROM OLD.active_revision_id
+    AND EXISTS(SELECT 1 FROM preference_registry_revisions target
+      WHERE target.account_id=NEW.account_id AND target.preference_id=NEW.id
+        AND target.id=NEW.active_revision_id AND target.skill_files IS NULL)
+    AND (
+      EXISTS(SELECT 1 FROM skill_source_bindings b WHERE b.account_id=NEW.account_id AND b.preference_id=NEW.id)
+      OR EXISTS(SELECT 1 FROM preference_registry_revisions r
+        WHERE r.account_id=NEW.account_id AND r.preference_id=NEW.id AND r.skill_files IS NOT NULL)
+    ) THEN
+    RAISE EXCEPTION 'Skill folder activation requires a files-bearing revision; use unified restore' USING ERRCODE='55000';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER skill_guard_legacy_activation BEFORE UPDATE OF active_revision_id ON preference_registry_preferences
+FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_activation();
 
 -- Activation metadata is bound to the exact event, so a later legacy human
 -- activation cannot inherit an earlier Automatic receipt for the same revision.
