@@ -63,7 +63,7 @@ test.skipIf(!baseUrl)(
       expect(events.some((event) => event.event === "app_active")).toBe(true);
       expect(events.some((event) => event.event === "login_completed")).toBe(false);
       await page.getByText("Loading settings", { exact: true }).waitFor({ state: "hidden" });
-    await page.screenshot({ path: "/tmp/opengeni-analytics-browser.png", fullPage: true });
+      await page.screenshot({ path: "/tmp/opengeni-analytics-browser.png", fullPage: true });
     } finally {
       await browser.close();
     }
