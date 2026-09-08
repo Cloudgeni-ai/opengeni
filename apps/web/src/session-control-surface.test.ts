@@ -200,9 +200,7 @@ describe("session control surface architecture", () => {
     ]);
     expect(route).toContain("Add Variable Set…");
     expect(route).toContain("<SelectedVariableSetList");
-    expect(route).toContain(
-      "const showVariableSets = props.variableSetsOnly === true",
-    );
+    expect(route).toContain("const showVariableSets = props.variableSetsOnly === true");
     expect(route).toContain("hasVariableSetChoices && draft.variableSetIds.length < 25");
     expect(route).toContain("PersonalResourceAccessInline");
     expect(route).toContain("PersonalResourceScopeChoice");
