@@ -40,7 +40,12 @@ import { ChildSessionLink } from "./child-session-link";
  * shell uses one CSS grid-track transition for deliberate open/close actions;
  * live queue reconciliation never feeds measurements back into layout.
  */
-import type { SessionGoal, SessionPendingInputPreview, SessionTurn } from "@opengeni/sdk";
+import type {
+  SessionGoal,
+  SessionPendingInputPreview,
+  SessionStatus,
+  SessionTurn,
+} from "@opengeni/sdk";
 import {
   ActivityIcon,
   AudioLinesIcon,
@@ -90,6 +95,8 @@ export type SessionChromeAgentsSignal = {
 
 export type SessionChromeProps = {
   compact?: boolean;
+  /** Authoritative execution status; omitted by older embedding hosts. */
+  sessionStatus?: SessionStatus | undefined;
   queue: UseTurnQueueResult;
   /** Needed for queue edit → composer checkout. Omit with `readOnly`. */
   composer?: ComposerState | undefined;
@@ -120,6 +127,7 @@ type GoalPillState =
   | "pursuing"
   | "waiting"
   | "scheduled"
+  | "session_failed"
   | "blocked"
   | "held"
   | "paused"
@@ -136,6 +144,7 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
   waiting: "Waiting",
   scheduled: "Waiting",
   blocked: "Blocked",
+  session_failed: "Blocked by session failure",
   held: "Held",
   paused: "Paused",
   invariant_broken: "Needs attention",
@@ -190,6 +199,9 @@ export function sessionChromeGoalPillExplanation(
   record: GoalPillRecord | null | undefined,
 ): string | null {
   const continuation = record?.continuation ?? null;
+  if (state === "session_failed") {
+    return "Resolve the session failure, then use Continue or send a message to continue this active goal.";
+  }
   if (state === "paused") {
     return record?.pausedReason
       ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
@@ -312,9 +324,11 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 export function sessionChromeGoalPillState(
   goalStatus: "active" | "paused" | "completed",
   continuation: SessionGoal["continuation"] | null | undefined,
+  sessionStatus?: SessionStatus,
 ): GoalPillState {
   if (goalStatus === "completed") return "completed";
   if (goalStatus === "paused") return "paused";
+  if (sessionStatus === "failed") return "session_failed";
   if (!continuation) return "invariant_broken";
   if (continuation.state === "running") {
     return continuation.reason === "goal_turn_running"
@@ -414,6 +428,7 @@ function toneClass(tone: SessionChromeSignalTone, selected: boolean): string {
 
 export function SessionChrome({
   compact = false,
+  sessionStatus,
   queue,
   composer,
   goal,
@@ -462,7 +477,9 @@ export function SessionChrome({
   const canMutateQueue = !readOnly && composer !== undefined;
 
   const elapsed = useLiveElapsed(record?.createdAt, Boolean(record));
-  const goalState = record ? sessionChromeGoalPillState(record.status, record.continuation) : null;
+  const goalState = record
+    ? sessionChromeGoalPillState(record.status, record.continuation, sessionStatus)
+    : null;
 
   const initialAuthoritativeQueuedCount = countAuthoritativeQueuedTurns(
     queue.queue,
@@ -575,6 +592,7 @@ export function SessionChrome({
       const waiting =
         goalState === "waiting" ||
         goalState === "blocked" ||
+        goalState === "session_failed" ||
         goalState === "held" ||
         goalState === "paused";
       const explanation = sessionChromeGoalPillExplanation(goalState, record);

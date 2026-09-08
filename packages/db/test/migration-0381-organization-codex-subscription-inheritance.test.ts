@@ -158,7 +158,7 @@ describe("migration 0381 organization Codex subscription inheritance", () => {
   test("Personal activation requires drained runtimes before installing the Codex inventory", async () => {
     const activation = await Bun.file(
       new URL(
-        "../drizzle/0419_personal_workspace_organization_codex_inheritance.sql",
+        "../drizzle/0421_personal_workspace_organization_codex_inheritance.sql",
         import.meta.url,
       ),
     ).text();

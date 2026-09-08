@@ -306,13 +306,13 @@ role list, deploy the matching release, then restart. Pre-0390 workers do not
 understand the new credential/billing branch. No new environment variable is
 required; the stable environments encryption key protects these credentials.
 
-Migration `0419_personal_workspace_organization_codex_inheritance.sql` is a
+Migration `0421_personal_workspace_organization_codex_inheritance.sql` is a
 maintenance activation for Personal workspace Codex inheritance. Stop all API,
 control-worker, and turn-worker processes and provide every runtime login in
 `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`. Apply the migration, run
 `db:provision-roles`, and start only the matching release. Select
-`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0419_personal_workspace_organization_codex_inheritance`
-for generated deployment plans. Never restart a pre-0419 binary: its organization
+`OPENGENI_DEPLOYMENT_MAINTENANCE_CUTOVER=0421_personal_workspace_organization_codex_inheritance`
+for generated deployment plans. Never restart a pre-0421 binary: its organization
 Codex mutations omit Personal workspace source fences and capacity wakeups.
 
 Bootstrap a new machine in two phases. First install only the persistent
@@ -1224,6 +1224,11 @@ content-hashed `/assets/*` responses are served with immutable one-year caching,
 while the HTML shell revalidates. The API compresses JSON responses and leaves
 SSE and other streaming transports uncompressed.
 
+Web assets, the React demo, and the server bundle compile once on BuildKit's
+native build platform. The amd64 and arm64 web images copy those portable
+outputs into their respective Bun runtime images without executing target
+architecture build steps. Web image publication therefore does not need QEMU.
+
 Build local OpenGeni workload images:
 
 ```bash
@@ -1241,7 +1246,7 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 `main` is the daily integration branch and remains GitHub's default branch.
 
 Site authoring installs exact registry versions. Stable builds use their source
-SDK/React/Codemode manifest versions. Before a canary rollout, publish packages
+SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The runtime includes these pins beside
@@ -3027,3 +3032,15 @@ A deployment is not acceptable until it proves:
 Use `bun run deployment:stack`, `bun run deployment:preflight`, provider
 Terraform validation, Helm rendering, and this conformance suite as the merge
 and release gate for deployment changes.
+
+
+### Background-command launch authority (0419)
+
+Migration `0419_background_command_launch_authority.sql` is rolling: nullable
+launch turn/attempt/generation columns and an immutable identity fence let older
+adoption writers remain compatible. New writers stamp the existing accepted
+attempt; terminal commands use that receipt without creating a personal grant.
+Historical managed rows may derive it from their exact retained process, while
+unattributed Connected Machine rows remain service-owned. Deploy the new API and
+worker together to enable command and wait-timeout causal admission; this source
+change does not itself deploy or authorize pre-claim recovery.

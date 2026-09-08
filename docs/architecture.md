@@ -14,8 +14,7 @@
 
 ## 1. Scope
 
-This map covers product shape, invariants, execution paths, repository ownership,
-and canonical-source routing. Exact inventories belong in code and focused docs.
+Product shape, invariants, execution paths, and source ownership. Exact inventories live in code.
 
 ---
 
@@ -638,6 +637,8 @@ packages; it does not own session or authorization semantics. Advanced hosts
 may embed API/core/worker packages, but the same domain and persistence
 boundaries still apply.
 
+Console appearance: `apps/web/src/lib/appearance.tsx`; pre-paint bootstrap: `apps/web/index.html`.
+
 ---
 
 ## 5. Runtime spine: session → turn → attempt
@@ -835,12 +836,12 @@ custom row, so they do not enter this fence. Custom-model retirement holds the
 exclusive counterpart; already accepted work, exact occurrence replay,
 same-model/existing-session continuations, and administrative-only task,
 trigger, or binding edits use retained definitions instead of reopening
-fresh-selection authority. A committed keyed session shell is also replayed as
-retained before active-only catalog checks so initialization remains repairable.
+fresh-selection authority. Committed keyed session shells replay before
+active-only catalog checks, preserving repairable initialization.
 
-Human preference snapshots require an exact causal human. Service-only turns
-with no causal human skip that human-bound capability; service continuations
-and legacy subject turns use only their already-frozen causal human.
+Human preferences require frozen causal identity. Command/timeout successors
+preserve immutable receipts, separate causal claims and live personal-grant
+admission; see [run lifecycle](run-lifecycle.md).
 
 Tool disclosure is progressive, but authority is not. A tool may be eager or
 lazy, local or MCP-backed, direct-model or Codemode-accessible; every invocation
@@ -1260,22 +1261,18 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 
 ### 7.6 SDK, React, web, and embedding
 
-`@opengeni/sdk` is the framework-neutral client contract. `@opengeni/react`
-adds hooks and UI. `apps/web` is a consumer of those packages and should not
-become a hidden source of domain semantics.
+`@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
+`apps/web` consumes them, never owns hidden domain semantics.
 
-`SessionConversation` is the default complete existing-session embed. It owns
-one event feed, queue projection/actions, durable composer and model policy,
-human-input forms, and timeline history. `ChatComposer` remains the lower-level
-input surface, not an implicit queue or whole conversation. Sites use the same
-component with their standard Site-bound SDK client.
+`SessionConversation` is the complete embed: event feed, queue/actions, durable
+composer, model policy, human-input forms, and history. `ChatComposer` is input
+only. Sites use the same component with their Site-bound client.
 
-Site authoring installs exact npm package versions from the runtime-generated
-`package-versions.json` beside the skill. Stable defaults come from source
-package manifests; canary deployments set `OPENGENI_SITE_PACKAGE_VERSIONS` to
-their published SDK/React/Codemode version map. Only local development enables
-`OPENGENI_LOCAL_SITE_PACKAGES` and packages dirty checkout source into archives
-at `/opt/opengeni/site-packages`; deployed images do not bake those archives.
+Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
+`package-versions.json`: source-manifest defaults or canary
+`OPENGENI_SITE_PACKAGE_VERSIONS`. No worker-directory writes. Only local
+`OPENGENI_LOCAL_SITE_PACKAGES` builds unreleased archives at
+`/opt/opengeni/site-packages`; deployed images do not.
 
 Timeline history ownership stays in `packages/react`: `use-session-events.ts`
 fences history navigation by session/client lifetime, independently of SSE
@@ -1289,13 +1286,10 @@ the residual correction after browser anchoring. Corrections cannot resume
 tip-follow, and continued upward input permits bounded sequential older-page
 loads even when collapsed content adds no scroll range.
 
-The stock web console imports the browser-focused `@opengeni/sdk/browser`
-entry. Operator-only Document-authority and tenancy-backfill methods live in
-the optional `@opengeni/sdk/document-authority` entry, while the root and
-`core` clients retain their compatibility surface. New SDK methods that the web
-does not call belong in a focused optional entry so they add nothing to the
-direct-session browser graph; bundle-boundary and browser-surface tests pin that
-separation.
+Web imports `@opengeni/sdk/browser`. Operator Document-authority and tenancy
+backfills use `@opengeni/sdk/document-authority`; root/`core` retain compatibility.
+Keep non-web methods in optional entries, outside the direct-session bundle;
+bundle-boundary and browser-surface tests enforce this.
 
 Most product integrations use the standalone service through a server-side SDK
 proxy and optional React surfaces. Advanced in-process embedding may bind host
@@ -1499,7 +1493,7 @@ services and credentials explicitly.
 Release publication is an evidence-bound process spanning npm packages,
 container images, the Helm chart, the Rust agent, and retained source identity.
 Package manifests, Changesets configuration, CI workflows, and release scripts
-own the exact closure and procedure. Do not copy those inventories here.
+own the exact closure and procedure. Web image assets compile natively for both CPU targets.
 
 Canonical commands and contribution rules are in
 [`../AGENTS.md`](../AGENTS.md) and [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
@@ -1637,3 +1631,5 @@ not an append-only ledger of everything the repository has ever learned.
 Agent goal lifecycle exposes `goal_resume` alongside `goal_pause`: any pause reason or actor is resumable; active goals return unchanged. See `docs/goals.md`.
 
 Filtered session page ownership and its maintenance boundary: [session pagination](session-pagination.md).
+
+Workspace timers: [implementation and rollout](workspace-pause-timers.md).

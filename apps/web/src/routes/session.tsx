@@ -1559,7 +1559,18 @@ function SessionChatPane(props: {
       );
       repositories.commitSent(input.resources ?? []);
     },
-    onSent: (_text, input) => personalAttachment.onAccepted(input),
+    // Steer and recovered sends do not pass through onSubmitted. Keep the
+    // host-owned upload/repository queue in sync once those inputs are
+    // accepted too; the immutable input snapshot preserves later additions.
+    onSent: (_text, input) => {
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      );
+      repositories.commitSent(input.resources ?? []);
+      personalAttachment.onAccepted(input);
+    },
     onDeliveryError: personalAttachment.onDeliveryError,
   });
   useBrowserAccountBridgeBlocker(`session-composer:${props.session.id}`, () => {
@@ -2043,6 +2054,7 @@ function SessionChatPane(props: {
       <div className="mb-2 w-full shrink-0 px-4 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <SessionChrome
+            sessionStatus={props.session.status}
             compact
             onOpenSession={props.onOpenSession}
             queue={props.queue}

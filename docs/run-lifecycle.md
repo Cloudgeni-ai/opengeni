@@ -432,6 +432,12 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
+A permanent admission failure with no claimed turn records the supplied failure
+message and, when available, its classified admission cause on the durable
+`session.status.changed` event. The absence of a `turn.failed` event must not
+discard those diagnostics. Older events remain unchanged; missing historical
+details cannot be reconstructed from the failure code alone.
+
 SuperGrok/xAI connected-subscription work separately freezes an identifier-free
 `workspace | user` provider-account authority snapshot. Workspace is the
 default shared pool. User scope is explicit/private and remains bound to the
@@ -1471,6 +1477,23 @@ Waits also recheck durable state once a second if a hint is missed. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+Migration 0419 records the exact launch turn, attempt, and execution generation
+when either provider adopts a background command under the existing attempt
+fence. Terminal results resolve that immutable receipt, copy only eligible
+same-session successor delegations, and retain the causal human for normal
+personal-resource admission. Legacy managed commands can prove the same tuple
+through their retained process; legacy Connected Machine commands with no receipt
+remain unattributed. A timeout similarly inherits its exact waiting turn.
+Different causal turns claim separately. No path substitutes the newest human,
+extends a once grant, or bypasses live revocation.
+
+The existing exact-set pre-claim recovery can restore unconsumed root command
+results and wait timeouts only after verifying their retained launch or timeout
+receipt, completed causal human turn, failure frontier, and unchanged failed
+update set. It repairs typed authority, preserves message/event content, and is
+idempotent; it does not replay a previously accepted turn or recover a nested
+session with parent-facing terminal truth.
 
 Both command readers accept `commandId`, an optional opaque `cursor`,
 `waitSeconds` (0–50; defaults 0 for read and 45 for wait), and `maxOutputBytes`

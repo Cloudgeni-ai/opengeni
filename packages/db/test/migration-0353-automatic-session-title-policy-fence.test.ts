@@ -987,7 +987,7 @@ describe("migrations 0353-0355 automatic session title policy fence", () => {
     // today's schema. A database frozen immediately after 0353 predates the
     // 0361 Memory materialization table/function and the 0380 company-profile
     // autonomy policy tables/functions, the 0400 model-context snapshot table,
-    // the 0401 setup-delivery transport routines, and the 0419 Codex inventory.
+    // the 0401 setup-delivery transport routines, and the 0421 Codex inventory.
     // Preserve those exact expected boundary gaps while continuing to
     // reject every other posture violation in this
     // rolling-compatibility test.

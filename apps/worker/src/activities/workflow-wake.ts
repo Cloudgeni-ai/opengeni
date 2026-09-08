@@ -1,3 +1,11 @@
+import {
+  fireWorkspacePauseTimerInTransaction,
+  listDueWorkspacePauseTimers,
+  withWorkspaceRls,
+  getWorkspaceControlEvent,
+  type Database,
+} from "@opengeni/db";
+import { publishDurableWorkspaceControlEvent } from "@opengeni/events";
 import type { ControlActivityServices } from "./types";
 import {
   reconcileAutomaticSessionTitleFanout,
@@ -24,6 +32,34 @@ export function createWorkflowWakeActivities(services: () => Promise<ControlActi
   return {
     async dispatchSessionWorkflowWakes(): Promise<DispatchSessionWorkflowWakesResult> {
       const service = await services();
+      // Timer commits produce ordinary durable wakes; drain those below in the same sweep.
+      const timers = await listDueWorkspacePauseTimers(service.db, 100);
+      for (const timer of timers) {
+        try {
+          const result = await withWorkspaceRls(service.db, timer.workspace_id, (scoped) =>
+            scoped.transaction((tx) =>
+              fireWorkspacePauseTimerInTransaction(tx as unknown as Database, {
+                workspaceId: timer.workspace_id,
+                timerId: timer.timer_id,
+              }),
+            ),
+          );
+          if (result?.workspaceControlEventId) {
+            const event = await getWorkspaceControlEvent(
+              service.db,
+              timer.workspace_id,
+              result.workspaceControlEventId,
+            );
+            if (event)
+              await publishDurableWorkspaceControlEvent(service.bus, timer.workspace_id, event);
+          }
+        } catch (error) {
+          service.observability.warn("Workspace pause timer will retry", {
+            workspaceId: timer.workspace_id,
+            error: String(error),
+          });
+        }
+      }
       let claimed = 0;
       let delivered = 0;
       let failed = 0;

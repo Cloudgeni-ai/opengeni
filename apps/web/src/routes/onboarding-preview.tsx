@@ -202,7 +202,7 @@ function AdditionalOrganizationPreview() {
               type="button"
               className="flex min-w-0 items-center gap-2 rounded-md border border-border bg-surface-2/50 px-2 py-1.5 text-left"
             >
-              <span className="flex size-7 items-center justify-center rounded-md bg-brand-strong/25 text-xs font-semibold text-brand">
+              <span className="flex size-7 items-center justify-center rounded-md bg-brand-strong/25 text-xs font-semibold text-[var(--og-color-accent-strong)]">
                 A
               </span>
               <span className="min-w-0 flex-1 truncate text-sm font-medium">Analytics</span>

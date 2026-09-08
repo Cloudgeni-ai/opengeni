@@ -33,11 +33,11 @@ This preserves workspace session isolation while making provider quota,
 refresh, health, cooldown, and cumulative fairness truthful for the one shared
 organization credential row.
 
-Migration `0419_personal_workspace_organization_codex_inheritance.sql` activates
+Migration `0421_personal_workspace_organization_codex_inheritance.sql` activates
 Personal inheritance during a maintenance cutover. Stop every old API, control
 worker, and turn worker, supply the complete application database role list,
 apply the migration, provision roles, and start only the matching release.
-Never restart a pre-0419 binary: its organization mutation and wake paths omit
+Never restart a pre-0421 binary: its organization mutation and wake paths omit
 Personal workspaces. The Codex-only `list_organization_codex_workspace_ids`
 inventory includes all same-organization workspaces for source locks, active-turn
 checks, and capacity wakeups. The general organization API-key inventory still

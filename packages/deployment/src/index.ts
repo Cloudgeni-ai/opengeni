@@ -1820,7 +1820,7 @@ export const MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER = "0404_mcp_oauth_au
 export const CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER =
   "0403_codex_unconditional_credential_leasing";
 export const PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER =
-  "0419_personal_workspace_organization_codex_inheritance";
+  "0421_personal_workspace_organization_codex_inheritance";
 
 const MAINTENANCE_CUTOVERS = {
   [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0389" },
@@ -1832,7 +1832,7 @@ const MAINTENANCE_CUTOVERS = {
   [MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER]: {
     migrationSummary: "migrations 0404 and 0405",
   },
-  [PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0419" },
+  [PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0421" },
 } as const;
 
 type MaintenanceCutover = keyof typeof MAINTENANCE_CUTOVERS;
