@@ -2172,12 +2172,24 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       expected,
     );
     expect(third.nextCursor).toBeNull();
+    expect(
+      [...first.sessions, ...second.sessions, ...third.sessions].map((row) => row.archivedAt),
+    ).toEqual([
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123455Z",
+    ]);
     const unpaged = await listSessionsForSubject(db, workspace.workspaceId, {
       ...options,
       limit: 3,
       materializeSnapshot: false,
     });
     expect(unpaged.sessions.map((row) => row.id)).toEqual(expected);
+    expect(unpaged.sessions.map((row) => row.archivedAt)).toEqual([
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123456Z",
+      "2026-01-01T00:00:00.123455Z",
+    ]);
     // A narrowed continuation grant must filter out the tied middle row before
     // applying the page limit, without leaking it or returning a short page.
     const narrowed = await listSessionsForSubject(db, workspace.workspaceId, {

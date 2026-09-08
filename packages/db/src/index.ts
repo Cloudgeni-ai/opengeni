@@ -33786,6 +33786,7 @@ export async function listSessionsForSubject(
                 and archive_order.session_id = ${schema.sessions.rootSessionId}
                 and archive_order.archived = true)`
           : schema.sessions.updatedAt;
+        const exactOrdinarySortAt = sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
@@ -33819,6 +33820,9 @@ export async function listSessionsForSubject(
             }>
           | undefined;
         let nextCursor: string | null = null;
+        // Keep archive ordering precision in the public root projection as well
+        // as the cursor. Drizzle's Date hydration otherwise loses microseconds.
+        const exactArchiveTimestamps = new Map<string, string>();
         if (options.pinsOnly) {
           // The rail polls the complete personal pin section independently from
           // its root page. Do not turn that cheap projection into an O(N)
@@ -33916,7 +33920,12 @@ export async function listSessionsForSubject(
           }
         } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
-            .select({ id: schema.sessions.id, session: schema.sessions, pin: schema.sessionPins })
+            .select({
+              id: schema.sessions.id,
+              session: schema.sessions,
+              pin: schema.sessionPins,
+              sortAt: exactOrdinarySortAt,
+            })
             .from(schema.sessions)
             .leftJoin(
               schema.sessionPins,
@@ -33931,6 +33940,9 @@ export async function listSessionsForSubject(
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
           selectedOrdinaryRows = ordinaryIdRows;
+          if (options.archivedOnly) {
+            for (const row of ordinaryIdRows) exactArchiveTimestamps.set(row.id, row.sortAt);
+          }
         } else {
           const cursor = options.cursor?.kind === "keyset" ? options.cursor : undefined;
           if (
@@ -33959,7 +33971,7 @@ export async function listSessionsForSubject(
               id: schema.sessions.id,
               session: schema.sessions,
               pin: schema.sessionPins,
-              sortAt: sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+              sortAt: exactOrdinarySortAt,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -33984,6 +33996,9 @@ export async function listSessionsForSubject(
           const page = ordinaryIdRows.slice(0, limit);
           pageIds = page.map((row) => row.id);
           selectedOrdinaryRows = page;
+          if (options.archivedOnly) {
+            for (const row of page) exactArchiveTimestamps.set(row.id, row.sortAt);
+          }
           const last = page.at(-1);
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
@@ -34097,7 +34112,12 @@ export async function listSessionsForSubject(
                   mcpServers.get(session.id) ?? [],
                   mapSessionPin(row.pin),
                   mapSessionAttention(session, row.pin),
-                  mapSessionArchive(row.pin),
+                  {
+                    ...mapSessionArchive(row.pin),
+                    ...(row.pin?.archived && exactArchiveTimestamps.has(session.id)
+                      ? { archivedAt: exactArchiveTimestamps.get(session.id)! }
+                      : {}),
+                  },
                   { subjectId: options.subjectId, activated: tenancyActivated },
                 ),
                 treeStats: treeStats.get(session.id) ?? EMPTY_SESSION_TREE_STATS,
