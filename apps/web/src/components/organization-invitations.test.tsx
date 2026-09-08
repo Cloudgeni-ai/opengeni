@@ -72,7 +72,7 @@ function invitation(input: {
     targetName: "Member",
     initialWorkspaceIds: [crypto.randomUUID()],
     role: "member" as const,
-    expiresAt: timestamp,
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     acceptedMembershipId: input.status === "accepted" ? crypto.randomUUID() : null,
     createdAt: timestamp,
     updatedAt: timestamp,
