@@ -4389,8 +4389,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4447,7 +4447,9 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
