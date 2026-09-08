@@ -43,6 +43,10 @@ CREATE POLICY feedback_author ON feedback_submissions
     AND (session_id IS NULL OR EXISTS (SELECT 1 FROM sessions s WHERE s.workspace_id = feedback_submissions.workspace_id AND s.id = feedback_submissions.session_id))
     AND (turn_id IS NULL OR EXISTS (SELECT 1 FROM session_turns t WHERE t.workspace_id = feedback_submissions.workspace_id AND t.session_id = feedback_submissions.session_id AND t.id = feedback_submissions.turn_id))
   );
+CREATE POLICY session_visibility_isolation ON feedback_submissions AS RESTRICTIVE
+  FOR ALL
+  USING (session_id IS NULL OR session_reference_visible(account_id, workspace_id, session_id))
+  WITH CHECK (session_id IS NULL OR session_reference_visible(account_id, workspace_id, session_id));
 REVOKE ALL ON feedback_submissions FROM PUBLIC;
 RESET statement_timeout;
 RESET lock_timeout;
