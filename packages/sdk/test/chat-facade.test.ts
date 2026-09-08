@@ -490,8 +490,8 @@ describe("Chat.steer, history, sessions.list, chatBySessionId", () => {
       [...history.map((message) => message.sequence)].sort((a, b) => a - b),
     );
     const page = server.requestsTo("GET", "/events").at(-1)!;
-    expect(new URL(page.url).searchParams.get("includeTypes")).toBe(
-      "user.message,agent.message.completed",
+    expect(new URL(page.url).searchParams.get("includeTypes")?.split(",")).toEqual(
+      expect.arrayContaining(["user.message", "agent.message.completed", "user.approvalDecision"]),
     );
   });
 

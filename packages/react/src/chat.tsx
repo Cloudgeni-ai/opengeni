@@ -13,6 +13,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { HumanInputForm, type HumanInputFormProps } from "./components/human-input-form";
 import { Markdown } from "./components/markdown";
 
 /**
@@ -42,8 +43,6 @@ export type OpenGeniChatProps = {
   className?: string | undefined;
   renderMessage?: ((message: OpenGeniChatMessage) => ReactNode) | undefined;
 };
-
-type Question = { id: string; prompt: string; options?: Array<{ id: string; label: string }> };
 
 const styles = {
   root: {
@@ -147,8 +146,9 @@ export function OpenGeniChat({
   renderMessage,
 }: OpenGeniChatProps) {
   const [messages, setMessages] = useState<OpenGeniChatMessage[]>([]);
-  const [pending, setPending] = useState<ChatPending | null>(null);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [pendingRequests, setPendingRequests] = useState<ChatPending[]>([]);
+  const pending = pendingRequests[0] ?? null;
+  const [restoring, setRestoring] = useState(true);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -157,11 +157,15 @@ export function OpenGeniChat({
   headersRef.current = headers;
 
   // Restore the conversation on mount and whenever it changes. The composer
-  // stays usable meanwhile; a host without a GET route is ignored silently.
+  // waits for restoration so a late snapshot cannot resurrect a decided card.
   useEffect(() => {
     const controller = new AbortController();
+    abortRef.current?.abort();
+    setBusy(false);
+    setRestoring(true);
+    setError(null);
     setMessages([]);
-    setPending(null);
+    setPendingRequests([]);
     void (async () => {
       try {
         const response = await fetch(handlerUrl, {
@@ -170,14 +174,20 @@ export function OpenGeniChat({
           signal: controller.signal,
         });
         if (!response.ok) return;
-        const restored = restoredMessages(await response.json());
-        if (controller.signal.aborted || restored.length === 0) return;
-        setMessages((prev) => [...restored, ...prev]);
+        const payload = (await response.json()) as { pending?: ChatPending[] };
+        if (controller.signal.aborted) return;
+        setMessages(restoredMessages(payload));
+        setPendingRequests(Array.isArray(payload.pending) ? payload.pending : []);
       } catch {
-        // History is a convenience; sending still works without it.
+        // Hosts without history may still accept sends.
+      } finally {
+        if (!controller.signal.aborted) setRestoring(false);
       }
     })();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      abortRef.current?.abort();
+    };
   }, [handlerUrl, conversation]);
 
   const update = useCallback(
@@ -193,7 +203,6 @@ export function OpenGeniChat({
       abortRef.current = controller;
       setBusy(true);
       setError(null);
-      setPending(null);
       try {
         const response = await fetch(url, {
           method: "POST",
@@ -205,22 +214,29 @@ export function OpenGeniChat({
           throw new Error(`Chat request failed (${response.status}).`);
         }
         for await (const chunk of parseChatChunkStream(response.body)) {
+          if (controller.signal.aborted) return;
           if (chunk.type === "text") {
             update(assistantId, (m) => ({ ...m, text: m.text + chunk.text }));
           } else if (chunk.type === "tool" && chunk.status === "started") {
             update(assistantId, (m) => ({ ...m, tools: [...m.tools, chunk.name] }));
           } else if (chunk.type === "pending") {
-            setPending(chunk.pending);
-            setAnswers({});
+            setPendingRequests([chunk.pending]);
+          } else if (chunk.type === "done") {
+            setPendingRequests(chunk.reply.pending ? [chunk.reply.pending] : []);
           }
         }
       } catch (caught) {
-        if (!(caught instanceof Error && caught.name === "AbortError")) {
+        if (
+          !controller.signal.aborted &&
+          !(caught instanceof Error && caught.name === "AbortError")
+        ) {
           setError(caught instanceof Error ? caught.message : "Chat request failed.");
         }
       } finally {
-        update(assistantId, (m) => ({ ...m, streaming: false }));
-        setBusy(false);
+        if (!controller.signal.aborted) {
+          update(assistantId, (m) => ({ ...m, streaming: false }));
+          setBusy(false);
+        }
       }
     },
     [conversation, headers, update],
@@ -229,7 +245,7 @@ export function OpenGeniChat({
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const text = draft.trim();
-    if (!text || busy) return;
+    if (!text || busy || restoring) return;
     setDraft("");
     const assistantId = uid();
     setMessages((prev) => [
@@ -241,7 +257,7 @@ export function OpenGeniChat({
   };
 
   const respond = (input: Record<string, unknown>) => {
-    if (!pending || busy) return;
+    if (!pending || busy || restoring) return;
     const last = [...messages].reverse().find((m) => m.role === "assistant");
     const assistantId = last?.id ?? uid();
     if (last) update(assistantId, (m) => ({ ...m, streaming: true }));
@@ -256,9 +272,6 @@ export function OpenGeniChat({
       assistantId,
     );
   };
-
-  const payload = (pending?.payload ?? {}) as { questions?: Question[]; allowSkip?: boolean };
-  const questions = Array.isArray(payload.questions) ? payload.questions : [];
 
   return (
     <div className={`og-root og-chat${className ? ` ${className}` : ""}`} style={styles.root}>
@@ -307,65 +320,16 @@ export function OpenGeniChat({
               </div>
             </>
           ) : (
-            <>
-              {questions.map((question) => (
-                <label
-                  key={question.id}
-                  style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}
-                >
-                  <span>{question.prompt}</span>
-                  {question.options?.length ? (
-                    <select
-                      style={styles.input}
-                      value={answers[question.id] ?? ""}
-                      onChange={(e) => setAnswers((a) => ({ ...a, [question.id]: e.target.value }))}
-                    >
-                      <option value="">Choose</option>
-                      {question.options.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      style={styles.input}
-                      value={answers[question.id] ?? ""}
-                      onChange={(e) => setAnswers((a) => ({ ...a, [question.id]: e.target.value }))}
-                      onInput={(e) => {
-                        const value = e.currentTarget.value;
-                        setAnswers((a) => ({ ...a, [question.id]: value }));
-                      }}
-                    />
-                  )}
-                </label>
-              ))}
-              <div style={styles.row}>
-                <button
-                  type="button"
-                  style={styles.button}
-                  onClick={() =>
-                    respond({
-                      answers: questions.map((q) => ({
-                        questionId: q.id,
-                        values: answers[q.id] ? [answers[q.id] as string] : [],
-                      })),
-                    })
-                  }
-                >
-                  Send answer
-                </button>
-                {payload.allowSkip ? (
-                  <button
-                    type="button"
-                    style={styles.secondary}
-                    onClick={() => respond({ skip: true })}
-                  >
-                    Skip
-                  </button>
-                ) : null}
-              </div>
-            </>
+            <HumanInputForm
+              request={pending.payload as HumanInputFormProps["request"]}
+              submitting={busy || restoring}
+              error={error}
+              onSubmit={(response) =>
+                respond(
+                  response.outcome === "answered" ? { answers: response.answers } : { skip: true },
+                )
+              }
+            />
           )}
         </div>
       ) : null}
@@ -389,7 +353,7 @@ export function OpenGeniChat({
             }
           }}
         />
-        <button type="submit" style={styles.button} disabled={busy || !draft.trim()}>
+        <button type="submit" style={styles.button} disabled={busy || restoring || !draft.trim()}>
           Send
         </button>
       </form>

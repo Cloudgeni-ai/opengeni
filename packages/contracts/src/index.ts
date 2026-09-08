@@ -5391,7 +5391,7 @@ export const KnowledgeMemory = z.object({
   scope: z.string(),
   /** Typed selector (migration 0152/0425): workspace, user, session, role, ephemeral, legacy. */
   scopeType: z.string().optional(),
-  /** `end_user:<source>:<id>` for a session end-user layer; null otherwise. */
+  /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
   scopeSubjectId: z.string().nullable().optional(),
   /** Lineage root for a session layer; null otherwise. */
   scopeSessionId: z.string().uuid().nullable().optional(),

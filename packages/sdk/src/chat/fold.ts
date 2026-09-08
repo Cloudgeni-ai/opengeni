@@ -19,6 +19,51 @@ export type ChatFoldStep = {
   terminal: ChatTurnTerminal | null;
 };
 
+/** Incremental replay of unresolved requests, without retaining the event log. */
+export class ChatPendingFold {
+  private readonly requests = new Map<string, { pending: ChatPending; turnId: string | null }>();
+
+  push(event: SessionEvent): void {
+    const payload = asRecord(event.payload);
+    if (event.type === "session.requiresAction") {
+      for (const [key, request] of this.requests) {
+        if (request.pending.kind === "approval") this.requests.delete(key);
+      }
+      for (const approval of Array.isArray(payload.approvals) ? payload.approvals : []) {
+        const pending = approvalPending({ approvals: [approval] });
+        if (pending) this.put(pending, event.turnId ?? null);
+      }
+    } else if (event.type === "session.humanInput.requested") {
+      const pending = humanInputPending(payload);
+      if (pending) this.put(pending, event.turnId ?? null);
+    } else if (event.type === "user.approvalDecision") {
+      this.requests.delete(`approval:${payload.approvalId}`);
+    } else if (event.type === "user.humanInputResponse") {
+      this.requests.delete(`human_input:${payload.requestId}`);
+    } else if (["turn.completed", "turn.failed", "turn.cancelled"].includes(event.type)) {
+      for (const [key, request] of this.requests) {
+        if (request.turnId === null || event.turnId == null || request.turnId === event.turnId) {
+          this.requests.delete(key);
+        }
+      }
+    }
+  }
+
+  pending(now = Date.now()): ChatPending[] {
+    return [...this.requests.values()]
+      .map((request) => request.pending)
+      .filter((pending) => {
+        if (pending.kind !== "human_input") return true;
+        const expiresAt = asRecord(pending.payload).expiresAt;
+        return expiresAt == null || (typeof expiresAt === "string" && Date.parse(expiresAt) > now);
+      });
+  }
+
+  private put(pending: ChatPending, turnId: string | null): void {
+    this.requests.set(`${pending.kind}:${pending.requestId}`, { pending, turnId });
+  }
+}
+
 type Segment = { text: string; open: boolean };
 
 export class ChatTurnFold {

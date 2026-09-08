@@ -56,7 +56,7 @@ exists. Humans and the organization API key are unaffected: these sessions stay
 `workspace_shared`.
 
 `endUser` is a label, never a principal: it scopes memory
-(`end_user:<source>:<id>`) and filters lists, and it grants nothing. Its shape
+(`end_user:v1:<sha256 of JSON [source,id]>`) and filters lists, and it grants nothing. Its shape
 matches the external-identity pair used by white-label embedding so the two can
 later be joined by value.
 

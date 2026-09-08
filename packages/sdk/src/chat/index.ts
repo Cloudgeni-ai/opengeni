@@ -17,6 +17,7 @@ export {
   type ChatRespondInput,
   type ChatSendOptions,
   type ChatSessionListOptions,
+  type ChatSnapshot,
   type ChatTarget,
   type ChatToolStatus,
   type OpenGeniOptions,

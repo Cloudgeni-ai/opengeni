@@ -1,7 +1,7 @@
 import { OpenGeniClient } from "../client";
 import { OpenGeniApiError } from "../errors";
 import type { CreateSessionRequest, Session, SessionEvent } from "../types";
-import { ChatTurnFold, asRecord, stringValue } from "./fold";
+import { ChatPendingFold, ChatTurnFold, asRecord, stringValue } from "./fold";
 import { chatIdempotencyKey, chatSessionId } from "./ids";
 import {
   OpenGeniChatError,
@@ -13,6 +13,7 @@ import {
   type ChatRespondInput,
   type ChatSendOptions,
   type ChatSessionListOptions,
+  type ChatSnapshot,
   type ChatTarget,
   type OpenGeniOptions,
 } from "./types";
@@ -277,16 +278,39 @@ export class Chat {
 
   /** User and assistant text in order, from the durable event log. */
   async history(): Promise<ChatMessage[]> {
-    if (!this.session) return [];
+    return (await this.snapshot()).messages;
+  }
+
+  /** Restore history and pending decisions from the complete ordered timeline. */
+  async snapshot(): Promise<ChatSnapshot> {
+    if (!this.session) return { messages: [], pending: [], status: null };
+    const pending = new ChatPendingFold();
+    let status = this.session.status;
     const messages: ChatMessage[] = [];
     let lastAssistantTurn: string | null = null;
     let after = 0;
-    for (let page = 0; page < 100; page += 1) {
+    while (true) {
       const result = await this.og.client.listEventPage(this.workspaceId, this.sessionId, {
         after,
-        includeTypes: ["user.message", "agent.message.completed"],
+        includeTypes: [
+          "user.message",
+          "agent.message.completed",
+          "session.requiresAction",
+          "session.humanInput.requested",
+          "user.approvalDecision",
+          "user.humanInputResponse",
+          "turn.completed",
+          "turn.failed",
+          "turn.cancelled",
+          "session.status.changed",
+        ],
       });
       for (const event of result.events) {
+        pending.push(event);
+        if (event.type === "session.status.changed") {
+          const next = asRecord(event.payload).status;
+          if (typeof next === "string") status = next as Session["status"];
+        }
         const text = stringValue(asRecord(event.payload).text);
         if (!text) continue;
         if (event.type === "user.message") {
@@ -311,9 +335,15 @@ export class Chat {
         lastAssistantTurn = turnId;
       }
       if (!result.hasMore || result.nextAfter === null || result.events.length === 0) break;
+      if (result.nextAfter <= after) {
+        throw new OpenGeniChatError(
+          "history_cursor_stalled",
+          "History pagination did not advance.",
+        );
+      }
       after = result.nextAfter;
     }
-    return messages;
+    return { messages, pending: pending.pending(), status };
   }
 
   private async submit(
@@ -390,6 +420,24 @@ export class Chat {
       })) {
         const step = fold.push(event);
         for (const chunk of step.chunks) yield chunk;
+        // Resuming one member of a parallel interruption group re-emits the
+        // waiting status, but existing human-input requests are not recreated.
+        // Recover the remaining decision instead of waiting forever for new text.
+        if (
+          !step.terminal &&
+          event.type === "session.status.changed" &&
+          asRecord(event.payload).status === "requires_action" &&
+          (event.turnId == null || fold.turnId === null || event.turnId === fold.turnId)
+        ) {
+          const pending = (await this.snapshot()).pending[0];
+          if (pending) {
+            fold.pending = pending;
+            this.pendingTurnId = fold.turnId;
+            yield { type: "pending", pending };
+            yield { type: "done", reply: fold.reply("pending") };
+            return;
+          }
+        }
         if (!step.terminal) continue;
         if (step.terminal === "failed") throw fold.failureError();
         this.pendingTurnId = step.terminal === "pending" ? fold.turnId : null;

@@ -80,7 +80,7 @@ chat by guessing its id. Without a `user`, the host must name the
 `conversation` from `resolve`. The browser side is
 `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
 `@opengeni/react/chat`, which talks only to your handler and restores the
-history on reload (`GET` on the same endpoint). If the product already uses the
+history and unresolved approvals/questions on reload (`GET` on the same endpoint). If the product already uses the
 Vercel AI SDK, pass `format: "vercel"` and keep `useChat` unchanged; for an
 OpenAI-shaped client pass `format: "openai-chat"` or
 `format: "openai-responses"`. These adapters send only the latest user message

@@ -4174,7 +4174,7 @@ export const sessions = pgTable(
     endUserSource: text("end_user_source"),
     endUserId: text("end_user_id"),
     // Typed Workspace Memory selector this session's agent reads and writes:
-    // 'workspace' | 'user' (end_user:<source>:<id>) | 'session' (root tree) |
+    // 'workspace' | 'user' (end_user:v1:<tuple hash>) | 'session' (root tree) |
     // 'off' (no Memory tools). Frozen at create like the columns above.
     memoryScope: text("memory_scope").notNull().default("workspace"),
     // Independent-copy provenance. A destination may use either visibility and

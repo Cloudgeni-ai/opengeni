@@ -51,6 +51,50 @@ function setTextarea(textarea: HTMLTextAreaElement, value: string): void {
 }
 
 describe("OpenGeniChat", () => {
+  test("restores an approval after reload even without text, and retains it after a failed response", async () => {
+    const pending = {
+      kind: "approval",
+      requestId: "restored-approval",
+      name: "delete_file",
+      payload: {},
+    };
+    let succeed = false;
+    const requests = stubFetch(
+      () =>
+        succeed
+          ? nativeSse([{ type: "done", reply: { pending: null, status: "completed" } }])
+          : new Response("temporary error", { status: 503 }),
+      () =>
+        new Response(
+          JSON.stringify({ messages: [], pending: [pending], status: "requires_action" }),
+        ),
+    );
+    const r = await renderComponent(
+      <OpenGeniChat handlerUrl="/api/chat" conversation="restored" />,
+    );
+    try {
+      await flush(10);
+      expect(r.container.querySelector(".og-chat-pending")?.textContent).toContain("delete_file");
+      await actRun(() =>
+        r.container.querySelector<HTMLButtonElement>(".og-chat-pending button")!.click(),
+      );
+      await flush(10);
+      expect(posts(requests)[0]?.body).toEqual({
+        requestId: "restored-approval",
+        decision: "approve",
+      });
+      expect(r.container.querySelector(".og-chat-pending")).not.toBeNull();
+      succeed = true;
+      await actRun(() =>
+        r.container.querySelector<HTMLButtonElement>(".og-chat-pending button")!.click(),
+      );
+      await flush(10);
+      expect(r.container.querySelector(".og-chat-pending")).toBeNull();
+    } finally {
+      await r.unmount();
+    }
+  });
+
   test("posts the message to the handler and renders the streamed reply", async () => {
     const requests = stubFetch(() =>
       nativeSse([
@@ -102,7 +146,19 @@ describe("OpenGeniChat", () => {
               type: "pending",
               pending: { kind: "approval", requestId: "call_9", name: "delete_file", payload: {} },
             },
-            { type: "done", reply: { text: "May I?", status: "pending" } },
+            {
+              type: "done",
+              reply: {
+                text: "May I?",
+                status: "pending",
+                pending: {
+                  kind: "approval",
+                  requestId: "call_9",
+                  name: "delete_file",
+                  payload: {},
+                },
+              },
+            },
           ])
         : nativeSse([
             { type: "text", text: " Done." },

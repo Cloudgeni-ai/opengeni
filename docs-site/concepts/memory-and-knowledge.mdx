@@ -12,6 +12,8 @@ Specific facts, decisions, incidents, fixes, and confirmed outcomes. When Memory
 
 Memory is retrieval context, never conversation history: the model sees relevant memories, not a transcript of how they were created.
 
+Integrations can choose a per-session `memoryScope`: `workspace`, `user`, `session`, or `off`. User and session scopes can read shared workspace facts, but their saves, corrections, and deletions stay within their own memory layer. Reading a shared fact does not allow a private chat to change it for everyone.
+
 ## Documents and Knowledge
 
 Upload documents or sync them from connected sources such as Google Drive. OpenGeni indexes them for hybrid vector and keyword search, and agents retrieve permission-filtered passages with citations. A separate curated Knowledge lane holds human-reviewed claims for facts that should not change without review.

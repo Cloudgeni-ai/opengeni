@@ -476,6 +476,7 @@ import {
   WORKSPACE_MEMORY_BLOCK_EMPTY,
   endUserMemorySubjectId,
   memoryReadScopesForAgentScope,
+  memoryWriteScopeForAgentScope,
   normalizeMemoryScope,
   type MemoryAgentScope,
   type MemoryBlockRecord,
@@ -14981,7 +14982,7 @@ export type CorrectWorkspaceMemoryInput = {
   replacementText?: string | undefined;
   sessionId?: string | null | undefined;
   origin?: WorkspaceMemoryOrigin | undefined;
-  /** Agent-only read context; the corrected record must be visible in it. */
+  /** Agent read/write context; mutations must remain in its writable layer. */
   agentScope?: MemoryAgentScope | undefined;
 };
 
@@ -15052,7 +15053,7 @@ function requireAgentWritableMemoryScope(
  * Bind the typed selectors of one read/write to the transaction so the
  * FORCE-RLS `workspace_isolation` policy on knowledge_memories admits exactly
  * the workspace layer plus the named private layer. The subject GUC is the
- * opaque end-user memory subject (`end_user:<source>:<id>`), never a human;
+ * opaque end-user memory subject (`end_user:v1:<tuple hash>`), never a human;
  * the memory session GUC is the lineage root.
  */
 async function withMemoryScopeRlsContext<T>(
@@ -15143,6 +15144,17 @@ function agentWritableMemoryScopeOfRow(
     return { type: "session", sessionId: row.scopeSessionId };
   }
   return null;
+}
+
+/** Shared read access never grants a private agent shared write authority. */
+function assertMemoryWriteScope(
+  row: Parameters<typeof agentWritableMemoryScopeOfRow>[0],
+  scope: AgentWritableMemoryScope,
+): void {
+  const actual = agentWritableMemoryScopeOfRow(row);
+  if (!actual || JSON.stringify(normalizeMemoryScope(actual)) !== JSON.stringify(scope)) {
+    throw new Error("Memory mutations must stay in the session's writable scope.");
+  }
 }
 
 function memoryAgentReadScopes(agentScope: MemoryAgentScope | undefined): MemoryScopeSpec[] | null {
@@ -15368,6 +15380,7 @@ export async function saveWorkspaceMemory(
             `Autonomous Memory can replace only active agent-writable records; memory "${row.id}" has status "${row.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
           );
         }
+        assertMemoryWriteScope(row, writeScope);
         replacesRow = row;
       }
 
@@ -15663,6 +15676,7 @@ export async function correctWorkspaceMemory(
   if (readScopes && readScopes.length === 0) {
     throw new Error("Memory is disabled for this session.");
   }
+  const writeScope = input.agentScope ? memoryWriteScopeForAgentScope(input.agentScope) : null;
   if (replacementText !== undefined) {
     // Correction WITH a replacement is a full supersede through the one write gate.
     const [old] = await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
@@ -15692,6 +15706,7 @@ export async function correctWorkspaceMemory(
         `Autonomous Memory can correct only active agent-writable records; memory "${old.id}" has status "${old.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
       );
     }
+    if (writeScope) assertMemoryWriteScope(old, requireAgentWritableMemoryScope(writeScope));
     const result = await saveWorkspaceMemory(
       db,
       {
@@ -15703,10 +15718,8 @@ export async function correctWorkspaceMemory(
         replacesId: old.id,
         sessionId: input.sessionId ?? null,
         origin: input.origin,
-        // A correction chain never changes layer: the replacement lives where
-        // the corrected record lived, so a private correction cannot retire a
-        // shared fact for everyone else or leak a private fact upward.
-        scope: agentWritableMemoryScopeOfRow(old) ?? { type: "workspace" },
+        // Rechecked under the replacement target lock by the common save gate.
+        scope: writeScope ?? agentWritableMemoryScopeOfRow(old) ?? { type: "workspace" },
       },
       embedder,
     );
@@ -15750,6 +15763,7 @@ export async function correctWorkspaceMemory(
           `Autonomous Memory can archive only active agent-writable records; memory "${existing.id}" has status "${existing.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
         );
       }
+      if (writeScope) assertMemoryWriteScope(existing, requireAgentWritableMemoryScope(writeScope));
       const correctionReason = cleanDbString(input.reason);
       const [archived] = await scopedDb
         .update(schema.knowledgeMemories)
@@ -32600,7 +32614,7 @@ export async function getSessionAccessProjection(
 
 /**
  * The typed Memory selector an agent on this session reads and writes. The
- * end-user subject is the opaque `end_user:<source>:<id>` label and the
+ * end-user subject is the opaque `end_user:v1:<tuple hash>` label and the
  * session selector is the lineage root, so one tree shares one private layer.
  * Null when the session does not exist in the workspace.
  */

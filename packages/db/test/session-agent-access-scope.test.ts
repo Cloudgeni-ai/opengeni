@@ -7,6 +7,7 @@ import {
   createDb,
   createSession,
   endUserMemorySubjectId,
+  memoryWriteScopeForAgentScope,
   getSessionAccessProjection,
   listKnowledgeMemories,
   listSessionsForSubject,
@@ -112,6 +113,78 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session agent access scope (real PostgreSQL)", () => {
+  test("private agents cannot correct, archive, or replace shared memory", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const root = await session(f, "private memory test");
+    const base = { accountId: f.accountId, workspaceId: f.workspaceId, origin: "agent" as const };
+    const fact = await saveWorkspaceMemory(db, {
+      ...base,
+      text: "zebra shared customer reference",
+    });
+    const scopes: MemoryAgentScope[] = [
+      { mode: "user", endUserSubjectId: endUserMemorySubjectId(u1), rootSessionId: null },
+      { mode: "session", endUserSubjectId: null, rootSessionId: root.id },
+    ];
+    for (const agentScope of scopes) {
+      for (const replacement of [undefined, "zebra private account detail", fact.memory.text]) {
+        await expect(
+          correctWorkspaceMemory(db, {
+            ...base,
+            id: fact.memory.id,
+            ...(replacement !== undefined ? { replacementText: replacement } : {}),
+            agentScope,
+          }),
+        ).rejects.toThrow("writable scope");
+      }
+      for (const text of ["zebra private account detail", fact.memory.text]) {
+        await expect(
+          saveWorkspaceMemory(db, {
+            ...base,
+            replacesId: fact.memory.id,
+            text,
+            scope: memoryWriteScopeForAgentScope(agentScope)!,
+          }),
+        ).rejects.toThrow("writable scope");
+      }
+    }
+    const visible = await searchWorkspaceMemories(db, f.workspaceId, {
+      query: "zebra",
+      mode: "keyword",
+      agentScope: {
+        mode: "user",
+        endUserSubjectId: endUserMemorySubjectId(u2),
+        rootSessionId: null,
+      },
+    });
+    expect(visible.map((row) => row.memory.text)).toEqual([fact.memory.text]);
+    expect(visible[0]!.memory.status).toBe("active");
+  });
+
+  test("distinct user identity pairs cannot read each other's memory", async () => {
+    if (!available) return;
+    const f = await fixture();
+    const a = { source: "app:team", id: "alice" };
+    const b = { source: "app", id: "team:alice" };
+    await saveWorkspaceMemory(db, {
+      accountId: f.accountId,
+      workspaceId: f.workspaceId,
+      origin: "agent",
+      text: "zebra private detail for identity A",
+      scope: { type: "user", subjectId: endUserMemorySubjectId(a) },
+    });
+    const visible = await searchWorkspaceMemories(db, f.workspaceId, {
+      query: "zebra",
+      mode: "keyword",
+      agentScope: {
+        mode: "user",
+        endUserSubjectId: endUserMemorySubjectId(b),
+        rootSessionId: null,
+      },
+    });
+    expect(visible).toHaveLength(0);
+  });
+
   test("the create insert stores the frozen scope and the projections read it back", async () => {
     if (!available) return;
     const f = await fixture();
@@ -145,10 +218,10 @@ describe("session agent access scope (real PostgreSQL)", () => {
     expect(row).toMatchObject({ agentAccess: "session", endUser: u1, memoryScope: "user" });
     expect(await resolveSessionMemoryAgentScope(db, f.workspaceId, scoped.id)).toEqual({
       mode: "user",
-      endUserSubjectId: "end_user:app:u_1",
+      endUserSubjectId: endUserMemorySubjectId(u1),
       rootSessionId: scoped.id,
     });
-    expect(endUserMemorySubjectId(u1)).toBe("end_user:app:u_1");
+    expect(endUserMemorySubjectId(u1)).toMatch(/^end_user:v1:[a-f0-9]{64}$/);
   });
 
   test("the end-user filter and the viewer predicate select exactly the reachable rows", async () => {
@@ -262,7 +335,7 @@ describe("session agent access scope (real PostgreSQL)", () => {
     expect(privateU1.memory).toMatchObject({
       scope: "user",
       scopeType: "user",
-      scopeSubjectId: "end_user:app:u_1",
+      scopeSubjectId: endUserMemorySubjectId(u1),
       scopeSessionId: null,
     });
     expect(treeOnly.memory).toMatchObject({
@@ -277,7 +350,11 @@ describe("session agent access scope (real PostgreSQL)", () => {
     >`
       select scope, scope_type as "scopeType", scope_subject_id as subject
       from knowledge_memories where id = ${privateU1.memory.id}`;
-    expect(stored).toEqual({ scope: "user", scopeType: "user", subject: "end_user:app:u_1" });
+    expect(stored).toEqual({
+      scope: "user",
+      scopeType: "user",
+      subject: endUserMemorySubjectId(u1),
+    });
 
     const ids = async (agentScope: MemoryAgentScope | undefined) =>
       new Set(
@@ -348,7 +425,7 @@ describe("session agent access scope (real PostgreSQL)", () => {
     expect(corrected.action).toBe("superseded");
     expect(corrected.replacement).toMatchObject({
       scopeType: "user",
-      scopeSubjectId: "end_user:app:u_1",
+      scopeSubjectId: endUserMemorySubjectId(u1),
     });
     expect(await ids(u1Scope)).toEqual(
       new Set([sharedFact.memory.id, corrected.replacement!.id, sameTextU1.memory.id]),

@@ -286,7 +286,7 @@ export type MemoryAgentScopeMode = "workspace" | "user" | "session" | "off";
 
 /**
  * The agent-side Memory selector resolved from one session row. The end-user
- * subject id is the opaque `end_user:<source>:<id>` label (never a human
+ * subject id is the opaque hash of the exact `[source, id]` tuple (never a human
  * subject); the root session id is the session's lineage root so one tree
  * shares one private session layer.
  */
@@ -296,11 +296,14 @@ export type MemoryAgentScope = {
   rootSessionId: string | null;
 };
 
-export const END_USER_MEMORY_SUBJECT_PREFIX = "end_user:";
+export const END_USER_MEMORY_SUBJECT_PREFIX = "end_user:v1:";
 
 /** The typed `user` selector for an opaque session end-user label. */
 export function endUserMemorySubjectId(endUser: { source: string; id: string }): string {
-  return `${END_USER_MEMORY_SUBJECT_PREFIX}${endUser.source}:${endUser.id}`;
+  const digest = createHash("sha256")
+    .update(JSON.stringify([endUser.source, endUser.id]), "utf8")
+    .digest("hex");
+  return `${END_USER_MEMORY_SUBJECT_PREFIX}${digest}`;
 }
 
 /**

@@ -3,6 +3,7 @@ import type {
   CreateSessionRequest,
   HumanInputAnswer,
   SessionEvent,
+  Session,
   SessionSkill,
   ToolRef,
 } from "../types";
@@ -102,6 +103,13 @@ export type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   sequence: number;
+};
+
+/** Durable text and unresolved decisions restored when a chat is reopened. */
+export type ChatSnapshot = {
+  messages: ChatMessage[];
+  pending: ChatPending[];
+  status: Session["status"] | null;
 };
 
 export type ChatRespondInput =

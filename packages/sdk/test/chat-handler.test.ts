@@ -88,6 +88,8 @@ describe("createChatHandler", () => {
       sessionId: await chatSessionId(WORKSPACE_ID, "c_9", { source: "app", id: "u_42" }),
       created: false,
       messages: [],
+      pending: [],
+      status: null,
     });
     expect(server.creates).toHaveLength(0);
 

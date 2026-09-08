@@ -105,7 +105,7 @@ export async function handleNativeChatRequest(
 }
 
 /**
- * `GET` -> `{ conversation, sessionId, created, messages }`: the user and
+ * `GET` -> `{ conversation, sessionId, created, messages, pending, status }`: the user and
  * assistant text of the conversation so a client can restore it on reload
  * (`messages` is empty and `created` false before the first message).
  */
@@ -119,12 +119,12 @@ export async function handleNativeHistoryRequest(
   const opened = await openResolvedChat(og, resolved.resolution, clientConversation(request, null));
   if (opened.response) return opened.response;
   try {
-    const messages = await opened.chat.history();
+    const snapshot = await opened.chat.snapshot();
     return jsonResponse({
       conversation: opened.chat.conversation,
       sessionId: opened.chat.sessionId,
       created: opened.chat.created,
-      messages,
+      ...snapshot,
     });
   } catch (error) {
     const summary = chatErrorSummary(error);

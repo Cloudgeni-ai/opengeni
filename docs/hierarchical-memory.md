@@ -94,15 +94,17 @@ the docs-MCP `memory_search` derive a `MemoryAgentScope` from the session row
 | `memoryScope` | Reads                                                                 | `memory_save` writes                                  |
 | ------------- | --------------------------------------------------------------------- | ----------------------------------------------------- |
 | `workspace`   | `workspace` rows                                                      | `workspace`                                           |
-| `user`        | `workspace` rows plus `user` rows whose subject is the session's label | `user` with `scope_subject_id = end_user:<source>:<id>` |
+| `user`        | `workspace` rows plus `user` rows whose subject is the session's label | `user` with `scope_subject_id = end_user:v1:<sha256 of JSON [source,id]>` |
 | `session`     | `workspace` rows plus `session` rows keyed by the root session         | `session` with `scope_session_id = <root session id>` |
 | `off`         | no Memory tools are registered                                        | none                                                  |
 
 Scoped layers are additive: a user- or session-scoped agent still reads the
 customer's workspace memory, and its own saves stay in its layer. The `user`
 subject is the session's opaque `endUser` label, not an OpenGeni login, and
-`memoryScope: "user"` without a label is rejected at create. Corrections stay
-in the layer of the row they correct. Human REST memory routes and the
+`memoryScope: "user"` without a label is rejected at create. The tuple hash is bounded and preserves opaque identity bytes, including delimiters
+and whitespace. There is no fallback to ambiguous pre-release memory keys.
+Corrections, archival, and `replaces_id` require the exact writable layer;
+shared memories are read-only to a user- or session-scoped agent. Human REST memory routes and the
 turn-time prompt selection are unchanged: they see workspace rows only. The
 docs-MCP `memory_propose` still writes workspace-scoped proposals because
 human reviewers must see them; `off` unregisters it.
