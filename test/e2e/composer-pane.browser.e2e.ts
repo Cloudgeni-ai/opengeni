@@ -63,8 +63,8 @@ describe("console composer in a split desktop pane", () => {
 
   test("controls never overlap while resizing the pane", async () => {
     for (const width of [320, 375, 448, 500, 639, 640, 768, 448]) {
-      await page.locator("main").evaluate((node, width) => {
-        node.style.width = `${width}px`;
+      await page.locator("main").evaluate((node, paneWidth) => {
+        node.style.width = `${paneWidth}px`;
       }, width);
       const buttons = await page.locator(".og-composer-footer button:visible").all();
       const boxes = await Promise.all(buttons.map((button) => button.boundingBox()));
