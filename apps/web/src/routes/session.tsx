@@ -53,12 +53,9 @@ import { isApiErrorStatus } from "@/api";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel } from "@/components/common";
-import {
-  FollowUpRepositoryMenuBody,
-  FollowUpRepositoryPicker,
-} from "@/components/follow-up-repository-picker";
+import { FollowUpRepositoryMenuBody } from "@/components/follow-up-repository-picker";
 import { MarkdownText } from "@/components/markdown";
-import { ModelPicker, SessionToolPicker, type SessionToolSelection } from "@/components/pickers";
+import { ModelPicker, type SessionToolSelection } from "@/components/pickers";
 import {
   TerminalSessionArchive,
   TerminalSessionBanner,
@@ -2114,35 +2111,40 @@ function SessionChatPane(props: {
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }
                   onToolSelectionChange={(next) => void saveDurableToolPolicy(next)}
+                  variableSets={{
+                    selectedCount:
+                      props.session.variableSetIds?.length ?? (props.session.variableSetId ? 1 : 0),
+                    panel: (
+                      <SessionVariableSetPicker
+                        session={props.session}
+                        canControl={workspacePermissions.includes("sessions:control")}
+                        canAttach={workspacePermissions.includes("variable-sets:attach")}
+                        canUse={workspacePermissions.includes("variable-sets:use")}
+                        canList={
+                          workspacePermissions.includes("variable-sets:list") &&
+                          workspacePermissions.includes("secrets:list")
+                        }
+                        disabled={terminal}
+                        busy={
+                          voiceActive ||
+                          composer.sending ||
+                          props.session.activeTurnId !== null ||
+                          props.queue.queue.length > 0
+                        }
+                        goalActive={props.goal.isActive}
+                        voiceActive={voiceActive}
+                        sharedState={variableSetPickerState}
+                        setSharedState={setVariableSetPickerState}
+                        embedded
+                        onReloadSession={props.onReloadSession}
+                      />
+                    ),
+                  }}
                   repositories={{
                     selectedCount: repositories.selectionCount,
                     disabled: terminal || composer.sending,
                     panel: <FollowUpRepositoryMenuBody {...repositoryPickerProps} />,
                   }}
-                />
-                <SessionVariableSetPicker
-                  session={props.session}
-                  canControl={workspacePermissions.includes("sessions:control")}
-                  canAttach={workspacePermissions.includes("variable-sets:attach")}
-                  canUse={workspacePermissions.includes("variable-sets:use")}
-                  canList={
-                    workspacePermissions.includes("variable-sets:list") &&
-                    workspacePermissions.includes("secrets:list")
-                  }
-                  disabled={terminal}
-                  busy={
-                    voiceActive ||
-                    composer.sending ||
-                    props.session.activeTurnId !== null ||
-                    props.queue.queue.length > 0
-                  }
-                  goalActive={props.goal.isActive}
-                  voiceActive={voiceActive}
-                  sharedState={variableSetPickerState}
-                  setSharedState={setVariableSetPickerState}
-                  compact
-                  triggerClassName="console-composer-compact-control sm:hidden"
-                  onReloadSession={props.onReloadSession}
                 />
               </>
             }
@@ -2182,7 +2184,7 @@ function SessionChatPane(props: {
                     : "Send a follow-up…"
             }
             controls={
-              <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
+              <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
                 <ModelPicker
                   hasImageAttachments={attachments.attachments.some(
                     (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
@@ -2202,45 +2204,6 @@ function SessionChatPane(props: {
                   onModelChange={composer.setModel}
                   onEffortChange={composer.setReasoningEffort}
                   onLatencyModeChange={composer.setLatencyMode}
-                />
-                <SessionToolPicker
-                  menuSide="top"
-                  servers={selectableSessionMcpServers}
-                  firstPartyTools={firstPartyToolOptions}
-                  selection={durableToolSelection}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                  disabled={
-                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
-                  }
-                  saving={durableToolsSaving}
-                  onChange={(next) => void saveDurableToolPolicy(next)}
-                />
-                <FollowUpRepositoryPicker
-                  {...repositoryPickerProps}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                />
-                <SessionVariableSetPicker
-                  session={props.session}
-                  canControl={workspacePermissions.includes("sessions:control")}
-                  canAttach={workspacePermissions.includes("variable-sets:attach")}
-                  canUse={workspacePermissions.includes("variable-sets:use")}
-                  canList={
-                    workspacePermissions.includes("variable-sets:list") &&
-                    workspacePermissions.includes("secrets:list")
-                  }
-                  disabled={terminal}
-                  busy={
-                    voiceActive ||
-                    composer.sending ||
-                    props.session.activeTurnId !== null ||
-                    props.queue.queue.length > 0
-                  }
-                  goalActive={props.goal.isActive}
-                  voiceActive={voiceActive}
-                  sharedState={variableSetPickerState}
-                  setSharedState={setVariableSetPickerState}
-                  triggerClassName="console-composer-wide-control max-sm:hidden"
-                  onReloadSession={props.onReloadSession}
                 />
                 {durableToolsError ? (
                   <span className="sr-only" role="alert">
