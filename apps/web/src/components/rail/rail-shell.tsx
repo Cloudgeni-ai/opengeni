@@ -73,134 +73,140 @@ function RailBody() {
   };
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface/40 pt-[env(safe-area-inset-top)]">
-      {/* Brand */}
       <div
-        className={cn(
-          "flex h-10 shrink-0 items-center gap-2",
-          rail.collapsed ? "justify-center px-2" : "px-3",
-        )}
+        data-rail-scroll-viewport
+        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
-        <Link
-          to="/workspaces/$workspaceId/sessions"
-          params={{ workspaceId: rail.workspaceId }}
-          className="flex items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none"
-          aria-label="OpenGeni home"
-        >
-          <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
-            <BrandMark className="size-4" />
-          </span>
-          {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
-        </Link>
-        {rail.isMobile ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Close navigation"
-            onClick={() => rail.setDrawerOpen(false)}
-            className="ml-auto pointer-coarse:size-11"
-          >
-            <XIcon className="size-4" />
-          </Button>
-        ) : null}
-      </div>
-
-      {rail.isMobile ? null : <SwitcherBlock />}
-
-      {rail.isMobile ? (
-        <>
+        <div className="flex min-h-full flex-col">
+          {/* Brand */}
           <div
-            role="tablist"
-            aria-label="Navigation section"
-            onKeyDown={(event) => {
-              if (event.key === "ArrowLeft" || event.key === "Home") {
-                event.preventDefault();
-                moveMobileTab("sessions");
-              } else if (event.key === "ArrowRight" || event.key === "End") {
-                event.preventDefault();
-                moveMobileTab("workspace");
-              }
-            }}
-            className="mx-3 mt-3 grid shrink-0 grid-cols-2 rounded-lg bg-surface-2/70 p-1"
+            className={cn(
+              "flex h-10 shrink-0 items-center gap-2",
+              rail.collapsed ? "justify-center px-2" : "px-3",
+            )}
           >
-            <button
-              ref={sessionsTabRef}
-              id="mobile-nav-tab-sessions"
-              type="button"
-              role="tab"
-              aria-selected={mobileSection === "sessions"}
-              aria-controls="mobile-nav-panel-sessions"
-              tabIndex={mobileSection === "sessions" ? 0 : -1}
-              onClick={() => setMobileSection("sessions")}
-              className={cn(
-                "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
-                mobileSection === "sessions"
-                  ? "bg-surface-3 text-fg shadow-sm"
-                  : "text-fg-muted hover:text-fg",
-              )}
+            <Link
+              to="/workspaces/$workspaceId/sessions"
+              params={{ workspaceId: rail.workspaceId }}
+              className="flex items-center gap-2 rounded-md text-[15px] font-semibold focus-visible:outline-none"
+              aria-label="OpenGeni home"
             >
-              <MessagesSquareIcon className="size-4" />
-              Sessions
-            </button>
-            <button
-              ref={workspaceTabRef}
-              id="mobile-nav-tab-workspace"
-              type="button"
-              role="tab"
-              aria-selected={mobileSection === "workspace"}
-              aria-controls="mobile-nav-panel-workspace"
-              tabIndex={mobileSection === "workspace" ? 0 : -1}
-              onClick={() => setMobileSection("workspace")}
-              className={cn(
-                "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
-                mobileSection === "workspace"
-                  ? "bg-surface-3 text-fg shadow-sm"
-                  : "text-fg-muted hover:text-fg",
-              )}
-            >
-              <Settings2Icon className="size-4" />
-              Workspace
-            </button>
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-brand-strong/20 text-brand">
+                <BrandMark className="size-4" />
+              </span>
+              {!rail.collapsed ? <span className="truncate">OpenGeni</span> : null}
+            </Link>
+            {rail.isMobile ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Close navigation"
+                onClick={() => rail.setDrawerOpen(false)}
+                className="ml-auto pointer-coarse:size-11"
+              >
+                <XIcon className="size-4" />
+              </Button>
+            ) : null}
           </div>
-          {mobileSection === "sessions" ? (
-            <div
-              id="mobile-nav-panel-sessions"
-              role="tabpanel"
-              aria-labelledby="mobile-nav-tab-sessions"
-              className="mt-2 flex min-h-0 flex-1 flex-col"
-            >
-              <PrimaryNav />
-              <SessionList />
-            </div>
+
+          {rail.isMobile ? null : <SwitcherBlock />}
+
+          {rail.isMobile ? (
+            <>
+              <div
+                role="tablist"
+                aria-label="Navigation section"
+                onKeyDown={(event) => {
+                  if (event.key === "ArrowLeft" || event.key === "Home") {
+                    event.preventDefault();
+                    moveMobileTab("sessions");
+                  } else if (event.key === "ArrowRight" || event.key === "End") {
+                    event.preventDefault();
+                    moveMobileTab("workspace");
+                  }
+                }}
+                className="mx-3 mt-3 grid shrink-0 grid-cols-2 rounded-lg bg-surface-2/70 p-1"
+              >
+                <button
+                  ref={sessionsTabRef}
+                  id="mobile-nav-tab-sessions"
+                  type="button"
+                  role="tab"
+                  aria-selected={mobileSection === "sessions"}
+                  aria-controls="mobile-nav-panel-sessions"
+                  tabIndex={mobileSection === "sessions" ? 0 : -1}
+                  onClick={() => setMobileSection("sessions")}
+                  className={cn(
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    mobileSection === "sessions"
+                      ? "bg-surface-3 text-fg shadow-sm"
+                      : "text-fg-muted hover:text-fg",
+                  )}
+                >
+                  <MessagesSquareIcon className="size-4" />
+                  Sessions
+                </button>
+                <button
+                  ref={workspaceTabRef}
+                  id="mobile-nav-tab-workspace"
+                  type="button"
+                  role="tab"
+                  aria-selected={mobileSection === "workspace"}
+                  aria-controls="mobile-nav-panel-workspace"
+                  tabIndex={mobileSection === "workspace" ? 0 : -1}
+                  onClick={() => setMobileSection("workspace")}
+                  className={cn(
+                    "flex h-10 items-center justify-center gap-2 rounded-md text-sm font-medium transition-colors",
+                    mobileSection === "workspace"
+                      ? "bg-surface-3 text-fg shadow-sm"
+                      : "text-fg-muted hover:text-fg",
+                  )}
+                >
+                  <Settings2Icon className="size-4" />
+                  Workspace
+                </button>
+              </div>
+              {mobileSection === "sessions" ? (
+                <div
+                  id="mobile-nav-panel-sessions"
+                  role="tabpanel"
+                  aria-labelledby="mobile-nav-tab-sessions"
+                  className="mt-2 flex shrink-0 flex-col"
+                >
+                  <PrimaryNav />
+                  <SessionList />
+                </div>
+              ) : (
+                <div
+                  id="mobile-nav-panel-workspace"
+                  role="tabpanel"
+                  aria-labelledby="mobile-nav-tab-workspace"
+                  className="mt-2 flex shrink-0 flex-col border-t border-border pt-2"
+                >
+                  <SwitcherBlock />
+                  <div className="my-2 border-t border-border" />
+                  <WorkspaceShortcutLinks className="px-2" />
+                  <div className="my-2 border-t border-border" />
+                </div>
+              )}
+            </>
           ) : (
-            <div
-              id="mobile-nav-panel-workspace"
-              role="tabpanel"
-              aria-labelledby="mobile-nav-tab-workspace"
-              className="mt-2 flex min-h-0 flex-1 flex-col overflow-y-auto border-t border-border pt-2"
-            >
-              <SwitcherBlock />
-              <div className="my-2 border-t border-border" />
-              <WorkspaceShortcutLinks className="px-2" />
-              <div className="my-2 border-t border-border" />
-              <WorkspaceNav />
-              <RailFooter />
-            </div>
-          )}
-        </>
-      ) : (
-        <>
-          {/* Sessions are the primary object. Workspace administration remains
+            <>
+              {/* Sessions are the primary object. Workspace administration remains
               secondary on desktop and becomes its own screen on phones. */}
-          <PrimaryNav />
-          <div className="mt-2 flex min-h-0 flex-1 flex-col">
-            {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
-          </div>
-          <div className="my-2 border-t border-border" />
-          <WorkspaceNav />
-          <RailFooter />
-        </>
-      )}
+              <PrimaryNav />
+              <div className="mt-2 flex shrink-0 flex-col">
+                {rail.collapsed ? <CollapsedSessionsButton /> : <SessionList />}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="shrink-0 border-t border-border pt-2">
+        <WorkspaceNav />
+        <RailFooter />
+      </div>
     </div>
   );
 }

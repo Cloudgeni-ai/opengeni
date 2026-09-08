@@ -619,6 +619,19 @@ export function SessionList() {
   const focusRestoreOperation = useRef(0);
   const pinning = useRef(new Set<string>());
   const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const viewport = listRef.current?.closest("[data-rail-scroll-viewport]");
+    if (!viewport) return;
+    const cancelReveal = () => cancelSessionRowRevealIntent(rowRevealIntent);
+    viewport.addEventListener("wheel", cancelReveal, { passive: true });
+    viewport.addEventListener("touchstart", cancelReveal, { passive: true });
+    viewport.addEventListener("pointerdown", cancelReveal);
+    return () => {
+      viewport.removeEventListener("wheel", cancelReveal);
+      viewport.removeEventListener("touchstart", cancelReveal);
+      viewport.removeEventListener("pointerdown", cancelReveal);
+    };
+  }, []);
   const pendingSessionFocus = useRef<PendingSessionFocus | null>(null);
   const [focusRestoreRevision, setFocusRestoreRevision] = useState(0);
   const channelMoveProbes = useRef(
@@ -2669,7 +2682,7 @@ export function SessionList() {
         onWheel={() => {
           cancelSessionRowRevealIntent(rowRevealIntent);
         }}
-        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto pb-2 pl-2 pr-3"
+        className="min-w-0 pb-2 pl-2 pr-3"
       >
         <p className="sr-only" aria-live="polite" aria-atomic="true">
           {announcement}
@@ -3014,7 +3027,9 @@ function SessionGroupPaginationControl(
     if (!hasMore || loading || failed) return;
     const sentinel = sentinelRef.current;
     if (!sentinel || typeof IntersectionObserver === "undefined") return;
-    const root = sentinel.closest<HTMLElement>("[data-sessionpin-session-list]");
+    const root =
+      sentinel.closest<HTMLElement>("[data-rail-scroll-viewport]") ??
+      sentinel.closest<HTMLElement>("[data-sessionpin-session-list]");
     if (!root) return;
     let requested = false;
     const observer = new IntersectionObserver(

@@ -1,6 +1,6 @@
 import { useRouterState } from "@tanstack/react-router";
-import { ChevronDownIcon, CompassIcon, SquarePenIcon } from "lucide-react";
-import { useState } from "react";
+import { ChevronDownIcon, SquarePenIcon } from "lucide-react";
+import { useEffect, useState } from "react";
 
 import { ForYouLink } from "@/components/rail/for-you-link";
 import { useRail } from "@/components/rail/rail-context";
@@ -18,7 +18,7 @@ function initialWorkspaceShortcutsExpanded(): boolean {
   if (typeof window === "undefined") return true;
   try {
     const raw = window.localStorage.getItem(WORKSPACE_SHORTCUTS_EXPANDED_KEY);
-    return raw === null ? true : raw === "true";
+    return raw === "true";
   } catch {
     return true;
   }
@@ -60,6 +60,17 @@ export function PrimaryNav() {
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
+  const [shortViewport, setShortViewport] = useState(
+    () => typeof window !== "undefined" && window.innerHeight < 720,
+  );
+  useEffect(() => {
+    const query = window.matchMedia("(max-height: 719px)");
+    const update = () => setShortViewport(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  const showShortcuts = !shortViewport || shortcutsExpanded;
   const setShortcutsExpanded = (next: boolean) => {
     setShortcutsExpandedState(next);
     try {
@@ -95,20 +106,22 @@ export function PrimaryNav() {
         <WorkspaceShortcutLinks />
       ) : (
         <div className="grid gap-0.5">
-          {shortcutsExpanded ? (
+          {showShortcuts ? (
             <>
               <WorkspaceShortcutLinks />
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                aria-expanded="true"
-                onClick={() => setShortcutsExpanded(false)}
-                className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-subtle hover:text-fg-muted"
-              >
-                <ChevronDownIcon aria-hidden="true" className="size-3 rotate-180" />
-                Show less
-              </Button>
+              {shortViewport ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-expanded="true"
+                  onClick={() => setShortcutsExpanded(false)}
+                  className="h-6 w-full justify-start gap-1.5 px-2.5 text-2xs font-normal text-fg-subtle hover:text-fg-muted"
+                >
+                  <ChevronDownIcon aria-hidden="true" className="size-3 rotate-180" />
+                  Less
+                </Button>
+              ) : null}
             </>
           ) : (
             <Button
@@ -118,7 +131,7 @@ export function PrimaryNav() {
               aria-expanded="false"
               aria-label={
                 activeWorkspaceSection
-                  ? `Explore, current section ${activeWorkspaceSection}`
+                  ? `More, current section ${activeWorkspaceSection}`
                   : undefined
               }
               data-active={activeWorkspaceSection ? "true" : undefined}
@@ -135,8 +148,7 @@ export function PrimaryNav() {
                   activeWorkspaceSection ? "opacity-100" : "opacity-0",
                 )}
               />
-              <CompassIcon className="size-4 shrink-0" />
-              <span className="min-w-0 flex-1 truncate text-left">Explore</span>
+              <span className="min-w-0 flex-1 truncate text-left">More</span>
               <ChevronDownIcon aria-hidden="true" className="size-3.5 shrink-0" />
             </Button>
           )}

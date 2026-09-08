@@ -223,6 +223,62 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 60_000);
 
+  test("loads the settings interface only when opening a management page", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    const errors: string[] = [];
+    const managementRequests: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (request.url().includes("/assets/workspace-management-surfaces-"))
+        managementRequests.push(request.url());
+    });
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      const settings = page.getByRole("link", { name: "Settings", exact: true });
+      await settings.waitFor();
+      expect(managementRequests).toHaveLength(0);
+      await settings.click();
+      await page.getByRole("heading", { name: "General", exact: true }).waitFor();
+      expect(managementRequests.length).toBeGreaterThan(0);
+      await page.getByRole("link", { name: "Back to sessions", exact: true }).click();
+      await page.getByRole("link", { name: "Settings", exact: true }).waitFor();
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
+  test("adapts rail shortcuts to viewport height without hiding them on tall screens", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 900 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      await workspaceFromPage(page);
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
+      await page.setViewportSize({ width: 1280, height: 600 });
+      await page.getByRole("button", { name: "More", exact: true }).click();
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      await page.getByRole("button", { name: "Less", exact: true }).click();
+      expect(await page.getByRole("link", { name: "Plugins", exact: true }).count()).toBe(0);
+      await page.setViewportSize({ width: 1280, height: 900 });
+      await page.getByRole("link", { name: "Plugins", exact: true }).waitFor();
+      expect(await page.getByRole("button", { name: "More", exact: true }).count()).toBe(0);
+      expect(await page.getByRole("button", { name: "Less", exact: true }).count()).toBe(0);
+    } finally {
+      await context.close();
+    }
+  }, 120_000);
+
   test("loads older sessions only in the project whose end enters the viewport", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -301,11 +357,28 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         name: `Load older sessions in ${projectA.name}`,
       });
       await loadProjectA.waitFor();
+      const footerBefore = await page
+        .getByRole("link", { name: "Settings", exact: true })
+        .boundingBox();
       await loadProjectA.scrollIntoViewIfNeeded();
       await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
         timeoutMs: 30_000,
       });
 
+      const scroll = await page.locator("[data-rail-scroll-viewport]").evaluate((element) => ({
+        top: element.scrollTop,
+        height: element.clientHeight,
+        total: element.scrollHeight,
+        listOverflow: getComputedStyle(element.querySelector("[data-sessionpin-session-list]")!)
+          .overflowY,
+      }));
+      expect(scroll.top).toBeGreaterThan(0);
+      expect(scroll.total).toBeGreaterThan(scroll.height);
+      expect(scroll.listOverflow).toBe("visible");
+      const footerAfter = await page
+        .getByRole("link", { name: "Settings", exact: true })
+        .boundingBox();
+      expect(footerAfter?.y).toBe(footerBefore?.y);
       expect(await projectBRows.count()).toBe(initialProjectBCount);
       expect(filteredRequests.length).toBeGreaterThan(0);
       expect(
