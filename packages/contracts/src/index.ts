@@ -8,7 +8,7 @@ export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
-export { siteSessionPath } from "./site-session-http";
+export { siteSessionPath, SiteSessionPathError } from "./site-session-http";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -3172,6 +3172,16 @@ export const UpdateWorkspaceRequest = z
   .strict();
 export type UpdateWorkspaceRequest = z.infer<typeof UpdateWorkspaceRequest>;
 
+/**
+ * Organization API key access tier. `full` keys administer the organization
+ * (create workspaces, mint keys, run sessions in every shared workspace);
+ * `read` keys only inventory shared workspaces and read their sessions, events,
+ * and files. The tier is derived from the key's stored permissions, never
+ * stored separately: a key whose permissions omit `workspace:admin` is `read`.
+ */
+export const OrganizationApiKeyAccess = z.enum(["full", "read"]);
+export type OrganizationApiKeyAccess = z.infer<typeof OrganizationApiKeyAccess>;
+
 export const ApiKey = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -3180,6 +3190,11 @@ export const ApiKey = z.object({
   description: z.string().nullable(),
   prefix: z.string(),
   permissions: z.array(Permission),
+  /**
+   * Organization keys only: the access tier derived from `permissions`.
+   * Omitted for workspace-scoped keys, whose permissions are explicit.
+   */
+  access: OrganizationApiKeyAccess.optional(),
   expiresAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
   lastUsedAt: z.string().nullable(),
@@ -3208,6 +3223,8 @@ export const CreateOrganizationApiKeyRequest = z
     name: z.string().trim().min(1).max(200),
     description: z.string().trim().min(1).max(500).optional(),
     expiresAt: z.string().datetime({ offset: true }).optional(),
+    /** Access tier; omitted means `full` so existing callers keep their keys. */
+    access: OrganizationApiKeyAccess.default("full"),
   })
   .strict();
 export type CreateOrganizationApiKeyRequest = z.infer<typeof CreateOrganizationApiKeyRequest>;
@@ -5388,6 +5405,12 @@ export const KnowledgeMemory = z.object({
   status: KnowledgeMemoryStatus,
   kind: KnowledgeMemoryKind,
   scope: z.string(),
+  /** Typed selector (migration 0152/0426): workspace, user, session, role, ephemeral, legacy. */
+  scopeType: z.string().optional(),
+  /** `end_user:v1:<tuple hash>` for a session end-user layer; null otherwise. */
+  scopeSubjectId: z.string().nullable().optional(),
+  /** Lineage root for a session layer; null otherwise. */
+  scopeSessionId: z.string().uuid().nullable().optional(),
   text: z.string(),
   sourceRefs: z.array(KnowledgeSourceRef),
   confidence: z.number().min(0).max(1),
@@ -6744,12 +6767,84 @@ export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDe
  */
 export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
 
+/**
+ * How far a live agent attempt on a session may reach across the workspace,
+ * and how far peer attempts may reach into it. `workspace` is the platform
+ * default. `user` limits both directions to sessions carrying the same
+ * {@link SessionEndUser} label; `session` limits both to the own root tree.
+ * The most restrictive side of a caller/target pair wins. Humans and API keys
+ * are unaffected: this is an agent-to-agent fence enforced only in the core
+ * session-authorization seam.
+ */
+export const SessionAgentAccess = z.enum(["session", "user", "workspace"]);
+export type SessionAgentAccess = z.infer<typeof SessionAgentAccess>;
+
+export const SESSION_END_USER_SOURCE_MAX_CHARS = 200;
+export const SESSION_END_USER_ID_MAX_CHARS = 1_024;
+
+const NUL_CHARACTER = String.fromCharCode(0);
+const UNPAIRED_SURROGATE_PATTERN =
+  /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+
+function opaqueEndUserSegment(maxChars: number) {
+  return z
+    .string()
+    .min(1)
+    .max(maxChars)
+    .refine((value) => !value.includes(NUL_CHARACTER), "must not contain NUL")
+    .refine((value) => !UNPAIRED_SURROGATE_PATTERN.test(value), "must be well-formed UTF-16");
+}
+
+/**
+ * Opaque end-user label attached to a session by the embedding product. It
+ * shares the external-identity shape (`source` + product-owned `id`) so a
+ * later join is by pair. It is NOT a subject and grants NO authority: it only
+ * scopes `agentAccess: "user"` reach, `memoryScope: "user"` Memory rows, and
+ * the session-list `endUserSource`/`endUserId` filter.
+ */
+export const SessionEndUser = z
+  .object({
+    source: opaqueEndUserSegment(SESSION_END_USER_SOURCE_MAX_CHARS),
+    id: opaqueEndUserSegment(SESSION_END_USER_ID_MAX_CHARS),
+  })
+  .strict();
+export type SessionEndUser = z.infer<typeof SessionEndUser>;
+
+/**
+ * The typed Workspace Memory selector an agent reads and writes. `workspace`
+ * is today's shared memory; `user` and `session` are ADDITIVE private layers
+ * (the agent still reads workspace facts and saves to its narrowest scope);
+ * `off` registers no Memory tools for the session. `user` requires an
+ * end-user label.
+ */
+export const SessionMemoryScope = z.enum(["workspace", "user", "session", "off"]);
+export type SessionMemoryScope = z.infer<typeof SessionMemoryScope>;
+
+/**
+ * The calling agent attempt's own access scope, resolved by OpenGeni from the
+ * caller session row (never from the request) and applied as one SQL
+ * predicate wherever a session list runs for that attempt.
+ */
+export const SessionAgentAccessViewer = z
+  .object({
+    callerRootSessionId: z.string().uuid(),
+    agentAccess: SessionAgentAccess,
+    endUser: SessionEndUser.nullable(),
+  })
+  .strict();
+export type SessionAgentAccessViewer = z.infer<typeof SessionAgentAccessViewer>;
+
 export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("all") }),
+  z.object({
+    kind: z.literal("all"),
+    /** Set by OpenGeni for an agent attempt; a host-returned value is replaced. */
+    agentAccessViewer: SessionAgentAccessViewer.optional(),
+  }),
   z.object({
     kind: z.literal("scoped"),
     rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
     sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    agentAccessViewer: SessionAgentAccessViewer.optional(),
   }),
 ]);
 export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
@@ -12151,6 +12246,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // workspace membership roles and from memory selectors. Null keeps the
     // compatibility fallback to a normalized metadata.role value.
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.nullable().default(null),
+    /** Agent-to-agent reach declared at create; see {@link SessionAgentAccess}. */
+    agentAccess: SessionAgentAccess.default("workspace"),
+    /** Opaque product label; null when the create carried none. */
+    endUser: SessionEndUser.nullable().default(null),
+    /** Typed Memory selector frozen at create; see {@link SessionMemoryScope}. */
+    memoryScope: SessionMemoryScope.default("workspace"),
     resources: z.array(ResourceRef),
     skills: SessionSkills.default([]),
     tools: z.array(ToolRef),
@@ -12167,6 +12268,8 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     /** Frozen creator fact used only for creation attribution/idempotent repair. */
     createdBy: TurnInitiator,
     createdByContext: TurnInitiatorContext,
+    // Read projection: latest turn.started policy, or creation policy before any turn starts.
+    // Accepted/queued turns and actor composer drafts retain their own explicit policy.
     model: z.string(),
     reasoningEffort: ReasoningEffort,
     latencyMode: LatencyMode,
@@ -12239,9 +12342,13 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     queueHeadPosition: z.number().int(),
     queueTailPosition: z.number().int(),
     effectiveControl: EffectiveSessionControl,
-    /** Current out-of-turn wait; elapsed deadline means a recheck is due. */
+    /** Current out-of-turn wait, independent of goals. Omitted by older servers.
+     * An elapsed deadline means the recheck is due, not proof it has started. */
     inputWait: z
-      .object({ deadlineAt: z.string().datetime({ offset: true }), reason: z.string() })
+      .object({
+        deadlineAt: z.string().datetime({ offset: true }),
+        reason: z.string(),
+      })
       .nullable()
       .optional(),
     lastSequence: z.number().int().nonnegative(),
@@ -12348,6 +12455,46 @@ export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() 
   }),
 );
 export type SessionListResponse = z.infer<typeof SessionListResponse>;
+
+/**
+ * `GET /v1/organizations/:organizationId/sessions` query. `endUserSource` and
+ * `endUserId` must be supplied together; `status` keeps only sessions in that
+ * exact lifecycle state.
+ */
+export const ListOrganizationSessionsQuery = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(200).default(50),
+    cursor: z.string().min(1).optional(),
+    endUserSource: z.string().trim().min(1).max(200).optional(),
+    endUserId: z.string().trim().min(1).max(1024).optional(),
+    status: SessionStatus.optional(),
+  })
+  .superRefine((value, context) => {
+    if ((value.endUserSource === undefined) !== (value.endUserId === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "endUserSource and endUserId must be supplied together",
+        path: ["endUserId"],
+      });
+    }
+  });
+export type ListOrganizationSessionsQuery = z.infer<typeof ListOrganizationSessionsQuery>;
+
+/**
+ * One page of the organization-wide session list: the sessions of every
+ * shared workspace the caller may read, visited in a stable workspace order.
+ * Every row carries its `workspaceId`; events, history, and files are read
+ * through the ordinary workspace routes. Personal workspaces are never
+ * included and private sessions stay invisible to the caller exactly as they
+ * are on the workspace list. A page may hold fewer than `limit` rows while
+ * `nextCursor` is still set (the server bounds how many workspaces one request
+ * visits), so callers follow `nextCursor` until it is null.
+ */
+export const OrganizationSessionListResponse = z.object({
+  sessions: z.array(Session),
+  nextCursor: z.string().nullable(),
+});
+export type OrganizationSessionListResponse = z.infer<typeof OrganizationSessionListResponse>;
 
 // Recursive: the TS type is declared first so the schema annotation can carry
 // the FULL recursive shape (a shallow annotation loses type information for
@@ -14663,6 +14810,18 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * capability, while a private child uses an exact live-parent-attempt
        * database capability. Both commit atomically. */
       visibility: SessionVisibility.default("workspace"),
+      /** Agent-to-agent reach. Top-level omission is the platform default
+       * `workspace`. An agent-created child inherits its parent's value on
+       * omission and may only narrow it (workspace > user > session); a wider
+       * explicit child value is rejected. Never widens human or API-key access. */
+      agentAccess: SessionAgentAccess.default("workspace"),
+      /** Opaque product label for the human this session serves. A child
+       * inherits its parent's label; naming a different pair is rejected. */
+      endUser: SessionEndUser.optional(),
+      /** Typed Memory selector. `user` requires an end-user label (own or
+       * inherited; 422 otherwise). A child inherits its parent's value on
+       * omission and may only narrow it (workspace > user > session > off). */
+      memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
@@ -14803,7 +14962,13 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // request 422s at create (instead of the first turn dying on the SDK's
       // manifest-env guard).
       sandbox: z
-        .union([z.literal("shared"), z.literal("new"), z.object({ groupId: z.string().uuid() })])
+        .union([
+          z.literal("shared"),
+          z.literal("new"),
+          z.object({
+            groupId: z.string().uuid(),
+          }),
+        ])
         .optional(),
     },
     { rejectKeys: ["turnInstructions"] },
@@ -14852,6 +15017,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         message: "new-session attachment authority epoch is derived by the server",
       });
     }
+    // memoryScope "user" requires an end-user label, but an agent-created child
+    // inherits its parent's label on omission, so that rule is enforced by the
+    // core create resolver (422) after inheritance rather than at parse time.
   }),
 );
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;

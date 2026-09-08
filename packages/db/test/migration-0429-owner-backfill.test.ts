@@ -12,7 +12,7 @@ import { createDb } from "../src/database";
 import { listSkillDescriptors, listSkillRecords } from "../src/skills";
 import { migrateLegacySkillConfigurations } from "../src/skill-config-migration";
 
-const cutover = "0427_unified_skill_lifecycle.sql";
+const cutover = "0429_unified_skill_lifecycle.sql";
 const windowTables = [
   "capability_plugin_installations",
   "capability_facets",
@@ -64,7 +64,7 @@ afterAll(async () => {
   await owned?.release();
 }, 120_000);
 
-describe("0427 owner-only Skill backfill", () => {
+describe("0429 owner-only Skill backfill", () => {
   test("migrates populated tenants as NOSUPERUSER NOBYPASSRLS and restores every FORCE policy", async () => {
     if (!owned) return;
     const { admin, ownerUrl, ownerRole } = owned;
@@ -346,12 +346,12 @@ describe("0427 owner-only Skill backfill", () => {
           {
             source_kind: "session",
             original_configuration: convertedFixture.skills,
-            actor: "service:skill-migration:0427",
+            actor: "service:skill-migration:0429",
           },
           {
             source_kind: "workspace-pack",
             original_configuration: convertedFixture.manifest,
-            actor: "service:skill-migration:0427",
+            actor: "service:skill-migration:0429",
           },
         ]);
       }
@@ -454,7 +454,7 @@ describe("0427 owner-only Skill backfill", () => {
         ).rejects.toThrow("files-bearing revision");
       }
       expect(
-        await admin`select id from preference_registry_events where actor_subject_id='service:skill-migration:0427'`,
+        await admin`select id from preference_registry_events where actor_subject_id='service:skill-migration:0429'`,
       ).toHaveLength(7);
       const restored =
         await admin`select relname,relrowsecurity,relforcerowsecurity from pg_class where relnamespace='public'::regnamespace and relname=any(${windowTables})`;

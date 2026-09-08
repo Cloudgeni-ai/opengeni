@@ -24,6 +24,32 @@ ancestor. Components are styled with Tailwind v4 utilities mapped onto the
 tokens, Radix primitives for behavior, and Motion for state-communicating
 animation. Override the tokens to rebrand everything.
 
+## Drop-in chat (`@opengeni/react/chat`)
+
+The smallest surface. `OpenGeniChat` talks only to your own endpoint served by
+`createChatHandler` from `@opengeni/sdk/chat`; it needs no provider, no SDK
+client, and no proxy of OpenGeni routes:
+
+```tsx
+import { OpenGeniChat } from "@opengeni/react/chat";
+
+<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" placeholder="Ask anything" />;
+```
+
+It posts `{ message }`, renders the streamed reply with `Markdown`, and shows a
+card with buttons when the agent stops for an approval or a structured
+human-input request (answered through `POST /api/chat/respond`). Optional props:
+`headers` for the host's auth header, `authKey`, `className`, and `renderMessage`.
+Changed header values clear messages, pending cards, drafts and in-flight
+requests before restoring the new identity's history. Header callbacks are
+resolved on each host render; re-render when their credentials change. For
+cookie authentication, pass `authKey={JSON.stringify([tenantId, userId])}` and
+change it on sign-in, sign-out and tenant switches, even when `conversation`
+stays the same. `authKey` is a local reset key and is never sent to the handler.
+`SessionConversation` below is the full-surface upgrade on the same session
+(files, queue, model picker, approvals with policies) once the host proxies the
+session routes.
+
 ## Editable Office artifacts
 
 The optional artifact workbench is isolated from the ordinary session and

@@ -18,6 +18,82 @@ bearer design, but an organization API key belongs on the product server.
 Browser cookies are accepted cross-origin only from operator-configured trusted
 origins; arbitrary embedding origins never receive credentialed CORS responses.
 
+## Chat quick start (`@opengeni/sdk/chat`)
+
+The fastest way to put OpenGeni behind an existing chat: one option object per
+conversation, one server handler for your endpoint. Tenants map to organization
+workspaces, conversations map to deterministic sessions, and the organization
+API key never leaves your server.
+
+```ts
+import { OpenGeni, createChatHandler } from "@opengeni/sdk/chat";
+
+const og = new OpenGeni({
+  apiKey: process.env.OPENGENI_API_KEY!,
+  organizationId: process.env.OPENGENI_ORGANIZATION_ID!,
+  // baseUrl defaults to https://app.opengeni.ai; source (default "app") labels your product.
+});
+
+const chat = await og.chat({
+  tenant: "acme", // one workspace per customer, created on first use
+  user: "u_42", // opaque end-user label (required for memory: "user")
+  conversation: "c_9", // stable id, namespaced to user; the session id is derived from both
+  agentAccess: "session", // "session" (default) | "user" | "workspace"
+  memory: "user", // "session" | "user" | "workspace" | false; default follows agentAccess
+  create: { sandboxBackend: "none" }, // raw create-request passthrough for a pure chat
+});
+
+const reply = await chat.send("hello"); // creates the session on the first send
+console.log(reply.text); // or String(reply)
+
+for await (const chunk of chat.stream("and then?")) {
+  if (chunk.type === "text") process.stdout.write(chunk.text);
+  if (chunk.type === "pending") await chat.respond({ requestId: chunk.pending.requestId, decision: "approve" });
+}
+
+// Your endpoint. `resolve` is your auth hook: identity comes from the request
+// you authenticated, never from the body. The handler reads the client's
+// conversation id itself (x-opengeni-conversation header, or the wire format's
+// own field) and scopes it to `user`; return `conversation` from resolve only
+// when the host names it, which is required when there is no `user`.
+export const handler = createChatHandler(og, {
+  resolve: async (request) => {
+    const session = await getSessionFromCookie(request);
+    if (!session) return new Response("Unauthorized", { status: 401 });
+    return { tenant: session.accountId, user: session.userId };
+  },
+  // format: "vercel" | "openai-chat" | "openai-responses" (default "native");
+  // a request may override it with the x-opengeni-chat-format header.
+});
+export const GET = handler; // conversation history, for restoring the chat on reload
+export const POST = handler; // send a message, or answer a pending request at .../respond
+```
+
+Conversation ids are namespaced per user: the same `conversation` for two
+`user` labels reaches two sessions, so a client cannot continue another user's
+chat by guessing its id. Without a `user`, the host must name the conversation
+from `resolve`. The Vercel and OpenAI adapters send only the latest user
+message; the earlier messages in that request are imported once, as context on
+the first message of a conversation, after which OpenGeni owns the history.
+
+Pick the isolation per session with `agentAccess` (which other sessions the
+agent may reach) and `memory` (what it remembers), all inside one workspace that
+shares the customer's documents, instructions, and integrations:
+
+| Scenario                                          | `agentAccess` | `memory`      |
+| ------------------------------------------------- | ------------- | ------------- |
+| Every chat isolated (support desk)                | `"session"`   | `"session"`   |
+| One user's chats see each other, not other users' | `"user"`      | `"user"`      |
+| Everything in the tenant shared                   | `"workspace"` | `"workspace"` |
+| Shared agent access, no memory                    | any           | `false`       |
+
+`<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
+`@opengeni/react/chat` is the browser component to swap in for your chat box:
+it talks only to your handler, sends the conversation id as the
+`x-opengeni-conversation` header, and restores the history on reload. Graduate
+to `OpenGeniClient` below when you need the full session surface: files, tools,
+approvals with policies, forks, realtime voice.
+
 ## Quick start
 
 ```ts
@@ -76,7 +152,14 @@ complete organization-workspace inventory.
 Organization key administration uses `listOrganizationApiKeys`,
 `createOrganizationApiKey`, and `deleteOrganizationApiKey`. The key token from a
 create response is shown once and must be stored in the backend's secret
-manager.
+manager. `createOrganizationApiKey(organizationId, { name, access: "read" })`
+mints a read-only master key: it inventories shared workspaces and reads their
+sessions, events, and files, but cannot create sessions, send messages, or mint
+keys, and every key reports its tier as `apiKey.access`. Either tier can call
+`listOrganizationSessions(organizationId, { limit, cursor, endUser, status })`
+for one page of sessions across every shared workspace (each row carries its
+`workspaceId`; private sessions and Personal workspaces never appear), or
+`iterateOrganizationSessions` to follow `nextCursor` to the end.
 
 The external backend also owns its Skill catalog. Load the selected definitions
 and pass them inline in `CreateSessionRequest.skills` for each product-created

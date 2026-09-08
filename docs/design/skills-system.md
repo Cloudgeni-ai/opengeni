@@ -376,7 +376,7 @@ Composite publication now waits for enclosing Pack/Plugin ownership finalization
 the latest integrated PostgreSQL run remains a release gate.
 
 Current main has been merged and the unpublished Skill migration renumbered to
-0427 without repinning published migration hashes. The browser tree-shaking fix
+0429 without repinning published migration hashes. The browser tree-shaking fix
 is integrated and the post-merge production build passes unchanged budgets.
 Projects guidance now uses the same host-controlled bundle selection and eager
 reader, with no unconditional second index or reader tool.
@@ -491,7 +491,7 @@ may land alongside writes; do not leave a second live editor until the end.
 ## 8. Remaining decisions, not hidden assumptions
 
 **Blocking retention decision:** a real PostgreSQL before/after probe confirms
-that migration 0427 prevents deletion of an installed-only workspace which was
+that migration 0429 prevents deletion of an installed-only workspace which was
 previously deletable (`23503`, registry workspace foreign key). The existing
 registry contract in `docs/preference-registry.md` intentionally retains history
 through restrictive deletion semantics. New source bindings and write receipts

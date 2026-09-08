@@ -45,6 +45,7 @@ import {
   ToolGatewayApprovalOperationStartedError,
   ToolGatewayApprovalRateLimitError,
   WorkspaceArtifactNotFoundError,
+  resolveSessionMemoryAgentScope,
   type ApiIntegrationRuntime,
 } from "@opengeni/db";
 import {
@@ -196,7 +197,20 @@ export async function prepareWorkspaceToolGatewayForGrant(
               grant.accountId,
               grant.workspaceId,
               routeDeps.getDocumentServices(),
-              { initiatingSubjectId: grant.subjectId },
+              {
+                initiatingSubjectId: grant.subjectId,
+                // A session-bound gateway caller reads Memory through that
+                // session's frozen selector; a sessionless caller keeps the
+                // workspace layer.
+                memory:
+                  typeof grant.metadata?.["sessionId"] === "string"
+                    ? ((await resolveSessionMemoryAgentScope(
+                        routeDeps.db,
+                        grant.workspaceId,
+                        grant.metadata["sessionId"],
+                      )) ?? { mode: "off" as const, endUserSubjectId: null, rootSessionId: null })
+                    : null,
+              },
             ),
           ),
         ]

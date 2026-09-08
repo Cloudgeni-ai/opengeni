@@ -56,6 +56,23 @@ test("children inherit or narrow bundle selection but cannot widen it", () => {
   expect(() => resolveBundledSkillSelection([sites], [documents])).toThrow("cannot widen");
 });
 
+test("bundle selection remains independent of session access and sandbox grouping", () => {
+  const groupId = "00000000-0000-4000-8000-000000000001";
+  const request = CreateSessionRequest.parse({
+    initialMessage: "Run with scoped access",
+    bundledSkillIds: [],
+    agentAccess: "user",
+    endUser: { source: "product", id: "reader" },
+    memoryScope: "off",
+    sandbox: { groupId },
+  });
+  expect(request.bundledSkillIds).toEqual([]);
+  expect(request.agentAccess).toBe("user");
+  expect(request.endUser).toEqual({ source: "product", id: "reader" });
+  expect(request.memoryScope).toBe("off");
+  expect(request.sandbox).toEqual({ groupId });
+});
+
 test("arbitrary metadata cannot override typed selection at admission", () => {
   const metadata = withBundledSkillSelectionMetadata({ label: "Keep" }, [sites]);
   const original = JSON.stringify(metadata);

@@ -146,7 +146,11 @@ import type {
   ScheduledTaskTriggerType,
   SlackInstallationBinding,
   Session,
+  SessionAgentAccess,
+  SessionAgentAccessViewer,
   SessionAuthorizationListScope,
+  SessionEndUser,
+  SessionMemoryScope,
   SessionListResponse,
   SessionTenancyPublicProjection,
   SessionEvent,
@@ -487,7 +491,13 @@ import {
   renderWorkspaceMemoryBlock,
   memoryTextForStorage,
   WORKSPACE_MEMORY_BLOCK_EMPTY,
+  endUserMemorySubjectId,
+  memoryReadScopesForAgentScope,
+  memoryWriteScopeForAgentScope,
+  normalizeMemoryScope,
+  type MemoryAgentScope,
   type MemoryBlockRecord,
+  type MemoryScopeSpec,
 } from "./memory-domain";
 
 export { sql as dbSql } from "drizzle-orm";
@@ -5387,6 +5397,30 @@ export type AppendEventInput = {
   occurredAt?: Date;
 };
 
+/**
+ * The creating session's access policy frozen onto an agent-created scheduled
+ * task. Each key is null when the creating session projection did not expose
+ * that fact at create time; a generated session then keeps its own default.
+ */
+export type ScheduledTaskCreatorSessionPolicy = {
+  agentAccess: string | null;
+  endUser: { source: string; id: string } | null;
+  memoryScope: string | null;
+};
+
+/**
+ * Frozen creator boundary of a scheduled task (migration 0428). Every field is
+ * null for a human/API-created task, which keeps the deployment default for
+ * its generated sessions. An agent-created task stores its creating session's
+ * effective first-party selection and permission set so a narrowed session
+ * cannot widen itself through a schedule.
+ */
+export type ScheduledTaskCreatorPolicy = {
+  firstPartyMcpTools: FirstPartyMcpToolName[] | null;
+  firstPartyMcpPermissions: Permission[] | null;
+  sessionPolicy: ScheduledTaskCreatorSessionPolicy | null;
+};
+
 export type CreateScheduledTaskInput = {
   id?: string;
   accountId: string;
@@ -5404,6 +5438,8 @@ export type CreateScheduledTaskInput = {
   createdByActor?: AgentSessionCreationActor | null;
   personalConnectionDelegations?: McpPersonalConnectionDelegation[];
   xaiProviderAccountAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1;
+  /** Frozen creator boundary; omit (or pass null fields) for human/API creates. */
+  creatorPolicy?: ScheduledTaskCreatorPolicy | null;
   targetSessionId?: string | null;
   variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
@@ -5486,6 +5522,8 @@ export type ListKnowledgeMemoryOptions = {
   kind?: KnowledgeMemoryKind | undefined;
   scope?: string | undefined;
   limit?: number | undefined;
+  /** Agent-only typed read layers; see WorkspaceMemorySearchInput.agentScope. */
+  agentScope?: MemoryAgentScope | undefined;
 };
 
 /**
@@ -15010,37 +15048,42 @@ export async function listKnowledgeMemories(
   workspaceId: string,
   options: ListKnowledgeMemoryOptions = {},
 ): Promise<KnowledgeMemory[]> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
-    if (options.status) {
-      conditions.push(
-        Array.isArray(options.status)
-          ? inArray(schema.knowledgeMemories.status, options.status)
-          : eq(schema.knowledgeMemories.status, options.status),
-      );
-    }
-    if (options.kind) {
-      conditions.push(eq(schema.knowledgeMemories.kind, options.kind));
-    }
-    const scope = cleanDbString(options.scope);
-    if (scope) {
-      conditions.push(eq(schema.knowledgeMemories.scope, scope));
-    }
-    const query = cleanDbString(options.query);
-    if (query) {
-      conditions.push(
-        sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
-      );
-    }
-    const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
-    const rows = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(and(...conditions))
-      .orderBy(desc(schema.knowledgeMemories.updatedAt))
-      .limit(limit);
-    return rows.map(mapKnowledgeMemory);
-  });
+  const readScopes = memoryAgentReadScopes(options.agentScope);
+  if (readScopes && readScopes.length === 0) return [];
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    withMemoryScopeRlsContext(scopedDb, readScopes, async () => {
+      const conditions: SQL[] = [eq(schema.knowledgeMemories.workspaceId, workspaceId)];
+      if (readScopes) conditions.push(memoryScopeVisibilityFilter(readScopes));
+      if (options.status) {
+        conditions.push(
+          Array.isArray(options.status)
+            ? inArray(schema.knowledgeMemories.status, options.status)
+            : eq(schema.knowledgeMemories.status, options.status),
+        );
+      }
+      if (options.kind) {
+        conditions.push(eq(schema.knowledgeMemories.kind, options.kind));
+      }
+      const scope = cleanDbString(options.scope);
+      if (scope) {
+        conditions.push(eq(schema.knowledgeMemories.scope, scope));
+      }
+      const query = cleanDbString(options.query);
+      if (query) {
+        conditions.push(
+          sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
+        );
+      }
+      const limit = Math.min(Math.max(options.limit ?? 20, 1), 100);
+      const rows = await scopedDb
+        .select()
+        .from(schema.knowledgeMemories)
+        .where(and(...conditions))
+        .orderBy(desc(schema.knowledgeMemories.updatedAt))
+        .limit(limit);
+      return rows.map(mapKnowledgeMemory);
+    }),
+  );
 }
 
 /**
@@ -15099,6 +15142,12 @@ export type SaveWorkspaceMemoryInput = {
   sessionId?: string | null | undefined; // provenance + event linkage
   origin?: WorkspaceMemoryOrigin | undefined;
   metadata?: Record<string, unknown> | undefined;
+  /**
+   * Typed selector the record is written under (migration 0427). Omitted
+   * means the shared workspace layer; `user` and `session` write one private
+   * layer whose rows only that end-user label / root tree can read back.
+   */
+  scope?: MemoryScopeSpec | undefined;
 };
 
 export type SaveWorkspaceMemoryResult = {
@@ -15123,6 +15172,8 @@ export type CorrectWorkspaceMemoryInput = {
   replacementText?: string | undefined;
   sessionId?: string | null | undefined;
   origin?: WorkspaceMemoryOrigin | undefined;
+  /** Agent read/write context; mutations must remain in its writable layer. */
+  agentScope?: MemoryAgentScope | undefined;
 };
 
 export type CorrectWorkspaceMemoryResult = {
@@ -15142,6 +15193,12 @@ export type WorkspaceMemorySearchInput = {
   mode?: WorkspaceMemorySearchMode | undefined;
   /** Agent-only containment. Human audit/search callers omit this. */
   agentPromptMode?: WorkspaceMemoryPromptMode | undefined;
+  /**
+   * Agent-only typed read layers (migration 0427): the workspace layer plus
+   * the session's own `user` or `session` layer. Human callers omit this and
+   * keep today's workspace-only read.
+   */
+  agentScope?: MemoryAgentScope | undefined;
 };
 
 export type WorkspaceMemorySearchResult = {
@@ -15161,6 +15218,138 @@ const visibleTextHashUniqueIndexNames = new Set([
   "knowledge_memories_workspace_visible_text_hash_uq",
   "knowledge_memories_scope_visible_text_hash_uq",
 ]);
+
+type AgentWritableMemoryScope = Extract<
+  MemoryScopeSpec,
+  { type: "workspace" } | { type: "user" } | { type: "session" }
+>;
+
+/** Session memory scope only ever writes the three agent-owned selectors. */
+function requireAgentWritableMemoryScope(
+  scope: MemoryScopeSpec | undefined,
+): AgentWritableMemoryScope {
+  const normalized = normalizeMemoryScope(scope ?? { type: "workspace" });
+  if (
+    normalized.type !== "workspace" &&
+    normalized.type !== "user" &&
+    normalized.type !== "session"
+  ) {
+    throw new Error(`Workspace memory writes do not accept the ${normalized.type} scope`);
+  }
+  return normalized;
+}
+
+/**
+ * Bind the typed selectors of one read/write to the transaction so the
+ * FORCE-RLS `workspace_isolation` policy on knowledge_memories admits exactly
+ * the workspace layer plus the named private layer. The subject GUC is the
+ * opaque end-user memory subject (`end_user:v1:<tuple hash>`), never a human;
+ * the memory session GUC is the lineage root.
+ */
+async function withMemoryScopeRlsContext<T>(
+  scopedDb: Database,
+  scopes: readonly MemoryScopeSpec[] | null,
+  fn: () => Promise<T>,
+): Promise<T> {
+  if (!scopes) return await fn();
+  let subjectId = "";
+  let sessionId = "";
+  for (const scope of scopes) {
+    if (scope.type === "user") subjectId = scope.subjectId;
+    if (scope.type === "session") sessionId = scope.sessionId;
+  }
+  // The override is transaction-local and restored afterwards so a wrapping
+  // caller (for example Slack publication in the same transaction) keeps its
+  // own actor context rather than inheriting the opaque end-user subject.
+  const [previous] = (await scopedDb.execute(sql`select
+    current_setting('opengeni.subject_id', true) as subject_id,
+    current_setting('opengeni.memory_session_id', true) as session_id`)) as unknown as Array<{
+    subject_id: string | null;
+    session_id: string | null;
+  }>;
+  await scopedDb.execute(sql`select
+    set_config('opengeni.subject_id', ${subjectId}, true),
+    set_config('opengeni.memory_session_id', ${sessionId}, true)`);
+  try {
+    return await fn();
+  } finally {
+    await scopedDb.execute(sql`select
+      set_config('opengeni.subject_id', ${previous?.subject_id ?? ""}, true),
+      set_config('opengeni.memory_session_id', ${previous?.session_id ?? ""}, true)`);
+  }
+}
+
+/** Explicit typed-scope predicate matching the RLS layer (defense in depth). */
+function memoryScopeVisibilityFilter(scopes: readonly MemoryScopeSpec[]): SQL {
+  const clauses: SQL[] = [];
+  for (const scope of scopes) {
+    if (scope.type === "workspace") {
+      clauses.push(eq(schema.knowledgeMemories.scopeType, "workspace"));
+    } else if (scope.type === "user") {
+      clauses.push(
+        and(
+          eq(schema.knowledgeMemories.scopeType, "user"),
+          eq(schema.knowledgeMemories.scopeSubjectId, scope.subjectId),
+        )!,
+      );
+    } else if (scope.type === "session") {
+      clauses.push(
+        and(
+          eq(schema.knowledgeMemories.scopeType, "session"),
+          eq(schema.knowledgeMemories.scopeSessionId, scope.sessionId),
+        )!,
+      );
+    }
+  }
+  if (clauses.length === 0) return sql`false`;
+  return clauses.length === 1 ? clauses[0]! : or(...clauses)!;
+}
+
+function memoryScopeColumns(scope: AgentWritableMemoryScope): {
+  scope: string;
+  scopeType: string;
+  scopeSubjectId: string | null;
+  scopeSessionId: string | null;
+} {
+  return {
+    scope: scope.type,
+    scopeType: scope.type,
+    scopeSubjectId: scope.type === "user" ? scope.subjectId : null,
+    scopeSessionId: scope.type === "session" ? scope.sessionId : null,
+  };
+}
+
+/** The typed scope a stored record lives in, when it is one an agent may write. */
+function agentWritableMemoryScopeOfRow(
+  row: Pick<
+    typeof schema.knowledgeMemories.$inferSelect,
+    "scopeType" | "scopeSubjectId" | "scopeSessionId"
+  >,
+): AgentWritableMemoryScope | null {
+  if (row.scopeType === "workspace") return { type: "workspace" };
+  if (row.scopeType === "user" && row.scopeSubjectId) {
+    return { type: "user", subjectId: row.scopeSubjectId };
+  }
+  if (row.scopeType === "session" && row.scopeSessionId) {
+    return { type: "session", sessionId: row.scopeSessionId };
+  }
+  return null;
+}
+
+/** Shared read access never grants a private agent shared write authority. */
+function assertMemoryWriteScope(
+  row: Parameters<typeof agentWritableMemoryScopeOfRow>[0],
+  scope: AgentWritableMemoryScope,
+): void {
+  const actual = agentWritableMemoryScopeOfRow(row);
+  if (!actual || JSON.stringify(normalizeMemoryScope(actual)) !== JSON.stringify(scope)) {
+    throw new Error("Memory mutations must stay in the session's writable scope.");
+  }
+}
+
+function memoryAgentReadScopes(agentScope: MemoryAgentScope | undefined): MemoryScopeSpec[] | null {
+  return agentScope ? memoryReadScopesForAgentScope(agentScope) : null;
+}
 
 function isVisibleTextHashUniqueViolation(error: unknown): boolean {
   const candidate = error as {
@@ -15316,6 +15505,12 @@ export async function saveWorkspaceMemory(
   }
   const textHash = hashMemoryText(exactText);
   const kind: KnowledgeMemoryKind = input.kind ?? "semantic";
+  const writeScope = requireAgentWritableMemoryScope(input.scope);
+  // A private write still sees the shared layer: an agent saving into its
+  // user/session layer dedupes against workspace facts it can already read.
+  const visibleScopes: MemoryScopeSpec[] =
+    writeScope.type === "workspace" ? [writeScope] : [{ type: "workspace" }, writeScope];
+  const visibleScopeFilter = memoryScopeVisibilityFilter(visibleScopes);
 
   // Embed fail-soft, OUTSIDE the transaction: a provider error must never block a
   // write (the row stays keyword-searchable). Mirrors indexDocumentNow.
@@ -15337,127 +15532,304 @@ export async function saveWorkspaceMemory(
     }
   }
 
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    // Resolve the supersession target first so an invalid replaces_id fails before
-    // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
-    let replacesFullId: string | null = null;
-    let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
-    if (input.replacesId) {
-      replacesFullId = await resolveWorkspaceMemoryId(
-        scopedDb,
-        input.workspaceId,
-        input.replacesId,
-      );
-      if (!replacesFullId) {
-        throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+  return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+    withMemoryScopeRlsContext(scopedDb, visibleScopes, async () => {
+      // Resolve the supersession target first so an invalid replaces_id fails before
+      // we insert anything (cross-workspace ids are RLS-invisible → treated as not found).
+      let replacesFullId: string | null = null;
+      let replacesRow: typeof schema.knowledgeMemories.$inferSelect | null = null;
+      if (input.replacesId) {
+        replacesFullId = await resolveWorkspaceMemoryId(
+          scopedDb,
+          input.workspaceId,
+          input.replacesId,
         );
+        if (!replacesFullId) {
+          throw new Error(
+            `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+          );
+        }
+        const [row] = await scopedDb
+          .select()
+          .from(schema.knowledgeMemories)
+          .where(
+            and(
+              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+              eq(schema.knowledgeMemories.id, replacesFullId),
+            ),
+          )
+          .limit(1)
+          .for("update");
+        if (!row) {
+          throw new Error(
+            `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+          );
+        }
+        if (input.origin === "agent" && row.status !== "active") {
+          throw new Error(
+            `Autonomous Memory can replace only active agent-writable records; memory "${row.id}" has status "${row.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+          );
+        }
+        assertMemoryWriteScope(row, writeScope);
+        replacesRow = row;
       }
-      const [row] = await scopedDb
+
+      const updateReplacesInPlace = async (): Promise<SaveWorkspaceMemoryResult> => {
+        if (!replacesFullId) {
+          throw new Error("Cannot update a memory in place without replaces_id.");
+        }
+        // A caller can "replace" a row with text that exact/near-dedups only to
+        // that same row. In that case there is no supersession target; keep the
+        // row live and update its text/vector metadata so the call still has an
+        // observable effect.
+        const normalizedTextChanged = replacesRow
+          ? hashMemoryText(
+              fromPostgresLosslessText(replacesRow.text, replacesRow.textCodecVersion),
+            ) !== textHash
+          : true;
+        const metadata = replacesRow
+          ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input)
+          : undefined;
+        const [updated] = await scopedDb
+          .update(schema.knowledgeMemories)
+          .set(
+            withLosslessContentWriteVersion(
+              {
+                text: exactText,
+                textHash,
+                ...(normalizedTextChanged
+                  ? {
+                      // New text with no fresh vector must clear the old vector. Keeping a
+                      // stale vector would make vector search return this row for the old
+                      // text's meaning; keyword search still covers the new text.
+                      embedding,
+                      embeddingModel,
+                    }
+                  : {}),
+                ...(input.kind !== undefined ? { kind } : {}),
+                ...(input.confidence !== undefined
+                  ? { confidence: confidenceToStorage(input.confidence) }
+                  : {}),
+                ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
+                ...(metadata !== undefined ? { metadata } : {}),
+                updatedAt: new Date(),
+              },
+              "text",
+              "textCodecVersion",
+            ),
+          )
+          .where(
+            and(
+              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+              eq(schema.knowledgeMemories.id, replacesFullId),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new Error(
+            `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+          );
+        }
+        return {
+          memory: mapKnowledgeMemory(updated),
+          deduped: false,
+          dedupeReason: null,
+          superseded: null,
+          supersededId: null,
+          updated: true,
+          embedded: embedding !== null,
+        };
+      };
+
+      const dedupeToExisting = async (
+        row: typeof schema.knowledgeMemories.$inferSelect,
+        dedupeReason: "exact" | "near",
+      ): Promise<SaveWorkspaceMemoryResult> => {
+        if (replacesFullId && row.id === replacesFullId) {
+          return await updateReplacesInPlace();
+        }
+        let superseded: KnowledgeMemory | null = null;
+        if (replacesFullId) {
+          const [old] = await scopedDb
+            .update(schema.knowledgeMemories)
+            .set({
+              status: "superseded",
+              supersededById: row.id,
+              validUntil: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+                eq(schema.knowledgeMemories.id, replacesFullId),
+              ),
+            )
+            .returning();
+          if (!old) {
+            throw new Error(
+              `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+            );
+          }
+          superseded = mapKnowledgeMemory(old);
+        }
+        return {
+          memory: mapKnowledgeMemory(row),
+          deduped: true,
+          dedupeReason,
+          superseded,
+          supersededId: superseded?.id ?? null,
+          updated: false,
+          embedded: embedding !== null,
+        };
+      };
+
+      // Exact-dup gate: same normalized text among agent-visible rows → NOOP.
+      const exactMatches = await scopedDb
         .select()
         .from(schema.knowledgeMemories)
         .where(
           and(
             eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
+            eq(schema.knowledgeMemories.textHash, textHash),
+            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+            visibleScopeFilter,
           ),
         )
-        .limit(1)
-        .for("update");
-      if (!row) {
-        throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-        );
+        .orderBy(
+          replacesFullId
+            ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
+            : schema.knowledgeMemories.updatedAt,
+        )
+        .limit(replacesFullId ? 2 : 1);
+      const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
+      if (exact) {
+        return await dedupeToExisting(exact, "exact");
       }
-      if (input.origin === "agent" && row.status !== "active") {
-        throw new Error(
-          `Autonomous Memory can replace only active agent-writable records; memory "${row.id}" has status "${row.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
-        );
-      }
-      replacesRow = row;
-    }
 
-    const updateReplacesInPlace = async (): Promise<SaveWorkspaceMemoryResult> => {
-      if (!replacesFullId) {
-        throw new Error("Cannot update a memory in place without replaces_id.");
+      // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
+      // vector from the SAME model; similarity ≥ threshold → NOOP. This check is
+      // advisory: cosine similarity cannot be protected by a unique index, unlike
+      // the exact text_hash gate below.
+      if (embedding && embeddingModel) {
+        const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
+        const neighbours = await scopedDb
+          .select({
+            id: schema.knowledgeMemories.id,
+            distance,
+          })
+          .from(schema.knowledgeMemories)
+          .where(
+            and(
+              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+              inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
+              eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
+              sql`${schema.knowledgeMemories.embedding} is not null`,
+              visibleScopeFilter,
+            ),
+          )
+          .orderBy(distance)
+          .limit(MEMORY_NEAR_DUP_NEIGHBORS);
+        const duplicateNeighbours = neighbours.filter(
+          (row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD,
+        );
+        const nearest =
+          duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
+        if (nearest) {
+          const [row] = await scopedDb
+            .select()
+            .from(schema.knowledgeMemories)
+            .where(
+              and(
+                eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+                eq(schema.knowledgeMemories.id, nearest.id),
+              ),
+            )
+            .limit(1);
+          if (row) {
+            return await dedupeToExisting(row, "near");
+          }
+        }
       }
-      // A caller can "replace" a row with text that exact/near-dedups only to
-      // that same row. In that case there is no supersession target; keep the
-      // row live and update its text/vector metadata so the call still has an
-      // observable effect.
-      const normalizedTextChanged = replacesRow
-        ? hashMemoryText(
-            fromPostgresLosslessText(replacesRow.text, replacesRow.textCodecVersion),
-          ) !== textHash
-        : true;
-      const metadata = replacesRow
-        ? inPlaceSaveMemoryMetadata(replacesRow.metadata, input)
-        : undefined;
-      const [updated] = await scopedDb
-        .update(schema.knowledgeMemories)
-        .set(
-          withLosslessContentWriteVersion(
-            {
-              text: exactText,
-              textHash,
-              ...(normalizedTextChanged
-                ? {
-                    // New text with no fresh vector must clear the old vector. Keeping a
-                    // stale vector would make vector search return this row for the old
-                    // text's meaning; keyword search still covers the new text.
-                    embedding,
-                    embeddingModel,
-                  }
-                : {}),
-              ...(input.kind !== undefined ? { kind } : {}),
-              ...(input.confidence !== undefined
-                ? { confidence: confidenceToStorage(input.confidence) }
-                : {}),
-              ...(input.pinned !== undefined ? { pinned: input.pinned } : {}),
-              ...(metadata !== undefined ? { metadata } : {}),
-              updatedAt: new Date(),
-            },
-            "text",
-            "textCodecVersion",
-          ),
-        )
+
+      // Per-workspace visible-record cap: fail actionably rather than silently drop.
+      const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb
+        .select({
+          visibleCount: sql<number>`count(*)::int`,
+        })
+        .from(schema.knowledgeMemories)
         .where(
           and(
             eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
+            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
           ),
-        )
-        .returning();
-      if (!updated) {
+        );
+      const replacesVisible = replacesRow
+        ? agentVisibleMemoryStatuses.includes(
+            replacesRow.status as (typeof agentVisibleMemoryStatuses)[number],
+          )
+        : false;
+      const effectiveVisibleCount = Number(visibleCount) - (replacesVisible ? 1 : 0);
+      if (effectiveVisibleCount >= MEMORY_VISIBLE_RECORD_CAP) {
         throw new Error(
-          `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
+          `Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`,
         );
       }
-      return {
-        memory: mapKnowledgeMemory(updated),
-        deduped: false,
-        dedupeReason: null,
-        superseded: null,
-        supersededId: null,
-        updated: true,
-        embedded: embedding !== null,
-      };
-    };
 
-    const dedupeToExisting = async (
-      row: typeof schema.knowledgeMemories.$inferSelect,
-      dedupeReason: "exact" | "near",
-    ): Promise<SaveWorkspaceMemoryResult> => {
-      if (replacesFullId && row.id === replacesFullId) {
-        return await updateReplacesInPlace();
+      const sourceRefs: KnowledgeSourceRef[] = input.sessionId
+        ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
+        : [];
+      let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
+      try {
+        const rows = await scopedDb.transaction(
+          async (tx) =>
+            await tx
+              .insert(schema.knowledgeMemories)
+              .values(
+                withLosslessContentWriteVersion(
+                  {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    status: "active",
+                    kind,
+                    ...memoryScopeColumns(writeScope),
+                    text: exactText,
+                    textHash,
+                    sourceRefs,
+                    confidence: confidenceToStorage(input.confidence ?? 0.5),
+                    pinned: input.pinned ?? false,
+                    metadata: saveMemoryMetadata(input),
+                    createdBySessionId: input.sessionId ?? null,
+                    supersedesId: replacesFullId,
+                    ...(embedding ? { embedding, embeddingModel } : {}),
+                  },
+                  "text",
+                  "textCodecVersion",
+                ),
+              )
+              .returning(),
+        );
+        inserted = rows[0];
+      } catch (error) {
+        if (!isVisibleTextHashUniqueViolation(error)) {
+          throw error;
+        }
+        const winner = await findVisibleMemoryByTextHash(scopedDb, input.workspaceId, textHash);
+        if (!winner) {
+          throw error;
+        }
+        return await dedupeToExisting(winner, "exact");
       }
+      if (!inserted) {
+        throw new Error("Failed to save workspace memory");
+      }
+
       let superseded: KnowledgeMemory | null = null;
       if (replacesFullId) {
         const [old] = await scopedDb
           .update(schema.knowledgeMemories)
           .set({
             status: "superseded",
-            supersededById: row.id,
+            supersededById: inserted.id,
             validUntil: new Date(),
             updatedAt: new Date(),
           })
@@ -15468,192 +15840,20 @@ export async function saveWorkspaceMemory(
             ),
           )
           .returning();
-        if (!old) {
-          throw new Error(
-            `replaces_id "${input.replacesId}" does not match a memory in this workspace.`,
-          );
-        }
-        superseded = mapKnowledgeMemory(old);
+        superseded = old ? mapKnowledgeMemory(old) : null;
       }
+
       return {
-        memory: mapKnowledgeMemory(row),
-        deduped: true,
-        dedupeReason,
+        memory: mapKnowledgeMemory(inserted),
+        deduped: false,
+        dedupeReason: null,
         superseded,
         supersededId: superseded?.id ?? null,
         updated: false,
         embedded: embedding !== null,
       };
-    };
-
-    // Exact-dup gate: same normalized text among agent-visible rows → NOOP.
-    const exactMatches = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.textHash, textHash),
-          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-        ),
-      )
-      .orderBy(
-        replacesFullId
-          ? sql`case when ${schema.knowledgeMemories.id} = ${replacesFullId} then 1 else 0 end`
-          : schema.knowledgeMemories.updatedAt,
-      )
-      .limit(replacesFullId ? 2 : 1);
-    const exact = exactMatches.find((row) => row.id !== replacesFullId) ?? exactMatches[0];
-    if (exact) {
-      return await dedupeToExisting(exact, "exact");
-    }
-
-    // Near-dup gate: top-N cosine neighbours among agent-visible rows with a
-    // vector from the SAME model; similarity ≥ threshold → NOOP. This check is
-    // advisory: cosine similarity cannot be protected by a unique index, unlike
-    // the exact text_hash gate below.
-    if (embedding && embeddingModel) {
-      const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(embedding)}::vector`;
-      const neighbours = await scopedDb
-        .select({
-          id: schema.knowledgeMemories.id,
-          distance,
-        })
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-            eq(schema.knowledgeMemories.embeddingModel, embeddingModel),
-            sql`${schema.knowledgeMemories.embedding} is not null`,
-          ),
-        )
-        .orderBy(distance)
-        .limit(MEMORY_NEAR_DUP_NEIGHBORS);
-      const duplicateNeighbours = neighbours.filter(
-        (row) => 1 - Number(row.distance) >= MEMORY_NEAR_DUP_COSINE_THRESHOLD,
-      );
-      const nearest =
-        duplicateNeighbours.find((row) => row.id !== replacesFullId) ?? duplicateNeighbours[0];
-      if (nearest) {
-        const [row] = await scopedDb
-          .select()
-          .from(schema.knowledgeMemories)
-          .where(
-            and(
-              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-              eq(schema.knowledgeMemories.id, nearest.id),
-            ),
-          )
-          .limit(1);
-        if (row) {
-          return await dedupeToExisting(row, "near");
-        }
-      }
-    }
-
-    // Per-workspace visible-record cap: fail actionably rather than silently drop.
-    const [{ visibleCount } = { visibleCount: 0 }] = await scopedDb
-      .select({
-        visibleCount: sql<number>`count(*)::int`,
-      })
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          inArray(schema.knowledgeMemories.status, agentVisibleMemoryStatuses),
-        ),
-      );
-    const replacesVisible = replacesRow
-      ? agentVisibleMemoryStatuses.includes(
-          replacesRow.status as (typeof agentVisibleMemoryStatuses)[number],
-        )
-      : false;
-    const effectiveVisibleCount = Number(visibleCount) - (replacesVisible ? 1 : 0);
-    if (effectiveVisibleCount >= MEMORY_VISIBLE_RECORD_CAP) {
-      throw new Error(
-        `Workspace's visible memory is full (${MEMORY_VISIBLE_RECORD_CAP} visible records). Correct or supersede stale memories before adding new ones.`,
-      );
-    }
-
-    const sourceRefs: KnowledgeSourceRef[] = input.sessionId
-      ? [{ kind: "session_event", id: input.sessionId, metadata: {} }]
-      : [];
-    let inserted: typeof schema.knowledgeMemories.$inferSelect | undefined;
-    try {
-      const rows = await scopedDb.transaction(
-        async (tx) =>
-          await tx
-            .insert(schema.knowledgeMemories)
-            .values(
-              withLosslessContentWriteVersion(
-                {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  status: "active",
-                  kind,
-                  scope: "workspace",
-                  text: exactText,
-                  textHash,
-                  sourceRefs,
-                  confidence: confidenceToStorage(input.confidence ?? 0.5),
-                  pinned: input.pinned ?? false,
-                  metadata: saveMemoryMetadata(input),
-                  createdBySessionId: input.sessionId ?? null,
-                  supersedesId: replacesFullId,
-                  ...(embedding ? { embedding, embeddingModel } : {}),
-                },
-                "text",
-                "textCodecVersion",
-              ),
-            )
-            .returning(),
-      );
-      inserted = rows[0];
-    } catch (error) {
-      if (!isVisibleTextHashUniqueViolation(error)) {
-        throw error;
-      }
-      const winner = await findVisibleMemoryByTextHash(scopedDb, input.workspaceId, textHash);
-      if (!winner) {
-        throw error;
-      }
-      return await dedupeToExisting(winner, "exact");
-    }
-    if (!inserted) {
-      throw new Error("Failed to save workspace memory");
-    }
-
-    let superseded: KnowledgeMemory | null = null;
-    if (replacesFullId) {
-      const [old] = await scopedDb
-        .update(schema.knowledgeMemories)
-        .set({
-          status: "superseded",
-          supersededById: inserted.id,
-          validUntil: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, replacesFullId),
-          ),
-        )
-        .returning();
-      superseded = old ? mapKnowledgeMemory(old) : null;
-    }
-
-    return {
-      memory: mapKnowledgeMemory(inserted),
-      deduped: false,
-      dedupeReason: null,
-      superseded,
-      supersededId: superseded?.id ?? null,
-      updated: false,
-      embedded: embedding !== null,
-    };
-  });
+    }),
+  );
 }
 
 export async function correctWorkspaceMemory(
@@ -15662,25 +15862,32 @@ export async function correctWorkspaceMemory(
   embedder?: MemoryEmbedder,
 ): Promise<CorrectWorkspaceMemoryResult> {
   const replacementText = input.replacementText;
+  const readScopes = memoryAgentReadScopes(input.agentScope);
+  if (readScopes && readScopes.length === 0) {
+    throw new Error("Memory is disabled for this session.");
+  }
+  const writeScope = input.agentScope ? memoryWriteScopeForAgentScope(input.agentScope) : null;
   if (replacementText !== undefined) {
     // Correction WITH a replacement is a full supersede through the one write gate.
-    const [old] = await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-      const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
-      if (!fullId) {
-        return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
-      }
-      return await scopedDb
-        .select()
-        .from(schema.knowledgeMemories)
-        .where(
-          and(
-            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-            eq(schema.knowledgeMemories.id, fullId),
-          ),
-        )
-        .limit(1)
-        .for("update");
-    });
+    const [old] = await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+      withMemoryScopeRlsContext(scopedDb, readScopes, async () => {
+        const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+        if (!fullId) {
+          return [] as (typeof schema.knowledgeMemories.$inferSelect)[];
+        }
+        return await scopedDb
+          .select()
+          .from(schema.knowledgeMemories)
+          .where(
+            and(
+              eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+              eq(schema.knowledgeMemories.id, fullId),
+            ),
+          )
+          .limit(1)
+          .for("update");
+      }),
+    );
     if (!old) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
@@ -15689,6 +15896,7 @@ export async function correctWorkspaceMemory(
         `Autonomous Memory can correct only active agent-writable records; memory "${old.id}" has status "${old.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
       );
     }
+    if (writeScope) assertMemoryWriteScope(old, requireAgentWritableMemoryScope(writeScope));
     const result = await saveWorkspaceMemory(
       db,
       {
@@ -15700,6 +15908,8 @@ export async function correctWorkspaceMemory(
         replacesId: old.id,
         sessionId: input.sessionId ?? null,
         origin: input.origin,
+        // Rechecked under the replacement target lock by the common save gate.
+        scope: writeScope ?? agentWritableMemoryScopeOfRow(old) ?? { type: "workspace" },
       },
       embedder,
     );
@@ -15718,57 +15928,60 @@ export async function correctWorkspaceMemory(
   }
 
   // No replacement → archive the record.
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
-    if (!fullId) {
-      throw new Error(`Memory "${input.id}" not found in this workspace.`);
-    }
-    const [existing] = await scopedDb
-      .select()
-      .from(schema.knowledgeMemories)
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.id, fullId),
-        ),
-      )
-      .limit(1)
-      .for("update");
-    if (!existing) {
-      throw new Error(`Memory "${input.id}" not found in this workspace.`);
-    }
-    if (input.origin === "agent" && existing.status !== "active") {
-      throw new Error(
-        `Autonomous Memory can archive only active agent-writable records; memory "${existing.id}" has status "${existing.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
-      );
-    }
-    const correctionReason = cleanDbString(input.reason);
-    const [archived] = await scopedDb
-      .update(schema.knowledgeMemories)
-      .set({
-        status: "archived",
-        validUntil: new Date(),
-        updatedAt: new Date(),
-        ...(correctionReason
-          ? { metadata: { ...(existing.metadata ?? {}), correctionReason } }
-          : {}),
-      })
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
-          eq(schema.knowledgeMemories.id, fullId),
-        ),
-      )
-      .returning();
-    if (!archived) {
-      throw new Error(`Memory "${input.id}" not found in this workspace.`);
-    }
-    return {
-      action: "archived",
-      memory: mapKnowledgeMemory(archived),
-      replacement: null,
-    };
-  });
+  return await withWorkspaceRls(db, input.workspaceId, (scopedDb) =>
+    withMemoryScopeRlsContext(scopedDb, readScopes, async () => {
+      const fullId = await resolveWorkspaceMemoryId(scopedDb, input.workspaceId, input.id);
+      if (!fullId) {
+        throw new Error(`Memory "${input.id}" not found in this workspace.`);
+      }
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.knowledgeMemories)
+        .where(
+          and(
+            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+            eq(schema.knowledgeMemories.id, fullId),
+          ),
+        )
+        .limit(1)
+        .for("update");
+      if (!existing) {
+        throw new Error(`Memory "${input.id}" not found in this workspace.`);
+      }
+      if (input.origin === "agent" && existing.status !== "active") {
+        throw new Error(
+          `Autonomous Memory can archive only active agent-writable records; memory "${existing.id}" has status "${existing.status}". Human-reviewed Knowledge must be changed through its review lifecycle.`,
+        );
+      }
+      if (writeScope) assertMemoryWriteScope(existing, requireAgentWritableMemoryScope(writeScope));
+      const correctionReason = cleanDbString(input.reason);
+      const [archived] = await scopedDb
+        .update(schema.knowledgeMemories)
+        .set({
+          status: "archived",
+          validUntil: new Date(),
+          updatedAt: new Date(),
+          ...(correctionReason
+            ? { metadata: { ...(existing.metadata ?? {}), correctionReason } }
+            : {}),
+        })
+        .where(
+          and(
+            eq(schema.knowledgeMemories.workspaceId, input.workspaceId),
+            eq(schema.knowledgeMemories.id, fullId),
+          ),
+        )
+        .returning();
+      if (!archived) {
+        throw new Error(`Memory "${input.id}" not found in this workspace.`);
+      }
+      return {
+        action: "archived",
+        memory: mapKnowledgeMemory(archived),
+        replacement: null,
+      };
+    }),
+  );
 }
 
 export async function searchWorkspaceMemories(
@@ -15792,149 +16005,158 @@ export async function searchWorkspaceMemories(
   if (input.kind) {
     baseConditions.push(eq(schema.knowledgeMemories.kind, input.kind));
   }
+  const readScopes = memoryAgentReadScopes(input.agentScope);
+  if (readScopes) {
+    // Memory off: an agent-scoped search sees nothing rather than the
+    // workspace layer its session was configured not to read.
+    if (readScopes.length === 0) return [];
+    baseConditions.push(memoryScopeVisibilityFilter(readScopes));
+  }
 
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const scored = new Map<string, { vectorScore: number | null; keywordScore: number | null }>();
+  return await withWorkspaceRls(db, workspaceId, (scopedDb) =>
+    withMemoryScopeRlsContext(scopedDb, readScopes, async () => {
+      const scored = new Map<string, { vectorScore: number | null; keywordScore: number | null }>();
 
-    if (mode === "vector" || mode === "hybrid") {
-      try {
-        if (!embedder) {
-          throw new Error("no embedder configured for vector memory search");
+      if (mode === "vector" || mode === "hybrid") {
+        try {
+          if (!embedder) {
+            throw new Error("no embedder configured for vector memory search");
+          }
+          const [vector] = await embedder.embedMany([query]);
+          if (!vector || vector.length === 0) {
+            throw new Error("embedder returned no query vector");
+          }
+          const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(vector)}::vector`;
+          const rows = await scopedDb
+            .select({ id: schema.knowledgeMemories.id, distance })
+            .from(schema.knowledgeMemories)
+            .where(
+              and(
+                ...baseConditions,
+                eq(schema.knowledgeMemories.embeddingModel, embedder.model),
+                sql`${schema.knowledgeMemories.embedding} is not null`,
+              ),
+            )
+            .orderBy(distance)
+            .limit(candidateLimit);
+          for (const row of rows) {
+            const vectorScore = 1 / (1 + Number(row.distance));
+            scored.set(row.id, {
+              vectorScore,
+              keywordScore: scored.get(row.id)?.keywordScore ?? null,
+            });
+          }
+        } catch (error) {
+          if (mode === "vector") {
+            throw error;
+          }
+          console.warn(
+            "workspace memory hybrid search vector component failed; falling back to keyword",
+            {
+              errorClass: "MemorySearchOperationError",
+              errorCode: "memory_hybrid_vector_failed",
+              origin: "db",
+            },
+          );
         }
-        const [vector] = await embedder.embedMany([query]);
-        if (!vector || vector.length === 0) {
-          throw new Error("embedder returned no query vector");
-        }
-        const distance = sql<number>`${schema.knowledgeMemories.embedding} <=> ${memoryVectorLiteral(vector)}::vector`;
+      }
+
+      if (mode === "keyword" || mode === "hybrid") {
+        const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.knowledgeMemories.text}), plainto_tsquery('simple', ${query}))`;
         const rows = await scopedDb
-          .select({ id: schema.knowledgeMemories.id, distance })
+          .select({ id: schema.knowledgeMemories.id, rank })
           .from(schema.knowledgeMemories)
           .where(
             and(
               ...baseConditions,
-              eq(schema.knowledgeMemories.embeddingModel, embedder.model),
-              sql`${schema.knowledgeMemories.embedding} is not null`,
+              sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
             ),
           )
-          .orderBy(distance)
+          .orderBy(desc(rank))
           .limit(candidateLimit);
         for (const row of rows) {
-          const vectorScore = 1 / (1 + Number(row.distance));
+          const rankValue = Number(row.rank);
+          const keywordScore =
+            Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
+          const prev = scored.get(row.id);
           scored.set(row.id, {
-            vectorScore,
-            keywordScore: scored.get(row.id)?.keywordScore ?? null,
+            vectorScore: prev?.vectorScore ?? null,
+            keywordScore,
           });
         }
-      } catch (error) {
-        if (mode === "vector") {
-          throw error;
-        }
-        console.warn(
-          "workspace memory hybrid search vector component failed; falling back to keyword",
-          {
-            errorClass: "MemorySearchOperationError",
-            errorCode: "memory_hybrid_vector_failed",
-            origin: "db",
-          },
-        );
       }
-    }
 
-    if (mode === "keyword" || mode === "hybrid") {
-      const rank = sql<number>`ts_rank_cd(to_tsvector('simple', ${schema.knowledgeMemories.text}), plainto_tsquery('simple', ${query}))`;
-      const rows = await scopedDb
-        .select({ id: schema.knowledgeMemories.id, rank })
-        .from(schema.knowledgeMemories)
+      const ranked = [...scored.entries()]
+        .map(([id, { vectorScore, keywordScore }]) => {
+          const matchType: WorkspaceMemorySearchMode =
+            vectorScore !== null && keywordScore !== null
+              ? "hybrid"
+              : vectorScore !== null
+                ? "vector"
+                : "keyword";
+          const vector = vectorScore ?? 0;
+          const keyword = keywordScore ?? 0;
+          const score =
+            mode === "vector"
+              ? vector
+              : mode === "keyword"
+                ? keyword
+                : Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0));
+          return {
+            id,
+            score: Number(score.toFixed(6)),
+            matchType,
+            vectorScore,
+            keywordScore,
+          };
+        })
+        .sort(
+          (left, right) =>
+            right.score - left.score ||
+            (right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
+            (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
+        )
+        .slice(0, limit);
+
+      if (ranked.length === 0) {
+        return [];
+      }
+
+      // Bump usage_count/last_used_at for the returned rows (NOT updated_at — search
+      // must not reshuffle the working set's recency order). Returns the fresh rows.
+      const ids = ranked.map((entry) => entry.id);
+      const bumped = await scopedDb
+        .update(schema.knowledgeMemories)
+        .set({
+          usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
+          lastUsedAt: new Date(),
+        })
         .where(
           and(
-            ...baseConditions,
-            sql`to_tsvector('simple', ${schema.knowledgeMemories.text}) @@ plainto_tsquery('simple', ${query})`,
+            eq(schema.knowledgeMemories.workspaceId, workspaceId),
+            inArray(schema.knowledgeMemories.id, ids),
           ),
         )
-        .orderBy(desc(rank))
-        .limit(candidateLimit);
-      for (const row of rows) {
-        const rankValue = Number(row.rank);
-        const keywordScore =
-          Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
-        const prev = scored.get(row.id);
-        scored.set(row.id, {
-          vectorScore: prev?.vectorScore ?? null,
-          keywordScore,
+        .returning();
+      const byId = new Map(bumped.map((row) => [row.id, row] as const));
+
+      const results: WorkspaceMemorySearchResult[] = [];
+      for (const entry of ranked) {
+        const row = byId.get(entry.id);
+        if (!row) {
+          continue;
+        }
+        results.push({
+          memory: mapKnowledgeMemory(row),
+          score: entry.score,
+          matchType: entry.matchType,
+          vectorScore: entry.vectorScore,
+          keywordScore: entry.keywordScore,
         });
       }
-    }
-
-    const ranked = [...scored.entries()]
-      .map(([id, { vectorScore, keywordScore }]) => {
-        const matchType: WorkspaceMemorySearchMode =
-          vectorScore !== null && keywordScore !== null
-            ? "hybrid"
-            : vectorScore !== null
-              ? "vector"
-              : "keyword";
-        const vector = vectorScore ?? 0;
-        const keyword = keywordScore ?? 0;
-        const score =
-          mode === "vector"
-            ? vector
-            : mode === "keyword"
-              ? keyword
-              : Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0));
-        return {
-          id,
-          score: Number(score.toFixed(6)),
-          matchType,
-          vectorScore,
-          keywordScore,
-        };
-      })
-      .sort(
-        (left, right) =>
-          right.score - left.score ||
-          (right.vectorScore ?? 0) - (left.vectorScore ?? 0) ||
-          (right.keywordScore ?? 0) - (left.keywordScore ?? 0),
-      )
-      .slice(0, limit);
-
-    if (ranked.length === 0) {
-      return [];
-    }
-
-    // Bump usage_count/last_used_at for the returned rows (NOT updated_at — search
-    // must not reshuffle the working set's recency order). Returns the fresh rows.
-    const ids = ranked.map((entry) => entry.id);
-    const bumped = await scopedDb
-      .update(schema.knowledgeMemories)
-      .set({
-        usageCount: sql`${schema.knowledgeMemories.usageCount} + 1`,
-        lastUsedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(schema.knowledgeMemories.workspaceId, workspaceId),
-          inArray(schema.knowledgeMemories.id, ids),
-        ),
-      )
-      .returning();
-    const byId = new Map(bumped.map((row) => [row.id, row] as const));
-
-    const results: WorkspaceMemorySearchResult[] = [];
-    for (const entry of ranked) {
-      const row = byId.get(entry.id);
-      if (!row) {
-        continue;
-      }
-      results.push({
-        memory: mapKnowledgeMemory(row),
-        score: entry.score,
-        matchType: entry.matchType,
-        vectorScore: entry.vectorScore,
-        keywordScore: entry.keywordScore,
-      });
-    }
-    return results;
-  });
+      return results;
+    }),
+  );
 }
 
 // Render the per-turn working-set block for a workspace. Returns null when the
@@ -16394,6 +16616,9 @@ export async function createScheduledTask(
           xaiProviderAccountAuthoritySnapshot:
             input.xaiProviderAccountAuthoritySnapshot ??
             WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+          creatorFirstPartyMcpTools: input.creatorPolicy?.firstPartyMcpTools ?? null,
+          creatorFirstPartyMcpPermissions: input.creatorPolicy?.firstPartyMcpPermissions ?? null,
+          creatorSessionPolicy: input.creatorPolicy?.sessionPolicy ?? null,
           reusableSessionId: input.targetSessionId ?? null,
           variableSetId: input.variableSetId ?? null,
           rigId: input.rigId ?? null,
@@ -16698,6 +16923,50 @@ export async function getScheduledTaskXaiProviderAccountAuthoritySnapshot(
     return row
       ? XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot)
       : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+  });
+}
+
+/**
+ * The frozen creator boundary of a scheduled task. Read at fire time (and by
+ * recovery of an already-admitted run, which is why a tombstoned task still
+ * answers): the columns are written once at create and never updated, so the
+ * read is deterministic for the task's whole life. Null when the task has no
+ * row at all.
+ */
+export async function getScheduledTaskCreatorPolicy(
+  db: Database,
+  workspaceId: string,
+  taskId: string,
+): Promise<ScheduledTaskCreatorPolicy | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        firstPartyMcpTools: schema.scheduledTasks.creatorFirstPartyMcpTools,
+        firstPartyMcpPermissions: schema.scheduledTasks.creatorFirstPartyMcpPermissions,
+        sessionPolicy: schema.scheduledTasks.creatorSessionPolicy,
+      })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          eq(schema.scheduledTasks.id, taskId),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    return {
+      firstPartyMcpTools: row.firstPartyMcpTools ? [...row.firstPartyMcpTools] : null,
+      firstPartyMcpPermissions: row.firstPartyMcpPermissions
+        ? [...row.firstPartyMcpPermissions]
+        : null,
+      sessionPolicy: row.sessionPolicy
+        ? {
+            agentAccess: row.sessionPolicy.agentAccess ?? null,
+            endUser: row.sessionPolicy.endUser ?? null,
+            memoryScope: row.sessionPolicy.memoryScope ?? null,
+          }
+        : null,
+    };
   });
 }
 
@@ -31064,6 +31333,12 @@ export type SessionCreateInput = {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   policyRole?: string | null;
+  /** Agent-to-agent reach (migration 0427); omitted means the workspace default. */
+  agentAccess?: SessionAgentAccess;
+  /** Opaque end-user label; omitted or null means none. */
+  endUser?: SessionEndUser | null;
+  /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
+  memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
@@ -31362,6 +31637,10 @@ type SessionCreateReplayIdentity = {
   variableSetIds: string[];
   selectedInstalledSkillIds: string[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
+  /** Access/memory scope of the retrying request; omitted means the defaults. */
+  agentAccess?: SessionAgentAccess;
+  endUser?: SessionEndUser | null;
+  memoryScope?: SessionMemoryScope;
 };
 
 // Session metadata is immutable after creation and already participates in
@@ -31420,6 +31699,17 @@ function assertSessionCreateReplayIdentity(
     throw new SessionCreateIdempotencyConflictError();
   }
   if (existing.createRequestedVisibility !== (input.visibility ?? "workspace_shared")) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
+  // A keyed retry that asks for a different agent-access, end-user, or memory
+  // scope is a different request, never a replay that silently keeps the
+  // winner's (possibly wider) scope.
+  if (
+    existing.agentAccess !== (input.agentAccess ?? "workspace") ||
+    existing.memoryScope !== (input.memoryScope ?? "workspace") ||
+    (existing.endUserSource ?? null) !== (input.endUser?.source ?? null) ||
+    (existing.endUserId ?? null) !== (input.endUser?.id ?? null)
+  ) {
     throw new SessionCreateIdempotencyConflictError();
   }
 }
@@ -31572,6 +31862,9 @@ async function createSessionInTransaction(
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
+        ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+        ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+        ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
       });
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
@@ -31726,6 +32019,10 @@ async function createSessionInTransaction(
             initialXaiProviderAccountAuthoritySnapshot: initialXaiProviderAccountAuthoritySnapshot,
             instructions: input.instructions ?? null,
             policyRole: input.policyRole ?? null,
+            agentAccess: input.agentAccess ?? "workspace",
+            endUserSource: input.endUser?.source ?? null,
+            endUserId: input.endUser?.id ?? null,
+            memoryScope: input.memoryScope ?? "workspace",
             parentSessionId: input.parentSessionId ?? null,
             parentTurnId,
             createIdempotencyKey,
@@ -31779,6 +32076,9 @@ async function createSessionInTransaction(
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
+          ...(input.agentAccess ? { agentAccess: input.agentAccess } : {}),
+          ...(input.endUser !== undefined ? { endUser: input.endUser } : {}),
+          ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
         });
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
@@ -32418,12 +32718,51 @@ export async function deleteSessionTreeIfQuiescent(
   }
 }
 
-export type SessionAuthorityProjection = {
+/**
+ * The frozen agent-access facts of one session (migration 0427). Together
+ * with `rootSessionId` these are everything the core seam needs to decide
+ * whether one live agent attempt may reach another session.
+ */
+export type SessionAccessProjection = {
   sessionId: string;
   rootSessionId: string;
+  agentAccess: SessionAgentAccess;
+  endUser: SessionEndUser | null;
+  memoryScope: SessionMemoryScope;
+};
+
+export type SessionAuthorityProjection = SessionAccessProjection & {
   visibility: "user_private" | "workspace_shared";
   ownerSubjectId: string | null;
 };
+
+type SessionAccessRow = Pick<
+  typeof schema.sessions.$inferSelect,
+  "agentAccess" | "endUserSource" | "endUserId" | "memoryScope"
+>;
+
+function sessionAgentAccessFromRow(row: Pick<SessionAccessRow, "agentAccess">): SessionAgentAccess {
+  return row.agentAccess === "session" || row.agentAccess === "user"
+    ? row.agentAccess
+    : "workspace";
+}
+
+function sessionEndUserFromRow(
+  row: Pick<SessionAccessRow, "endUserSource" | "endUserId">,
+): SessionEndUser | null {
+  return row.endUserSource !== null &&
+    row.endUserSource !== undefined &&
+    row.endUserId !== null &&
+    row.endUserId !== undefined
+    ? { source: row.endUserSource, id: row.endUserId }
+    : null;
+}
+
+function sessionMemoryScopeFromRow(row: Pick<SessionAccessRow, "memoryScope">): SessionMemoryScope {
+  return row.memoryScope === "user" || row.memoryScope === "session" || row.memoryScope === "off"
+    ? row.memoryScope
+    : "workspace";
+}
 
 export async function getSessionAuthorityProjection(
   db: Database,
@@ -32437,6 +32776,10 @@ export async function getSessionAuthorityProjection(
         rootSessionId: schema.sessions.rootSessionId,
         visibility: schema.sessions.visibility,
         ownerSubjectId: schema.sessions.ownerSubjectId,
+        agentAccess: schema.sessions.agentAccess,
+        endUserSource: schema.sessions.endUserSource,
+        endUserId: schema.sessions.endUserId,
+        memoryScope: schema.sessions.memoryScope,
       })
       .from(schema.sessions)
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
@@ -32447,8 +32790,54 @@ export async function getSessionAuthorityProjection(
       rootSessionId: row.rootSessionId,
       visibility: row.visibility as SessionAuthorityProjection["visibility"],
       ownerSubjectId: row.ownerSubjectId ?? null,
+      agentAccess: sessionAgentAccessFromRow(row),
+      endUser: sessionEndUserFromRow(row),
+      memoryScope: sessionMemoryScopeFromRow(row),
     };
   });
+}
+
+/** Workspace-RLS read of one session's frozen agent-access and memory scope. */
+export async function getSessionAccessProjection(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionAccessProjection | null> {
+  const authority = await getSessionAuthorityProjection(db, workspaceId, sessionId);
+  if (!authority) return null;
+  return {
+    sessionId: authority.sessionId,
+    rootSessionId: authority.rootSessionId,
+    agentAccess: authority.agentAccess,
+    endUser: authority.endUser,
+    memoryScope: authority.memoryScope,
+  };
+}
+
+/**
+ * The typed Memory selector an agent on this session reads and writes. The
+ * end-user subject is the opaque `end_user:v1:<tuple hash>` label and the
+ * session selector is the lineage root, so one tree shares one private layer.
+ * Null when the session does not exist in the workspace.
+ */
+export async function resolveSessionMemoryAgentScope(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<MemoryAgentScope | null> {
+  const access = await getSessionAccessProjection(db, workspaceId, sessionId);
+  if (!access) return null;
+  return memoryAgentScopeForSessionAccess(access);
+}
+
+export function memoryAgentScopeForSessionAccess(
+  access: Pick<SessionAccessProjection, "rootSessionId" | "endUser" | "memoryScope">,
+): MemoryAgentScope {
+  return {
+    mode: access.memoryScope,
+    endUserSubjectId: access.endUser ? endUserMemorySubjectId(access.endUser) : null,
+    rootSessionId: access.rootSessionId,
+  };
 }
 
 async function personalConnectionDelegationsForTurnInTransaction(
@@ -32851,6 +33240,8 @@ export type SessionListFilterOptions = {
   createdFrom?: Date;
   /** Exclusive creation upper bound. */
   createdBefore?: Date;
+  /** Exact opaque end-user label pair (both parts). */
+  endUser?: SessionEndUser;
 };
 
 export type ListSessionsForSubjectOptions = ListSessionsOptions &
@@ -33647,6 +34038,7 @@ function sessionFilters(
     | "updatedBefore"
     | "createdFrom"
     | "createdBefore"
+    | "endUser"
   >,
 ): SQL[] {
   const filters: SQL[] = [
@@ -33715,7 +34107,44 @@ function sessionFilters(
   if (options.updatedBefore) filters.push(lt(schema.sessions.updatedAt, options.updatedBefore));
   if (options.createdFrom) filters.push(gte(schema.sessions.createdAt, options.createdFrom));
   if (options.createdBefore) filters.push(lt(schema.sessions.createdAt, options.createdBefore));
+  if (options.endUser) {
+    filters.push(
+      eq(schema.sessions.endUserSource, options.endUser.source),
+      eq(schema.sessions.endUserId, options.endUser.id),
+    );
+  }
   return filters;
+}
+
+/**
+ * The agent-access predicate for one calling attempt (migration 0427). It
+ * mirrors the pairwise rule in the core seam exactly: a caller always keeps
+ * its own root tree; a `session` caller sees nothing else; a `user` caller
+ * additionally sees non-`session` sessions carrying its own end-user label; a
+ * `workspace` caller additionally sees every `workspace` session and the
+ * `user` sessions carrying its own label. A caller without a label can never
+ * match a labelled `user` session.
+ */
+export function sessionAgentAccessViewerFilter(viewer: SessionAgentAccessViewer): SQL {
+  const ownTree = eq(schema.sessions.rootSessionId, viewer.callerRootSessionId);
+  const sameEndUser = viewer.endUser
+    ? and(
+        eq(schema.sessions.endUserSource, viewer.endUser.source),
+        eq(schema.sessions.endUserId, viewer.endUser.id),
+      )!
+    : sql`false`;
+  switch (viewer.agentAccess) {
+    case "session":
+      return ownTree;
+    case "user":
+      return or(ownTree, and(ne(schema.sessions.agentAccess, "session"), sameEndUser)!)!;
+    case "workspace":
+      return or(
+        ownTree,
+        eq(schema.sessions.agentAccess, "workspace"),
+        and(eq(schema.sessions.agentAccess, "user"), sameEndUser)!,
+      )!;
+  }
 }
 
 /**
@@ -33725,6 +34154,13 @@ function sessionFilters(
  * `UNION ALL`) makes legacy cycles terminate without a caller-sized path array.
  */
 export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
+  const hostScope = sessionAuthorizationHostScopeFilter(scope);
+  return scope.agentAccessViewer
+    ? and(hostScope, sessionAgentAccessViewerFilter(scope.agentAccessViewer))!
+    : hostScope;
+}
+
+function sessionAuthorizationHostScopeFilter(scope: SessionAuthorizationListScope): SQL {
   if (scope.kind === "all") return sql`true`;
   if (
     scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
@@ -33768,8 +34204,9 @@ async function sessionIdsCoveredByAuthorizationRoots(
   scope: SessionAuthorizationListScope | undefined,
 ): Promise<Set<string>> {
   if (sessionIds.length === 0) return new Set();
-  if (!scope || scope.kind === "all") return new Set(sessionIds);
-  if (scope.rootSessionIds.length === 0) return new Set();
+  if (!scope) return new Set(sessionIds);
+  if (scope.kind === "all" && !scope.agentAccessViewer) return new Set(sessionIds);
+  if (scope.kind === "scoped" && scope.rootSessionIds.length === 0) return new Set();
   const rows = await db
     .select({ id: schema.sessions.id })
     .from(schema.sessions)
@@ -33777,11 +34214,16 @@ async function sessionIdsCoveredByAuthorizationRoots(
       and(
         eq(schema.sessions.workspaceId, workspaceId),
         inArray(schema.sessions.id, sessionIds),
-        sessionAuthorizationScopeFilter({
-          kind: "scoped",
-          rootSessionIds: scope.rootSessionIds,
-          sessionIds: [],
-        }),
+        sessionAuthorizationScopeFilter(
+          scope.kind === "all"
+            ? scope
+            : {
+                kind: "scoped",
+                rootSessionIds: scope.rootSessionIds,
+                sessionIds: [],
+                ...(scope.agentAccessViewer ? { agentAccessViewer: scope.agentAccessViewer } : {}),
+              },
+        ),
       ),
     );
   return new Set(rows.map((row) => row.id));
@@ -33837,7 +34279,8 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     !options.updatedFrom &&
     !options.updatedBefore &&
     !options.createdFrom &&
-    !options.createdBefore
+    !options.createdBefore &&
+    !options.endUser
   ) {
     return "all";
   }
@@ -33849,6 +34292,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     options.updatedBefore ? ["updatedBefore", options.updatedBefore.toISOString()] : null,
     options.createdFrom ? ["createdFrom", options.createdFrom.toISOString()] : null,
     options.createdBefore ? ["createdBefore", options.createdBefore.toISOString()] : null,
+    options.endUser ? ["endUser", options.endUser.source, options.endUser.id] : null,
   ]);
 }
 
@@ -75728,6 +76172,9 @@ function mapSession(
     titleSource: (row.titleSource as "user" | "agent" | null) ?? null,
     instructions: row.instructions ?? null,
     policyRole: row.policyRole ?? null,
+    agentAccess: sessionAgentAccessFromRow(row),
+    endUser: sessionEndUserFromRow(row),
+    memoryScope: sessionMemoryScopeFromRow(row),
     resources: row.resources as ResourceRef[],
     skills: StoredSessionSkills.parse(row.skills ?? []),
     ...(bundledSkillSelectionFromMetadata(row.metadata) !== undefined
@@ -76487,6 +76934,9 @@ function mapKnowledgeMemory(row: typeof schema.knowledgeMemories.$inferSelect): 
     status: row.status as KnowledgeMemoryStatus,
     kind: row.kind as KnowledgeMemoryKind,
     scope: row.scope,
+    scopeType: row.scopeType,
+    scopeSubjectId: row.scopeSubjectId ?? null,
+    scopeSessionId: row.scopeSessionId ?? null,
     text: fromPostgresLosslessText(row.text, row.textCodecVersion),
     sourceRefs: Array.isArray(row.sourceRefs) ? (row.sourceRefs as KnowledgeSourceRef[]) : [],
     confidence: confidenceFromStorage(row.confidence),

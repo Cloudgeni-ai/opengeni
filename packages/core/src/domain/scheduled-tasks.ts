@@ -1,4 +1,8 @@
-import { resolveFirstPartyMcpToolPolicy, type Settings } from "@opengeni/config";
+import {
+  allowedFirstPartyMcpToolsForSession,
+  resolveFirstPartyMcpToolPolicy,
+  type Settings,
+} from "@opengeni/config";
 import type {
   AccessGrant,
   McpPersonalConnectionDelegation,
@@ -18,6 +22,9 @@ import {
   OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
   resolveWorkspaceSessionToolDefaults,
   resolveBundledSkillSelection,
+  SessionAgentAccess,
+  SessionEndUser,
+  SessionMemoryScope,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
@@ -42,6 +49,7 @@ import {
   withWorkspaceSubjectRls,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
   type Database,
+  type ScheduledTaskCreatorPolicy,
   type TemporalScheduleCleanupClaim,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
@@ -247,6 +255,14 @@ export async function createValidatedScheduledTask(input: {
           ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
         });
   const creationInitiator = creationInitiatorForGrant(input.grant);
+  const creatorPolicy = creationInitiator.actor
+    ? await frozenScheduledTaskCreatorPolicy({
+        db: input.db,
+        settings: input.settings,
+        grant: input.grant,
+        sessionId: creationInitiator.actor.sessionId,
+      })
+    : null;
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -286,6 +302,7 @@ export async function createValidatedScheduledTask(input: {
       createdByActor: creationInitiator.actor ?? null,
       personalConnectionDelegations,
       xaiProviderAccountAuthoritySnapshot,
+      creatorPolicy,
       targetSessionId: target?.id ?? null,
       variableSetId: input.payload.variableSetId ?? null,
       rigId: input.payload.rigId ?? null,
@@ -293,6 +310,59 @@ export async function createValidatedScheduledTask(input: {
       ...(beforeCreateCommit ? { beforeCreateCommit } : {}),
     }),
   );
+}
+
+/**
+ * Freeze the creating session's boundary onto an agent-created task so the
+ * sessions generated for it inherit exactly what the creator could see and
+ * do, never the deployment default. Tools are the session's effective
+ * model-visible selection under the deployment ceiling; permissions are the
+ * session's effective first-party set intersected with what the calling
+ * grant actually holds (a narrowly delegated spawn token cannot hand a
+ * schedule more than itself). The session access policy is copied from the
+ * projection when it exposes those facts; each absent fact is stored as null
+ * so a generated session keeps its own default for that key.
+ */
+async function frozenScheduledTaskCreatorPolicy(input: {
+  db: Database;
+  settings: Settings;
+  grant: AccessGrant;
+  sessionId: string;
+}): Promise<ScheduledTaskCreatorPolicy> {
+  const session = await getSession(input.db, input.grant.workspaceId, input.sessionId);
+  if (!session) {
+    throw new HTTPException(403, {
+      message: "the calling agent session is not available in this workspace",
+    });
+  }
+  const firstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
+    input.settings,
+    session.firstPartyMcpTools,
+  );
+  const firstPartyMcpPermissions = (
+    session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]
+  ).filter((permission) => hasPermission(input.grant.permissions, permission));
+  if (firstPartyMcpPermissions.length === 0) {
+    throw new HTTPException(403, {
+      message:
+        "the calling agent session holds no first-party MCP permission it could delegate to scheduled runs",
+    });
+  }
+  // The projection facts are validated through the access-scope contract so
+  // only a well-formed value is frozen; anything else stores null for that key.
+  const projection = session as unknown as Record<string, unknown>;
+  const agentAccess = SessionAgentAccess.safeParse(projection["agentAccess"]);
+  const endUser = SessionEndUser.safeParse(projection["endUser"]);
+  const memoryScope = SessionMemoryScope.safeParse(projection["memoryScope"]);
+  return {
+    firstPartyMcpTools,
+    firstPartyMcpPermissions,
+    sessionPolicy: {
+      agentAccess: agentAccess.success ? agentAccess.data : null,
+      endUser: endUser.success ? { source: endUser.data.source, id: endUser.data.id } : null,
+      memoryScope: memoryScope.success ? memoryScope.data : null,
+    },
+  };
 }
 
 function nestedPostgresMessage(error: unknown): string | null {
