@@ -34,10 +34,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
-              // Workspace forms and provider marks are lazy route UI. Keep them
-              // out of shared session chunks when consumer sizes change.
+              // Workspace forms, provider marks, and administration links are
+              // shared route primitives. They must not pull the settings
+              // implementation into the workspace shell or direct sessions.
               name: "workspace-form-primitives",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark)\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
@@ -115,7 +116,7 @@ export default defineConfig({
               // management surface reachable from an active session. The shared
               // settings drawer and runtime controls belong behind this boundary too.
               name: "workspace-management-surfaces",
-              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:workspace-settings-shell|organization-workspace-administration|settings-sidebar|organization-settings-switcher)\.tsx|routes[\\/](?:workspace-learning-admin\.tsx|workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
+              test: /apps[\\/]web[\\/]src[\\/](?:components[\\/](?:ai-gateway-connection|codex-connection|default-session-model|model-access-policy|permission-picker|supergrok-connection|supergrok-device-poll|transcription-settings|video-generation-settings|workspace-capability-defaults|workspace-runtime-control)\.(?:ts|tsx)|components[\\/]settings[\\/](?:workspace-settings-shell|settings-sidebar|organization-settings-switcher)\.tsx|routes[\\/](?:workspace-learning-admin\.tsx|workspace-learning-loader\.ts|workspace-members-section\.tsx|workspace-settings\.tsx))$/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
