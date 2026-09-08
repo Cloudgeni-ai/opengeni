@@ -181,7 +181,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (!deps.objectStorage)
-      throw new HTTPException(503, { message: "Object storage is not configured" });
+      throw new HTTPException(503, {
+        message: "Object storage is not configured",
+      });
     const ref = await getWorkspaceArtifactContentRef(
       deps.db,
       workspaceId,
@@ -193,13 +195,20 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
 
   app.get(base, async (context) => {
     const workspaceId = context.req.param("workspaceId");
-    await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     const query = WorkspaceArtifactListQuery.safeParse({
       limit: context.req.query("limit"),
       cursor: context.req.query("cursor"),
       status: context.req.query("status"),
+      sourceSessionId: context.req.query("sourceSessionId"),
     });
     if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
+    if (
+      query.data.sourceSessionId &&
+      !(await canReadProvenanceSession(deps, grant, query.data.sourceSessionId))
+    ) {
+      throw new HTTPException(404, { message: "Session not found" });
+    }
     try {
       return context.json(
         WorkspaceArtifactListResponse.parse(
@@ -208,6 +217,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
               limit: query.data.limit,
               ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
               ...(query.data.status ? { status: query.data.status } : {}),
+              ...(query.data.sourceSessionId
+                ? { sourceSessionId: query.data.sourceSessionId }
+                : {}),
             }),
           ),
         ),
@@ -281,7 +293,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     if (!deps.objectStorage)
-      throw new HTTPException(503, { message: "Object storage is not configured" });
+      throw new HTTPException(503, {
+        message: "Object storage is not configured",
+      });
     const ref = await getWorkspaceArtifactContentRef(
       deps.db,
       workspaceId,

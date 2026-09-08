@@ -755,6 +755,36 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       expect(created.version.sourceTurnId).toBe(attempt.turnId);
       expect(created.version.sourceAttemptId).toBe(attempt.attemptId);
       expect(created.version.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+      const sessionList = await request(
+        grant,
+        ["artifacts:read", "sessions:read"],
+        `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=${attempt.sessionId}`,
+      );
+      expect(sessionList.status).toBe(200);
+      const sessionSites = WorkspaceArtifactListResponse.parse(await sessionList.json());
+      expect(sessionSites.artifacts.map((site) => site.id)).toContain(created.artifact.id);
+      const unrelated = await seedAttempt(grant);
+      const unrelatedList = await request(
+        grant,
+        ["artifacts:read", "sessions:read"],
+        `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=${unrelated.sessionId}`,
+      );
+      expect(WorkspaceArtifactListResponse.parse(await unrelatedList.json()).artifacts).toEqual([]);
+      const inaccessible = await seedAttempt(otherGrant);
+      const deniedList = await request(
+        grant,
+        ["artifacts:read"],
+        `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=${inaccessible.sessionId}`,
+      );
+      // Legacy local authorization can admit the metadata query, but tenant
+      // filtering must still return no artifact from the other workspace.
+      expect(WorkspaceArtifactListResponse.parse(await deniedList.json()).artifacts).toEqual([]);
+      const invalidList = await request(
+        grant,
+        ["artifacts:read"],
+        `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=invalid`,
+      );
+      expect(invalidList.status).toBe(422);
 
       const putsAfterCreate = objectPutCount;
       const replayResult = await mcp.callTool({
@@ -848,6 +878,37 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       const restored = WorkspaceArtifactMutationResponse.parse(JSON.parse(restoreText.text));
       expect(restored.artifact.status).toBe("active");
       expect(restored.event.sourceExecutionGeneration).toBe(attempt.executionGeneration);
+      // A later publisher must not erase the original session's association.
+      const later = await seedAttempt(grant);
+      await publishWorkspaceArtifactVersion(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        artifactId: created.artifact.id,
+        expectedCurrentVersionId: created.version.id,
+        contentKey: `workspace-artifacts/${grant.workspaceId}/later.html`,
+        contentSha256: "1".repeat(64),
+        sizeBytes: 100,
+        requestedTools: [],
+        operationKey: crypto.randomUUID(),
+        actorSubjectId: grant.subjectId,
+        sourceSessionId: later.sessionId,
+        sourceTurnId: later.turnId,
+        sourceAttemptId: later.attemptId,
+        sourceExecutionGeneration: later.executionGeneration,
+        sourceToolName: "artifacts_publish",
+        persistContent: async () => undefined,
+        discardContent: async () => undefined,
+      });
+      for (const sessionId of [attempt.sessionId, later.sessionId]) {
+        const listed = await request(
+          grant,
+          ["artifacts:read", "sessions:read"],
+          `/v1/workspaces/${grant.workspaceId}/published-artifacts?sourceSessionId=${sessionId}&limit=1`,
+        );
+        const page = WorkspaceArtifactListResponse.parse(await listed.json());
+        expect(page.artifacts.map((site) => site.id)).toEqual([created.artifact.id]);
+        expect(page.truncated).toBe(false);
+      }
 
       const replacement = await supersedeAttempt(attempt);
       const putsBeforeStaleAttempt = objectPutCount;

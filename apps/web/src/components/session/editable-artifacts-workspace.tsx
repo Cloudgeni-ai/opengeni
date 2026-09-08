@@ -13,11 +13,14 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
+import { ArtifactDetailRoute } from "@/routes/artifacts";
 
 export type SessionEditableArtifactSummary = Readonly<{
   id: string;
-  modality: "document" | "spreadsheet" | "presentation";
+  modality: "document" | "spreadsheet" | "presentation" | "site";
   title: string;
+  versionId?: string;
+  siteStatus?: "active" | "archived";
 }>;
 
 export type SessionEditableArtifactsStatus = "loading" | "ready" | "error";
@@ -79,7 +82,7 @@ export function SessionEditableArtifactsWorkspace({
               ? "Opening the shared workspace."
               : failed
                 ? "The shared workspace could not be loaded."
-                : "Ask the agent to create or import a document, spreadsheet, or presentation."}
+                : "Ask the agent to create or import a Site, document, spreadsheet, or presentation."}
           </p>
           {failed ? (
             <Button type="button" variant="outline" size="sm" className="mt-4" onClick={onRetry}>
@@ -100,7 +103,7 @@ export function SessionEditableArtifactsWorkspace({
         {artifacts.length > 1 ? (
           <div className="min-w-0 flex-1 [&>span]:block [&>span]:w-full">
             <Select
-              aria-label="Choose editable artifact"
+              aria-label="Choose artifact"
               className="h-8 min-w-0 border-0 bg-transparent pl-1 font-medium shadow-none"
               value={artifact.id}
               onChange={(event) => {
@@ -119,7 +122,9 @@ export function SessionEditableArtifactsWorkspace({
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{artifact.title}</p>
             <p className="truncate text-xs capitalize text-fg-subtle">
-              {artifact.modality} · shared editor
+              {artifact.modality === "site"
+                ? "Site · published preview"
+                : `${artifact.modality} · shared editor`}
             </p>
           </div>
         )}
@@ -141,25 +146,39 @@ export function SessionEditableArtifactsWorkspace({
           variant="ghost"
           size="icon-sm"
           className="ml-auto shrink-0"
-          title="Open full-page editor"
+          title={artifact.modality === "site" ? "Open Site" : "Open full-page editor"}
         >
           <Link
-            to="/workspaces/$workspaceId/artifacts/editable/$artifactId"
+            to={
+              artifact.modality === "site"
+                ? "/workspaces/$workspaceId/artifacts/$artifactId"
+                : "/workspaces/$workspaceId/artifacts/editable/$artifactId"
+            }
             params={{ workspaceId, artifactId: artifact.id }}
-            aria-label={`Open ${artifact.title} in the full-page editor`}
+            aria-label={`Open ${artifact.title} full-page`}
           >
             <Maximize2Icon className="size-4" />
           </Link>
         </Button>
       </div>
       <div className="min-h-0 flex-1">
-        <EditableArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} />
+        {artifact.modality === "site" ? (
+          <ArtifactDetailRoute
+            key={`${artifact.id}:${artifact.versionId ?? ""}:${artifact.siteStatus ?? ""}`}
+            workspaceId={workspaceId}
+            artifactId={artifact.id}
+            embedded
+          />
+        ) : (
+          <EditableArtifactRoute workspaceId={workspaceId} artifactId={artifact.id} />
+        )}
       </div>
     </div>
   );
 }
 
-function artifactIcon(modality: "document" | "spreadsheet" | "presentation"): ReactNode {
+function artifactIcon(modality: SessionEditableArtifactSummary["modality"]): ReactNode {
+  if (modality === "site") return <PanelsTopLeftIcon className="size-4" />;
   if (modality === "document") return <FilePenLineIcon className="size-4" />;
   if (modality === "spreadsheet") return <Table2Icon className="size-4" />;
   return <GalleryHorizontalEndIcon className="size-4" />;

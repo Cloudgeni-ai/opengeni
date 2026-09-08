@@ -59,7 +59,10 @@ function Conversation({
   const error = detail.error ?? feed.error ?? human.error;
   return (
     <div
-      className={cn("og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden", className)}
+      className={cn(
+        "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-fg",
+        className,
+      )}
       ref={region}
       style={{ height }}
       data-og-conversation=""

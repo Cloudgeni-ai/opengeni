@@ -50,6 +50,7 @@ import {
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
+import { retainArtifactsAfterRefreshFailure } from "@/lib/artifact-refresh";
 import { ConsoleComposer } from "@/components/Composer";
 import { ComposerMobilePlus } from "@/components/composer-mobile-plus";
 import { LoadingPanel } from "@/components/common";
@@ -77,7 +78,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Notice } from "@/components/ui/notice";
-import type { EditableArtifactResource } from "@opengeni/sdk/artifacts";
 import { useAppContext } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import type {
@@ -353,7 +353,10 @@ export function SessionRoute({
     windowFocused: document.hasFocus(),
   }));
   const [attentionRetryRevision, setAttentionRetryRevision] = useState(0);
-  const reconciledSessionRead = useRef<{ sessionId: string; revision: number } | null>(null);
+  const reconciledSessionRead = useRef<{
+    sessionId: string;
+    revision: number;
+  } | null>(null);
   useEffect(() => {
     if (!fetchedSession || sessionReadRevision === 0) return;
     if (
@@ -362,7 +365,10 @@ export function SessionRoute({
     ) {
       return;
     }
-    reconciledSessionRead.current = { sessionId, revision: sessionReadRevision };
+    reconciledSessionRead.current = {
+      sessionId,
+      revision: sessionReadRevision,
+    };
     const accepted = context.sessionChannelProjectionAuthority.recordRead(
       fetchedSession,
       sessionReadGeneration,
@@ -1072,7 +1078,7 @@ function useSessionEditableArtifactSummaries(input: {
   const [loaded, setLoaded] = useState<{
     key: string;
     status: SessionEditableArtifactsStatus;
-    artifacts: readonly EditableArtifactResource[];
+    artifacts: readonly SessionEditableArtifactSummary[];
   } | null>(null);
 
   useEffect(() => {
@@ -1091,19 +1097,56 @@ function useSessionEditableArtifactSummaries(input: {
       import("@/lib/editable-artifact-browser"),
     ])
       .then(async ([{ editableArtifactClient }, { createConsoleEditableArtifactReplicaId }]) => {
-        const result = await editableArtifactClient.listSessionEditableArtifacts(
-          input.workspaceId,
-          input.sessionId,
-          {
+        const [result, sites] = await Promise.allSettled([
+          editableArtifactClient.listSessionEditableArtifacts(input.workspaceId, input.sessionId, {
             replicaId: createConsoleEditableArtifactReplicaId(),
-          },
-        );
+          }),
+          (async () => {
+            const sitePages = await editableArtifactClient.listWorkspaceArtifacts(
+              input.workspaceId,
+              {
+                sourceSessionId: input.sessionId,
+                limit: 100,
+              },
+            );
+            while (sitePages.nextCursor) {
+              const page = await editableArtifactClient.listWorkspaceArtifacts(input.workspaceId, {
+                sourceSessionId: input.sessionId,
+                limit: 100,
+                cursor: sitePages.nextCursor,
+              });
+              if (!current) return [];
+              sitePages.artifacts.push(...page.artifacts);
+              sitePages.nextCursor = page.nextCursor;
+            }
+            return sitePages.artifacts;
+          })(),
+        ]);
         if (current) {
-          setLoaded({
+          setLoaded((previous) => ({
             key: authorityKey,
-            status: "ready",
-            artifacts: result.artifacts,
-          });
+            status:
+              result.status === "fulfilled" && sites.status === "fulfilled" ? "ready" : "error",
+            artifacts: [
+              ...(result.status === "fulfilled"
+                ? result.value.artifacts
+                : previous?.key === authorityKey &&
+                    retainArtifactsAfterRefreshFailure(result.reason)
+                  ? previous.artifacts.filter((item) => item.modality !== "site")
+                  : []),
+              ...(sites.status === "fulfilled"
+                ? sites.value.map((site) => ({
+                    id: site.id,
+                    title: site.title,
+                    modality: "site" as const,
+                    versionId: site.currentVersion?.id,
+                    siteStatus: site.status,
+                  }))
+                : previous?.key === authorityKey && retainArtifactsAfterRefreshFailure(sites.reason)
+                  ? previous.artifacts.filter((item) => item.modality === "site")
+                  : []),
+            ],
+          }));
         }
       })
       .catch(() => {
