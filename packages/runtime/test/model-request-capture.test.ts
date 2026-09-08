@@ -107,3 +107,131 @@ describe("model request capture", () => {
     expect(sent.tools).toEqual([]);
   });
 });
+
+describe("final HTTP body capture", () => {
+  test("observes exact provider-transformed bytes without consuming the upload", async () => {
+    const { captureProviderRequestBody } = await import("../src/model-request-capture");
+    const { buildProviderRequestSnapshot } = await import("../src/model-context-inspector");
+    const { ModelContextSnapshot } = await import("@opengeni/contracts");
+    const body =
+      '{ "model":"provider-model", "instructions":"exact\\n  whitespace", "tools":[{"type":"function","strict":true,"name":"tool"}], "input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]}] }';
+    let observed: string | null = null;
+    const capture = Object.assign(() => {}, {
+      onProviderRequest: (provider: string, text: string | null) => {
+        observed = text;
+        const snapshot = ModelContextSnapshot.parse(
+          buildProviderRequestSnapshot({ provider, body: text, requestIndex: 1 }),
+        );
+        expect(snapshot.providerRequest?.body).toBe(body);
+        expect(snapshot.providerRequest?.parts.map((part) => part.key)).toEqual([
+          "model",
+          "instructions",
+          "tools",
+          "input",
+        ]);
+      },
+    });
+    await withModelRequestCapture(capture, async () => {
+      const stream = new Blob([body]).stream();
+      const result = captureProviderRequestBody("test", "https://example.test/responses", {
+        body: stream,
+      });
+      expect(await new Response(result.init?.body).text()).toBe(body);
+      await result.captured;
+    });
+    expect(observed).toBe(body);
+  });
+
+  test("oversized bodies produce an unavailable receipt, never a truncated payload", async () => {
+    const { captureProviderRequestBody } = await import("../src/model-request-capture");
+    const body = "x".repeat(4 * 1024 * 1024 + 1);
+    let reason: string | undefined;
+    let observed: unknown = "not called";
+    const capture = Object.assign(() => {}, {
+      onProviderRequest: (_provider: string, text: string | null, why?: string) => {
+        observed = text;
+        reason = why;
+      },
+    });
+    await withModelRequestCapture(capture, async () => {
+      const result = captureProviderRequestBody("test", "https://example.test/responses", {
+        body: new Blob([body]).stream(),
+      });
+      expect((await new Response(result.init?.body).text()).length).toBe(body.length);
+      await result.captured;
+    });
+    expect(observed).toBeNull();
+    expect(reason).toContain("4 MiB");
+  });
+
+  test("capture failure cannot change transport bytes", async () => {
+    const { captureProviderRequestBody } = await import("../src/model-request-capture");
+    const capture = Object.assign(() => {}, {
+      onProviderRequest: () => {
+        throw new Error("database unavailable");
+      },
+    });
+    await withModelRequestCapture(capture, async () => {
+      const init = { body: '{"input":"unchanged"}' };
+      const result = captureProviderRequestBody("test", "https://example.test/responses", init);
+      expect(result.init).toBe(init);
+      await result.captured;
+    });
+  });
+});
+
+test("failed uploads cancel a stalled diagnostic read without waiting for persistence", async () => {
+  const { captureProviderRequestBody } = await import("../src/model-request-capture");
+  let captured = false;
+  await withModelRequestCapture(
+    Object.assign(() => {}, {
+      onProviderRequest: () => {
+        captured = true;
+      },
+    }),
+    async () => {
+      const body = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"input":'));
+        },
+      });
+      const result = captureProviderRequestBody("test", "https://example.test/responses", { body });
+      result.cancel();
+      await result.captured;
+      expect(captured).toBe(false);
+      void (result.init!.body as ReadableStream).cancel();
+    },
+  );
+});
+
+test("capture ordinals survive stream re-entry and remain isolated between agents", async () => {
+  const { nextModelContextCaptureIndex } = await import("../src/model-request-capture");
+  const agent = {};
+  const otherAgent = {};
+  expect(nextModelContextCaptureIndex(agent)).toBe(1);
+  expect(nextModelContextCaptureIndex(agent)).toBe(2);
+  expect(nextModelContextCaptureIndex(otherAgent)).toBe(1);
+  expect(nextModelContextCaptureIndex(agent)).toBe(3);
+});
+
+test("media and encrypted state are unknown token costs, not base64 text estimates", async () => {
+  const { buildProviderRequestSnapshot } = await import("../src/model-context-inspector");
+  const snapshot = buildProviderRequestSnapshot({
+    provider: "test",
+    requestIndex: 1,
+    body: JSON.stringify({
+      input: [
+        {
+          role: "user",
+          content: [{ type: "input_image", image_url: "data:image/png;base64,AAAA" }],
+        },
+        { type: "reasoning", encrypted_content: "opaque" },
+        { role: "user", content: "Plain text" },
+      ],
+    }),
+  });
+  const input = snapshot.providerRequest!.parts[0]!;
+  expect(input.estimatedTokens).toBeNull();
+  expect(input.itemEstimatedTokens?.slice(0, 2)).toEqual([null, null]);
+  expect(input.itemEstimatedTokens?.[2]).toBeGreaterThan(0);
+});
