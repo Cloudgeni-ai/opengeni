@@ -4,7 +4,7 @@
 -- only the effective provider pool, never session or workspace visibility.
 -- Stop all old API and worker processes before activation. Old Codex mutation
 -- callers omit Personal workspaces from source locks and capacity wakeups;
--- never restart a pre-0421 binary after commit.
+-- never restart a pre-0422 binary after commit.
 
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
@@ -18,14 +18,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation requires an explicit application database role list'
+      '0422 Personal Codex activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation received a malformed application database role list'
+      '0422 Personal Codex activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -44,7 +44,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation received an invalid application database role list'
+      '0422 Personal Codex activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -56,7 +56,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation requires all configured OpenGeni application database sessions to be stopped'
+      '0422 Personal Codex activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
@@ -318,14 +318,14 @@ DECLARE
 BEGIN
   IF configured_roles_text IS NULL THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation requires an explicit application database role list'
+      '0422 Personal Codex activation requires an explicit application database role list'
       USING ERRCODE = '55000';
   END IF;
   BEGIN
     configured_roles := configured_roles_text::jsonb;
   EXCEPTION WHEN OTHERS THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation received a malformed application database role list'
+      '0422 Personal Codex activation received a malformed application database role list'
       USING ERRCODE = '55000';
   END;
   IF jsonb_typeof(configured_roles) <> 'array'
@@ -344,7 +344,7 @@ BEGIN
     )
   THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation received an invalid application database role list'
+      '0422 Personal Codex activation received an invalid application database role list'
       USING ERRCODE = '55000';
   END IF;
   IF EXISTS (
@@ -356,7 +356,7 @@ BEGIN
   )
   THEN
     RAISE EXCEPTION
-      '0421 Personal Codex activation requires all configured OpenGeni application database sessions to be stopped'
+      '0422 Personal Codex activation requires all configured OpenGeni application database sessions to be stopped'
       USING ERRCODE = '55000';
   END IF;
 END
