@@ -90,7 +90,7 @@ export function createSkillSearchAttemptToolDefinition(input: {
       const output = {
         workspace: workspaceHits,
         library: libraryHits,
-        public: publicResult?.items ?? [],
+        public: publicResult?.items.map((entry) => ({ ...entry })) ?? [],
         // A provider outage is not an empty search. Keep local results useful
         // and expose partial failure explicitly, without leaking network details.
         partial: publicError !== null,

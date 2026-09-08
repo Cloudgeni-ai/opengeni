@@ -13,6 +13,47 @@ const scope = {
 };
 
 describe("skill_search gateway definition", () => {
+  test("catalog search returns install sources without reading workspace content", async () => {
+    const hit = {
+      id: "example/skills/deploy",
+      name: "deploy",
+      source: "example/skills",
+      skillId: "deploy",
+      url: "https://skills.sh/example/skills/deploy",
+      installs: 1,
+    };
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        createSkillSearchAttemptToolDefinition({
+          authorize: async () => {},
+          listWorkspace: async () => {
+            throw new Error("must not list workspace");
+          },
+          publicSearch: {
+            search: async ({ query }) => ({
+              provider: "skills_sh",
+              query,
+              items: [hit],
+              nextCursor: null,
+            }),
+          },
+        }),
+      ],
+    });
+    const result = await environment.callModel({
+      modelName: "skill_search",
+      arguments: { query: "deploy", scope: "catalog" },
+      subjectId: "agent:test",
+    });
+    expect(result.structuredContent).toMatchObject({
+      workspace: [],
+      public: [hit],
+      partial: false,
+    });
+  });
+
   test("installed search never contacts a public provider", async () => {
     const environment = createAttemptToolEnvironment({
       scope,
