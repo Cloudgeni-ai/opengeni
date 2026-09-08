@@ -2708,7 +2708,7 @@ describe("connections routes", () => {
             scopes_supported: ["documents:read"],
           });
         }
-        if (url.pathname === "/as") {
+        if (url.pathname === "/.well-known/oauth-authorization-server/as") {
           return Response.json({
             issuer: `${origin}/as`,
             authorization_endpoint: `${origin}/authorize`,
@@ -2757,12 +2757,6 @@ describe("connections routes", () => {
         "/mcp",
         "/prm",
         "/.well-known/oauth-authorization-server/as",
-        "/as/.well-known/oauth-authorization-server",
-        "/.well-known/oauth-authorization-server",
-        "/.well-known/openid-configuration/as",
-        "/as/.well-known/openid-configuration",
-        "/.well-known/openid-configuration",
-        "/as",
         "/register",
       ]);
       expect(registrations).toEqual([
