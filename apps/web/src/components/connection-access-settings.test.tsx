@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { ConnectionAccessSettings } from "./connection-access-settings";
@@ -22,7 +22,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
       version: 1,
     };
     const writes: unknown[] = [];
-    const client = {
+    const client = Object.assign(new OpenGeniBrowserClient({ baseUrl: "http://localhost" }), {
       requestJson: async (method: string, path: string, body: typeof policy) => {
         expect(path).toBe(`/v1/organizations/org/model-connections/${kind}/account/access`);
         if (method === "PUT") {
@@ -43,7 +43,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
           personalWorkspacesSupported: kind === "codex" || kind === "supergrok",
         };
       },
-    } as unknown as OpenGeniBrowserClient;
+    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);

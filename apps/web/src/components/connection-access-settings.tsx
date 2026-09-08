@@ -1,6 +1,6 @@
 import type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { FormDisclosure } from "@/components/ui/form-disclosure";
@@ -20,12 +20,20 @@ export function ConnectionAccessSettings(props: {
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
   const id = useId();
-  const path = `/v1/${props.organizationId ? "organizations" : "workspaces"}/${props.organizationId ?? props.workspaceId}/model-connections/${props.kind}/${props.connectionId}/access`;
+  const target = useMemo(
+    () => ({
+      scope: props.organizationId ? ("organizations" as const) : ("workspaces" as const),
+      scopeId: props.organizationId ?? props.workspaceId!,
+      kind: props.kind,
+      connectionId: props.connectionId,
+    }),
+    [props.organizationId, props.workspaceId, props.kind, props.connectionId],
+  );
   const load = useCallback(async () => {
     const current = ++generation.current;
     setError(null);
     try {
-      const result = await props.client.requestJson<ModelConnectionAccessResponse>("GET", path);
+      const result = await props.client.getModelConnectionAccess(target);
       if (generation.current !== current) return;
       setData(result);
       setDraft(result.policy);
@@ -33,7 +41,7 @@ export function ConnectionAccessSettings(props: {
       if (generation.current === current)
         setError(caught instanceof Error ? caught.message : "Couldn't load connection access");
     }
-  }, [path, props.client]);
+  }, [target, props.client]);
   const invalidate = useCallback(() => {
     generation.current++;
   }, []);
@@ -44,7 +52,7 @@ export function ConnectionAccessSettings(props: {
   useEffect(() => {
     setData(null);
     setDraft(null);
-  }, [path]);
+  }, [target]);
   const disabled = busy || !props.canManage;
   const dirty = draft && data && JSON.stringify(draft) !== JSON.stringify(data.policy);
   const toggle = (values: string[], value: string, checked: boolean) =>
@@ -55,7 +63,7 @@ export function ConnectionAccessSettings(props: {
     setBusy(true);
     setError(null);
     try {
-      await props.client.requestJson("PUT", path, draft);
+      await props.client.updateModelConnectionAccess(target, draft);
       if (generation.current !== current) return;
       await load();
       window.dispatchEvent(new Event("model-connections-changed"));

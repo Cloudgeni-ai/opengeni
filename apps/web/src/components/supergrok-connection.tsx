@@ -7,8 +7,6 @@ import type {
   SuperGrokAccount,
   SuperGrokAccountsResponse,
   SuperGrokAccountScope,
-  SuperGrokConnectStart,
-  SuperGrokConnectPoll,
 } from "@opengeni/sdk";
 import {
   CheckIcon,
@@ -112,10 +110,7 @@ export function SuperGrokSubscriptionsCardWithClient({
     try {
       setData(
         organizationId
-          ? await client.requestJson<SuperGrokAccountsResponse>(
-              "GET",
-              `/v1/organizations/${organizationId}/supergrok/accounts`,
-            )
+          ? await client.listOrganizationSuperGrokAccounts(organizationId)
           : await client.listSuperGrokAccounts(workspaceId!),
       );
       setLoadError(null);
@@ -143,11 +138,7 @@ export function SuperGrokSubscriptionsCardWithClient({
     setBusy(true);
     try {
       const start = organizationId
-        ? await client.requestJson<SuperGrokConnectStart>(
-            "POST",
-            `/v1/organizations/${organizationId}/supergrok/connect/start`,
-            {},
-          )
+        ? await client.organizationSupergrokConnectStart(organizationId)
         : await client.supergrokConnectStart(workspaceId!, scope);
       setPending({
         userCode: start.userCode,
@@ -164,11 +155,7 @@ export function SuperGrokSubscriptionsCardWithClient({
       void pollSuperGrokDeviceLogin({
         poll: () =>
           organizationId
-            ? client.requestJson<SuperGrokConnectPoll>(
-                "POST",
-                `/v1/organizations/${organizationId}/supergrok/connect/poll`,
-                { state: start.state },
-              )
+            ? client.organizationSupergrokConnectPoll(organizationId, start.state)
             : client.supergrokConnectPoll(workspaceId!, start.state),
         initialIntervalSeconds: start.intervalSeconds,
         expiresAtMs: Date.now() + start.expiresInSeconds * 1_000,
@@ -230,9 +217,6 @@ export function SuperGrokSubscriptionsCardWithClient({
   const accounts = data?.accounts ?? [];
   const inherited = !organizationId && data?.source === "organization";
   const canManageAccounts = canManage && !inherited;
-  const connectionPath = organizationId
-    ? `/v1/organizations/${organizationId}/supergrok`
-    : `/v1/workspaces/${workspaceId}/supergrok`;
   return (
     <ModelConnectionSection
       title="SuperGrok"
@@ -286,7 +270,7 @@ export function SuperGrokSubscriptionsCardWithClient({
               void mutate(
                 () =>
                   organizationId
-                    ? client.requestJson("PATCH", `${connectionPath}/settings`, {
+                    ? client.setOrganizationSuperGrokRotationSettings(organizationId, {
                         rotationEnabled: event.target.checked,
                       })
                     : client.setSuperGrokRotationSettings(workspaceId!, {
@@ -340,11 +324,7 @@ export function SuperGrokSubscriptionsCardWithClient({
                   void mutate(
                     () =>
                       organizationId
-                        ? client.requestJson(
-                            "POST",
-                            `${connectionPath}/accounts/${account.id}/activate`,
-                            {},
-                          )
+                        ? client.activateOrganizationSuperGrokAccount(organizationId, account.id)
                         : client.activateSuperGrokAccount(workspaceId!, account.id),
                     "Active SuperGrok account updated",
                   )
@@ -355,10 +335,10 @@ export function SuperGrokSubscriptionsCardWithClient({
                         void mutate(
                           () =>
                             organizationId
-                              ? client.requestJson(
-                                  "PATCH",
-                                  `${connectionPath}/accounts/${account.id}`,
-                                  { label: label || null },
+                              ? client.renameOrganizationSuperGrokAccount(
+                                  organizationId,
+                                  account.id,
+                                  label || null,
                                 )
                               : client.renameSuperGrokAccount(
                                   workspaceId!,
@@ -397,9 +377,9 @@ export function SuperGrokSubscriptionsCardWithClient({
                         void mutate(
                           () =>
                             organizationId
-                              ? client.requestJson(
-                                  "PATCH",
-                                  `${connectionPath}/accounts/${account.id}/allocator`,
+                              ? client.setOrganizationSuperGrokAccountAllocator(
+                                  organizationId,
+                                  account.id,
                                   {
                                     enabled: event.target.checked,
                                     expectedVersion: account.allocatorVersion,
@@ -434,9 +414,9 @@ export function SuperGrokSubscriptionsCardWithClient({
                         void mutate(
                           () =>
                             organizationId
-                              ? client.requestJson(
-                                  "DELETE",
-                                  `${connectionPath}/accounts/${account.id}`,
+                              ? client.disconnectOrganizationSuperGrokAccount(
+                                  organizationId,
+                                  account.id,
                                 )
                               : client.disconnectSuperGrokAccount(workspaceId!, account.id),
                           "SuperGrok account disconnected",

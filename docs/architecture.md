@@ -924,16 +924,12 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
-Managed billing is an API concern over the shared usage and entitlement
-boundaries. Provider subscription pools such as Codex or SuperGrok add their
-own credential and capacity authority without changing the logical-turn model.
-Codex and SuperGrok may resolve to a workspace pool or an organization pool inherited by a
-shared or Personal workspace in the same organization; the resolved pool
-remains one complete allocator boundary and grants no workspace access.
-SuperGrok freezes that scope on accepted work; its organization management
-adapter is `packages/db/src/organization-xai-subscriptions.ts`, while runtime
-selection remains in `packages/db/src/xai-subscription.ts`. Both providers use
-shared subscription account rows and connection actions in the web settings.
+Managed billing uses shared usage and entitlement boundaries. Codex and SuperGrok
+pools own credentials and capacity without changing logical turns. Shared and
+Personal workspaces may inherit same-organization pools. Each pool remains one
+allocator boundary and grants no workspace access. SuperGrok freezes that scope
+on accepted work. Both providers share subscription controls; see
+[`model-connection-access.md`](model-connection-access.md) for permissions.
 Vercel AI Gateway and OpenRouter expose separate workspace- and
 organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
