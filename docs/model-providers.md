@@ -354,8 +354,8 @@ OpenRouter routes—default to `credits` unless
 `OPENGENI_MODEL_COST_POLICY_JSON` marks the exact product ID `free`. The picker
 groups all deployment-provided models under OpenGeni, regardless of upstream
 provider or settlement. Only explicitly free models receive a Free badge; paid
-rows omit repetitive credit labels. Payment descriptions remain available to
-assistive technology and on hover, and `list_models` retains the explicit cost.
+rows omit repetitive credit labels. Subscription descriptions appear once per
+provider group; the Free badge stays explicit, and `list_models` retains the cost.
 Workspace/organization connections and connected subscriptions stay separate.
 
 ### OpenCode Zen temporary free contributor model
