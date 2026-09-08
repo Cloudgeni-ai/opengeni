@@ -27,7 +27,7 @@ const cases = [
     depth: 0,
     summary: neutral,
     scheduled: true,
-    relativeTime: "1 Aug",
+    relativeTime: "12 Aug",
   },
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
   { id: "selected-child", active: true, depth: 1, summary: neutral, relativeTime: "1h" },
@@ -94,6 +94,9 @@ function SessionRailRowMetadataFixture() {
                     className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
                   >
                     <SessionRowContent
+                      quickActionSlots={
+                        Number(!quickActionSession.archived) + Number(scenario.depth === 0)
+                      }
                       title={longTitle}
                       stateLabel="Idle"
                       depthLabel={scenario.depth > 0 ? `Level ${scenario.depth + 1}` : null}
@@ -102,11 +105,15 @@ function SessionRailRowMetadataFixture() {
                       summary={scenario.summary}
                       scheduled={"scheduled" in scenario ? scenario.scheduled : false}
                       relativeTime={"relativeTime" in scenario ? scenario.relativeTime : undefined}
-                      creator={{
-                        kind: "subject",
-                        subjectId: "user:bendik",
-                        label: "Bendik Nyheim",
-                      }}
+                      creator={
+                        scenario.depth > 0
+                          ? null
+                          : {
+                              kind: "subject",
+                              subjectId: "user:bendik",
+                              label: "Bendik Nyheim",
+                            }
+                      }
                     />
                   </a>
                 </HoverCardTrigger>
@@ -131,19 +138,20 @@ function SessionRailRowMetadataFixture() {
                   />
                 </HoverCardContent>
               </HoverCard>
-              {scenario.id === "time-only" ? (
-                <RowQuickActions
-                  session={quickActionSession}
-                  onPin={async (session, pinned) => {
-                    const updated = { ...session, pinned };
-                    setQuickActionSession(updated);
-                    return updated;
-                  }}
-                  onArchive={async (session, archived) => {
-                    setQuickActionSession({ ...session, archived });
-                  }}
-                />
-              ) : null}
+              <RowQuickActions
+                session={{
+                  ...quickActionSession,
+                  parentSessionId: scenario.depth > 0 ? "parent" : null,
+                }}
+                onPin={async (session, pinned) => {
+                  const updated = { ...session, pinned };
+                  setQuickActionSession(updated);
+                  return updated;
+                }}
+                onArchive={async (session, archived) => {
+                  setQuickActionSession({ ...session, archived });
+                }}
+              />
             </div>
           ))}
         </div>

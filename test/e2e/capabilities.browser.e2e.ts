@@ -261,8 +261,8 @@ describe("capabilities browser e2e", () => {
 
         for (const theme of ["light", "dark"] as const) {
           await setTheme(page, theme);
-          await expectVisible(page.getByLabel("Search connectors"));
-          expect(await page.getByLabel("Search connectors").count()).toBe(1);
+          await expectVisible(page.getByLabel("Search all plugins"));
+          expect(await page.getByLabel("Search all plugins").count()).toBe(1);
           await assertAccessibleAndBounded(page, '[role="region"][aria-label="Plugins"]');
           await page.screenshot({
             path: `${evidenceDir}responsive-${viewport.name}-${theme}.png`,
@@ -274,6 +274,46 @@ describe("capabilities browser e2e", () => {
       }
     }
   }, 150_000);
+
+  test("top-level search filters MCP servers and apps, and resource names opt out of identity autofill", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+      const search = page.getByLabel("Search all plugins");
+      const apps = page.locator("[data-integration-list] [data-integration-row]");
+      const appCount = await apps.count();
+      expect(appCount).toBeGreaterThan(0);
+      const searchBox = await search.boundingBox();
+      const appsHeading = await page
+        .getByRole("heading", { name: "Apps", exact: true })
+        .boundingBox();
+      expect(searchBox!.y).toBeLessThan(appsHeading!.y);
+      await search.fill(capabilityName);
+      await expectVisible(page.locator(`[data-capability-catalog-tile="${capabilityId}"]`));
+      expect(await apps.count()).toBe(0);
+      await search.fill("GitHub");
+      await expectVisible(apps.first());
+      expect(await apps.count()).toBeLessThan(appCount);
+      await search.fill("no-such-plugin-xyz");
+      expect(await page.locator("[data-capability-catalog-tile]").count()).toBe(0);
+      expect(await apps.count()).toBe(0);
+      await search.fill("");
+      expect(await apps.count()).toBe(appCount);
+      await page.getByRole("button", { name: "Add MCP server", exact: true }).click();
+      const name = page.getByRole("dialog").getByLabel("Name", { exact: true });
+      expect(await name.getAttribute("autocomplete")).toBe("off");
+      expect(await name.getAttribute("data-1p-ignore")).toBe("true");
+      await name.fill("Internal Tools MCP");
+      await page.screenshot({ path: `${evidenceDir}mcp-name-autofill-desktop.png` });
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
 
   test("four-column tiles preserve readable names and non-overlapping metadata", async () => {
     const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
@@ -408,7 +448,7 @@ describe("capabilities browser e2e", () => {
       expect(await tiles.count()).toBe(96);
 
       const startedAt = performance.now();
-      await page.getByLabel("Search connectors").fill("Capability 4999");
+      await page.getByLabel("Search all plugins").fill("Capability 4999");
       await expectVisible(page.locator('[data-capability-catalog-tile="mcp:large-4999"]'));
       expect(performance.now() - startedAt).toBeLessThan(1_000);
       expect(await tiles.count()).toBe(1);

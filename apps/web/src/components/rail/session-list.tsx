@@ -4,6 +4,8 @@
 // dot + single-line truncated title + relative time (visible at rest). The
 // active session (from the URL) is highlighted with an accent bar.
 import { useChannels, useSessionLineage, useWorkspaceSessions } from "@opengeni/react";
+import { SiteOriginLink } from "@/components/session/site-origin-link";
+import { SiteSessionGroupHeading } from "./site-session-group-heading";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -57,6 +59,8 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import {
@@ -246,6 +250,8 @@ type MoveToChannelFn = (
   channelId: string | null,
   restoreFocusTo?: SessionFocusTarget,
 ) => Promise<void>;
+const SESSION_DRAG_TYPE = "application/x-opengeni-session";
+const PROJECT_DRAG_TYPE = "application/x-opengeni-project";
 type UpdateAttentionFn = (
   session: Session,
   update: { unread?: boolean; activelyWorking?: boolean },
@@ -1263,8 +1269,11 @@ export function SessionList() {
   // The helper builds all three projections together so explicit nested pins
   // never disappear into an ancestor shortcut.
   const railSections = useMemo(
-    () => buildPinnedRailSections(projectedSessions),
-    [projectedSessions],
+    () =>
+      buildPinnedRailSections(projectedSessions, new Date(), {
+        groupSites: hierarchyMode && !browseControlsActive,
+      }),
+    [projectedSessions, hierarchyMode, browseControlsActive],
   );
   const forest = useMemo(
     () =>
@@ -1835,6 +1844,7 @@ export function SessionList() {
         return next;
       });
       const node = nodesById.get(sessionId);
+      if (sessionId.startsWith("site:")) return;
       const knownDirectChildren =
         node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
       if (
@@ -2316,14 +2326,11 @@ export function SessionList() {
     { key: "matching-results", label: "matching sessions", kind: "results" },
     nextCursor,
   );
-  const defaultPagination = paginationForGroup(
-    { key: "channel:default", label: "Default", kind: "channel", channelId: null },
-    nextCursor,
-  );
-  const renderedChannelSections =
-    channelSections.some((section) => section.channelId === null) || !defaultPagination
-      ? channelSections
-      : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  // Default is also a move destination: keep its header when its last row
+  // leaves, even if there is no next page of unfiled sessions.
+  const renderedChannelSections = channelSections.some((section) => section.channelId === null)
+    ? channelSections
+    : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
   const renderedGroupedBuckets =
     browseGroupBy === "creator"
       ? forest.grouped
@@ -3121,6 +3128,7 @@ function SessionGroup(props: {
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
 }) {
+  const [sessionDragOver, setSessionDragOver] = useState(false);
   const sectionId = `session-group-${
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
@@ -3143,23 +3151,45 @@ function SessionGroup(props: {
           onDragStart={(event: DragEvent<HTMLDivElement>) => {
             if (!props.project) return;
             event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", props.project.id);
+            event.dataTransfer.setData(PROJECT_DRAG_TYPE, props.project.id);
             props.onProjectDragStart?.(props.project.id);
           }}
           onDragOver={(event: DragEvent<HTMLDivElement>) => {
-            if (!props.project) return;
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              if (props.allowNewSession === false) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setSessionDragOver(true);
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
             props.onProjectDragOver?.(props.project.id);
           }}
           onDrop={(event: DragEvent<HTMLDivElement>) => {
-            if (!props.project) return;
+            setSessionDragOver(false);
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              event.preventDefault();
+              event.stopPropagation();
+              if (props.allowNewSession === false) return;
+              const session = props.flat.find(
+                (candidate) => candidate.id === event.dataTransfer.getData(SESSION_DRAG_TYPE),
+              );
+              if (session && session.parentSessionId === null && !session.archived) {
+                void props.onMoveToChannel(session, props.channelId ?? null, "row");
+              }
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
-            const sourceProjectId = event.dataTransfer.getData("text/plain");
+            const sourceProjectId = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
             if (sourceProjectId) props.onProjectDrop?.(sourceProjectId, props.project.id);
           }}
           onDragEnd={props.onProjectDragEnd}
+          onDragLeave={() => setSessionDragOver(false)}
           className={cn(
+            sessionDragOver && "bg-accent ring-1 ring-ring",
             "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
             props.project && "cursor-grab active:cursor-grabbing",
             props.project && props.draggedProjectId === props.project.id && "opacity-45",
@@ -3285,6 +3315,39 @@ function SessionGroup(props: {
 }
 
 /** A node plus, when expanded, its spawned children rendered one level deeper. */
+function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
+  const { node } = props;
+  const origin = node.siteGroup!;
+  const key = `site:${origin.siteId}`;
+  const expanded = props.expanded.has(key);
+  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const selected = selectedDescendantNode(node, props.activeSessionId);
+  const children = expanded ? node.children : selected ? [selected] : [];
+  return (
+    <div role="listitem" className="min-w-0">
+      <SiteSessionGroupHeading
+        origin={origin}
+        workspaceId={node.session.workspaceId}
+        expanded={expanded}
+        onToggle={() => props.onToggleExpand(key)}
+        summary={summary}
+      />
+      {children.length > 0 && (
+        <div role="list" aria-label={`Conversations from ${origin.title}`}>
+          {children.map((child) => (
+            <SessionTreeRow
+              {...props}
+              key={child.session.id}
+              node={child}
+              depth={props.depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionTreeRow(props: {
   node: SessionTreeNode;
   localDeliveryAttention: ReadonlyMap<string, number>;
@@ -3306,6 +3369,7 @@ function SessionTreeRow(props: {
   onRequestDelete: RequestDeleteFn;
 }) {
   const { node } = props;
+  if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
   const index = props.flat.indexOf(node.session);
   const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
   // Server treeStats only counts spawned descendants. Repeat runs of a scheduled
@@ -3580,10 +3644,21 @@ function SessionRow(props: {
         <div className={rowClassName}>
           <ActiveAccent active={props.active} />
           {lead}
+          <SiteOriginLink session={props.session} compact />
           <HoverCard openDelay={100} closeDelay={80}>
             <HoverCardTrigger asChild>
               <Link
                 to="/workspaces/$workspaceId/sessions/$sessionId"
+                draggable={props.session.parentSessionId === null && !props.session.archived}
+                onDragStart={(event) => {
+                  if (props.session.parentSessionId !== null || props.session.archived) {
+                    event.preventDefault();
+                    return;
+                  }
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
+                }}
                 params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
                 data-session-index={props.index}
                 data-session-focus
@@ -3664,6 +3739,9 @@ function SessionRow(props: {
               >
                 <SessionRowContent
                   waiting={waiting}
+                  quickActionSlots={
+                    Number(!props.session.archived) + Number(props.session.parentSessionId === null)
+                  }
                   title={title}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
@@ -3776,6 +3854,29 @@ function SessionRow(props: {
             Delete workstream
           </ContextMenuItem>
         ) : null}
+        {props.channels.length > 0 &&
+        props.session.parentSessionId === null &&
+        !props.session.archived ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+              Move to project
+            </ContextMenuLabel>
+            {[...props.channels, { id: null, name: "Default" }].map((channel) => (
+              <ContextMenuItem
+                key={channel.id ?? "default"}
+                className="pointer-coarse:min-h-11"
+                disabled={props.session.channelId === channel.id}
+                onSelect={() => {
+                  contextPinSelection.current = true;
+                  void props.onMoveToChannel(props.session, channel.id, "row");
+                }}
+              >
+                <span className="truncate">{channel.name}</span>
+              </ContextMenuItem>
+            ))}
+          </>
+        ) : null}
       </ContextMenuContent>
     </ContextMenu>
   );
@@ -3826,7 +3927,7 @@ export function RowQuickActions({
 
   return (
     <div
-      className="absolute right-0.5 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 rounded-md bg-surface-2 p-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden"
+      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md bg-surface-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
       data-session-quick-actions={session.id}
     >
       {canPin ? (

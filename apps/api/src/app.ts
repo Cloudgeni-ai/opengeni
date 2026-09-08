@@ -1,3 +1,4 @@
+import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
@@ -451,6 +452,8 @@ export function createAppComposition(deps: AppDependencies): {
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Correlation-Id",
       "X-OpenGeni-Session-Csrf",
+      "X-OpenGeni-Site-Id",
+      "X-OpenGeni-Site-Version",
       "X-OpenGeni-Subject",
     ],
     exposeHeaders: [
@@ -1237,6 +1240,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

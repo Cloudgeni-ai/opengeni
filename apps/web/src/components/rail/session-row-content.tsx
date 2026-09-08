@@ -6,7 +6,7 @@ import {
   Loader2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useId } from "react";
+import { Children, isValidElement, useId } from "react";
 
 import { CreatorMonogram } from "@/components/creator-monogram";
 import {
@@ -111,10 +111,13 @@ export function RailTrailingMetadata({
   scheduled = false,
   relativeTime,
   creator,
+  quickActionSlots = 0,
 }: {
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string | undefined;
+  /** Rightmost items replaced in place by the row's desktop quick actions. */
+  quickActionSlots?: number;
   /**
    * Session creator for a top-level row, else null; callers decide which rows
    * are roots. A chip is its own reason to render this block: a mobile root row
@@ -132,35 +135,71 @@ export function RailTrailingMetadata({
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)
       : "";
-  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram) return null;
+  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram && !quickActionSlots)
+    return null;
+  const items = Children.toArray([
+    scheduled ? (
+      <CalendarClockIcon
+        key="schedule"
+        aria-label="Scheduled task"
+        className="size-3.5 shrink-0 text-fg-subtle"
+      />
+    ) : null,
+    hasMonogram && creator ? (
+      <CreatorMonogram key="creator" createdBy={creator} showTitle={false} />
+    ) : null,
+    waitingFor ? (
+      <span
+        key="waiting"
+        data-session-row-waiting
+        title={summary.label}
+        className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-status-waiting"
+      >
+        {waitingFor}
+      </span>
+    ) : null,
+    hasStatusMarker ? (
+      <span key="status" className="flex size-3 items-center justify-center" title={summary.label}>
+        <RailAggregateDot summary={summary} />
+      </span>
+    ) : null,
+    hasRelativeTime ? (
+      <span
+        key="time"
+        className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg"
+      >
+        {relativeTime}
+      </span>
+    ) : null,
+  ]).filter(isValidElement);
+  if (!quickActionSlots) {
+    return (
+      <span
+        data-session-row-metadata
+        className="inline-flex shrink-0 items-center justify-end gap-1"
+      >
+        {items}
+      </span>
+    );
+  }
+  // Empty rows still reserve their action footprint. Visibility (never display
+  // or padding) swaps the last items, keeping every other box stationary.
+  while (items.length < quickActionSlots) items.unshift(<span key={`empty-${items.length}`} />);
   return (
-    <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end gap-1">
-      {scheduled ? (
-        <CalendarClockIcon
-          aria-label="Scheduled task"
-          className="size-3.5 shrink-0 text-fg-subtle"
-        />
-      ) : null}
-      {creator ? <CreatorMonogram createdBy={creator} showTitle={false} /> : null}
-      {waitingFor ? (
+    <span data-session-row-metadata className="inline-flex shrink-0 items-center justify-end">
+      {items.map((item, index) => (
         <span
-          data-session-row-waiting
-          title={summary.label}
-          className="shrink-0 whitespace-nowrap text-2xs tabular-nums text-status-waiting"
+          key={item.key}
+          data-session-row-slot
+          className={cn(
+            "inline-flex min-w-6 shrink-0 items-center justify-center last:min-w-10",
+            index >= items.length - quickActionSlots &&
+              "pointer-fine:group-hover:invisible pointer-fine:group-focus-within:invisible",
+          )}
         >
-          {waitingFor}
+          {item}
         </span>
-      ) : null}
-      {hasStatusMarker ? (
-        <span className="flex size-3 items-center justify-center" title={summary.label}>
-          <RailAggregateDot summary={summary} />
-        </span>
-      ) : null}
-      {hasRelativeTime ? (
-        <span className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
-          {relativeTime}
-        </span>
-      ) : null}
+      ))}
     </span>
   );
 }
@@ -246,6 +285,7 @@ export function SessionRowContent({
   relativeTime,
   creator,
   waiting = false,
+  quickActionSlots = 0,
 }: {
   title: string;
   stateLabel: string;
@@ -256,6 +296,7 @@ export function SessionRowContent({
   summary: RailAggregateStatus;
   scheduled?: boolean;
   relativeTime?: string;
+  quickActionSlots?: number;
   /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
   creator?: CreatorRef | null | undefined;
 }) {
@@ -280,6 +321,7 @@ export function SessionRowContent({
         ) : null}
       </span>
       <RailTrailingMetadata
+        quickActionSlots={quickActionSlots}
         summary={summary}
         scheduled={scheduled}
         relativeTime={relativeTime}

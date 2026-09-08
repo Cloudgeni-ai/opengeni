@@ -141,7 +141,7 @@ describe("Bundles section browser acceptance", () => {
       });
       // One Bundles section, one search, and a row for every kind in it.
       await expectVisible(page.getByRole("heading", { name: "Bundles" }));
-      const search = page.getByLabel("Search bundles");
+      const search = page.getByLabel("Search all plugins");
       await search.fill("research");
       await expectVisible(pluginRow);
       await expectHidden(skillRow);
