@@ -57,6 +57,7 @@
         "postgres": "^3.4.9",
         "typescript": "7.0.2",
         "yaml": "2.9.0",
+        "zod": "^4.2.1",
       },
     },
     "apps/api": {
