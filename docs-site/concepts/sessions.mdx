@@ -45,3 +45,11 @@ An agent can spawn child sessions for parallel or delegated work. Children run a
 ## Visibility
 
 Workspaces are shared by their members, and sessions in a shared workspace are visible to members by default. An organization owner can allow members to create "Only me" sessions that only their owner can see. Personal workspaces belong to one person.
+
+## Model inheritance
+
+Follow-ups without an explicit selection, voice requests and voice-end handoffs
+use the model, reasoning effort and speed from the latest turn that started.
+Session labels and fresh message drafts use those settings too. Before any turn
+starts, the initial session settings apply. Existing drafts, queued messages and
+historical turns retain their own settings.

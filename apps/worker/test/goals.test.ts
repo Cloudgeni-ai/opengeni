@@ -98,15 +98,17 @@ describe("goalContinuationPrompt", () => {
 });
 
 describe("goalContinuationModelDecision", () => {
-  test("falls back to the session model when the inherited model left the catalog", () => {
+  test("does not revert to the original model when the inherited model left the catalog", () => {
     expect(
       goalContinuationModelDecision({
         settings: testSettings(),
         workspaceModelPolicy: null,
         inheritedModel: "removed/provider-model",
-        sessionModel: "scripted-model",
       }),
-    ).toEqual({ model: "scripted-model", blocked: null });
+    ).toMatchObject({
+      model: "removed/provider-model",
+      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+    });
   });
 
   test("pauses instead of materializing when neither inherited nor session model exists", () => {
@@ -115,7 +117,6 @@ describe("goalContinuationModelDecision", () => {
         settings: testSettings(),
         workspaceModelPolicy: null,
         inheritedModel: "removed/provider-model",
-        sessionModel: "removed/session-model",
       }),
     ).toMatchObject({
       model: "removed/provider-model",
@@ -133,7 +134,6 @@ describe("goalContinuationModelDecision", () => {
           settings,
           workspaceModelPolicy: null,
           inheritedModel: model,
-          sessionModel: "scripted-model",
         }),
       ).toEqual({ model, blocked: null });
     }

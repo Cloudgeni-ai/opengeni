@@ -16,6 +16,9 @@ import {
   evaluateSessionControl,
   getScheduledTargetSessionExecution,
   getSessionTurn,
+  getSession,
+  listSessions,
+  listFloorSessions,
   getSessionQueueSnapshot,
   listSessionTurns,
   markSessionAttemptQuiesced,
@@ -137,6 +140,74 @@ async function storedEvents(workspaceId: string, eventIds: string[]) {
       .where(inArray(schema.sessionEvents.id, eventIds)),
   );
 }
+
+describe("latest started session policy", () => {
+  test("projects and inherits started policy, preserving explicit and queued policies", async () => {
+    const value = await fixture(3);
+    const workspaceId = value.grant.workspaceId!;
+    const initial = { model: "scripted-model", reasoningEffort: "medium", latencyMode: "standard" };
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(initial);
+    const started = value.turns[0]!;
+    await withWorkspaceRls(client.db, workspaceId, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ reasoningEffort: "high", latencyMode: "priority" })
+        .where(eq(schema.sessionTurns.id, started.id));
+      // Admission failure / startedAt alone cannot replace turn.started truth.
+      await db
+        .update(schema.sessionTurns)
+        .set({ startedAt: new Date(), status: "failed" })
+        .where(eq(schema.sessionTurns.id, value.turns[2]!.id));
+    });
+    await appendSessionEvents(client.db, workspaceId, value.session.id, [
+      {
+        type: "turn.started",
+        turnId: started.id,
+        payload: {},
+      },
+    ]);
+    const effective = { model: started.model, reasoningEffort: "high", latencyMode: "priority" };
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(effective);
+    expect(
+      (await listSessions(client.db, workspaceId)).find((row) => row.id === value.session.id),
+    ).toMatchObject(effective);
+    expect(
+      (await listFloorSessions(client.db, workspaceId)).find((row) => row.id === value.session.id),
+    ).toMatchObject({ model: started.model });
+    const submit = (override = {}) =>
+      withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as unknown as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "follow up",
+            resources: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+            ...override,
+          }),
+        ),
+      );
+    const inherited = await submit();
+    expect(await getSessionTurn(client.db, workspaceId, inherited.turnId)).toMatchObject(effective);
+    const explicit = { model: "explicit-model", reasoningEffort: "low", latencyMode: "standard" };
+    const overridden = await submit(explicit);
+    expect(await getSessionTurn(client.db, workspaceId, overridden.turnId)).toMatchObject(explicit);
+    expect(await getSessionTurn(client.db, workspaceId, value.turns[1]!.id)).toMatchObject({
+      model: value.turns[1]!.model,
+    });
+    expect(await getSession(client.db, workspaceId, value.session.id)).toMatchObject(effective);
+    const stored = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db.select().from(schema.sessions).where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(stored[0]).toMatchObject(initial);
+  });
+});
 
 describe("canonical queue commands", () => {
   test("projects only prompts admitted to wait behind work into the visible queue", async () => {
