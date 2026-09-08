@@ -23,6 +23,7 @@ describe("skill_read gateway definition", () => {
             skillId: "workspace-skill",
             revisionId: "current-revision",
             scopeVersion: 4,
+            installationVersion: 7,
             files: [
               { path: "SKILL.md", content: "main" },
               { path: "reference.md", content: "support" },
@@ -40,6 +41,7 @@ describe("skill_read gateway definition", () => {
       skillId: "workspace-skill",
       revisionId: "current-revision",
       scopeVersion: 4,
+      installationVersion: 7,
       files: [{ path: "reference.md", content: "support" }],
     });
   });

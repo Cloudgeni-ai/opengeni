@@ -24,11 +24,17 @@ calling it. Use `skill_search` to find installed or available Skills and
 `skill_install` to install a chosen source. Installation resolves source bytes
 on the server; do not invent a source hash. Search does not install anything.
 Installed guidance never grants credentials, tools, or additional permissions.
+Keep the same `operationId` and original arguments when retrying an uncertain
+install. A committed install replays before fetching the source again. Updates
+must supply the reviewed installation version; do not substitute a newer value
+merely to get past a conflict.
 
 ## Create and edit
 
 Use `skill_save` for small changes to any text file, not only `SKILL.md`.
 Creating a Skill requires a `SKILL.md` with a useful name and description.
+Choose a fresh UUID `skillId`, set `expectedRevisionId` to null and
+`expectedScopeVersion` to 1, and retain the operation id for retries.
 Keep the main instructions focused; place longer references or scripts in
 supporting files. Text files may have any extension or no extension.
 
@@ -40,6 +46,9 @@ Use `skill_checkout` only when you need files on disk, for example to run a
 script or edit a larger directory. Edit with ordinary filesystem tools, then
 use `skill_publish` to save the directory. Do not repeat the whole folder's
 contents in a tool argument. Checkout alone does not publish changes.
+Stop processes editing the directory before publishing it. Publishing reads the
+whole folder; server revision checks prevent overwriting a newer saved revision,
+but they do not freeze a directory another process is changing.
 
 ## Persistent changes
 

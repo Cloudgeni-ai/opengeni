@@ -88,6 +88,9 @@ export function createWorkspaceSkillTools(input: {
       skillId: record.id,
       revisionId: record.activeRevisionId,
       scopeVersion: record.scopeVersion,
+      ...(match.installationVersion !== null
+        ? { installationVersion: match.installationVersion }
+        : {}),
       files: record.files,
     };
   };
@@ -117,6 +120,9 @@ export function createWorkspaceSkillTools(input: {
           description: entry.description,
           revisionId: entry.revisionId,
           scopeVersion: entry.scopeVersion,
+          ...(entry.installationVersion !== null
+            ? { installationVersion: entry.installationVersion }
+            : {}),
         })),
         ...input.selected.map((entry) => ({
           id: entry.id,

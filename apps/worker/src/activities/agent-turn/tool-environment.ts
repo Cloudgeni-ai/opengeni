@@ -89,6 +89,7 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
+import { guardSkillFilesystem } from "./skill-transfer";
 import type { RuntimeSkillActivation } from "@opengeni/runtime";
 
 export type PrepareTurnToolPolicyDeps = {
@@ -617,7 +618,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       );
       const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
       const runAs = sandboxRunAs(runSettings);
-      return new SandboxChannelAService({
+      const channel = new SandboxChannelAService({
         session: access.session,
         workspaceRoot: machineRoot ?? "/workspace",
         ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
@@ -626,6 +627,16 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           await eventing.publish?.(events, true);
         },
         ...(runAs ? { runAs } : {}),
+      });
+      return guardSkillFilesystem(channel, {
+        assertActive: () => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+        },
+        runMutation: async (mutation) =>
+          access.sandbox && !routingOn
+            ? runWorkspaceMutationForSandbox(access.sandbox, "skillCheckout", mutation)
+            : mutation(),
       });
     },
   });

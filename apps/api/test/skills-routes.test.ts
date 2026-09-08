@@ -441,6 +441,15 @@ describe("portable Skill routes", () => {
       capabilityId: updated.capabilityId,
       status: "uninstalled",
       remainingOwners: [],
+      skillReleases: [
+        {
+          skillId: expect.any(String),
+          revisionId: expect.any(String),
+          disposition: "deactivated",
+          eventId: expect.any(String),
+          warning: null,
+        },
+      ],
     });
   }, 60_000);
 });

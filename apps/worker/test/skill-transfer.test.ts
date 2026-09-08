@@ -7,6 +7,7 @@ import {
 } from "../src/activities/agent-turn/skill-checkout";
 import {
   checkoutSkillDirectory,
+  guardSkillFilesystem,
   readSkillDirectory,
 } from "../src/activities/agent-turn/skill-transfer";
 
@@ -69,6 +70,26 @@ function fixture() {
 }
 
 describe("optional Skill directory transfers", () => {
+  test("checkout writes use mutation admission and recheck cancellation after admission", async () => {
+    const { fs, writes } = fixture();
+    let active = true;
+    let admissions = 0;
+    const guarded = guardSkillFilesystem(fs, {
+      assertActive: () => {
+        if (!active) throw new Error("attempt cancelled");
+      },
+      runMutation: async (operation) => {
+        admissions++;
+        active = false;
+        return operation();
+      },
+    });
+    await expect(
+      checkoutSkillDirectory(guarded, "fresh", [{ path: "SKILL.md", content: main }]),
+    ).rejects.toThrow("attempt cancelled");
+    expect(admissions).toBe(1);
+    expect(writes).toEqual([]);
+  });
   test("gateway checkout is lazy and publish uses the governed save receipt", async () => {
     const { fs } = fixture();
     const calls: string[] = [];

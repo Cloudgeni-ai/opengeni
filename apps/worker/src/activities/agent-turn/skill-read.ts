@@ -12,6 +12,7 @@ export type SkillReadContent = Readonly<{
   skillId: string;
   revisionId: string;
   scopeVersion: number;
+  installationVersion?: number;
 }>;
 
 /** A first-party gateway definition, not a sandbox capability or second backend. */
@@ -72,6 +73,9 @@ export function createSkillReadAttemptToolDefinition(input: {
               skillId: metadata.skillId,
               revisionId: metadata.revisionId,
               scopeVersion: metadata.scopeVersion,
+              ...(metadata.installationVersion !== undefined
+                ? { installationVersion: metadata.installationVersion }
+                : {}),
             }
           : {}),
         ...selected,

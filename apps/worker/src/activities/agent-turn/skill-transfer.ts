@@ -12,6 +12,30 @@ import {
 type SkillFileSystem = Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">;
 const maxTraversalEntries = 1024;
 
+/** Reuse the host's cancellation and workspace-mutation authority for each filesystem operation. */
+export function guardSkillFilesystem(
+  fs: SkillFileSystem,
+  authority: {
+    assertActive: () => void;
+    runMutation: <T>(operation: () => Promise<T>) => Promise<T>;
+  },
+): SkillFileSystem {
+  const read = <T>(operation: () => Promise<T>): Promise<T> => {
+    authority.assertActive();
+    return operation();
+  };
+  const write = <T>(operation: () => Promise<T>): Promise<T> => {
+    authority.assertActive();
+    return authority.runMutation(() => read(operation));
+  };
+  return {
+    fsList: (request) => read(() => fs.fsList(request)),
+    fsRead: (request) => read(() => fs.fsRead(request)),
+    fsWrite: (request) => write(() => fs.fsWrite(request)),
+    fsMkdir: (request) => write(() => fs.fsMkdir(request)),
+  };
+}
+
 /** Caller supplies an authorized live filesystem and a fresh workspace-relative target. */
 export async function checkoutSkillDirectory(
   fs: SkillFileSystem,

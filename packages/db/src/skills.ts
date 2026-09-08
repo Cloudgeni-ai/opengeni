@@ -88,6 +88,7 @@ export type SkillDescriptor = {
   description: string;
   revisionId: string;
   scopeVersion: number;
+  installationVersion: number | null;
   activationMode: "workspace_managed" | "session_selected";
 };
 
@@ -101,11 +102,15 @@ export async function listSkillDescriptors(
       tx,
       sql`
     SELECT h.id, h.stable_key AS "stableKey", r.title, r.description,
-      r.id AS "revisionId", h.scope_version AS "scopeVersion",
+      r.id AS "revisionId", h.scope_version AS "scopeVersion", pi.version AS "installationVersion",
       coalesce(r.skill_activation_mode,'workspace_managed') AS "activationMode"
     FROM preference_registry_preferences h
     JOIN preference_registry_revisions r ON r.id=h.active_revision_id AND r.preference_id=h.id
       AND r.account_id=h.account_id
+    LEFT JOIN skill_source_bindings b ON b.preference_id=h.id AND b.account_id=h.account_id
+      AND b.workspace_id=${context.workspaceId}::uuid
+    LEFT JOIN capability_plugin_installations pi ON pi.plugin_id=b.plugin_id
+      AND pi.account_id=h.account_id AND pi.workspace_id=b.workspace_id AND pi.status='active'
     WHERE h.account_id=${context.accountId}::uuid AND h.status='active'
       AND (h.scope='organization' OR (h.scope='workspace' AND h.scope_workspace_id=${context.workspaceId}::uuid)
         OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
