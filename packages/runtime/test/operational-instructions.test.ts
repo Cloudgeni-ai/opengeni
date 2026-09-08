@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildOpenGeniAgent } from "../src/index";
+import { buildOpenGeniAgent, CODEMODE_PROGRAMMATIC_DIRECTIVE } from "../src/index";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "../src/operational-instructions";
 
 describe("provider-neutral operational instructions", () => {
@@ -20,6 +20,13 @@ describe("provider-neutral operational instructions", () => {
     expect(guidance).toContain("a running read does not");
     expect(guidance).toContain("Earlier tool results and delivered messages never change");
     expect(guidance.length).toBeLessThan(1600);
+  });
+
+  test("prefers the attempt-provided native Codemode client over an older installed CLI", () => {
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain(
+      "prefer the connection-bound native client even if an older `ogtool` is installed",
+    );
+    expect(CODEMODE_PROGRAMMATIC_DIRECTIVE).toContain("OPENGENI_CODEMODE_NATIVE_CLIENT");
   });
 
   test("does not carry Codex-only runtime language", () => {
