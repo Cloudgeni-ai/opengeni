@@ -262,6 +262,11 @@ file primitives and packaged guidance live in `packages/runtime/src/skill-files.
 from its live registration and persisted lifecycle. Native packaged guidance can
 be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
 embedding selection controls or Connected Machine visibility from that helper.
+`packages/contracts/src/skill-metadata.ts` owns the shared YAML interpretation.
+Every active Skill's name and description come from `SKILL.md` frontmatter;
+database/catalog metadata is a derived projection, never a second edit surface.
+Preserve valid YAML bytes and historical revisions. Legacy conversion and
+activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 

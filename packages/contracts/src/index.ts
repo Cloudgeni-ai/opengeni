@@ -1,5 +1,6 @@
 export * from "./skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt } from "./skills";
+import { readSkillMetadata } from "./skill-metadata";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -9790,28 +9791,21 @@ export const CapabilityPackSkillFile = z.object({
 });
 export type CapabilityPackSkillFile = z.infer<typeof CapabilityPackSkillFile>;
 
-// A skill delivered by a capability pack. The name doubles as the skill
-// directory under the sandbox skill index (skills/<name>), so it must be a
-// single safe path segment. Every skill must ship a top-level SKILL.md.
+// A skill delivered by a capability pack. Files own metadata. Optional legacy
+// name/description inputs are consistency assertions, never competing values.
 export const CapabilityPackSkill = z
   .object({
-    name: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/, {
-        message: "skill name must be a single path segment of letters, digits, '.', '_' or '-'",
-      }),
-    description: z.string().min(1).max(2048).optional(),
+    name: z.string().min(1).max(64).optional(),
+    description: z.string().min(1).max(1024).optional(),
     // Workspace-managed Skills are available to every session in the
     // workspace. Session-selected Skills remain installed and inspectable, but
     // enter model context only when their immutable definition is attached to
     // a session explicitly. This is the hard contamination boundary for Packs
     // that guide implementation agents rather than customer-facing agents.
     activationMode: z.enum(["workspace_managed", "session_selected"]).optional(),
-    files: z.array(CapabilityPackSkillFile).min(1).max(64),
+    files: z.array(CapabilityPackSkillFile).min(1).max(128),
   })
-  .superRefine((skill, ctx) => {
+  .transform((skill, ctx) => {
     const seen = new Set<string>();
     skill.files.forEach((file, index) => {
       if (seen.has(file.path)) {
@@ -9823,15 +9817,38 @@ export const CapabilityPackSkill = z
       }
       seen.add(file.path);
     });
-    if (!skill.files.some((file) => file.path === "SKILL.md")) {
+    const main = skill.files.find((file) => file.path === "SKILL.md");
+    if (!main) {
       ctx.addIssue({
         code: "custom",
         message: "skill must include a top-level SKILL.md file",
         path: ["files"],
       });
+      return z.NEVER;
     }
+    let metadata: ReturnType<typeof readSkillMetadata>;
+    try {
+      metadata = readSkillMetadata(main.content);
+    } catch (error) {
+      ctx.addIssue({
+        code: "custom",
+        message: error instanceof Error ? error.message : "Invalid Skill frontmatter",
+        path: ["files"],
+      });
+      return z.NEVER;
+    }
+    for (const key of ["name", "description"] as const) {
+      if (skill[key] !== undefined && skill[key] !== metadata[key])
+        ctx.addIssue({
+          code: "custom",
+          message: `Skill ${key} must match SKILL.md frontmatter`,
+          path: [key],
+        });
+    }
+    return { ...skill, ...metadata };
   });
 export type CapabilityPackSkill = z.infer<typeof CapabilityPackSkill>;
+export type CapabilityPackSkillInput = z.input<typeof CapabilityPackSkill>;
 
 // Inline skill content fixed onto one session at creation. It intentionally
 // uses the exact same validated directory shape as a pack skill, but has a
@@ -9842,6 +9859,7 @@ export const SessionSkill = CapabilityPackSkill.transform(
   ({ activationMode: _activationMode, ...skill }) => skill,
 );
 export type SessionSkill = z.infer<typeof SessionSkill>;
+export type SessionSkillInput = z.input<typeof SessionSkill>;
 
 export const SessionSkills = z
   .array(SessionSkill)

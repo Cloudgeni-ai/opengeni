@@ -47,7 +47,7 @@ read-version pins or introduce remote preview as a prerequisite.
 
 ## 2. Proposed simple model
 
-A Skill has a stable identity, display metadata, a current saved folder, and
+A Skill has a stable identity, metadata derived from `SKILL.md`, a current saved folder, and
 saved history. Installed Skills also retain their source and upstream version.
 The exact schema is still to be chosen; a Skill is not identified solely by its
 frontmatter name, since different sources may use the same name.

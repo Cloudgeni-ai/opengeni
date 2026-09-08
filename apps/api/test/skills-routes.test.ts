@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 
 import { registerSkillRoutes } from "../src/routes/skills";
+import { registerPreferenceRegistryRoutes } from "../src/routes/preference-registry";
 
 const delegationSecret = "portable-skill-route-secret";
 const skillMarkdown = `---
@@ -86,6 +87,10 @@ beforeAll(async () => {
   accountId = grant.accountId;
   workspaceId = grant.workspaceId;
   app = new Hono();
+  registerPreferenceRegistryRoutes(app, {
+    db: client.db,
+    settings: testSettings({ productAccessMode: "managed", delegationSecret }),
+  } as ApiRouteDeps);
   registerSkillRoutes(
     app,
     {
@@ -128,6 +133,20 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("legacy metadata-writing endpoints are retired without changing content", async () => {
+    if (!available) return;
+    const before = await request("/skills/content").then((response) => response.json());
+    for (const path of [
+      "proposals",
+      `${crypto.randomUUID()}/activate`,
+      `${crypto.randomUUID()}/correct`,
+    ]) {
+      const response = await request(`/preferences/${path}`, { method: "POST", body: "{}" });
+      expect(response.status).toBe(410);
+      expect(await response.json()).toMatchObject({ code: "SKILL_FILE_LIFECYCLE_REQUIRED" });
+    }
+    expect(await request("/skills/content").then((response) => response.json())).toEqual(before);
+  });
   test("shared content routes preserve folders, replay saves, reject stale heads and restore history", async () => {
     if (!available) return;
     const skillId = crypto.randomUUID();

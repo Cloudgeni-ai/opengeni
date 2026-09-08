@@ -24,7 +24,7 @@ const saveRequest = z
     expectedRevisionId: z.uuid().nullable(),
     expectedScopeVersion: z.number().int().nonnegative(),
     scope: scopeSchema.default("workspace"),
-    stableKey: z.string().min(1).max(120),
+    stableKey: z.string().min(1).max(96),
     files: z.array(SkillFile).max(128),
     deletions: z.array(z.string().min(1).max(512)).max(128).default([]),
     reason: z.string().min(1).max(2000),

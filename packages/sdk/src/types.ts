@@ -2840,7 +2840,7 @@ export type CreateSessionRequest = {
   policyRole?: string | undefined;
   resources?: ResourceRef[] | undefined;
   /** Inline skills fixed onto this session; omitted children inherit them. */
-  skills?: SessionSkill[] | undefined;
+  skills?: SessionSkillInput[] | undefined;
   /** Installed session-selected Skill identities to freeze onto this session at creation. */
   installedSkillIds?: string[] | undefined;
   tools?: ToolRef[] | undefined;
@@ -6221,6 +6221,12 @@ export type CapabilityPackSkill = {
 };
 
 export type SessionSkill = Omit<CapabilityPackSkill, "activationMode">;
+/** SKILL.md owns metadata; supplied legacy fields must exactly match it. */
+export type CapabilityPackSkillInput = Omit<CapabilityPackSkill, "name" | "description"> & {
+  name?: string | undefined;
+  description?: string | undefined;
+};
+export type SessionSkillInput = Omit<CapabilityPackSkillInput, "activationMode">;
 
 export type CapabilityPackVariableSetSpec = {
   description: string;
@@ -6312,7 +6318,7 @@ export type RegisterCapabilityPackRequest = {
     | undefined;
   skills?:
     | {
-        name: string;
+        name?: string | undefined;
         description?: string | undefined;
         activationMode?: "workspace_managed" | "session_selected" | undefined;
         files: CapabilityPackSkillFile[];

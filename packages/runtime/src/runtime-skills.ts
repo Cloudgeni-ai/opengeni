@@ -10,6 +10,7 @@ import {
 import { sitePackageVersions } from "./site-package-versions";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSkillMetadata } from "@opengeni/contracts";
 
 import { localDirLazySkillSource } from "@openai/agents/sandbox/local";
 import {
@@ -22,11 +23,7 @@ import {
   type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 
-import {
-  buildPortableSkillArtifact,
-  readSkillLibraryArtifact,
-  skillArtifactContentSha256,
-} from "./skill-library";
+import { buildPortableSkillArtifact, readSkillLibraryArtifact } from "./skill-library";
 
 export type RuntimeSkillArtifactFile = Readonly<{
   path: string;
@@ -288,13 +285,21 @@ function validateRuntimeSkillActivation(
   }
   assertSafeRuntimeSkillName(activation.artifact.name);
   runtimeSkillDirNode(activation.artifact);
-  const contentSha256 = skillArtifactContentSha256(activation.artifact.files);
+  const artifact = buildPortableSkillArtifact(activation.artifact.files);
+  if (
+    activation.artifact.name !== artifact.name ||
+    (activation.artifact.description != null &&
+      activation.artifact.description !== artifact.description)
+  ) {
+    throw new Error(`Skill metadata must match SKILL.md frontmatter: ${activation.id}`);
+  }
+  const contentSha256 = artifact.contentSha256;
   if (activation.source === "installation" && contentSha256 !== activation.contentSha256) {
     throw new Error(
       `Installed Skill artifact hash mismatch for ${activation.id}: expected ${activation.contentSha256}, got ${contentSha256}`,
     );
   }
-  return Object.freeze({ activation, contentSha256 });
+  return Object.freeze({ activation: { ...activation, artifact }, contentSha256 });
 }
 
 function selectionForActivation({
@@ -513,43 +518,6 @@ function compareRuntimeSkillName(left: string, right: string): number {
 }
 
 function runtimeSkillDescription(skill: RuntimeSkillArtifact): string {
-  const explicit = skill.description?.trim();
-  if (explicit) return explicit;
   const markdown = skill.files.find((skillFile) => skillFile.path === "SKILL.md")?.content ?? "";
-  return skillFrontmatterDescription(markdown) ?? "No description provided.";
-}
-
-function skillFrontmatterDescription(markdown: string): string | null {
-  const lines = markdown.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) return null;
-  const collected: string[] = [];
-  let inDescription = false;
-  for (const line of lines.slice(1, end)) {
-    const match = line.match(/^description:\s*(.*)$/);
-    if (match) {
-      const inline = match[1]!.trim();
-      if (inline && inline !== ">-" && inline !== ">" && inline !== "|" && inline !== "|-") {
-        return unquoteFrontmatterValue(inline);
-      }
-      inDescription = true;
-      continue;
-    }
-    if (!inDescription) continue;
-    if (/^\s+\S/.test(line)) {
-      collected.push(line.trim());
-      continue;
-    }
-    break;
-  }
-  const blockValue = collected.join(" ").trim();
-  return blockValue || null;
-}
-
-function unquoteFrontmatterValue(value: string): string {
-  if (value.length >= 2 && value[0] === value.at(-1) && (value[0] === '"' || value[0] === "'")) {
-    return value.slice(1, -1);
-  }
-  return value;
+  return readSkillMetadata(markdown).description;
 }

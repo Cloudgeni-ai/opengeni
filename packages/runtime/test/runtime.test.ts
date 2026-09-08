@@ -11326,14 +11326,12 @@ describe("runtime Skill activation", () => {
     expect(infra?.path).toBe("infra-ops");
   });
 
-  test("an explicit pack skill description wins over SKILL.md frontmatter", () => {
-    const source = composeRuntimeSkills([
-      packActivation({ ...infraSkill, description: "Explicit description." }),
-    ]).lazySource;
-    const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
-    expect(index.find((entry) => entry.name === "infra-ops")?.description).toBe(
-      "Explicit description.",
-    );
+  test("an explicit pack description cannot override SKILL.md frontmatter", () => {
+    expect(() =>
+      composeRuntimeSkills([
+        packActivation({ ...infraSkill, description: "Explicit description." }),
+      ]),
+    ).toThrow("must match SKILL.md frontmatter");
   });
 
   test("a Pack may explicitly contribute Checkov like any other Skill", () => {
@@ -11343,7 +11341,7 @@ describe("runtime Skill activation", () => {
         files: [
           {
             path: "SKILL.md",
-            content: "---\ndescription: Pack-provided checkov.\n---\n",
+            content: "---\nname: checkov\ndescription: Pack-provided checkov.\n---\n",
           },
         ],
       }),
@@ -11393,7 +11391,12 @@ describe("runtime Skill activation", () => {
         packActivation({
           name: loaded.skill.name,
           description: "Divergent Pack override.",
-          files: [{ path: "SKILL.md", content: "# Divergent Pack override\n" }],
+          files: [
+            {
+              path: "SKILL.md",
+              content: `---\nname: ${loaded.skill.name}\ndescription: Divergent Pack override.\n---\n# Divergent Pack override\n`,
+            },
+          ],
         }),
       ]),
     ).toThrow(`Conflicting Skill definitions for "${loaded.skill.name}"`);
@@ -11423,11 +11426,15 @@ describe("runtime Skill activation", () => {
       composeRuntimeSkills([
         packActivation({
           name: "dup",
-          files: [{ path: "SKILL.md", content: "a" }],
+          files: [
+            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\na" },
+          ],
         }),
         packActivation({
           name: "dup",
-          files: [{ path: "SKILL.md", content: "b" }],
+          files: [
+            { path: "SKILL.md", content: "---\nname: dup\ndescription: Duplicate fixture\n---\nb" },
+          ],
         }),
       ]),
     ).toThrow('Conflicting Skill definitions for "dup"');

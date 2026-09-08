@@ -271,8 +271,6 @@ const session = await client.createSession(workspace.id, {
   initialMessage: userMessage,
   idempotencyKey: productRequest.id,
   skills: selectedSkills.map((skill) => ({
-    name: skill.name,
-    description: skill.description,
     files: skill.files.map((file) => ({
       path: file.path,
       content: file.content,
@@ -281,9 +279,13 @@ const session = await client.createSession(workspace.id, {
 });
 ```
 
-Every inline Skill must include a top-level `SKILL.md`; additional reference
-files remain relative to that Skill directory. Skill content is session
-configuration, not a secret store.
+Every inline Skill must include a top-level `SKILL.md` with valid YAML
+frontmatter containing `name` and `description`. Those values are the source of
+the context index metadata; do not maintain a separate short description.
+Submit `files` alone. Legacy `name` and `description` fields are optional
+consistency assertions and, when supplied, must exactly match the frontmatter.
+Additional reference files remain relative to that Skill directory. Skill
+content is session configuration, not a secret store.
 
 There is no organization-wide Skill registry or Skill inheritance for this
 integration contract. Installing or selecting a Skill in the external product
