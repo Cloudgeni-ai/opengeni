@@ -12,6 +12,38 @@ const scope = {
 };
 
 describe("skill_read gateway definition", () => {
+  test("returns edit metadata from the same read without expanding explicit paths", async () => {
+    const environment = createAttemptToolEnvironment({
+      scope,
+      generation: 1,
+      definitions: [
+        createSkillReadAttemptToolDefinition({
+          authorize: async () => {},
+          load: async () => ({
+            skillId: "workspace-skill",
+            revisionId: "current-revision",
+            scopeVersion: 4,
+            files: [
+              { path: "SKILL.md", content: "main" },
+              { path: "reference.md", content: "support" },
+            ],
+          }),
+        }),
+      ],
+    });
+    const output = await environment.callModel({
+      modelName: "skill_read",
+      arguments: { skill: "workspace-skill", paths: ["reference.md"] },
+      subjectId: "agent:test",
+    });
+    expect(output.structuredContent).toEqual({
+      skillId: "workspace-skill",
+      revisionId: "current-revision",
+      scopeVersion: 4,
+      files: [{ path: "reference.md", content: "support" }],
+    });
+  });
+
   test("uses the canonical attempt gateway and exact requested files", async () => {
     const calls: string[] = [];
     const environment = createAttemptToolEnvironment({

@@ -6,6 +6,9 @@ export type WorkspaceSkillSearchEntry = Readonly<{
   id: string;
   name: string;
   description: string;
+  revisionId?: string;
+  scopeVersion?: number;
+  installationVersion?: number;
 }>;
 
 export function createSkillSearchAttemptToolDefinition(input: {

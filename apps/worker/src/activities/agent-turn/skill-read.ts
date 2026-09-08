@@ -8,10 +8,17 @@ import {
 
 export const SKILL_READ_TOOL_NAME = "skill_read";
 
+export type SkillReadContent = Readonly<{
+  files: readonly SkillTextFile[];
+  skillId: string;
+  revisionId: string;
+  scopeVersion: number;
+}>;
+
 /** A first-party gateway definition, not a sandbox capability or second backend. */
 export function createSkillReadAttemptToolDefinition(input: {
   authorize: () => Promise<void>;
-  load: (skill: string) => Promise<readonly SkillTextFile[]>;
+  load: (skill: string) => Promise<readonly SkillTextFile[] | SkillReadContent>;
 }): AttemptToolDefinition {
   return {
     identity: { serverId: "opengeni", toolName: SKILL_READ_TOOL_NAME },
@@ -54,11 +61,25 @@ export function createSkillReadAttemptToolDefinition(input: {
         throw new Error("skill_read requires a Skill identifier and optional relative paths.");
       }
       await input.authorize();
-      const files =
+      const loaded =
         args.skill === "opengeni-skills" || args.skill === "builtin:opengeni-skills"
           ? loadSkillManagementSkill().files
           : await input.load(args.skill);
-      const output = readSkillFiles(files, args.paths as string[] | undefined);
+      const metadata = "files" in loaded ? loaded : null;
+      const selected = readSkillFiles(
+        metadata ? metadata.files : (loaded as readonly SkillTextFile[]),
+        args.paths as string[] | undefined,
+      );
+      const output = {
+        ...(metadata
+          ? {
+              skillId: metadata.skillId,
+              revisionId: metadata.revisionId,
+              scopeVersion: metadata.scopeVersion,
+            }
+          : {}),
+        ...selected,
+      };
       return {
         isError: false,
         content: [{ type: "text", text: JSON.stringify(output) }],
