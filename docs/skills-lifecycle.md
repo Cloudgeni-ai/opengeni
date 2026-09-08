@@ -153,6 +153,15 @@ interpretation of YAML. Restore requires valid frontmatter; plain archived conte
 must be explicitly repaired through save. Files-bearing activation remains
 compatible with human governance.
 
+The old Knowledge-backed preference proposal service is retired as well.
+`writeCompanyBrainGovernedProposal` rejects `propose_preference` and
+`promote_task_note_preference` before materializing Knowledge evidence or change
+proposals. Its legacy SQL capability retains its signature but always refuses
+writes with an explicit `skill_save` redirect error. Existing Knowledge,
+instruction-policy, and historical proposal/receipt reads are unchanged. New
+Skills must use the shared file lifecycle and simple Learning mode, not the
+Knowledge confidence/evidence evaluator.
+
 The exact 0426 runner stage executes inside an explicit migration transaction:
 setup and owner window, TypeScript parsing into a temporary staging table, then
 SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
