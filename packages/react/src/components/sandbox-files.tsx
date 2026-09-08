@@ -667,8 +667,10 @@ function GitHeader({ git, loading }: { git: SandboxFilesGitSummary; loading: boo
       </span>
       {(git.ahead > 0 || git.behind > 0) && (
         <span className="flex shrink-0 items-center gap-1.5 text-og-xs text-og-fg-subtle">
-          {git.ahead > 0 && <span>↑{git.ahead}</span>}
-          {git.behind > 0 && <span>↓{git.behind}</span>}
+          {/* Small arrow glyphs can make axe's pixel overlap heuristic inconclusive.
+              Keep both counters in the same computed-contrast audit as the dirty count. */}
+          {git.ahead > 0 && <span data-contrast-audited>↑{git.ahead}</span>}
+          {git.behind > 0 && <span data-contrast-audited>↓{git.behind}</span>}
         </span>
       )}
       {dirty && (

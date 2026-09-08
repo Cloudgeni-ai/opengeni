@@ -301,6 +301,40 @@ describe("workbench browser acceptance", () => {
     expect(failures).toEqual([]);
   }, 180_000);
 
+  test("mobile Git divergence counters retain fail-closed computed contrast coverage", async () => {
+    for (const theme of ["dark", "light"] as const) {
+      const context = await browser.newContext({
+        viewport: { width: 320, height: 720 },
+        isMobile: true,
+      });
+      try {
+        const page = await context.newPage();
+        await page.goto(dockUrl(baseUrl, "live-file-wake-recovery", theme, "files"), {
+          waitUntil: "networkidle",
+        });
+        await waitForWorkbenchVisualReady(page);
+        for (const text of ["↑2", "↓1"]) {
+          const counter = page.getByText(text, { exact: true });
+          await counter.waitFor();
+          expect(await counter.getAttribute("data-contrast-audited")).not.toBeNull();
+          const before = await manualAccessibilityAudit(page);
+          expect(before.minimumContrast).not.toBeNull();
+          expect(before.minimumContrast!).toBeGreaterThanOrEqual(4.5);
+          // Negative control: the existing audit must reject this exact counter
+          // when its foreground matches an explicitly painted background.
+          await counter.evaluate((node) => {
+            (node as HTMLElement).style.color = "rgb(0, 0, 0)";
+            (node as HTMLElement).style.backgroundColor = "rgb(0, 0, 0)";
+          });
+          expect((await manualAccessibilityAudit(page)).minimumContrast!).toBeLessThan(4.5);
+          await counter.evaluate((node) => node.removeAttribute("style"));
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }, 25_000);
+
   test("forced colors keeps selection and diff meaning while reduced motion stops animation", async () => {
     const context = await browser.newContext({
       viewport: { width: 320, height: 720 },
