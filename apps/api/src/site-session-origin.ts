@@ -3,7 +3,7 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-/** Origin is descriptive, not a grant. Session authorization remains unchanged. */
+/** Validates a caller-asserted Site association, not browser execution or authority. */
 export async function resolveSiteSessionOrigin(
   db: ApiRouteDeps["db"],
   workspaceId: string,

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { sessionCreationMetadata, withSiteSessionOrigin } from "../src/site-session-origin";
 
-test("only trusted request origin is recorded, without changing user metadata", async () => {
+test("only resolved request origin is recorded, without changing user metadata", async () => {
   const metadata = { custom: "value", _opengeniSiteOrigin: { siteId: "forged" } };
   expect(sessionCreationMetadata(metadata)).toEqual({ custom: "value" });
   const first = { siteId: "first", title: "First" };

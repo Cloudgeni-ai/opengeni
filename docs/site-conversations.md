@@ -6,6 +6,10 @@
   `_opengeniSiteOrigin: { siteId, title }` in existing session metadata. The title
   is a creation-time label; the stable Site ID is the identity.
 - Origin is descriptive, not permission, project membership, or parentage.
+  It is a caller-asserted, server-validated Site association, not proof that code
+  executed inside a Site. An authorized API client can provide an existing
+  same-workspace Site/version pair too. Never use this label for authorization
+  or security/audit attestation.
   Opening a pre-existing conversation does not relabel it. Existing unlabelled
   sessions are not guessed/backfilled from prompts or publishing sessions.
 - Ordinary browsing groups unfiled, unpinned Site-created root conversations in
@@ -28,7 +32,7 @@ Origin is bound into continuation cursors. Successful responses echo
 The first-party `sessions_list` tool accepts the same UUID filter.
 
 The Site-bound SDK accepts `originSiteId: "current"`; the host replaces it with
-its trusted Site ID. Sandbox previews have no published identity and resolve it
+its host-supplied Site ID. Sandbox previews have no published identity and resolve it
 to an empty history, not the entire workspace. Other session SDK calls keep their
 existing behavior and authentication.
 
