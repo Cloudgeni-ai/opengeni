@@ -1,4 +1,7 @@
 import type { Settings } from "@opengeni/config";
+import { createHash } from "node:crypto";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import { requireConnectOwnerAuthority } from "./connect-authority";
 import type { AccessGrant, ScheduledTask, ScheduledTaskScheduleSpec } from "@opengeni/contracts";
 import {
   ATLASSIAN_CREDENTIAL_LABEL,
@@ -24,7 +27,6 @@ import {
 import {
   captureScheduledTaskRestoreState,
   createValidatedScheduledTask,
-  hasPermission,
   manualScheduledTaskTriggerWorkflowId,
   requireEnvironmentEncryption,
   syncCreatedScheduledTask,
@@ -37,6 +39,11 @@ import {
   ConnectionDisconnectGenerationError,
   ConnectionDisconnectIdempotencyError,
   consumeIntegrationOAuthStateNonce,
+  claimConnectOperation,
+  finishConnectOperation,
+  getConnectAttempt,
+  decryptEnvironmentValue,
+  type Database,
   createConnection,
   deauthorizeKnowledgeSourceRetrieval,
   disconnectConnectionIdempotently,
@@ -44,7 +51,6 @@ import {
   getConnectionMetadata,
   getKnowledgeSourceByExternalIdentityForSyncAuthority,
   getKnowledgeSourceForSyncAuthority,
-  getWorkspaceGrant,
   listKnowledgeSourceSyncTasksForConnection,
   loadConnectionCredentialForBroker,
   recordKnowledgeLifecycleEvent,
@@ -87,6 +93,8 @@ const ATLASSIAN_REQUEST_TIMEOUT_MS = 15_000;
 const ATLASSIAN_RETURN_PATH = (workspaceId: string) => `/workspaces/${workspaceId}/capabilities`;
 
 type AtlassianOAuthState = {
+  connectAttemptId?: string;
+  externalContinuation?: ExternalActorContinuation;
   accountId: string;
   workspaceId: string;
   subjectId: string;
@@ -115,6 +123,8 @@ export async function startAtlassianOAuth(
     subjectId: string;
     requestUrl: string;
     payload: AtlassianOAuthStartRequest;
+    connectAttemptId?: string;
+    externalContinuation?: ExternalActorContinuation;
   },
 ): Promise<AtlassianOAuthStartResponse> {
   const oauth = requireAtlassianSettings(deps.settings);
@@ -138,6 +148,15 @@ export async function startAtlassianOAuth(
     workspaceId: input.workspaceId,
     subjectId: input.subjectId,
     kind: ATLASSIAN_OAUTH_STATE_KIND,
+    ...(input.connectAttemptId ? { connectAttemptId: input.connectAttemptId } : {}),
+    ...(input.externalContinuation
+      ? {
+          encryptedExternalContinuation: encryptEnvironmentValue(
+            requireEnvironmentEncryption(deps.settings),
+            JSON.stringify(ExternalActorContinuation.parse(input.externalContinuation)),
+          ),
+        }
+      : {}),
     // The route admits only a managed human, so reaching here is the proof; the
     // callback has no live principal and enforces exactly this claim.
     [PERSONAL_OWNER_VERIFIED_STATE_CLAIM]: true,
@@ -166,12 +185,32 @@ export async function completeAtlassianOAuthCallback(
     error?: string | undefined;
     requestUrl: string;
   },
-): Promise<{ redirectTo: string }> {
+): Promise<{ redirectTo: string; exactReturn?: boolean }> {
   const baseUrl = integrationBaseUrl(deps.settings.publicBaseUrl, input.requestUrl);
   const returnBaseUrl = deps.settings.webBaseUrl?.replace(/\/+$/, "") ?? baseUrl;
   let state: AtlassianOAuthState | null = null;
+  let exactReturnUrl: string | undefined;
+  let operation: { attemptId: string; operationId: string; inputDigest: string } | undefined;
   try {
     state = readAtlassianOAuthState(input.state, deps.settings);
+    if (state.connectAttemptId) {
+      const stored = await getConnectAttempt(deps.db, state, state.connectAttemptId);
+      if (stored.attempt.providerId !== "atlassian" || stored.attempt.ownership !== "personal")
+        throw new AtlassianCallbackError("connection_conflict");
+      exactReturnUrl = stored.returnUrl;
+      operation = {
+        attemptId: state.connectAttemptId,
+        operationId: `oauth:${state.nonce}`,
+        inputDigest: createHash("sha256").update(input.state!).digest("hex"),
+      };
+      const claim = await claimConnectOperation(deps.db, state, {
+        ...operation,
+        expectedRevision: stored.attempt.revision,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+      });
+      if (claim.status === "replayed") return { redirectTo: exactReturnUrl, exactReturn: true };
+    }
     await requireCallbackGrant(deps, state);
     const consumed = await consumeIntegrationOAuthStateNonce(deps.db, {
       accountId: state.accountId,
@@ -182,6 +221,25 @@ export async function completeAtlassianOAuthCallback(
       now: new Date(),
     });
     if (!consumed) throw new AtlassianCallbackError("state_reused");
+    if (operation && (input.error || !input.code)) {
+      await finishConnectOperation(deps.db, state, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          state: input.error === "access_denied" ? "cancelled" : "failed",
+          nextAction: { type: "none" },
+          error: {
+            code: input.error ? "provider_denied" : "missing_code",
+            message: "Authorization was not completed. Start a new connection attempt.",
+            retryable: false,
+          },
+        }),
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
     if (input.error) throw new AtlassianCallbackError("provider_denied");
     if (!input.code) throw new AtlassianCallbackError("missing_code");
 
@@ -262,39 +320,77 @@ export async function completeAtlassianOAuthCallback(
         : {}),
       selectedSources: previousMetadata?.selectedSources ?? [],
     });
-    const connection = existing
-      ? await updateConnection(deps.db, {
-          workspaceId: state.workspaceId,
-          connectionId: existing.id,
-          visibleToSubjectId: state.subjectId,
-          expectedVersion: existing.version,
-          subjectId: state.subjectId,
-          providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
-          kind: "oauth2",
-          status: "active",
-          credentialEncrypted,
-          grantedScopes: token.scopes,
-          expiresAt: token.expiresAt,
-          metadata,
-          updatedBySubjectId: state.subjectId,
-        })
-      : await createConnection(deps.db, {
-          accountId: state.accountId,
-          workspaceId: state.workspaceId,
-          subjectId: state.subjectId,
-          providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
-          kind: "oauth2",
-          credentialEncrypted,
-          grantedScopes: token.scopes,
-          expiresAt: token.expiresAt,
-          metadata,
-          createdBySubjectId: state.subjectId,
-        });
+    const acceptedState = state;
+    const persist = (tx: Database) => {
+      // Capture the validated immutable callback state for delayed persistence.
+      // eslint-disable-next-line no-shadow
+      const state = acceptedState;
+      return existing
+        ? updateConnection(tx, {
+            workspaceId: state.workspaceId,
+            connectionId: existing.id,
+            visibleToSubjectId: state.subjectId,
+            expectedVersion: existing.version,
+            subjectId: state.subjectId,
+            providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
+            kind: "oauth2",
+            status: "active",
+            credentialEncrypted,
+            grantedScopes: token.scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            updatedBySubjectId: state.subjectId,
+          })
+        : createConnection(tx, {
+            accountId: state.accountId,
+            workspaceId: state.workspaceId,
+            subjectId: state.subjectId,
+            providerDomain: ATLASSIAN_PROVIDER_DOMAIN,
+            kind: "oauth2",
+            credentialEncrypted,
+            grantedScopes: token.scopes,
+            expiresAt: token.expiresAt,
+            metadata,
+            createdBySubjectId: state.subjectId,
+          });
+    };
+    if (operation) {
+      await finishConnectOperation(deps.db, acceptedState, {
+        ...operation,
+        authorize: (tx, _attempt, origin) =>
+          requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+        commit: async (tx, current) => {
+          const connection = await persist(tx);
+          if (!connection) throw new AtlassianCallbackError("connection_conflict");
+          return {
+            ...current,
+            revision: current.revision + 1,
+            state: "complete",
+            credentialsCommitted: true,
+            nextAction: { type: "none" },
+            account: {
+              id: connection.id,
+              version: connection.version,
+              providerId: "atlassian",
+              label: profile.displayName ?? "Atlassian",
+              ownership: "personal",
+              status: "connected",
+            },
+          };
+        },
+      });
+      return { redirectTo: exactReturnUrl!, exactReturn: true };
+    }
+    const connection = await deps.db.transaction(async (tx) => {
+      await requireCallbackGrant({ ...deps, db: tx }, acceptedState);
+      return persist(tx);
+    });
     if (!connection) throw new AtlassianCallbackError("connection_conflict");
     return {
       redirectTo: returnUrl(returnBaseUrl, state.returnPath, "connected", connection.id),
     };
   } catch (error) {
+    if (exactReturnUrl) return { redirectTo: exactReturnUrl, exactReturn: true };
     return {
       redirectTo: returnUrl(
         returnBaseUrl,
@@ -1521,6 +1617,21 @@ function readAtlassianOAuthState(raw: string | undefined, settings: Settings): A
     workspaceId,
     subjectId,
     personalOwnerVerified: personalOwnerVerifiedInState(payload),
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: payload.connectAttemptId }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     returnPath,
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "state.nonce"),
@@ -1544,14 +1655,7 @@ async function requireCallbackGrant(deps: ApiRouteDeps, state: AtlassianOAuthSta
       message: personalOnlyConnectionPrincipalMessage("Atlassian"),
     });
   }
-  const grant = await getWorkspaceGrant(deps.db, state.subjectId, state.workspaceId);
-  if (
-    !grant ||
-    grant.accountId !== state.accountId ||
-    !hasPermission(grant.permissions, "connections:write")
-  ) {
-    throw new HTTPException(403, { message: "Atlassian OAuth subject no longer has access" });
-  }
+  await requireConnectOwnerAuthority(deps.db, state, "connections:write");
 }
 
 function requireAtlassianSettings(settings: Settings) {

@@ -19,7 +19,9 @@ The canonical server-side integration uses:
 
 An organization workspace has wire `kind: "shared"`. Use “organization
 workspace" in customer-facing integration guidance; `shared` is the exact wire
-value. Personal workspaces are excluded from this integration model.
+value. Personal workspaces are excluded from this service-provisioning model.
+The separate verified `asUser` lane can access its own provisioned Personal
+workspace; an unscoped service key cannot. See the external-user section below.
 
 The built-in `opengeni-product-integration` Pack is guidance for the coding
 session that builds this integration, not for the resulting product chatbot.
@@ -27,6 +29,11 @@ Its Skill is session-selected: installation alone does not add it to any agent.
 Use **Start with Pack** in the web console, or create the implementation session
 with the reviewed Skill component ID in `installedSkillIds`. Never include that
 ID in customer-facing session creation.
+The Pack content is generated from `.agents/skills/opengeni-client`, with only
+an explicit install-name/description/activation wrapper. After editing the
+developer guide, run `bun scripts/sync-product-integration-skill.ts`; use
+`bun run check:product-integration-skill` to detect drift. Published runtime
+packages contain the generated content and do not read repository Markdown.
 When a create uses an idempotency key, its ordered `installedSkillIds`
 selection is immutable: a retry may repeat it exactly, but changing or removing
 the selection conflicts instead of replaying a differently configured session.
@@ -80,11 +87,13 @@ Parent/child lineage is not the general access boundary. Turning
 `memoryEnabled` off only disables workspace Memory retrieval/saving; it does not
 isolate session history or remove cross-session tools.
 
-An organization-key-created top-level session is `workspace_shared`. The
-managed-human `user_private` / **Only me** capability requires the exact
-supported managed-cookie human path and is not a service-backend privacy
-mechanism. Creating an OpenGeni human per product user is not required for the
-canonical backend integration.
+A top-level session created by an unscoped organization service key is
+`workspace_shared`. The owning-user `user_private` / **Only me** capability
+requires verified native-cookie or external `asUser` provenance, plus the
+existing platform/organization readiness policy. An unscoped service key cannot
+claim that provenance. External identity admission does not create an OpenGeni
+login. Broader personal-resource and durable external execution guarantees must
+be verified separately from core private-session access.
 
 When the product deliberately accepts a softer same-workspace boundary, an
 explicit minimal `firstPartyMcpTools` selection can remove unnecessary
@@ -161,9 +170,10 @@ workspace id beside the product tenant record so later session requests do not
 depend on a name lookup.
 
 `ensureWorkspace` never selects, returns, or creates a Personal workspace.
-Personal workspaces belong to managed humans and are not product tenant
-containers. Do not use `/v1/access/me`'s personal/default workspace as a
-fallback for an external backend integration.
+Personal workspaces belong to individual native or external identities and are
+not product tenant containers. Only an authenticated owning-user lane can use
+its exact Personal pointer. Do not use `/v1/access/me`'s personal/default
+workspace as a fallback for an unscoped service integration.
 
 A server-side setup flow has this shape; use the request types exported by the
 installed SDK as the exact schema authority:
@@ -214,9 +224,11 @@ const session = await client.createSession(workspace.id, {
 same nested `workspace` with `created: false` and does not overwrite its name,
 slug, or agent instructions with stale retry data.
 
-The external source/id pair is globally unique. Namespace `externalSource` to
-the product and treat a `409` response as an identity already owned by another
-organization, not as a successful replay.
+The external source/id pair is unique within the organization. Two organizations
+may independently use the same pair; neither can discover or replay the other's
+workspace through this mapping. Within one organization, retries preserve the
+existing workspace ID and presentation. Namespace `externalSource` to the product
+to avoid collisions between products in the same organization.
 
 The organization API key identifies the organization boundary. Never accept an
 organization id, external mapping identity, or OpenGeni workspace id directly

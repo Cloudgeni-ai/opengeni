@@ -1,3 +1,10 @@
+export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export type {
+  SiteToolBridge,
+  SiteToolCaller,
+  SiteToolCallRequest,
+  CreateSiteToolBridgeOptions,
+} from "./site-tool-bridge";
 import {
   OpenGeniToolsClient,
   type OpenGeniToolTransport,

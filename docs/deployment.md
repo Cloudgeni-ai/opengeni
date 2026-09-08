@@ -1,5 +1,50 @@
 # Deployment
 
+### Host MCP, native-link and Connect authority migrations (0419–0432)
+
+`0419_host_mcp_binding_registry.sql`, `0420_host_mcp_delegations.sql`, and
+`0421_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
+Migrations 0422–0424 extend it with exact causal continuation, immutable task
+revision selections, and guarded child inheritance.
+Migrations 0425–0428 add optional native consent, immutable linked-work provenance,
+bounded consent identity previews and scheduled-origin checks. Migration 0429
+allows separately owned native host bindings through organization membership;
+it never transfers an external binding or changes existing resource owners.
+Migration 0430 preserves immutable external Connect origin authority separately
+from the effective owner. All setup mutations and callback receipts recheck that
+origin as well as current request authority; changing API keys cannot bypass
+revocation. Do not restart a pre-0430 Connect writer that omits this restriction.
+Migration 0431 adds bounded, participant-only identity labels for link inventory;
+it does not grant application roles direct access to external identity mappings.
+Migration 0432 versions social connections on every update, including refresh and
+disconnect. Reconnect commits must match the observed version and upstream account;
+a concurrent change produces a conflict rather than overwriting another account.
+Stop old API and worker database sessions and provide the complete runtime login
+list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES` before migration.
+Provision the matching binary's application role afterward; do not restart an
+older runtime against this schema. The new registry stores no credentials and
+does not automatically opt existing host references or inline credentials into
+durable renewal. A registered binding alone never authorizes execution: accepted
+work must capture an explicitly selected delegation.
+The delegation migration adds owner-scoped, immutable grant metadata and terminal
+revocation. Verified native and external owners can issue/read/revoke metadata through the
+API and SDK; direct human starts explicitly select grants for atomic
+initial-turn capture. Worker runtime
+validation requires an exact captured authority snapshot and denies missing records.
+Existing inline credentials remain unchanged; durable renewal is still opt-in.
+Migration 0421 adds direct-turn snapshot storage with a canonical insert guard
+and SELECT/INSERT-only application privileges. Its binding/delegation foreign
+keys prevent deleting referenced metadata while accepted work remains. Internal
+capture is reached through verified direct-create admission, gated by the host
+authority fleet switch. Follow-up send/steer captures selections atomically on
+fresh turns. Scheduled selections are frozen per task revision and captured at
+claim in all three existing execution modes. Causal resumptions copy only their
+exact source; children inherit only selected, live `always` grants, never a
+parent's session-bound grant. Scheduled descendants retain their scheduled origin
+for live authorization. No worker needs the original host API key. Drain the
+complete API/control-worker/turn-worker fleet for these maintenance migrations;
+deploy matching code and provision runtime privileges before enabling host renewal.
+
 OpenGeni deployment work is organized around a repo-owned deployment contract, deterministic artifacts, and conformance checks. Repository CI validates deployment artifacts; it does not deploy maintainer-owned preview infrastructure from pull requests.
 
 Managed deployments using organization recovery must first complete the
@@ -8,6 +53,54 @@ fake-provider conformance, rollback, and unsupported-operation contract in
 [`organization-recovery.md`](organization-recovery.md). Repository delivery does
 not enable an external recovery notification provider or perform a production
 mutation.
+
+## Organization-scoped external workspace cutover
+
+Migration `0413_organization_scoped_external_workspaces.sql` is maintenance-only.
+Stop every old API, control worker, and turn worker, and supply the exact runtime
+database login list through `OPENGENI_MIGRATION_APPLICATION_DATABASE_ROLES`.
+The migration checks those sessions before and after its workspace lock, replaces
+the external identity index with organization/source/id uniqueness, and updates
+the native membership conflict targets and personal-workspace conflict guard.
+Existing workspace IDs and rows are preserved. After commit, do not restart an
+old binary: its global `ON CONFLICT` target no longer matches the database.
+Rollback requires a reviewed database restore or forward repair, not an old image.
+
+Migration `0414_durable_connect_attempts.sql` adds actor-scoped setup state and
+changes the exact FORCE-RLS/runtime table contract. Drain the same complete
+API/worker role list, apply it, then run `db:provision-roles` for the matching
+runtime role. Do not restart an older binary after this cutover. Attempt state
+and operation receipts are distinct from provider credentials. Claims are not
+reclaimed merely because the caller times out; an uncertain provider effect
+requires reconciliation. Actor-local creation prunes at most 100 attempts older
+than 30 days after expiry, including their setup idempotency receipts, but never
+deletes the associated Connection.
+
+Migration `0415_external_identity_provisioning.sql` requires the same maintenance
+drain and matching role provisioning. Migrations
+`0416_external_workspace_member_removal.sql` and
+`0417_external_identity_membership_lifecycle.sql` are rolling extensions of the
+existing lifecycle routines. The first adds live-key external-member removal;
+the second adds explicit service attribution to immutable organization lifecycle
+history and synchronizes external admission generations with member transitions.
+Both refuse drift in the existing privileged function definitions. Neither
+grants Personal/private access or changes retention/scheduling policy. Service
+transitions require explicit `account:admin`, and reactivation does not restore
+revoked memberships or durable grants. Include the nullable native actor and
+separate service subject when projecting lifecycle audit records.
+
+Migration `0418_external_owning_user_authority.sql` adds persisted external-owner
+consistency checks to the existing self-membership and private-create routines.
+It does not activate private sessions: platform readiness and shared-workspace
+organization settings still apply. Pair it with the API's dedicated external
+owning-user proof; do not synthesize native-cookie flags or grant Personal
+workspace membership to service keys. The matching runtime adds live external
+authority checks before session-create, visibility-change, and fork commits.
+
+The optional remote host MCP credential adapter is configured separately with
+server-owned secrets. It is not required for inline credentials or native OAuth.
+See [remote MCP credentials](remote-mcp-credentials.md) for the endpoint contract,
+limits, and live host authorization obligations.
 
 ## Workspace MCP OAuth
 

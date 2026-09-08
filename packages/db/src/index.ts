@@ -1,5 +1,30 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  normalizeHostCreateSelection,
+  metadataWithHostCreateSelection,
+  hostCreateSelectionFromMetadata,
+  type HostMcpCreateSelection,
+} from "./host-selection-identity";
+export * from "./connect-attempts";
+export * from "./external-identities";
+export * from "./external-identity-links";
+export * from "./connection-setup-authority";
+export * from "./external-link-work";
+import {
+  inheritExternalLinkTurnAuthority, captureScheduledExternalLinkTurnAuthority,
+  cloneExternalLinkTaskAuthority, getExternalLinkTurnAuthorization,
+} from "./external-link-work";
+export * from "./host-mcp-bindings";
+import {
+  inheritCausalHostMcpTurnAuthorities,
+  inheritChildHostMcpTurnAuthorities,
+} from "./host-mcp-bindings";
+export * from "./host-mcp-task-authority";
+import {
+  cloneHostMcpTaskAuthorities,
+  captureScheduledHostMcpTurnAuthorities,
+} from "./host-mcp-task-authority";
+import {
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
@@ -594,6 +619,7 @@ export {
   type UserProfileLookup,
 } from "./database";
 export { withSessionRlsActorContext } from "./database";
+export { normalizedHostCredentialHeaders } from "./connection-token-resolver";
 import {
   buildCodexTokenResolver as buildCodexTokenResolverCore,
   fetchCodexRateLimitResetCreditsForAccount as fetchCodexRateLimitResetCreditsForAccountCore,
@@ -1441,6 +1467,7 @@ export async function bootstrapWorkspace(
         and(
           eq(schema.workspaces.externalSource, input.workspaceExternalSource),
           eq(schema.workspaces.externalId, input.workspaceExternalId),
+          eq(schema.workspaces.accountId, account.id),
         ),
       )
       .limit(1);
@@ -1454,7 +1481,11 @@ export async function bootstrapWorkspace(
           externalId: input.workspaceExternalId,
         })
         .onConflictDoUpdate({
-          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+          target: [
+            schema.workspaces.accountId,
+            schema.workspaces.externalSource,
+            schema.workspaces.externalId,
+          ],
           set: {
             name: input.workspaceName,
             updatedAt: new Date(),
@@ -1922,6 +1953,7 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
         and(
           eq(schema.workspaces.externalSource, "better-auth:user"),
           eq(schema.workspaces.externalId, `${input.userId}:default`),
+          eq(schema.workspaces.accountId, account.id),
         ),
       )
       .limit(1);
@@ -1936,7 +1968,11 @@ export async function ensureManagedAccessForUserWithOrganizationMemberships(
           externalId: `${input.userId}:default`,
         })
         .onConflictDoUpdate({
-          target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+          target: [
+            schema.workspaces.accountId,
+            schema.workspaces.externalSource,
+            schema.workspaces.externalId,
+          ],
           // Preserve a later administrator rename on legacy fallback workspaces.
           set: { updatedAt: new Date() },
         })
@@ -2349,6 +2385,7 @@ export class WorkspaceExternalIdentityConflictError extends Error {
 export async function findWorkspaceByExternalIdentity(
   db: Database,
   input: {
+    accountId: string;
     externalSource: string;
     externalId: string;
   },
@@ -2360,6 +2397,7 @@ export async function findWorkspaceByExternalIdentity(
       and(
         eq(schema.workspaces.externalSource, input.externalSource),
         eq(schema.workspaces.externalId, input.externalId),
+        eq(schema.workspaces.accountId, input.accountId),
       ),
     )
     .limit(1);
@@ -2407,7 +2445,7 @@ async function assertWorkspaceCapacity(
 
 /**
  * Create an organization workspace exactly once for a stable external tenant
- * identity. The global unique index is the concurrency arbiter. A replay never
+ * identity. The organization-scoped unique index is the concurrency arbiter. A replay never
  * mutates presentation fields supplied by the original create.
  */
 export async function ensureWorkspaceByExternalIdentity(
@@ -2434,6 +2472,7 @@ export async function ensureWorkspaceByExternalIdentity(
         and(
           eq(schema.workspaces.externalSource, input.externalSource),
           eq(schema.workspaces.externalId, input.externalId),
+          eq(schema.workspaces.accountId, input.accountId),
         ),
       )
       .limit(1);
@@ -2468,7 +2507,11 @@ export async function ensureWorkspaceByExternalIdentity(
         agentInstructions: input.agentInstructions ?? null,
       })
       .onConflictDoNothing({
-        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+        target: [
+          schema.workspaces.accountId,
+          schema.workspaces.externalSource,
+          schema.workspaces.externalId,
+        ],
       })
       .returning();
 
@@ -2504,6 +2547,7 @@ export async function ensureWorkspaceByExternalIdentity(
         and(
           eq(schema.workspaces.externalSource, input.externalSource),
           eq(schema.workspaces.externalId, input.externalId),
+          eq(schema.workspaces.accountId, input.accountId),
         ),
       )
       .limit(1);
@@ -5326,6 +5370,8 @@ export type CreateScheduledTaskInput = {
   metadata: Record<string, unknown>;
   /** Trusted database-only admission seam. Throwing rolls the task creation back. */
   beforeCreateCommit?: (tx: Database) => Promise<void>;
+  captureHostAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
+  captureLinkAuthority?: (tx: Database, task: ScheduledTask) => Promise<void>;
 };
 
 export type UpdateScheduledTaskInput = Partial<{
@@ -5350,6 +5396,8 @@ export type UpdateScheduledTaskInput = Partial<{
   authorityUpdatedByActor: AgentSessionCreationActor | null;
   /** Trusted database-only admission seam. Throwing rolls the task update back. */
   beforeUpdateCommit: (tx: Database) => Promise<void>;
+  captureHostAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
+  captureLinkAuthority: (tx: Database, task: ScheduledTask) => Promise<void>;
 }>;
 
 export type CreatePackInstallationInput = {
@@ -5432,6 +5480,7 @@ export type CreateSocialConnectionInput = {
 };
 
 export type UpsertSocialOAuthConnectionInput = {
+  expectedConnection?: { id: string; version: number };
   accountId: string;
   workspaceId: string;
   subjectId?: string | null;
@@ -5548,6 +5597,8 @@ export type UpdateConnectionInput = {
 };
 
 export type PersistProviderOAuthConnectionInput = CreateConnectionInput & {
+  /** Server continuation reauthorization; runs inside the credential transaction. */
+  authorize?: (tx: Database) => Promise<void>;
   visibleToSubjectId: string;
   credentialRole: string;
   providerFamily: string;
@@ -9987,6 +10038,11 @@ export async function persistProviderOAuthConnection(
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
         const ownerKey = input.subjectId ?? "workspace";
+        if (input.authorize) {
+          await input.authorize(tx);
+          await setRlsContext(tx, { accountId: input.accountId, workspaceId: input.workspaceId });
+          await setSubjectRlsContext(tx, input.subjectId ?? input.visibleToSubjectId ?? "");
+        }
         if (input.requireLiveUserAuthority) {
           if (!input.subjectId) {
             throw new Error("Live user authority requires a subject-owned connection");
@@ -15763,6 +15819,23 @@ export async function upsertSocialOAuthConnection(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
+      if (input.expectedConnection) {
+        const [updated] = await scopedDb.update(schema.socialConnections).set({
+          accountHandle: input.accountHandle, accountName: input.accountName ?? null,
+          status: "connected", scopes: input.scopes, credentialEncrypted: input.credentialEncrypted,
+          tokenMetadata: input.tokenMetadata ?? {}, updatedAt: new Date(),
+        }).where(and(
+          eq(schema.socialConnections.accountId, input.accountId),
+          eq(schema.socialConnections.workspaceId, input.workspaceId),
+          eq(schema.socialConnections.id, input.expectedConnection.id),
+          eq(schema.socialConnections.version, input.expectedConnection.version),
+          eq(schema.socialConnections.provider, input.provider),
+          input.subjectId ? eq(schema.socialConnections.subjectId, input.subjectId) : isNull(schema.socialConnections.subjectId),
+          input.externalAccountId ? eq(schema.socialConnections.externalAccountId, input.externalAccountId) : sql`false`,
+        )).returning();
+        if (!updated) throw new Error("Social connection changed; authorize the same account again from current state");
+        return mapSocialConnection(updated);
+      }
       const [row] = await scopedDb
         .insert(schema.socialConnections)
         .values({
@@ -16137,6 +16210,8 @@ export async function createScheduledTask(
         ${row.id}::uuid,
         ${row.authorityRevision}::bigint
       )`);
+      await input.captureHostAuthority?.(scopedDb, mapScheduledTask(row));
+      await input.captureLinkAuthority?.(scopedDb, mapScheduledTask(row));
       return mapScheduledTask(row);
     },
   );
@@ -16149,6 +16224,17 @@ export async function updateScheduledTask(
   input: UpdateScheduledTaskInput,
 ): Promise<ScheduledTask> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [previousHostRevision] = await scopedDb
+      .select({ authorityRevision: schema.scheduledTasks.authorityRevision })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, workspaceId),
+          eq(schema.scheduledTasks.id, taskId),
+        ),
+      )
+      .for("update")
+      .limit(1);
     if (
       input.refreshPersonalResourceAuthority &&
       input.clonePersonalResourceAuthorityFromRevision !== undefined
@@ -16258,7 +16344,18 @@ export async function updateScheduledTask(
         ${row.authorityRevision}::bigint
       )`);
     }
-    return mapScheduledTask(row);
+    const mapped = mapScheduledTask(row);
+    if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
+    else if (previousHostRevision)
+      await cloneExternalLinkTaskAuthority(scopedDb, mapped,
+        input.clonePersonalResourceAuthorityFromRevision ?? input.cloneConnectionAuthorityFromRevision ??
+        previousHostRevision.authorityRevision);
+    if (input.captureHostAuthority) await input.captureHostAuthority(scopedDb, mapped);
+    else if (previousHostRevision)
+      await cloneHostMcpTaskAuthorities(scopedDb, mapped,
+        input.clonePersonalResourceAuthorityFromRevision ?? input.cloneConnectionAuthorityFromRevision ??
+        previousHostRevision.authorityRevision);
+    return mapped;
   });
 }
 
@@ -17164,6 +17261,15 @@ export async function materializeScheduledTaskReusableSessionFromRun(
       if (!row) {
         throw new Error("scheduled reusable-session materialization returned no revision");
       }
+      const materializedTask = await getScheduledTask(scopedDb, input.workspaceId, input.taskId);
+      if (!materializedTask || materializedTask.authorityRevision !== Number(row.authorityRevision))
+        throw new Error("scheduled host materialization revision changed");
+      await cloneHostMcpTaskAuthorities(
+        scopedDb,
+        materializedTask,
+        input.sourceTaskAuthorityRevision,
+      );
+      await cloneExternalLinkTaskAuthority(scopedDb, materializedTask, input.sourceTaskAuthorityRevision);
       return Number(row.authorityRevision);
     },
   );
@@ -30648,11 +30754,16 @@ async function setScheduledTaskAuthorityRlsContext(
 ): Promise<void> {
   const subjectId = frozen.initiator.subjectId.trim();
   if (!subjectId) throw new Error("scheduled task authority writer has no subject");
+  // frozenSessionCreatorForInsert verified the agent attempt before reading
+  // this separate causal-human field. Keep service audit attribution intact;
+  // never substitute the session creator or parse a caller's provenance JSON.
+  const causalHumanSubjectId = frozen.initiatingHumanSubjectId ??
+    (frozen.initiator.kind === "subject" ? subjectId : "");
   await tx.execute(sql`select
     set_config('opengeni.subject_id', ${subjectId}, true),
     set_config(
       'opengeni.initiating_human_subject_id',
-      ${frozen.initiator.kind === "subject" ? subjectId : ""},
+      ${causalHumanSubjectId},
       true
     )`);
 }
@@ -30689,6 +30800,8 @@ export type SessionCreateInput = {
   createIdempotencyKey?: string | null;
   /** Exact explicit installed-Skill selection used for keyed-create replay. */
   selectedInstalledSkillIds?: string[];
+  /** Backend-only replay identity; does not admit host credential authority. */
+  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   sandboxGroupId?: string | null;
   sandboxOs?: SandboxOs;
   /** Exact accepted generated-session compaction policy; internal lifecycle callers only. */
@@ -30981,6 +31094,7 @@ type SessionCreateReplayIdentity = {
   visibility?: "user_private" | "workspace_shared";
   variableSetIds: string[];
   selectedInstalledSkillIds: string[];
+  selectedHostMcpDelegations?: HostMcpCreateSelection[];
   initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
 };
 
@@ -31015,6 +31129,12 @@ function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
 ): void {
+  if (
+    stableJson(hostCreateSelectionFromMetadata(existing.metadata)) !==
+    stableJson(normalizeHostCreateSelection(input.selectedHostMcpDelegations))
+  ) {
+    throw new SessionCreateIdempotencyConflictError();
+  }
   if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
     throw new SessionIdConflictError(input.requestedSessionId);
   }
@@ -31129,7 +31249,7 @@ async function createSessionInTransaction(
   const variableSetId = variableSetIds.at(-1) ?? null;
   const selectedInstalledSkillIds = input.selectedInstalledSkillIds ?? [];
   const sessionMetadata = metadataWithSelectedInstalledSkillCreateIdentity(
-    input.metadata,
+    metadataWithHostCreateSelection(input.metadata, input.selectedHostMcpDelegations),
     selectedInstalledSkillIds,
   );
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
@@ -31183,6 +31303,7 @@ async function createSessionInTransaction(
         visibility: createRequestedVisibility,
         variableSetIds,
         selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
+        selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
         initialPersonalResourceAttachmentIntent:
           input.initialPersonalResourceAttachmentIntent ?? null,
       });
@@ -31389,6 +31510,7 @@ async function createSessionInTransaction(
           visibility: createRequestedVisibility,
           variableSetIds,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
+          selectedHostMcpDelegations: input.selectedHostMcpDelegations ?? [],
           initialPersonalResourceAttachmentIntent:
             input.initialPersonalResourceAttachmentIntent ?? null,
         });
@@ -31580,6 +31702,7 @@ export async function getInitializedSessionCreateReplay(
     visibility?: "user_private" | "workspace_shared";
     variableSetIds: string[];
     selectedInstalledSkillIds: string[];
+    selectedHostMcpDelegations?: HostMcpCreateSelection[];
     initialPersonalResourceAttachmentIntent?: PersonalResourceAttachmentIntent | null;
     deferInitialTurn?: boolean;
   },
@@ -32470,13 +32593,13 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
  *
  * **This flag is the authorization.** The resolver it gates is not: it answers
  * "does subject X hold authority here" and establishes nothing about who the
- * caller is. The exception is for "the canonical managed-cookie (Better Auth)
- * session" only — "Bearer/delegated principals, API keys, and account or
- * organization administrators receive no personal-workspace access through that
- * exception" — and a host-signed delegated bearer chooses its own `subjectId`,
+ * caller is. The exception requires verified native-cookie or dedicated
+ * external owning-user provenance. Unscoped service keys and account or
+ * organization administrators receive no Personal access through it.
+ * A host-signed delegated bearer chooses its own `subjectId`,
  * `principalKind`, `metadata.delegated`, and `serviceInitiator` claims, so no
  * inspection of the grant can carry that distinction. Set this ONLY from
- * `AccessGrantAuthorization.canonicalManagedHumanSession` (`@opengeni/core`),
+ * `hasVerifiedOwningUserAuthorization` (`@opengeni/core`),
  * which reflects HOW the request authenticated. Omitted/false keeps the
  * historical bare-membership fence exactly.
  */
@@ -60617,6 +60740,10 @@ export type InitializeSessionStartInput = {
   /** Trusted create-session policy. Omitted only by legacy low-level callers. */
   turnExecutionPolicy?: TurnExecutionPolicyV1;
   createdEventPayload: Record<string, unknown>;
+  /** Trusted backend-only capture for a newly inserted initial turn. Runs under
+   * the canonical activity transaction; failure rolls back events and turn.
+   * Never invoked on replay or deferred starts; not caller JSON authority. */
+  captureInitialTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   /** Sensitive-safe semantic title supplied by the trusted agent-child create
    * path. It is committed with the initial timeline, never as a bare row edit. */
   initialAutomaticTitle?: string | null;
@@ -60673,6 +60800,8 @@ export async function initializeSessionStartAtomically(
   db: Database,
   input: InitializeSessionStartInput,
 ): Promise<InitializeSessionStartResult> {
+  if (input.deferInitialTurn && input.captureInitialTurnAuthority)
+    throw new Error("Deferred session starts cannot capture initial turn authority");
   return await withSessionActivityRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -61203,6 +61332,26 @@ export async function initializeSessionStartAtomically(
         });
 
         const initialPersonalResourceIntent = session.initialPersonalResourceAttachmentIntent;
+        if (insertedTurn && input.captureInitialTurnAuthority)
+          await input.captureInitialTurnAuthority(tx as unknown as Database, turn.id);
+        if (insertedTurn && session.parentSessionId && session.parentTurnId)
+          await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
+            accountId: session.accountId, workspaceId: input.workspaceId, sessionId: session.id,
+            turnId: turn.id, sourceTurnId: session.parentTurnId, kind: "child",
+          });
+        if (
+          insertedTurn &&
+          session.parentSessionId &&
+          session.parentTurnId &&
+          turn.initiatingHumanSubjectId
+        )
+          await inheritChildHostMcpTurnAuthorities(tx as unknown as Database, {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            turnId: turn.id,
+            subjectId: turn.initiatingHumanSubjectId,
+          });
         if (initialPersonalResourceIntent) {
           const attachmentInitiatingHumanSubjectId =
             turn.initiatingHumanSubjectId ??
@@ -64198,6 +64347,31 @@ export async function claimSessionWorkForAttempt(
             frozenGoalSnapshot,
             goalContinuationHistoryItem ?? scheduledOccurrenceHistoryItem,
           );
+          if (scheduledTaskRunId) {
+            await captureScheduledExternalLinkTurnAuthority(tx as unknown as Database, {
+              accountId: session.accountId, workspaceId, sessionId, turnId: internalTurn.id, runId: scheduledTaskRunId,
+            });
+            await captureScheduledHostMcpTurnAuthorities(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              runId: scheduledTaskRunId,
+            });
+          } else if (causalHumanTurnId && initiatingHumanSubjectId) {
+            await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
+              accountId: session.accountId, workspaceId, sessionId, turnId: internalTurn.id,
+              sourceTurnId: causalHumanTurnId, kind: "causal",
+            });
+            await inheritCausalHostMcpTurnAuthorities(tx as unknown as Database, {
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              subjectId: initiatingHumanSubjectId,
+              sourceTurnId: causalHumanTurnId,
+              targetTurnId: internalTurn.id,
+            });
+          }
           // The batch is now durable model memory. Every child it reports on has
           // been carried to this turn's initiating human, so their read fence on
           // those children advances with the same commit.
@@ -70571,6 +70745,10 @@ export async function getActiveSessionTurnForExecution(
       )
       .limit(1);
     if (!row) return null;
+    const linked = await getExternalLinkTurnAuthorization(scopedDb, {
+      accountId: row.turn.accountId, workspaceId,
+    }, row.turn.id);
+    if (linked && !linked.authorized) return null;
     await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
     return mapSessionTurnForExecution(row.turn);
   });
@@ -70625,6 +70803,10 @@ export async function getSessionTurnForAttempt(
       )
       .limit(1);
     if (!row) return null;
+    const linked = await getExternalLinkTurnAuthorization(scopedDb, {
+      accountId: row.turn.accountId, workspaceId,
+    }, row.turn.id);
+    if (linked && !linked.authorized) return null;
     await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
     return mapSessionTurnForExecution(row.turn);
   });
@@ -75551,6 +75733,7 @@ function mapSocialConnection(
 ): SocialConnection {
   return {
     id: row.id,
+    version: row.version,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     provider: row.provider as SocialProvider,
@@ -75927,6 +76110,7 @@ export {
 
 export {
   buildHostConnectionTokenResolver,
+  buildHostGatewayConnectionTokenResolver,
   ConnectionRefreshHttpError,
   HostMcpCredentialBindingError,
   HostMcpCredentialScopeError,

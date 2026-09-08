@@ -18,6 +18,25 @@ const grant = (permissions: AccessGrant["permissions"]): AccessGrant => ({
 });
 
 describe("literal high-trust permissions", () => {
+  test("external actor headers cannot borrow local bootstrap authority", async () => {
+    const app = new Hono();
+    app.get("/", async (c) =>
+      c.json(
+        await requireAccessContext(c, {
+          db: {} as never,
+          settings: testSettings({ productAccessMode: "local" }),
+        }),
+      ),
+    );
+    const response = await app.request("/", {
+      headers: {
+        "x-opengeni-external-actor": encodeURIComponent(
+          JSON.stringify({ mode: "external", identity: { externalId: "dev" } }),
+        ),
+      },
+    });
+    expect(response.status).toBe(401);
+  });
   test("API-key-shaped access contexts cannot forge account-scoped workspace authority", () => {
     const accountId = "11111111-1111-4111-8111-111111111111";
     expect(

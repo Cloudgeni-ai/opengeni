@@ -16,7 +16,7 @@ import { requirePermission, type AccessGrantAuthorization } from "../access";
 import type { AppDependencies } from "../dependencies";
 import { requireSessionAuthorization } from "../session-authorization";
 import {
-  requireCanonicalManagedHuman,
+  requireVerifiedOwningUser,
   SessionTenancyManagedHumanRequiredError,
 } from "./session-tenancy";
 
@@ -58,7 +58,7 @@ function requireOwnerAuthority(
   permissions: readonly Permission[],
 ): void {
   if (!authorization.canonicalLocalHumanSession) {
-    requireCanonicalManagedHuman(authorization, workspaceId);
+    requireVerifiedOwningUser(authorization, workspaceId);
   } else if (
     !authorization.contextIntegrity ||
     authorization.authenticatedSubjectId !== authorization.grant.subjectId ||

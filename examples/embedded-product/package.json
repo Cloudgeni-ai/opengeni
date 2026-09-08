@@ -1,0 +1,28 @@
+{
+  "name": "@opengeni/example-embedded-product",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 3102",
+    "server": "bun --env-file=.env.local src/server.ts",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opengeni/connect": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "@vitejs/plugin-react": "^6.0.1",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "vite": "^8.0.9",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "7.0.2"
+  }
+}

@@ -8,6 +8,8 @@ export type {
   HumanInputFormProps,
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
+export { ApprovalSurface } from "./components/approval-surface";
+export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";

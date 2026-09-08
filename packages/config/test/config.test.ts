@@ -196,6 +196,15 @@ describe("browser analytics configuration", () => {
     ).toBe(false);
   });
 
+  test("remote host MCP resolver configuration is optional server configuration", () => {
+    expect(withEnv({}, () => getSettings()).hostMcpCredentialResolversJson).toBeUndefined();
+    const value = JSON.stringify([]);
+    expect(
+      withEnv({ OPENGENI_HOST_MCP_CREDENTIAL_RESOLVERS_JSON: value }, () => getSettings())
+        .hostMcpCredentialResolversJson,
+    ).toBe(value);
+  });
+
   test("configured host MCP refs require the completed fleet activation", () => {
     const mcpServers = JSON.stringify([
       {

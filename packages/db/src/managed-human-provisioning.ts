@@ -37,6 +37,7 @@ export async function ensureManagedHumanPersonalWorkspace(
       and(
         eq(schema.workspaces.externalSource, personalWorkspaceExternalSource),
         eq(schema.workspaces.externalId, personalWorkspaceExternalId),
+        eq(schema.workspaces.accountId, input.accountId),
       ),
     )
     .limit(1);
@@ -51,7 +52,11 @@ export async function ensureManagedHumanPersonalWorkspace(
         externalId: personalWorkspaceExternalId,
       })
       .onConflictDoUpdate({
-        target: [schema.workspaces.externalSource, schema.workspaces.externalId],
+        target: [
+          schema.workspaces.accountId,
+          schema.workspaces.externalSource,
+          schema.workspaces.externalId,
+        ],
         set: { updatedAt: new Date() },
       })
       .returning();

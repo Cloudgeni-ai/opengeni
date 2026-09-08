@@ -3,9 +3,9 @@ import type {
   WorkspaceArtifactContentResponse,
   WorkspaceArtifactDetailResponse,
   WorkspaceArtifactListResponse,
-  WorkspaceArtifactMutationResponse,
 } from "@opengeni/sdk";
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
+import { loadSiteSnapshot, type SiteClient } from "@opengeni/react/sites";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowLeftIcon,
@@ -19,10 +19,9 @@ import {
   RotateCcwIcon,
   SparklesIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { request } from "@/api";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +42,7 @@ import {
   artifactEditOpeningMessage,
 } from "@/lib/artifact-authoring";
 import { createSiteToolBridge } from "@/lib/site-tool-bridge";
+import { hasWorkspacePermission } from "@/lib/permissions";
 
 function formatDate(value: string): string {
   const date = new Date(value);
@@ -54,22 +54,18 @@ function asError(error: unknown): Error {
 }
 
 const NO_SITE_TOOLS: readonly ToolGatewayIdentity[] = [];
-
-function useArtifacts(workspaceId: string) {
+function useArtifacts(workspaceId: string, client: Pick<SiteClient, "listWorkspaceArtifacts">) {
   const [data, setData] = useState<WorkspaceArtifactListResponse | null>(null);
   const [error, setError] = useState<unknown>(null);
   const load = useCallback(async () => {
     try {
       setError(null);
-      setData(
-        await request<WorkspaceArtifactListResponse>(
-          `/v1/workspaces/${workspaceId}/published-artifacts`,
-        ),
-      );
+      setData(await client.listWorkspaceArtifacts(workspaceId));
     } catch (nextError) {
+      setData(null);
       setError(nextError);
     }
-  }, [workspaceId]);
+  }, [workspaceId, client]);
   useEffect(() => void load(), [load]);
   return { data, error, load };
 }
@@ -88,14 +84,14 @@ export function ArtifactsRoute({
       artifactId={artifactId}
     />
   ) : (
-    <ArtifactListRoute workspaceId={workspaceId} />
+    <ArtifactListRoute key={workspaceId} workspaceId={workspaceId} />
   );
 }
 
 function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
-  const { data, error, load } = useArtifacts(workspaceId);
+  const { data, error, load } = useArtifacts(workspaceId, context.client);
   const createWithGeni = async () => {
     const submission = await context.client
       .getNewSessionDraft(workspaceId)
@@ -202,6 +198,11 @@ export function ArtifactDetailRoute({
   artifactId: string;
 }) {
   const context = useAppContext();
+  const canPublish = hasWorkspacePermission(
+    context.accessContext,
+    workspaceId,
+    "artifacts:publish",
+  );
   const navigate = useNavigate();
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
   const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
@@ -209,21 +210,33 @@ export function ArtifactDetailRoute({
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const readAbort = useRef<AbortController | null>(null);
   const load = useCallback(async () => {
+    readAbort.current?.abort();
+    const abort = new AbortController();
+    readAbort.current = abort;
     try {
       setError(null);
-      const basePath = `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`;
-      const [nextDetail, nextContent] = await Promise.all([
-        request<WorkspaceArtifactDetailResponse>(basePath),
-        request<WorkspaceArtifactContentResponse>(`${basePath}/content`),
-      ]);
-      setDetail(nextDetail);
-      setContent(nextContent);
+      const snapshot = await loadSiteSnapshot(context.client, workspaceId, artifactId, {
+        signal: abort.signal,
+        includeArchivedContent: true,
+      });
+      if (abort.signal.aborted) return;
+      setDetail(snapshot.detail);
+      setContent(snapshot.content);
     } catch (nextError) {
+      if (abort.signal.aborted) return;
+      setDetail(null);
+      setContent(null);
       setError(nextError);
     }
-  }, [artifactId, workspaceId]);
-  useEffect(() => void load(), [load]);
+  }, [artifactId, workspaceId, context.client]);
+  useEffect(() => {
+    setDetail(null);
+    setContent(null);
+    void load();
+    return () => readAbort.current?.abort();
+  }, [load]);
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
   const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
@@ -273,21 +286,21 @@ export function ArtifactDetailRoute({
   };
   const rollback = async (versionId: string) => {
     const current = detail?.artifact.currentVersion;
-    if (!current || current.id === versionId || detail?.artifact.status === "archived") return;
+    if (
+      !canPublish ||
+      !current ||
+      current.id === versionId ||
+      detail?.artifact.status === "archived"
+    )
+      return;
     setBusyVersion(versionId);
     try {
-      await request<WorkspaceArtifactMutationResponse>(
-        `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            versionId,
-            expectedCurrentVersionId: current.id,
-            reason: `Restored from the artifact history by ${context.authSession?.user?.name ?? "a workspace member"}`,
-            idempotencyKey: crypto.randomUUID(),
-          }),
-        },
-      );
+      await context.client.rollbackWorkspaceArtifact(workspaceId, artifactId, {
+        versionId,
+        expectedCurrentVersionId: current.id,
+        reason: `Restored from the artifact history by ${context.authSession?.user?.name ?? "a workspace member"}`,
+        idempotencyKey: crypto.randomUUID(),
+      });
       toast.success("Artifact version restored");
       await load();
     } catch (nextError) {
@@ -299,23 +312,18 @@ export function ArtifactDetailRoute({
     }
   };
   const setSiteStatus = async (status: "active" | "archived") => {
+    if (!canPublish) return false;
     const artifact = detail?.artifact;
     const currentVersion = artifact?.currentVersion;
     if (!artifact || !currentVersion || artifact.status === status) return true;
     setStatusBusy(true);
     try {
-      await request<WorkspaceArtifactMutationResponse>(
-        `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
-        {
-          method: "PATCH",
-          body: JSON.stringify({
-            status,
-            expectedCurrentVersionId: currentVersion.id,
-            reason: `${status === "archived" ? "Archived" : "Restored"} from Sites by ${context.authSession?.user?.name ?? "a workspace member"}`,
-            idempotencyKey: crypto.randomUUID(),
-          }),
-        },
-      );
+      await context.client.setWorkspaceArtifactStatus(workspaceId, artifactId, {
+        status,
+        expectedCurrentVersionId: currentVersion.id,
+        reason: `${status === "archived" ? "Archived" : "Restored"} from Sites by ${context.authSession?.user?.name ?? "a workspace member"}`,
+        idempotencyKey: crypto.randomUUID(),
+      });
       toast.success(status === "archived" ? "Site archived" : "Site restored");
       await load();
       return true;
@@ -365,7 +373,7 @@ export function ArtifactDetailRoute({
                 variant="outline"
                 size="sm"
                 onClick={() => void setSiteStatus("active")}
-                disabled={!detail || statusBusy}
+                disabled={!canPublish || !detail || statusBusy}
               >
                 <ArchiveRestoreIcon className="mr-2 size-4" />
                 {statusBusy ? "Restoring…" : "Restore Site"}
@@ -375,7 +383,7 @@ export function ArtifactDetailRoute({
                 variant="outline"
                 size="sm"
                 onClick={() => setArchiveDialogOpen(true)}
-                disabled={!detail || statusBusy}
+                disabled={!canPublish || !detail || statusBusy}
               >
                 <ArchiveIcon className="mr-2 size-4" />
                 Archive
@@ -384,7 +392,7 @@ export function ArtifactDetailRoute({
             <Button
               size="sm"
               onClick={() => void editWithGeni()}
-              disabled={!detail || context.busy || archived}
+              disabled={!canPublish || !detail || context.busy || archived}
             >
               <SparklesIcon className="mr-2 size-4" />
               Edit with Geni
@@ -423,7 +431,7 @@ export function ArtifactDetailRoute({
                 ? `v${detail.artifact.currentVersion.revision}`
                 : undefined
             }
-            editDisabled={context.busy || archived}
+            editDisabled={!canPublish || context.busy || archived}
             onEdit={() => void editWithGeni()}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
@@ -488,7 +496,7 @@ export function ArtifactDetailRoute({
                       <Button
                         variant="outline"
                         size="sm"
-                        disabled={busyVersion !== null || archived}
+                        disabled={!canPublish || busyVersion !== null || archived}
                         onClick={() => void rollback(version.id)}
                       >
                         <RotateCcwIcon className="mr-2 size-3.5" />

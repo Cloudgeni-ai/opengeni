@@ -85,6 +85,8 @@ import {
   accountScopedApiKeyWorkspaceAuthority,
   hasPermission,
   requireAccessContext,
+  listExternalActorWorkspaces,
+  addExternalWorkspaceMemberForRequest,
   requireAccessGrant,
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
@@ -194,12 +196,25 @@ export function workspaceUpdateRequestsAccountTransfer(value: unknown): boolean 
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.post("/v1/workspaces/:workspaceId/external-members", async (c) => {
+    return c.json(
+      await addExternalWorkspaceMemberForRequest(
+        c,
+        deps,
+        c.req.param("workspaceId"),
+        await c.req.json(),
+      ),
+    );
+  });
   app.get("/v1/access/me", async (c) => {
     return c.json(await requireAccessContext(c, deps));
   });
 
   app.get("/v1/workspaces", async (c) => {
     const context = await requireAccessContext(c, deps);
+    const externalWorkspaces = await listExternalActorWorkspaces(context, deps);
+    if (externalWorkspaces !== null)
+      return c.json(externalWorkspaces.map((workspace) => Workspace.parse(workspace)));
     const accountScopedAuthority = accountScopedApiKeyWorkspaceAuthority(context);
     if (
       accountScopedAuthority &&
@@ -237,6 +252,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireAccountPermission(context, payload.accountId, "workspace:create");
     try {
       const existing = await findWorkspaceByExternalIdentity(deps.db, {
+        accountId: payload.accountId,
         externalSource: payload.externalSource,
         externalId: payload.externalId,
       });

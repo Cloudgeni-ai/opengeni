@@ -524,6 +524,9 @@ async function grantAppRoleIfSchemaExists(
   const runtimeReadInsertUpdateTables = `ARRAY[${RUNTIME_READ_INSERT_UPDATE_TABLES.map(literal).join(", ")}]`;
   const workClaimCapabilityRoutines = `ARRAY[${WORK_CLAIM_CAPABILITY_ROUTINES.map(literal).join(", ")}]`;
   const organizationMembershipLifecycleRoutines = `ARRAY[${[
+    "ensure_external_identity(uuid,text,text)",
+    "get_external_identity_link_reference(uuid,uuid,text)",
+    "get_external_identity_link_inventory_references(uuid,uuid[])",
     "list_self_organization_memberships(text)",
     "list_self_organization_invitations(text)",
     "list_self_organization_invitations(text,uuid,integer)",

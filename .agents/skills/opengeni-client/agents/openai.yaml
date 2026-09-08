@@ -1,4 +1,4 @@
 interface:
   display_name: "OpenGeni Client"
-  short_description: "Integrate products with organization keys, tenant workspaces, sessions, and inline Skills."
+  short_description: "Developer guide for tenant-safe OpenGeni SDK and UI integration; not runtime instructions."
   default_prompt: "Integrate my product with OpenGeni using the smallest safe surface. Keep standing credentials server-side, choose organization vs workspace key vs delegated token explicitly, map each external tenant to an organization workspace without Personal-workspace fallback, and pass product-owned Skills inline per session."

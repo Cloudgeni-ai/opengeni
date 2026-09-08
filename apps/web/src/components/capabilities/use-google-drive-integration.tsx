@@ -1,7 +1,7 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
 
-import { request as apiRequest } from "@/api";
 import {
   configuredGoogleDriveSources,
   googleDriveBoundaryLabel,
@@ -43,7 +43,6 @@ import type {
   ApiIntegrationInstallationSummary,
   ConnectionMetadata,
   GoogleDriveLifecycleActionRequest,
-  GoogleDriveOAuthStartResponse,
   IntegrationDefinitionSummary,
 } from "@/types";
 
@@ -93,6 +92,21 @@ export function useGoogleDriveIntegration({
 }): IntegrationAdapter {
   const context = useAppContext();
   const client = context.client;
+  const connectTransport = useMemo(() => client.connectTransport(), [client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const completeConnect = useCallback(() => {
+    const publishing = connectRequest?.providerId === "google-drive-publish";
+    setConnectRequest(null);
+    void refresh()
+      .then(() => {
+        if (publishing)
+          toast.success("Google Drive publishing configured", {
+            description: "The selected folder is active. Writes ask by default.",
+          });
+        else setFolderDialogOpen(true);
+      })
+      .catch(() => toast.error("Connected, but account details could not be refreshed"));
+  }, [refresh, connectRequest]);
   const canRead = hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const canWrite = hasWorkspacePermission(context.accessContext, workspaceId, "connections:write");
   const workspaceGrant = context.accessContext?.workspaceGrants.find(
@@ -178,31 +192,19 @@ export function useGoogleDriveIntegration({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
-  async function connect(reconnect = false, capability: "source_read" | "publish" = "source_read") {
+  function connect(reconnect = false, capability: "source_read" | "publish" = "source_read") {
     if (!canWrite) return;
-    setBusy(true);
-    try {
-      const start = await apiRequest<GoogleDriveOAuthStartResponse>(
-        `/v1/workspaces/${workspaceId}/connections/google-drive/install`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            ...(reconnect && connection ? { connectionId: connection.id } : {}),
-            capability,
-          }),
-        },
-      );
-      window.sessionStorage.setItem(
-        `opengeni:google-drive-oauth-capability:${workspaceId}`,
-        capability,
-      );
-      window.location.assign(start.authorizationUrl);
-    } catch (error) {
-      toast.error("Google Drive connection could not start", {
-        description: error instanceof Error ? error.message : String(error),
-      });
-      setBusy(false);
-    }
+    setConnectRequest({
+      scope: { workspaceId, transport: connectTransport },
+      providerId: capability === "publish" ? "google-drive-publish" : "google-drive-knowledge",
+      displayName: capability === "publish" ? "Google Drive publishing" : "Google Drive",
+      ownership: "personal",
+      returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+      ...((reconnect || capability === "publish") && connection
+        ? { reconnectAccountId: connection.id }
+        : {}),
+    });
   }
 
   async function transitionLifecycle(action: GoogleDriveLifecycleActionRequest["action"]) {
@@ -528,6 +530,15 @@ export function useGoogleDriveIntegration({
 
   const dialogs = canRead ? (
     <>
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={completeConnect}
+        />
+      )}
       {extraAccounts.dialogs}
       <ConfirmDialog
         open={disconnectOpen}

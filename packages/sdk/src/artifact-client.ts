@@ -13,17 +13,6 @@ import type {
   ReadEditableArtifactMaterializationOptions,
   ReadEditableArtifactResourceOptions,
 } from "./editable-artifact-resources";
-import type {
-  CreateWorkspaceArtifactRequest,
-  PublishWorkspaceArtifactVersionRequest,
-  RollbackWorkspaceArtifactRequest,
-  SetWorkspaceArtifactStatusRequest,
-  WorkspaceArtifactContentResponse,
-  WorkspaceArtifactDetailResponse,
-  WorkspaceArtifactListOptions,
-  WorkspaceArtifactListResponse,
-  WorkspaceArtifactMutationResponse,
-} from "./workspace-artifacts";
 
 /** Public SDK client. Optional operator and artifact operations stay out of the console core. */
 export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
@@ -140,90 +129,6 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/materializations/${encodeURIComponent(jobId)}/download`,
       { replicaId: options.replicaId },
       options,
-    );
-  }
-
-  async listWorkspaceArtifacts(
-    workspaceId: string,
-    options: WorkspaceArtifactListOptions = {},
-  ): Promise<WorkspaceArtifactListResponse> {
-    const query = new URLSearchParams();
-    if (options.limit !== undefined) query.set("limit", String(options.limit));
-    if (options.cursor) query.set("cursor", options.cursor);
-    if (options.status) query.set("status", options.status);
-    const suffix = query.size > 0 ? `?${query.toString()}` : "";
-    return await this.requestJson<WorkspaceArtifactListResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts${suffix}`,
-    );
-  }
-
-  async getWorkspaceArtifact(
-    workspaceId: string,
-    artifactId: string,
-  ): Promise<WorkspaceArtifactDetailResponse> {
-    return await this.requestJson<WorkspaceArtifactDetailResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`,
-    );
-  }
-
-  async getWorkspaceArtifactContent(
-    workspaceId: string,
-    artifactId: string,
-    versionId?: string,
-  ): Promise<WorkspaceArtifactContentResponse> {
-    const query = versionId ? `?versionId=${encodeURIComponent(versionId)}` : "";
-    return await this.requestJson<WorkspaceArtifactContentResponse>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/content${query}`,
-    );
-  }
-
-  async createWorkspaceArtifact(
-    workspaceId: string,
-    request: CreateWorkspaceArtifactRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts`,
-      request,
-    );
-  }
-
-  async publishWorkspaceArtifactVersion(
-    workspaceId: string,
-    artifactId: string,
-    request: PublishWorkspaceArtifactVersionRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/versions`,
-      request,
-    );
-  }
-
-  async rollbackWorkspaceArtifact(
-    workspaceId: string,
-    artifactId: string,
-    request: RollbackWorkspaceArtifactRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "POST",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/rollback`,
-      request,
-    );
-  }
-
-  async setWorkspaceArtifactStatus(
-    workspaceId: string,
-    artifactId: string,
-    request: SetWorkspaceArtifactStatusRequest,
-  ): Promise<WorkspaceArtifactMutationResponse> {
-    return await this.requestJson<WorkspaceArtifactMutationResponse>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}/status`,
-      request,
     );
   }
 }

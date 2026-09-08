@@ -4,7 +4,7 @@
 // only the bounded pre-snapshot legacy path (a ref with no connection id).
 import { describe, expect, test } from "bun:test";
 import type { SessionTurn } from "@opengeni/contracts";
-import type { Database, resolveAcceptedConnectionUse } from "@opengeni/db";
+import type { Database, SessionTurnForExecution, resolveAcceptedConnectionUse } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { connectionTokenResolverForTurn } from "../src/activities/mcp-credentials";
 
@@ -36,6 +36,7 @@ function workspaceResolver(input: {
     rootSessionId: "session-root",
     attemptId: "attempt-1",
     turn,
+    getHostTurnForAttempt: async () => turn as SessionTurnForExecution,
     authorizeAcceptedUse: async (_db, authority) => input.authorize(authority),
     isSessionTenancyProductActivated: async () => input.activated ?? false,
     connectionCredentials: {
@@ -167,7 +168,8 @@ describe("workspace connection lane", () => {
     });
 
     expect(result).toMatchObject({ status: "ok", connectionId: "cloudgeni-capability" });
-    expect(result).not.toHaveProperty("authorizeProviderRequest");
+    if (result.status !== "ok") throw new Error("Expected host credentials");
+    expect(await result.authorizeProviderRequest?.()).toBe(true);
 
     const uuidHostBindingId = "44444444-4444-4444-8444-444444444444";
     const uuidHostBindingResult = await resolver({
@@ -187,7 +189,8 @@ describe("workspace connection lane", () => {
       status: "ok",
       connectionId: uuidHostBindingId,
     });
-    expect(uuidHostBindingResult).not.toHaveProperty("authorizeProviderRequest");
+    if (uuidHostBindingResult.status !== "ok") throw new Error("Expected host credentials");
+    expect(await uuidHostBindingResult.authorizeProviderRequest?.()).toBe(true);
     expect(authorizeCalls).toBe(0);
     expect(hostCalls).toBe(2);
   });

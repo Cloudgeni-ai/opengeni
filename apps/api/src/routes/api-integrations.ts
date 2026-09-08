@@ -15,6 +15,7 @@ import {
   PreviewApiIntegrationRequest,
   UninstallApiIntegrationRequest,
   UninstallApiIntegrationResult,
+  type AccessGrant,
 } from "@opengeni/contracts";
 import { requireAccessGrant, type ApiRouteDeps } from "@opengeni/core";
 import {
@@ -37,6 +38,7 @@ import { HTTPException } from "hono/http-exception";
 import {
   resolveApiIntegrationPreview,
   type ApiIntegrationConnectionDescriptor,
+  type ResolvedApiIntegrationPreview,
 } from "../integrations/api-integrations";
 
 export type ApiIntegrationRouteOverrides = Readonly<{ fetchImpl?: FetchLike }>;
@@ -46,6 +48,72 @@ export function apiIntegrationRequiresConnection(authScheme: Record<string, unkn
   return typeof authKind === "string" && authKind !== "none";
 }
 
+/** Shared native/embedded install validation. The caller must still authorize
+ * capabilities:manage and commit under its own live-authority boundary. */
+export function validatedIntegrationInstallInput(
+  grant: AccessGrant,
+  workspaceId: string,
+  payload: InstallApiIntegrationRequest,
+  resolved: ResolvedApiIntegrationPreview,
+): Parameters<typeof installApiIntegration>[1] {
+  if (
+    resolved.preview.revisionId !== payload.expectedRevisionId ||
+    resolved.preview.contentSha256 !== payload.expectedContentSha256
+  ) {
+    throw new HTTPException(409, {
+      message:
+        "The Integration source changed after preview. Review the new tools and permissions before installing.",
+    });
+  }
+  if (resolved.preview.auth.kind !== "none" && !payload.connectionId)
+    throw new HTTPException(422, {
+      message: "Connect an account before installing this Integration.",
+    });
+  if (
+    payload.ownership &&
+    resolved.preview.connectionOwnership &&
+    payload.ownership !== resolved.preview.connectionOwnership
+  )
+    throw new HTTPException(422, {
+      message: "The selected Connection ownership does not match this install request.",
+    });
+  if (payload.ownership === "personal" && !resolved.preview.connectionOwnership)
+    throw new HTTPException(422, {
+      message: "Choose a Personal Connection before installing for yourself.",
+    });
+  return {
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+    capabilityId: resolved.preview.capabilityId,
+    pluginKey: resolved.preview.pluginKey,
+    serverId: resolved.preview.serverId,
+    name: resolved.preview.name,
+    description: resolved.preview.description,
+    category: "integrations",
+    tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom"],
+    definitionId: resolved.preview.definitionId,
+    definitionProvenance: resolved.preview.definitionProvenance,
+    ...(resolved.provider ? { provider: resolved.provider } : {}),
+    providerDomain: resolved.preview.providerDomain,
+    protocol: resolved.preview.protocol,
+    baseUrl: resolved.preview.baseUrl,
+    sourceUrl: resolved.preview.sourceUrl,
+    authScheme: resolved.authScheme,
+    ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+    ...(payload.instanceKey ? { instanceKey: payload.instanceKey } : {}),
+    ...(payload.displayName ? { displayName: payload.displayName } : {}),
+    ...(payload.expectedInstanceVersion !== undefined
+      ? { expectedInstanceVersion: payload.expectedInstanceVersion }
+      : {}),
+    requiredScopes: resolved.requiredScopes,
+    ownership: resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
+    ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
+    facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
+    revision: resolved.revision,
+  };
+}
+
 export function registerApiIntegrationRoutes(
   app: Hono,
   deps: ApiRouteDeps,
@@ -53,7 +121,9 @@ export function registerApiIntegrationRoutes(
 ): void {
   const transport = createPinnedIntegrationTransport({
     network: deps.settings,
-    ...(overrides.fetchImpl ? { fetchImpl: overrides.fetchImpl } : {}),
+    ...((overrides.fetchImpl ?? deps.apiIntegrationSourceFetch)
+      ? { fetchImpl: overrides.fetchImpl ?? deps.apiIntegrationSourceFetch! }
+      : {}),
   });
 
   app.get("/v1/workspaces/:workspaceId/integrations/definitions", async (c) => {
@@ -157,70 +227,10 @@ export function registerApiIntegrationRoutes(
       subjectId: grant.subjectId,
       payload,
     });
-    if (
-      resolved.preview.revisionId !== payload.expectedRevisionId ||
-      resolved.preview.contentSha256 !== payload.expectedContentSha256
-    ) {
-      throw new HTTPException(409, {
-        message:
-          "The Integration source changed after preview. Review the new tools and permissions before installing.",
-      });
-    }
-    if (resolved.preview.auth.kind !== "none" && !payload.connectionId) {
-      throw new HTTPException(422, {
-        message: "Connect an account before installing this Integration.",
-      });
-    }
-    if (
-      payload.ownership &&
-      resolved.preview.connectionOwnership &&
-      payload.ownership !== resolved.preview.connectionOwnership
-    ) {
-      throw new HTTPException(422, {
-        message: "The selected Connection ownership does not match this install request.",
-      });
-    }
-    if (payload.ownership === "personal" && !resolved.preview.connectionOwnership) {
-      throw new HTTPException(422, {
-        message: "Choose a Personal Connection before installing for yourself.",
-      });
-    }
+    const installation = validatedIntegrationInstallInput(grant, workspaceId, payload, resolved);
     try {
       return c.json(
-        InstalledApiIntegration.parse(
-          await installApiIntegration(deps.db, {
-            accountId: grant.accountId,
-            workspaceId,
-            subjectId: grant.subjectId,
-            capabilityId: resolved.preview.capabilityId,
-            pluginKey: resolved.preview.pluginKey,
-            serverId: resolved.preview.serverId,
-            name: resolved.preview.name,
-            description: resolved.preview.description,
-            category: "integrations",
-            tags: [resolved.preview.protocol, resolved.preview.provider ?? "custom"],
-            definitionId: resolved.preview.definitionId,
-            definitionProvenance: resolved.preview.definitionProvenance,
-            ...(resolved.provider ? { provider: resolved.provider } : {}),
-            providerDomain: resolved.preview.providerDomain,
-            protocol: resolved.preview.protocol,
-            baseUrl: resolved.preview.baseUrl,
-            sourceUrl: resolved.preview.sourceUrl,
-            authScheme: resolved.authScheme,
-            ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
-            ...(payload.instanceKey ? { instanceKey: payload.instanceKey } : {}),
-            ...(payload.displayName ? { displayName: payload.displayName } : {}),
-            ...(payload.expectedInstanceVersion !== undefined
-              ? { expectedInstanceVersion: payload.expectedInstanceVersion }
-              : {}),
-            requiredScopes: resolved.requiredScopes,
-            ownership:
-              resolved.preview.connectionOwnership === "personal" ? "subject" : "workspace",
-            ...(payload.allowedTools ? { allowedTools: payload.allowedTools } : {}),
-            facetDefinitions: integrationFacetDefinitions(resolved.preview.definitionId),
-            revision: resolved.revision,
-          }),
-        ),
+        InstalledApiIntegration.parse(await installApiIntegration(deps.db, installation)),
         payload.expectedInstanceVersion === undefined ? 201 : 200,
       );
     } catch (error) {
@@ -295,7 +305,7 @@ export function registerApiIntegrationRoutes(
   );
 }
 
-async function resolveForRoute(input: {
+export async function resolveForRoute(input: {
   deps: ApiRouteDeps;
   transport: ReturnType<typeof createPinnedIntegrationTransport>;
   workspaceId: string;

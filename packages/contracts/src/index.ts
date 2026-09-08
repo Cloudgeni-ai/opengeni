@@ -1,4 +1,23 @@
 import { z } from "zod";
+export const HostMcpCreateSelections = z
+  .array(
+    z
+      .object({
+        serverId: z.string().min(1).max(256),
+        delegationId: z
+          .string()
+          .uuid()
+          .transform((value) => value.toLowerCase()),
+        generation: z.number().int().positive().safe(),
+      })
+      .strict(),
+  )
+  .max(128)
+  .superRefine((values, ctx) => {
+    if (new Set(values.map((value) => value.serverId)).size !== values.length)
+      ctx.addIssue({ code: "custom", message: "Duplicate host server selection" });
+  });
+export type HostMcpCreateSelection = z.input<typeof HostMcpCreateSelections>[number];
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
 import {
@@ -4003,6 +4022,11 @@ export const McpServerConnectionRef = z
     connectionId: z.string().min(1).optional(),
     /** Host-owned credential authority; omission keeps OpenGeni's native connection authority. */
     authoritySource: z.literal("host").optional(),
+    /** Opt-in durable reference. A live execution validator is mandatory. */
+    hostBinding: z
+      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+      .strict()
+      .optional(),
     /** Stable provider family (for example github, gitlab, or azure_devops). */
     provider: z.string().min(1).max(128).optional(),
     /** Provider host or tenant domain. */
@@ -4024,6 +4048,12 @@ export const McpServerConnectionRef = z
         path: ["connectionId"],
       });
     }
+    if (reference.hostBinding && reference.authoritySource !== "host")
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message: "Durable binding requires host authority",
+      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({
@@ -4317,7 +4347,39 @@ export type McpCredentialResolution =
       authorizationUrl?: string;
     };
 
+/** Non-turn authority captured by the authenticated API gateway, never by caller JSON. */
+export type McpGatewayCredentialAuthority = {
+  kind: "external_user" | "organization_service";
+  subjectId: string;
+  permissions: AccessGrant["permissions"];
+};
+
+export type McpGatewayCredentialsRequest = Pick<
+  McpCredentialsRequest,
+  | "accountId"
+  | "workspaceId"
+  | "destinationUrl"
+  | "credentialTarget"
+  | "serverId"
+  | "toolName"
+  | "connectionRef"
+  | "forceRefresh"
+> & {
+  surface: "workspace_gateway";
+  requestId: string;
+  authority: McpGatewayCredentialAuthority;
+};
+
+export type McpGatewayCredentialResolution =
+  | (Omit<Extract<McpCredentialResolution, { status: "ok" }>, "sessionId"> & { requestId: string })
+  | (Omit<Extract<McpCredentialResolution, { status: "auth_needed" }>, "sessionId"> & {
+      requestId: string;
+    });
+
 export type ConnectionCredentialsPort = {
+  /** Restrict an optional remote adapter to explicit host refs. Omission keeps
+   * existing in-process host override and legacy-reference behavior. */
+  mcpAuthoritySource?: "host";
   // Every leg is optional: a host may drive only the credential classes it
   // owns. An unset leg falls through to today's standalone implementation for
   // that leg only.
@@ -4336,6 +4398,11 @@ export type ConnectionCredentialsPort = {
    * used by model-visible MCP tools and the exact-attempt Codemode projection.
    */
   mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
+  /** Explicit opt-in for authenticated pre-session discovery and invocation.
+   * Does not call the turn-based mcpCredentials fallback or grant durable use. */
+  mcpGatewayCredentials?(
+    input: McpGatewayCredentialsRequest,
+  ): Promise<McpGatewayCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -9232,6 +9299,7 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias({
   overlapPolicy: ScheduledTaskOverlapPolicy.default("allow_concurrent"),
   targetSessionId: z.string().uuid().nullable().optional(),
   connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+  selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
   agentConfig: ScheduledTaskAgentConfigInput,
   status: ScheduledTaskStatus.default("active"),
   variableSetId: z.string().uuid().nullable().optional(),
@@ -9311,6 +9379,7 @@ export const UpdateScheduledTaskRequest =
     action: ScheduledTaskAction.optional(),
     targetSessionId: z.string().uuid().nullable().optional(),
     connectionAuthorities: McpConnectionAuthoritySelections.optional(),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     agentConfig: ScheduledTaskAgentConfigInput.optional(),
     status: ScheduledTaskStatus.optional(),
     variableSetId: z.string().uuid().nullable().optional(),
@@ -10481,6 +10550,8 @@ export type ConnectionOwnership = z.infer<typeof ConnectionOwnership>;
 
 export const SocialConnection = z.object({
   id: z.string().uuid(),
+  /** Present on version-aware deployments; required for observed reconnect. */
+  version: z.number().int().positive().optional(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   provider: SocialProvider,
@@ -10813,6 +10884,7 @@ export const OAuthStartRequest = z
     resource: z.string().url().optional(),
     requestedScopes: z.array(z.string().min(1)).default([]),
     returnPath: z.string().min(1).optional(),
+    returnUrl: z.string().min(1).max(4096).optional(),
     connectionId: z.string().uuid().optional(),
     ownership: ConnectionOwnership.optional(),
     oauthClient: z
@@ -14442,6 +14514,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
      * identity or authorization from the UUID.
      */
     requestedSessionId: z.string().uuid().optional(),
+    /** Explicit external-owner grants for the direct initial turn only. */
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     /** Top-level omission is workspace-visible. Agent-child omission inherits
      * the exact parent visibility; cross-visibility child creation is rejected.
      * Top-level private creation is an activated managed-cookie owning-human
@@ -14846,6 +14920,7 @@ export const SessionUserMessagePayload = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact logical turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()
@@ -14895,6 +14970,7 @@ export const SteerSessionMessageRequest = z
     mcpCredentialUpdates: z.array(SessionMcpCredentialUpdateInput).optional(),
     /** Explicit personal-connection grants for this exact steered turn. */
     connectionAuthorities: McpConnectionAuthoritySelections.default([]),
+    selectedHostMcpDelegations: HostMcpCreateSelections.optional(),
     personalResourceAttachment: PersonalResourceAttachmentIntent.optional(),
   })
   .strict()

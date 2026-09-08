@@ -21,6 +21,19 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./sites": {
+      "types": "./src/sites.ts",
+      "default": "./src/sites.ts"
+    },
+    "./connect.css": {
+      "types": "./styles/connect.d.ts",
+      "style": "./styles/connect.css",
+      "default": "./styles/connect.css"
+    },
+    "./connect": {
+      "types": "./src/connect.ts",
+      "default": "./src/connect.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -120,6 +133,7 @@
     "@dnd-kit/utilities": "3.2.2",
     "@fontsource-variable/noto-sans-arabic": "5.2.10",
     "@fontsource-variable/noto-sans-jp": "5.2.10",
+    "@opengeni/connect": "workspace:*",
     "@opengeni/sdk": "workspace:*",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",

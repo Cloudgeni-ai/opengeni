@@ -1,4 +1,14 @@
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  useMemo,
+  useCallback,
+  type ReactNode,
+} from "react";
+import { NativeConnectSetup, type NativeConnectRequest } from "./native-connect-setup";
 import { toast } from "sonner";
 
 import type {
@@ -20,10 +30,10 @@ import type {
 /**
  * The curated multi-instance ApiIntegration mechanism (Outlook Mail/Calendar/
  * Contacts, OneDrive, extra Google Drive accounts): every curated
- * `IntegrationDefinition` here is OAuth2-only, so adding an account is a
- * zero-dialog, straight-redirect action. This module is the one place that
- * knows the `definitionId`/`instanceKey`/OAuth-return-path plumbing; every
- * adapter that folds N accounts into one row builds on it.
+ * `IntegrationDefinition` here is OAuth2-only. New setup uses the shared durable
+ * Connect controller and explicit operation review, retaining exact named
+ * instance/version selection. The legacy query callback reader below handles
+ * already-issued old callbacks; new native setup does not mint those URLs.
  */
 
 // The per-account facets surface is a large, rarely-opened control plane
@@ -204,7 +214,7 @@ export type ApiIntegrationAccountsController = {
   connected: boolean;
   needsAttention: boolean;
   busy: boolean;
-  /** Zero-dialog: every curated definition here is oauth2-reviewed. */
+  /** Open durable account setup and explicit operation review. */
   addAccount: () => void;
   /** Every account's currently discovered tool names, deduplicated. */
   tools: string[];
@@ -245,6 +255,16 @@ export function useApiIntegrationAccounts({
 }): ApiIntegrationAccountsController {
   const context = useAppContext();
   const client = context.client;
+  const connectTransport = useMemo(() => client.connectTransport(), [client]);
+  const [connectRequest, setConnectRequest] = useState<NativeConnectRequest | null>(null);
+  const completeConnect = useCallback(() => {
+    setConnectRequest(null);
+    void refresh?.().catch(() =>
+      toast.error("Account connected, but refreshing the catalog failed"),
+    );
+    onRuntimeChanged?.();
+  }, [refresh, onRuntimeChanged]);
+  useEffect(() => setConnectRequest(null), [workspaceId, context.accessContext.subjectId]);
   const [busy, setBusy] = useState(false);
   const [removeTarget, setRemoveTarget] = useState<{
     instance: ApiIntegrationInstallationSummary;
@@ -274,25 +294,20 @@ export function useApiIntegrationAccounts({
         : accounts.length === 0
           ? definition.name
           : `${definition.name} - Account ${accounts.length + 1}`;
-      const returnPath = apiIntegrationOAuthReturnPath(
-        window.location.pathname,
-        window.location.search,
-        {
-          definitionId,
+      setConnectRequest({
+        scope: { workspaceId, transport: connectTransport },
+        providerId: definitionId,
+        ownership,
+        returnUrl: window.location.href,
+        idempotencyKey: crypto.randomUUID(),
+        ...(existing?.connectionId ? { reconnectAccountId: existing.connectionId } : {}),
+        installationTarget: {
           instanceKey,
           displayName,
-          ownership,
           ...(existing ? { expectedInstanceVersion: existing.instanceVersion } : {}),
         },
-      );
-      const response = await client.startApiIntegrationOAuth(workspaceId, {
-        definitionId,
-        ownership,
-        returnPath,
-        ...(existing?.connectionId ? { connectionId: existing.connectionId } : {}),
       });
-      if (!response.authorizationUrl) throw new Error("The provider did not return a consent URL.");
-      window.location.assign(response.authorizationUrl);
+      setBusy(false);
     } catch (error) {
       setBusy(false);
       toast.error("Couldn't start account connection", {
@@ -400,21 +415,32 @@ export function useApiIntegrationAccounts({
   const tools = [...new Set(accounts.flatMap((account) => account.allowedTools))];
 
   const dialogs = (
-    <ConfirmDialog
-      open={removeTarget !== null}
-      onOpenChange={(open) => {
-        if (!open) setRemoveTarget(null);
-      }}
-      title={removeTarget ? `Remove ${removeTarget.instance.displayName}?` : "Remove account?"}
-      description={
-        removeTarget
-          ? `This removes only this named account${removeTarget.removesDefinition ? " and its now-unused shared definition" : ""}. The authenticated Connection remains intact.`
-          : ""
-      }
-      confirmLabel="Remove account"
-      destructive
-      onConfirm={removeAccount}
-    />
+    <>
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={completeConnect}
+        />
+      )}
+      <ConfirmDialog
+        open={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemoveTarget(null);
+        }}
+        title={removeTarget ? `Remove ${removeTarget.instance.displayName}?` : "Remove account?"}
+        description={
+          removeTarget
+            ? `This removes only this named account${removeTarget.removesDefinition ? " and its now-unused shared definition" : ""}. The authenticated Connection remains intact.`
+            : ""
+        }
+        confirmLabel="Remove account"
+        destructive
+        onConfirm={removeAccount}
+      />
+    </>
   );
 
   return {

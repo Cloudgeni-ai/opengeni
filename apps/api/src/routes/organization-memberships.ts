@@ -36,6 +36,7 @@ import {
   getManagedSession,
   organizationMembershipHttpStatus,
   requireCanonicalLocalAccountAdministrator,
+  updateExternalIdentityMembershipForRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -164,6 +165,28 @@ function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): 
 }
 
 export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDeps): void {
+  app.patch("/v1/organizations/:organizationId/external-members/:membershipId", async (context) => {
+    const organizationId = parseId(
+      OrganizationId,
+      context.req.param("organizationId"),
+      "organization id",
+    );
+    const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
+    try {
+      return context.json(
+        await updateExternalIdentityMembershipForRequest(
+          context,
+          deps,
+          organizationId,
+          membershipId,
+          await context.req.json().catch(() => null),
+        ),
+      );
+    } catch (error) {
+      if (error instanceof HTTPException) throw error;
+      rethrowMembershipError(error);
+    }
+  });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateOrganizationRequest);

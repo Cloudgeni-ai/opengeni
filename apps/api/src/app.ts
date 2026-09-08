@@ -1,3 +1,4 @@
+import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -35,6 +36,8 @@ import {
   CodemodePayloadTooLargeError,
   CodemodeToolApprovalRequiredError,
   CodemodeToolNotInCatalogError,
+  ConnectAttemptConflictError,
+  ConnectAttemptNotFoundError,
   configureChildLifecycleNotices,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
@@ -143,6 +146,9 @@ import { registerCodexRoutes } from "./routes/codex";
 import { registerOrganizationModelProviderRoutes } from "./routes/organization-model-providers";
 import { registerSuperGrokRoutes } from "./routes/supergrok";
 import { registerConnectionRoutes } from "./routes/connections";
+import { registerConnectRoutes } from "./routes/connect";
+import { registerHostMcpBindingRoutes } from "./routes/host-mcp-bindings";
+import { registerExternalIdentityLinkRoutes } from "./routes/external-identity-links";
 import { registerDocumentRoutes } from "./routes/documents";
 import { registerEnrollmentRoutes } from "./routes/enrollments";
 import { registerMachineRoutes } from "./routes/machines";
@@ -1180,6 +1186,7 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  registerConnectCallbackReturns(app, routeDeps);
   registerFileRoutes(app, routeDeps);
   registerApiKeyRoutes(app, routeDeps);
   registerBillingRoutes(app, routeDeps);
@@ -1205,6 +1212,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerPersonalGitHubRoutes(app, routeDeps);
   registerPersonalGitHubGitBrokerRoutes(app, routeDeps);
   registerConnectionRoutes(app, routeDeps);
+  registerConnectRoutes(app, routeDeps);
+  registerHostMcpBindingRoutes(app, routeDeps);
+  registerExternalIdentityLinkRoutes(app, routeDeps);
   registerCapabilityRoutes(app, routeDeps);
   registerApiIntegrationRoutes(app, routeDeps);
   registerIntegrationFacetRoutes(app, routeDeps);
@@ -1520,6 +1530,8 @@ function codexCompactionV2ProviderLockedError(
 }
 
 export function httpStatusForError(error: unknown): number {
+  if (error instanceof ConnectAttemptConflictError) return 409;
+  if (error instanceof ConnectAttemptNotFoundError) return 404;
   if (codexCompactionV2ProviderLockedError(error)) {
     return 422;
   }
@@ -1552,6 +1564,8 @@ function retryableHttpStatus(status: number): boolean {
 }
 
 function publicErrorMessage(error: unknown, status: number): string {
+  if (error instanceof ConnectAttemptConflictError) return "Connection setup changed or is still in progress. Reload its current status before retrying.";
+  if (error instanceof ConnectAttemptNotFoundError) return "Connection setup not found.";
   if (status === 502 || status === 503 || status === 504) {
     return "OpenGeni is temporarily unavailable — retry.";
   }

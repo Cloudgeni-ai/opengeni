@@ -113,6 +113,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/connect": "workspace:*",
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {

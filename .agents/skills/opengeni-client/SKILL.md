@@ -74,6 +74,23 @@ Read `references/product-integration-shapes.md` before designing the boundary.
 Read `references/api-workflows.md` for session, upload, retry, repository,
 machine, and schedule patterns.
 
+For deeper implementation decisions, read selectively:
+
+- [Discovery and autonomy](references/discovery-and-autonomy.md)
+- [Isolation and authorization](references/isolation-and-authorization.md)
+- [Product shapes and UI](references/product-shapes-and-ui.md)
+- [Data tools and credentials](references/data-tools-and-credentials.md)
+- [Integration configuration and verification](references/runtime-profile-and-verification.md)
+- [Implementation checklist](references/implementation-overview.md)
+- [External users and embedded connection setup](references/external-users-and-connect.md)
+
+This tree is the canonical developer guide for both repository installation and
+the generated OpenGeni Product Integration Pack. It does not define a runtime
+profile API, schedule Skill fields, or a new registry. Any references to an
+integration's "runtime profile" mean configuration owned by the customer's code,
+not a new OpenGeni resource. The Pack remains inactive until explicitly selected
+for a coding session.
+
 ## Choose The Credential
 
 - Use an **organization API key** when one server-side product integration

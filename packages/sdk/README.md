@@ -1,5 +1,52 @@
 # @opengeni/sdk
 
+## External-user admission (implementation branch)
+
+On a product backend, `client.asUser(externalId, { source? })` returns a separate
+client that sends the external actor assertion with the organization key. IDs
+are opaque and case-sensitive; the default source is `default`. Keep the key and
+this client server-side. Each request requires the intersection of the key's
+permissions and the user's explicit workspace membership. API-key rotation does
+not change the external identity.
+
+Use the service client—not an `asUser` client—to call
+`addExternalWorkspaceMember(workspaceId, { identity: { externalId, source? }, permissions })`
+for explicit onboarding. It requires `members:manage`, cannot grant more than
+the key permits, excludes Personal workspaces, and refuses to overwrite an
+existing membership with different permissions. Ordinary `asUser` calls never
+restore removed workspace membership or reactivate disabled identities.
+
+Service `removeWorkspaceMember` supports external members through the existing
+fenced workspace teardown. Account-wide `updateExternalIdentityMembership(
+organizationId, organizationMembershipId, { kind, expectedAuthorizationRevision,
+operationId, reason? })` requires explicit `account:admin` and supports suspend,
+reactivate, and offboard. The membership ID is returned by onboarding; its initial
+authorization revision is 1. Retain the returned revision for subsequent changes.
+Reactivation restores admission, not revoked memberships or work. Offboarding
+follows existing retention policy and cannot be reactivated through this API.
+Native-user targets and `asUser` calls are rejected by this service endpoint.
+
+An `asUser` client can discover/access its own provisioned Personal workspace
+under the key's permission ceiling. Core private session operations retain
+organization readiness/settings and explicit sharing acknowledgments; service
+clients gain no Personal-workspace fallback.
+
+Optional native-account delegation uses `beginIdentityLink`, authenticated native
+`previewIdentityLink`/`confirmIdentityLink`, and explicit server-side
+`asLinkedUser(externalId, { source?, linkId, expectedLinkRevision })`. Confirmation
+requires the actual native login plus the one-time host challenge; an organization
+key cannot confirm for the native user. `listIdentityLinks(workspaceId, cursor?)`
+returns only the effective participant's links in that organization (50 per page).
+`revokeIdentityLink` requires the observed revision. Linking never changes ordinary
+`asUser`, merges histories or transfers credentials. Link-dependent accepted work
+retains revocation checks across schedules and children. Short-lived inline MCP
+credentials remain supported, and durable renewal stays opt-in.
+
+Connect accepts an optional `installationTarget: { instanceKey, displayName,
+expectedInstanceVersion? }`. Keep the exact observed version for an existing named
+account. Setup freezes the target through callback and operation review; omitting
+it creates an independent named account instead of overwriting a default instance.
+
 Framework-agnostic TypeScript SDK for the OpenGeni public API: a typed client,
 session lifecycle, and the streaming core — SSE event streaming with automatic
 reconnect, resume-by-sequence, gap backfill, and duplicate suppression — plus

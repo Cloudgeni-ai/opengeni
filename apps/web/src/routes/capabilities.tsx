@@ -779,11 +779,24 @@ export function CapabilitiesRoute({
       });
   }
 
+  async function enableMcpThroughConnect(capabilityId: string) {
+    const attempt = await client.beginConnect(workspaceId, {
+      providerId: "mcp-install", ownership: "workspace", returnUrl: window.location.href,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
+      expectedRevision: attempt.revision, idempotencyKey: crypto.randomUUID(),
+      action: { type: "credentials", values: { capabilityId } },
+    });
+    if (completed.state !== "complete" || !completed.integrationInstalled)
+      throw new Error("MCP setup did not complete. Reload connection setup before retrying.");
+  }
+
   async function quickEnable(item: CapabilityCatalogItem) {
     setBusyId(item.id);
     try {
       const persisted = await persistIfRegistry(item, false);
-      await client.enableCapability(workspaceId, persisted.id);
+      await enableMcpThroughConnect(persisted.id);
       await refresh();
       onRuntimeChanged();
       toast.success(`Enabled ${item.name}`);
@@ -948,16 +961,16 @@ export function CapabilitiesRoute({
       }
 
       if (action.type === "social_oauth" && plan.mode === "social_oauth") {
-        const returnPath = `${window.location.pathname}?connect_item=${encodeURIComponent(item.id)}`;
-        const response = await client.startSocialOAuth(workspaceId, {
-          provider: action.provider,
+        const response = await client.beginConnect(workspaceId, {
+          providerId: action.provider,
           ownership: action.ownership,
-          returnPath,
+          returnUrl: window.location.href,
+          idempotencyKey: crypto.randomUUID(),
         });
-        if (!response.authorizationUrl) {
+        if (response.nextAction.type !== "authorize") {
           throw new Error("The provider did not return an authorization link.");
         }
-        window.location.assign(response.authorizationUrl);
+        window.location.assign(response.nextAction.url);
         return;
       }
 

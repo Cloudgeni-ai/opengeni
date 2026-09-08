@@ -173,6 +173,12 @@ try {
   ]);
 
   const versions = await workspaceVersions();
+  const connect = await stageTarball("packages/connect", stagingRoot, tarballRoot, versions);
+  const connectTarballContents = await run(["tar", "-tzf", connect.tarball], consumerRoot, true);
+  for (const artifact of ["package/dist/index.js", "package/dist/index.d.ts"]) {
+    if (!connectTarballContents.split("\n").includes(artifact))
+      throw new Error(`Connect tarball is missing ${artifact}`);
+  }
   const sdk = await stageTarball("packages/sdk", stagingRoot, tarballRoot, versions);
   const sdkTarballContents = await run(["tar", "-tzf", sdk.tarball], consumerRoot, true);
   for (const artifact of [
@@ -358,6 +364,12 @@ try {
   }
   const reactTarballContents = await run(["tar", "-tzf", react.tarball], consumerRoot, true);
   for (const artifact of [
+    "package/dist/connect.js",
+    "package/dist/connect.d.ts",
+    "package/dist/sites.js",
+    "package/dist/sites.d.ts",
+    "package/styles/connect.css",
+    "package/styles/connect.d.ts",
     "package/dist/artifacts.js",
     "package/dist/artifacts.d.ts",
     "package/dist/artifacts-document.js",
@@ -420,6 +432,10 @@ try {
   if (!codemode) throw new Error("runtime package closure did not stage @opengeni/codemode");
   if (sdk.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`) {
     throw new Error("SDK tarball does not declare the staged canonical contracts version");
+  }
+  for (const consumer of [sdk, react]) {
+    if (consumer.manifest.dependencies?.["@opengeni/connect"] !== `^${connect.manifest.version}`)
+      throw new Error(`${consumer.manifest.name} does not declare the staged Connect version`);
   }
   if (
     codemode.manifest.dependencies?.["@opengeni/contracts"] !== `^${contracts.manifest.version}`
@@ -507,6 +523,7 @@ try {
   }
 
   const sdkFile = `file:${sdk.tarball}`;
+  const connectFile = `file:${connect.tarball}`;
   const codemodeFile = `file:${codemode.tarball}`;
   const artifactToolFile = `file:${artifactTool.tarball}`;
   const contractsFile = `file:${contracts.tarball}`;
@@ -531,6 +548,7 @@ try {
       ...(reactSource.peerDependencies ?? {}),
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/codemode": codemodeFile,
+      "@opengeni/connect": connectFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
@@ -547,6 +565,7 @@ try {
     overrides: {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/connect": connectFile,
       ...runtimeLocalDependencyFiles,
       postcss: postcssVersion,
     },
@@ -957,6 +976,7 @@ try {
       "@opengeni/artifact-tool": artifactToolFile,
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/connect": connectFile,
       postcss: postcssVersion,
     },
   };
@@ -1033,6 +1053,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/connect": connectFile,
       postcss: postcssVersion,
     },
   };
@@ -1097,6 +1118,7 @@ try {
     overrides: {
       "@opengeni/contracts": contractsFile,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/connect": connectFile,
       postcss: postcssVersion,
     },
   };

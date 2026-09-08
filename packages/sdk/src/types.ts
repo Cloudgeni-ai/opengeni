@@ -685,6 +685,7 @@ export type McpConnectionAuthoritySelection = {
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
   authoritySource?: "host" | undefined;
+  hostBinding?: { bindingId: string; generation: number } | undefined;
   provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
@@ -1168,6 +1169,8 @@ export type OAuthStartRequest = {
   resource?: string | undefined;
   requestedScopes?: string[] | undefined;
   returnPath?: string | undefined;
+  /** Exact trusted-host destination; requires verified external-user mode. */
+  returnUrl?: string | undefined;
   connectionId?: string | undefined;
   ownership?: ConnectionOwnership | undefined;
   oauthClient?:
@@ -2819,6 +2822,10 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  /** Opt-in host grants for a direct external-user initial turn. */
+  selectedHostMcpDelegations?:
+    | { serverId: string; delegationId: string; generation: number }[]
+    | undefined;
   // Optional UUID preallocated by an embedding host so it can durably link its
   // projection before OpenGeni admits the initial turn. Replays must retain the
   // same UUID and idempotency key.
@@ -5091,6 +5098,7 @@ export type CreateAgentScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
@@ -5121,6 +5129,7 @@ export type UpdateScheduledTaskRequest = {
   runMode?: ScheduledTaskRunMode | undefined;
   targetSessionId?: string | null | undefined;
   connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+  selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
@@ -7775,6 +7784,7 @@ export type UserMessageEventInput = {
     expectedDraftRevision?: number | undefined;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[] | undefined;
     connectionAuthorities?: McpConnectionAuthoritySelection[] | undefined;
+    selectedHostMcpDelegations?: CreateSessionRequest["selectedHostMcpDelegations"];
     personalResourceAttachment?: PersonalResourceAttachmentIntent | undefined;
   };
 };

@@ -1,0 +1,48 @@
+/* Opt-in, scoped styles. No document-level resets or Tailwind dependency. */
+.og-connect {
+  font-family: var(--og-font-sans, system-ui, sans-serif);
+  color: inherit;
+  line-height: 1.55;
+  max-width: 48rem;
+  min-width: 0;
+}
+.og-connect :where(*, *::before, *::after) { box-sizing: border-box; }
+.og-connect :where(select, input, label) { min-width: 0; }
+.og-connect select { width: 100%; }
+.og-connect :where(section, form, fieldset, ul, li, [role="group"]) {
+  display: grid;
+  gap: .75rem;
+  min-width: 0;
+}
+.og-connect section { padding-block: 1rem; }
+.og-connect section + section { border-top: 1px solid color-mix(in srgb, currentColor 20%, transparent); }
+.og-connect fieldset { border: 0; padding: 0; margin: 0; }
+.og-connect legend { font-weight: 600; padding-block-end: .5rem; }
+.og-connect label { display: grid; gap: .375rem; }
+.og-connect label:has(input[type="checkbox"], input[type="radio"]) { display: flex; align-items: center; gap: .75rem; min-height: 2.75rem; }
+.og-connect :where(button, select, input:not([type="checkbox"]):not([type="radio"])) {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, currentColor 35%, transparent);
+  border-radius: var(--og-radius-sm, 6px);
+  min-height: 2.75rem;
+  padding: .5rem .75rem;
+  max-width: 100%;
+}
+.og-connect button { cursor: pointer; width: fit-content; text-align: start; }
+.og-identity-link { display: grid; gap: 1rem; }
+.og-identity-link dl { margin: 0; display: grid; gap: .25rem; }
+.og-identity-link dt { font-weight: 600; }
+.og-identity-link dd { margin: 0 0 .75rem; overflow-wrap: anywhere; }
+.og-identity-link label:has(input[type="checkbox"]) { min-height: 2.75rem; align-items: center; gap: .75rem; }
+.og-connect button:hover:not(:disabled) { background: color-mix(in srgb, currentColor 8%, transparent); }
+.og-connect :disabled { opacity: .55; cursor: not-allowed; }
+.og-connect :focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.og-connect :where(p, h2) { margin: 0; overflow-wrap: anywhere; }
+.og-connect ul { list-style: none; padding: 0; margin: 0; }
+.og-connect li + li { padding-block-start: .75rem; border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); }
+.og-connect [role="alert"] { border-inline-start: 3px solid currentColor; padding-inline-start: .75rem; }
+@media (forced-colors: active) {
+  .og-connect :where(button, select, input, section, li) { border-color: ButtonText; }
+}

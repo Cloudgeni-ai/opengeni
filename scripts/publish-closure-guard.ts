@@ -9,8 +9,8 @@
  *       private workspace package.
  *   (b) a publishable package is missing npm-public package metadata or a build.
  *   (c) @opengeni/sdk / @opengeni/react stop honoring the client-clean closure:
- *       the SDK depends only on the canonical contracts package, React depends
- *       only on SDK, and its browser-safe artifact engine is an optional peer
+ *       the SDK depends only on contracts and headless Connect, React depends
+ *       only on SDK and Connect, and its browser-safe artifact engine is an optional peer
  *       for the isolated artifact subpaths.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
  *   (e) the BUILT runtime leaves OpenAI Agents or Zod externally resolved,
@@ -311,42 +311,48 @@ for (const ignoredName of ignored) {
   }
 }
 
-// (a) SDK may depend only on the canonical contracts package used by its opt-in
-// editable-artifact entries. Its ordinary entries remain isolated below.
+// (a) SDK may depend on canonical contracts and framework-neutral Connect only.
+// Ordinary client entries remain isolated from server and artifact engines below.
 const sdkPkg = readPkg("packages/sdk");
 const sdkRuntimeDeps = Object.keys(sdkPkg.dependencies ?? {});
-const allowedSdkRuntimeDeps = new Set(["@opengeni/contracts"]);
+const allowedSdkRuntimeDeps = new Set(["@opengeni/contracts", "@opengeni/connect"]);
 const sdkForbiddenRuntimeDeps = sdkRuntimeDeps.filter((name) => !allowedSdkRuntimeDeps.has(name));
 if (sdkForbiddenRuntimeDeps.length > 0) {
   failures.push(
-    `@opengeni/sdk may only depend on @opengeni/contracts at runtime, found: ${sdkForbiddenRuntimeDeps.join(", ")}.`,
+    `@opengeni/sdk may only depend on contracts and headless Connect at runtime, found: ${sdkForbiddenRuntimeDeps.join(", ")}.`,
   );
 }
 const sdkOpengeniDeps = opengeniRuntimeDeps(sdkPkg);
 if (
-  sdkOpengeniDeps.length !== 1 ||
-  sdkOpengeniDeps[0] !== "@opengeni/contracts" ||
-  sdkPkg.dependencies?.["@opengeni/contracts"] !== "workspace:*"
+  sdkOpengeniDeps.length !== allowedSdkRuntimeDeps.size ||
+  [...allowedSdkRuntimeDeps].some((name) => sdkPkg.dependencies?.[name] !== "workspace:*")
 ) {
   failures.push(
-    `@opengeni/sdk must declare exactly @opengeni/contracts="workspace:*" as its @opengeni runtime dependency.`,
+    `@opengeni/sdk must declare exactly contracts and Connect as workspace runtime dependencies.`,
   );
 }
 
-// (b) React's only @opengeni runtime dependency is the client SDK. The artifact
+// (b) React uses the client SDK and headless Connect. The artifact
 // engine stays an optional peer so ordinary React/session consumers do not
 // install its format codecs or native rasterizer.
 const reactPkg = readPkg("packages/react");
 const reactOpengeniDeps = opengeniRuntimeDeps(reactPkg);
-const allowedReactOpengeniDeps = new Set(["@opengeni/sdk"]);
+const allowedReactOpengeniDeps = new Set(["@opengeni/sdk", "@opengeni/connect"]);
 const reactForbidden = reactOpengeniDeps.filter((name) => !allowedReactOpengeniDeps.has(name));
 if (reactForbidden.length > 0) {
   failures.push(
-    `@opengeni/react may only depend on @opengeni/sdk among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
+    `@opengeni/react may only depend on SDK and Connect among @opengeni/* packages, found: ${reactForbidden.join(", ")}.`,
   );
 }
-if (!reactOpengeniDeps.includes("@opengeni/sdk")) {
-  failures.push(`@opengeni/react must keep @opengeni/sdk as a runtime dependency.`);
+if ([...allowedReactOpengeniDeps].some((name) => !reactOpengeniDeps.includes(name))) {
+  failures.push(`@opengeni/react must keep SDK and Connect as runtime dependencies.`);
+}
+const connectPkg = readPkg("packages/connect");
+if (
+  Object.keys(connectPkg.dependencies ?? {}).length ||
+  Object.keys(connectPkg.peerDependencies ?? {}).length
+) {
+  failures.push("@opengeni/connect must remain dependency-free and framework-neutral.");
 }
 const reactPeerDependencies = reactPkg.peerDependencies ?? {};
 if (reactPeerDependencies["@opengeni/artifact-tool"] !== ">=0.1.0 <0.4.0") {
@@ -366,7 +372,13 @@ if (reactPeerMetadata?.["@opengeni/artifact-tool"]?.optional !== true) {
 // unable to type a side-effect import unless every consumer adds its own
 // wildcard declaration.
 const reactExports = (reactPkg as PackageJson & { exports?: Record<string, unknown> }).exports;
-for (const subpath of ["./styles.css", "./compiled.css", "./responsive.css", "./tokens.css"]) {
+for (const subpath of [
+  "./styles.css",
+  "./compiled.css",
+  "./responsive.css",
+  "./tokens.css",
+  "./connect.css",
+]) {
   const entry = reactExports?.[subpath];
   if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
     failures.push(`@opengeni/react ${subpath} must provide typed conditional exports.`);
@@ -557,7 +569,7 @@ for (const pkg of publishable) {
   }
 }
 
-for (const pkgDir of ["packages/sdk", "packages/react"]) {
+for (const pkgDir of ["packages/sdk", "packages/react", "packages/connect"]) {
   const distDir = join(repoRoot, pkgDir, "dist");
   if (!existsSync(distDir)) continue;
   for (const path of builtContractFiles(distDir)) {

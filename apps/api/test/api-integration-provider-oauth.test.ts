@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import {
   GOOGLE_DRIVE_INTEGRATION_DEFINITION,
@@ -16,6 +16,7 @@ import {
 import {
   bootstrapWorkspace,
   createDb,
+  createOrganizationApiKey,
   deleteWorkspace,
   listConnectionsMetadata,
   loadConnectionCredentialForBroker,
@@ -31,6 +32,8 @@ import {
 import postgres from "postgres";
 
 import { createApp } from "../src/app";
+import { requireAccessGrantAuthorization } from "@opengeni/core";
+import { requireWorkspaceToolGatewayAuthorization } from "../src/workspace-tool-gateway";
 
 const DELEGATION_SECRET = "api-integration-provider-oauth-delegation";
 const STATE_SECRET = "api-integration-provider-oauth-state";
@@ -136,6 +139,8 @@ type TokenPlan = {
 };
 
 function providerFixture() {
+  let sourceTitle = "Drive fixture";
+  let beforeGoogleTokenReply: (() => Promise<void>) | undefined;
   const googlePlans: TokenPlan[] = [];
   const microsoftPlans: TokenPlan[] = [];
   const tokenRequests: Array<{
@@ -147,7 +152,56 @@ function providerFixture() {
   let microsoftPrincipalId = "microsoft-principal-1";
   const fetch: typeof globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input.toString());
+    if (url.href === "https://www.googleapis.com/fixture-openapi.json")
+      return Response.json({
+        openapi: "3.0.3",
+        info: { title: "Public fixture", version: "1" },
+        servers: [{ url: "https://www.googleapis.com" }],
+        paths: {
+          "/items": {
+            get: { operationId: "listItems", responses: { "200": { description: "Items" } } },
+          },
+        },
+      });
+    if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.source.url) {
+      return Response.json({
+        name: "drive",
+        version: "v3",
+        title: sourceTitle,
+        rootUrl: "https://www.googleapis.com/",
+        servicePath: "drive/v3/",
+        resources: {
+          files: {
+            methods: {
+              list: {
+                id: "drive.files.list",
+                path: "files",
+                httpMethod: "GET",
+                description: "List files",
+                response: { $ref: "FileList" },
+              },
+              get: {
+                id: "drive.files.get",
+                path: "files/{fileId}",
+                httpMethod: "GET",
+                description: "Get file",
+                parameters: { fileId: { type: "string", required: true, location: "path" } },
+                response: { $ref: "File" },
+              },
+            },
+          },
+        },
+        schemas: {
+          File: { type: "object", properties: { id: { type: "string" } } },
+          FileList: {
+            type: "object",
+            properties: { files: { type: "array", items: { $ref: "File" } } },
+          },
+        },
+      });
+    }
     if (url.href === GOOGLE_DRIVE_INTEGRATION_DEFINITION.authentication.tokenUrl) {
+      await beforeGoogleTokenReply?.();
       const body = requestBody(init?.body);
       tokenRequests.push({
         family: "google",
@@ -204,6 +258,12 @@ function providerFixture() {
   };
   return {
     fetch,
+    setSourceTitle(value: string) {
+      sourceTitle = value;
+    },
+    setBeforeGoogleTokenReply(hook: (() => Promise<void>) | undefined) {
+      beforeGoogleTokenReply = hook;
+    },
     googlePlans,
     microsoftPlans,
     tokenRequests,
@@ -229,6 +289,7 @@ function testApp(fixture: ReturnType<typeof providerFixture>) {
     workflowClient: {} as never,
     managedAuth: null,
     apiIntegrationOAuthFetch: fixture.fetch,
+    apiIntegrationSourceFetch: fixture.fetch,
   } as never);
 }
 
@@ -291,6 +352,361 @@ async function callback(
 }
 
 describe("API Integration provider OAuth", () => {
+  test("external curated OAuth encrypts actor context and refuses key revocation during exchange", async () => {
+    if (!available) throw new Error("External OAuth acceptance requires PostgreSQL");
+    const workspace = await freshWorkspace();
+    const fixture = providerFixture();
+    const token = crypto.randomUUID();
+    const key = await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "External OAuth fixture",
+      prefix: "fixture",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: [
+        "workspace:read",
+        "connections:read",
+        "connections:write",
+        "members:manage",
+        "capabilities:manage",
+      ],
+    });
+    const app = testApp(fixture);
+    app.get("/embedding-gateway-authority-fixture", async (c) => {
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        { db: client.db, settings },
+        workspace.workspaceId,
+        "workspace:read",
+      );
+      const grant = requireWorkspaceToolGatewayAuthorization(authorization);
+      expect(grant).toBe(authorization.grant);
+      const original = authorization.grant;
+      authorization.grant = { ...original };
+      expect(() => requireWorkspaceToolGatewayAuthorization(authorization)).toThrow();
+      authorization.grant = original;
+      return c.json({ subjectId: grant.subjectId });
+    });
+    const serviceHeaders = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-access-key": EDGE_ACCESS_KEY,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+    };
+    const reference = { externalId: "opaque-provider-owner", source: "test-host" };
+    const onboarding = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/external-members`,
+      {
+        method: "POST",
+        headers: serviceHeaders,
+        body: JSON.stringify({
+          identity: reference,
+          permissions: [
+            "workspace:read",
+            "connections:read",
+            "connections:write",
+            "capabilities:manage",
+          ],
+        }),
+      },
+    );
+    expect(onboarding.status).toBe(200);
+    const external = await onboarding.json();
+    const headers = {
+      ...serviceHeaders,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: reference }),
+      ),
+    };
+    const begin = async () => {
+      const response = await app.request(
+        `/v1/workspaces/${workspace.workspaceId}/integrations/oauth/start`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            definitionId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+            ownership: "workspace",
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      return new URL(body.authorizationUrl).searchParams.get("state")!;
+    };
+    expect((await app.request("/embedding-gateway-authority-fixture", { headers })).status).toBe(
+      200,
+    );
+    expect(
+      (await app.request("/embedding-gateway-authority-fixture", { headers: serviceHeaders }))
+        .status,
+    ).toBe(200);
+    const catalogResponse = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/catalog`,
+      { headers },
+    );
+    expect(catalogResponse.status).toBe(200);
+    expect(
+      (await catalogResponse.json()).find(
+        (provider: { id: string }) => provider.id === GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ),
+    ).toMatchObject({ readiness: "available", setup: ["oauth"] });
+    const serviceCatalog = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/catalog`,
+      { headers: serviceHeaders },
+    );
+    const serviceProviders = await serviceCatalog.json();
+    expect(
+      serviceProviders.find((provider: { id: string }) => provider.id === "openapi"),
+    ).toMatchObject({ readiness: "available", ownership: ["workspace"] });
+    expect(
+      serviceProviders.every(
+        (provider: { ownership: string[] }) => !provider.ownership.includes("personal"),
+      ),
+    ).toBe(true);
+    for (const suffix of [
+      "connections/slack-bot/install",
+      "connections/fiken/oauth/start",
+      "connections/google-drive/install",
+      "connections/atlassian/install",
+      "connections/github/oauth/start",
+      "connections/example/github/reconnect",
+    ]) {
+      const legacy = await app.request(`/v1/workspaces/${workspace.workspaceId}/${suffix}`, {
+        method: "POST",
+        headers,
+        body: "{}",
+      });
+      expect(legacy.status).toBe(422);
+      expect(await legacy.text()).toContain("external-user OAuth continuation");
+    }
+    expect(fixture.tokenRequests).toHaveLength(0);
+    const firstState = await begin();
+    const signed = readSignedState(firstState, STATE_SECRET) as Record<string, unknown>;
+    expect(typeof signed.encryptedExternalContinuation).toBe("string");
+    expect(JSON.stringify(signed)).not.toContain(reference.externalId);
+    fixture.setBeforeGoogleTokenReply(async () => {
+      await shared!.admin`update api_keys set revoked_at = now() where id = ${key.id}`;
+    });
+    const denied = await callback(fixture, firstState);
+    expect(new URL(denied.headers.get("location")!).searchParams.get("integration_oauth")).toBe(
+      "error",
+    );
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, external.subjectId),
+    ).toEqual([]);
+    fixture.setBeforeGoogleTokenReply(undefined);
+    await shared!.admin`update api_keys set revoked_at = null where id = ${key.id}`;
+    const returnUrl = "https://HOST.example:443/finish?opaque=%2f&literal=%2520#unchanged";
+    const customBase = `/v1/workspaces/${workspace.workspaceId}/connect/attempts`;
+    const customStart = await app.request(customBase, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "openapi",
+        ownership: "workspace",
+        returnUrl,
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    });
+    expect(customStart.status).toBe(200);
+    const customAttempt = await customStart.json();
+    const customAdvance = (body: unknown) =>
+      app.request(`${customBase}/${customAttempt.id}/advance`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    const customPreviewResponse = await customAdvance({
+      expectedRevision: 1,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "credentials",
+        values: { url: "https://www.googleapis.com/fixture-openapi.json" },
+      },
+    });
+    if (customPreviewResponse.status !== 200)
+      throw new Error(`Custom preview failed: ${await customPreviewResponse.text()}`);
+    const customPreview = await customPreviewResponse.json();
+    expect(customPreview).toMatchObject({
+      state: "preview",
+      credentialsCommitted: false,
+      integrationInstalled: false,
+      source: { kind: "openapi" },
+    });
+    expect(customPreview.nextAction.operations).toHaveLength(1);
+    const installCustom = {
+      expectedRevision: customPreview.revision,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "install",
+        previewId: customPreview.nextAction.previewId,
+        contentHash: customPreview.nextAction.contentHash,
+        operationIds: [customPreview.nextAction.operations[0].id],
+      },
+    };
+    const customInstalledResponse = await customAdvance(installCustom);
+    expect(customInstalledResponse.status).toBe(200);
+    const customInstalled = await customInstalledResponse.json();
+    expect(customInstalled).toMatchObject({
+      state: "complete",
+      integrationInstalled: true,
+      credentialsCommitted: false,
+    });
+    expect(await (await customAdvance(installCustom)).json()).toEqual(customInstalled);
+    const beginPayload = {
+      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "workspace",
+      returnUrl,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const durableStart = () =>
+      app.request(`/v1/workspaces/${workspace.workspaceId}/connect/attempts`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(beginPayload),
+      });
+    const firstBegin = await durableStart();
+    expect(firstBegin.status).toBe(200);
+    const attempt = await firstBegin.json();
+    const replayBegin = await durableStart();
+    expect(replayBegin.status).toBe(200);
+    expect(await replayBegin.json()).toEqual(attempt);
+    const secondState = new URL(attempt.nextAction.url).searchParams.get("state")!;
+    const completed = await callback(fixture, secondState);
+    expect(completed.headers.get("location")).toBe(returnUrl);
+    const exchanges = fixture.tokenRequests.length;
+    expect((await callback(fixture, secondState)).headers.get("location")).toBe(returnUrl);
+    expect(fixture.tokenRequests).toHaveLength(exchanges);
+    const statusResponse = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts/${attempt.id}`,
+      { headers },
+    );
+    expect(statusResponse.status).toBe(200);
+    expect(await statusResponse.json()).toMatchObject({
+      id: attempt.id,
+      revision: 2,
+      state: "connected_but_incomplete",
+      credentialsCommitted: true,
+      integrationInstalled: false,
+    });
+    const advance = (body: unknown) =>
+      app.request(
+        `/v1/workspaces/${workspace.workspaceId}/connect/attempts/${attempt.id}/advance`,
+        { method: "POST", headers, body: JSON.stringify(body) },
+      );
+    const previewResponse = await advance({
+      expectedRevision: 2,
+      idempotencyKey: crypto.randomUUID(),
+      action: { type: "retry" },
+    });
+    expect(previewResponse.status).toBe(200);
+    const preview = await previewResponse.json();
+    expect(preview.state).toBe("preview");
+    expect(preview.nextAction.operations).toHaveLength(2);
+    const installInput = {
+      expectedRevision: 3,
+      idempotencyKey: crypto.randomUUID(),
+      action: {
+        type: "install",
+        previewId: preview.nextAction.previewId,
+        contentHash: preview.nextAction.contentHash,
+        operationIds: [preview.nextAction.operations[0].id],
+      },
+    };
+    const invalidSelection = await advance({
+      ...installInput,
+      idempotencyKey: crypto.randomUUID(),
+      action: { ...installInput.action, operationIds: ["not-reviewed"] },
+    });
+    expect(invalidSelection.status).toBe(409);
+    fixture.setSourceTitle("Updated Drive fixture");
+    const changedResponse = await advance(installInput);
+    expect(changedResponse.status).toBe(200);
+    const changed = await changedResponse.json();
+    expect(changed).toMatchObject({
+      revision: 4,
+      state: "preview",
+      integrationInstalled: false,
+      error: { code: "source_changed" },
+    });
+    installInput.expectedRevision = changed.revision;
+    installInput.idempotencyKey = crypto.randomUUID();
+    installInput.action.previewId = changed.nextAction.previewId;
+    installInput.action.contentHash = changed.nextAction.contentHash;
+    installInput.action.operationIds = [changed.nextAction.operations[0].id];
+    const installedResponse = await advance(installInput);
+    expect(installedResponse.status).toBe(200);
+    const installed = await installedResponse.json();
+    expect(installed).toMatchObject({
+      revision: 5,
+      state: "complete",
+      credentialsCommitted: true,
+      integrationInstalled: true,
+    });
+    expect(await (await advance(installInput)).json()).toEqual(installed);
+    const cancelledStart = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ ...beginPayload, idempotencyKey: crypto.randomUUID() }),
+      },
+    );
+    const toCancel = await cancelledStart.json();
+    const cancelledResponse = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/attempts/${toCancel.id}/cancel`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ expectedRevision: 1, idempotencyKey: crypto.randomUUID() }),
+      },
+    );
+    expect(cancelledResponse.status).toBe(200);
+    expect((await cancelledResponse.json()).state).toBe("cancelled");
+    expect(
+      await listConnectionsMetadata(client.db, workspace.workspaceId, external.subjectId),
+    ).toHaveLength(1);
+    const accountsResponse = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+      { headers },
+    );
+    expect(accountsResponse.status).toBe(200);
+    const accounts = await accountsResponse.json();
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]).toMatchObject({
+      providerId: GOOGLE_DRIVE_INTEGRATION_DEFINITION.id,
+      ownership: "workspace",
+      status: "connected",
+    });
+    expect(Object.keys(accounts[0]).sort()).toEqual([
+      "id",
+      "label",
+      "ownership",
+      "providerId",
+      "status",
+      "version",
+    ]);
+    expect(accounts[0].version).toBeGreaterThan(0);
+    const disconnectPath = `/v1/workspaces/${workspace.workspaceId}/connections/${accounts[0].id}`;
+    const staleDisconnect = await app.request(
+      `${disconnectPath}?expectedVersion=${accounts[0].version + 1}`,
+      { method: "DELETE", headers },
+    );
+    expect(staleDisconnect.status).toBe(409);
+    const invalidDisconnect = await app.request(`${disconnectPath}?expectedVersion=1.5`, {
+      method: "DELETE",
+      headers,
+    });
+    expect(invalidDisconnect.status).toBe(400);
+    const currentAccounts = await app.request(
+      `/v1/workspaces/${workspace.workspaceId}/connect/accounts`,
+      { headers },
+    );
+    expect((await currentAccounts.json())[0]).toMatchObject({
+      status: "connected",
+      version: accounts[0].version,
+    });
+  });
   test("connects a Google definition with signed PKCE state and no callback perimeter credential", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

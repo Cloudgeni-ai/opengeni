@@ -1,4 +1,9 @@
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
+import { findConnectRecoveryAccount } from "@opengeni/connect";
+import {
+  NativeConnectSetup,
+  type NativeConnectRequest,
+} from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
@@ -647,6 +652,8 @@ export function SessionRoute({
   // return to this session; api-key ones can't OAuth, so hand off to credential
   // re-entry on the capabilities sheet for that provider. Throwing bubbles a
   // calm inline error on the reconnect card.
+  const reconnectTransport = useMemo(() => context.client.connectTransport(), [context.client]);
+  const [reconnectRequest, setReconnectRequest] = useState<NativeConnectRequest | null>(null);
   const onReconnect = useCallback(
     async (item: AuthNeededItem) => {
       if (item.authoritySource === "host") {
@@ -657,6 +664,24 @@ export function SessionRoute({
         }
         window.location.assign(item.authorizationUrl);
         return;
+      }
+      if (item.connectionId) {
+        const account = findConnectRecoveryAccount(
+          await reconnectTransport.accounts(workspaceId),
+          item.connectionId,
+        );
+        if (account) {
+          setReconnectRequest({
+            scope: { workspaceId, transport: reconnectTransport },
+            providerId: account.providerId,
+            ownership: account.ownership,
+            reconnectAccountId: account.id,
+            displayName: account.label,
+            returnUrl: window.location.href,
+            idempotencyKey: crypto.randomUUID(),
+          });
+          return;
+        }
       }
       if (item.capability) {
         const returnPath = `${window.location.pathname}?capability_auth=${encodeURIComponent(item.capability.id)}`;
@@ -744,7 +769,13 @@ export function SessionRoute({
       }
       window.location.assign(response.authorizationUrl);
     },
-    [context.accessContext, context.client, context.workspaceCapabilityCatalog, workspaceId],
+    [
+      context.accessContext,
+      context.client,
+      context.workspaceCapabilityCatalog,
+      workspaceId,
+      reconnectTransport,
+    ],
   );
 
   // The workspace shell already needs the capability catalog for session tool
@@ -889,6 +920,20 @@ export function SessionRoute({
 
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
+      {reconnectRequest && (
+        <NativeConnectSetup
+          transport={reconnectTransport}
+          workspaceId={workspaceId}
+          request={reconnectRequest}
+          onClose={() => setReconnectRequest(null)}
+          onComplete={() => {
+            setReconnectRequest(null);
+            toast.success("Connection updated", {
+              description: "New tool calls can use the updated connection.",
+            });
+          }}
+        />
+      )}
       <SessionDock
         workspaceId={workspaceId}
         sessionId={sessionId}

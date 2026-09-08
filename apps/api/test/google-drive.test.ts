@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Settings } from "@opengeni/config";
 import {
   OPENGENI_API_CONTRACT_HEADER,
@@ -16,6 +16,8 @@ import {
 } from "@opengeni/contracts/google-drive";
 import {
   createDb,
+  createOrganizationApiKey,
+  ensureExternalIdentity,
   getConnectionMetadata,
   listConnectionsMetadata,
   listScheduledTasks,
@@ -316,6 +318,62 @@ async function connect(
 }
 
 describe("Google Drive local source preview", () => {
+  test("embedded knowledge OAuth preserves personal scope and exact durable return", async () => {
+    if (!available) throw new Error("PostgreSQL required");
+    const workspace = await freshWorkspace();
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "drive-product-user",
+    });
+    const token = randomBytes(24).toString("hex");
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Drive embedding",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
+    const google = googleFixture();
+    const server = app(google.fetch);
+    const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
+    const returnUrl = "https://HOST.example:443/finish?x=%2f#Drive";
+    const begin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "google-drive-knowledge",
+        ownership: "personal",
+        returnUrl,
+        idempotencyKey: randomUUID(),
+      }),
+    });
+    expect(begin.status).toBe(200);
+    const attempt = await begin.json();
+    const authorization = new URL(attempt.nextAction.url);
+    expect(authorization.searchParams.get("scope")).toBe(GOOGLE_DRIVE_READONLY_SCOPE);
+    expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+    const callback = () =>
+      server.request(
+        `/v1/integrations/google-drive/callback?${new URLSearchParams({ code: "fixture-code", state: authorization.searchParams.get("state")! })}`,
+      );
+    expect((await callback()).headers.get("location")).toBe(returnUrl);
+    expect(await (await server.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject(
+      {
+        state: "complete",
+        completionRequirement: "connection",
+        account: { ownership: "personal", providerId: "google-drive-knowledge" },
+      },
+    );
+    expect((await callback()).headers.get("location")).toBe(returnUrl);
+    expect(google.tokenRequests).toHaveLength(1);
+  });
   test("starts an explicit read-only OAuth flow with state and PKCE", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();

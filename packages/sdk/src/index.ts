@@ -1,4 +1,29 @@
 export { OpenGeniClient } from "./artifact-client";
+export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
+export type {
+  SiteToolBridge,
+  SiteToolCaller,
+  SiteToolCallRequest,
+  CreateSiteToolBridgeOptions,
+} from "./site-tool-bridge";
+export type {
+  ExternalIdentityLink,
+  BeginExternalIdentityLinkRequest,
+  BeginExternalIdentityLinkResponse,
+  ConfirmExternalIdentityLinkRequest,
+  ExternalIdentityLinkPreview,
+  ExternalIdentityLinkPage,
+} from "@opengeni/contracts/external-identities";
+export {
+  ARTIFACT_CREATE_PERMISSIONS,
+  ARTIFACT_EDIT_PERMISSIONS,
+  ARTIFACT_CREATE_TOOLS,
+  ARTIFACT_EDIT_TOOLS,
+  artifactCreateOpeningMessage,
+  artifactCreateInstructions,
+  artifactEditOpeningMessage,
+  artifactEditInstructions,
+} from "./site-authoring";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,

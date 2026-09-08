@@ -208,6 +208,10 @@ import {
   GatewayRealtimeBrokerError,
 } from "../gateway-realtime";
 import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xai-realtime";
+import {
+  prepareExternalLinkTurnAdmission,
+  externalContinuationCommitAuthorizer,
+} from "@opengeni/core";
 import { z, ZodError } from "zod";
 import {
   runConcurrentChannelAReads,
@@ -234,6 +238,7 @@ import {
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireFreshAccessGrant,
+  hasVerifiedOwningUserAuthorization,
   requirePermission,
   requireSessionAuthorization,
   requireSessionAuthorizationListScope,
@@ -615,6 +620,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           workspaceId,
           payload,
           authorization.canonicalManagedHumanSession,
+          authorization,
         ),
       );
     } catch (error) {
@@ -672,8 +678,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
-        // pointer — for the canonical managed-cookie session that owns it only.
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        // pointer, only with verified native or external owning-user provenance.
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
       });
     } catch (error) {
       if (error instanceof SessionListAccessError) {
@@ -1638,7 +1644,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const sessionId = c.req.param("sessionId");
       const realtimeId = c.req.param("realtimeId");
-      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const authorization = await requireAccessGrantAuthorization(
+        c,
+        deps,
+        workspaceId,
+        "sessions:control",
+      );
+      const grant = authorization.grant;
+      const beforeCommit = externalContinuationCommitAuthorizer(authorization);
+      const captureLinked = prepareExternalLinkTurnAdmission(authorization);
       if (
         !z.string().uuid().safeParse(sessionId).success ||
         !z.string().uuid().safeParse(realtimeId).success
@@ -1654,16 +1668,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
       try {
-        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) =>
-          syncSessionRealtimeLedgerInTransaction(scopedDb, {
-            workspaceId,
-            sessionId,
-            realtimeId,
-            ownerSubjectId: grant.subjectId,
-            ...parsed.data,
-            controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
-          }),
-        );
+        const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+          // Acquire origin authority before inference/session locks. A deferred
+          // realtime session has no initial worker turn; capture its exact
+          // linked actor when the ledger actually admits ordinary agent work.
+          await beforeCommit?.(scopedDb as unknown as Database);
+          return syncSessionRealtimeLedgerInTransaction(
+            scopedDb,
+            {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+              controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+            },
+            captureLinked
+              ? {
+                  afterDelegationAdmission: async ({ turnId }) =>
+                    captureLinked(scopedDb as unknown as Database, sessionId, turnId),
+                }
+              : {},
+          );
+        });
         await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
         c.header("cache-control", "private, no-store");
         return c.json({ accepted: result.accepted, outbound: result.outbound });
@@ -1699,7 +1726,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         subjectId: grant.subjectId,
         sessionId,
         // Same owner-only personal-workspace fallback as the list above.
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
       if (!session) {
@@ -1756,7 +1783,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
@@ -1806,7 +1833,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         workspaceId,
         subjectId: grant.subjectId,
         sessionId,
-        personalWorkspaceOwnerException: authorization.canonicalManagedHumanSession,
+        personalWorkspaceOwnerException: hasVerifiedOwningUserAuthorization(authorization),
         ...parsed.data,
       });
       if (!session) throw new HTTPException(404, { message: "session not found" });
@@ -3021,6 +3048,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         latencyMode: payload.latencyMode ?? null,
         mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
         connectionAuthorities: payload.connectionAuthorities,
+        ...(payload.selectedHostMcpDelegations
+          ? { selectedHostMcpDelegations: payload.selectedHostMcpDelegations }
+          : {}),
         ...(payload.personalResourceAttachment
           ? { personalResourceAttachment: payload.personalResourceAttachment }
           : {}),
@@ -3103,6 +3133,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           latencyMode: event.payload.latencyMode ?? null,
           mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
           connectionAuthorities: event.payload.connectionAuthorities,
+          ...(event.payload.selectedHostMcpDelegations
+            ? { selectedHostMcpDelegations: event.payload.selectedHostMcpDelegations }
+            : {}),
           ...(event.payload.personalResourceAttachment
             ? { personalResourceAttachment: event.payload.personalResourceAttachment }
             : {}),

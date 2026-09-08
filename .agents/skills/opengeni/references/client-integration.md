@@ -8,6 +8,13 @@ When the repository is available, `docs/product-integration.md` is the canonical
 external-product contract. This reference should summarize and link to it, not
 invent a second organization-key, workspace-mapping, or Skill-ownership model.
 
+`.agents/skills/opengeni-client` is also the canonical content for the installable
+Product Integration Pack. Update that tree, then run
+`bun scripts/sync-product-integration-skill.ts`; `--check` verifies byte parity.
+The generated Pack wrapper preserves its install identity and session-selected
+activation. Do not hand-edit the generated bundle or inject this developer guide
+into customer-facing runtime sessions.
+
 ## First Determine Context
 
 Ask or infer:
