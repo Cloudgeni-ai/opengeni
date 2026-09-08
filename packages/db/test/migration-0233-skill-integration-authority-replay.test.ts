@@ -303,15 +303,14 @@ describe("Skill and Integration authority migration replay", () => {
       expect(replayed).toEqual({ skillCount: 1, mcpCount: 1 });
       app = createDb(shared.appUrl);
       expect(await listInstalledPortableSkills(app.db, grant.workspaceId)).toEqual(runtime);
-      expect(
-        await shared.admin`
+      const replayedHistory = await shared.admin`
         select r.* from preference_registry_revisions r
         join skill_source_bindings b on b.preference_id = r.preference_id
           and b.account_id = r.account_id
         where b.workspace_id = ${grant.workspaceId}
         order by r.id
-      `,
-      ).toEqual(history);
+      `;
+      expect([...replayedHistory]).toEqual([...history]);
     } finally {
       await app.close().catch(() => undefined);
       await shared.release();
@@ -332,6 +331,10 @@ async function acquireCapabilityAuthorityDatabase(): Promise<SharedTestDatabase 
     : null;
   if (!adminUrl) {
     if (!blank) return null;
+    if (!blank.appPassword) {
+      await blank.release();
+      throw new Error("Capability authority replay requires an application-role password");
+    }
     adminUrl = blank.databaseUrl;
     const application = new URL(adminUrl);
     application.username = "opengeni_app";
