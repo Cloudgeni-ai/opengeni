@@ -3,6 +3,7 @@
 // rule — RUNNING sessions pinned to the very top, then most-recent activity
 // first within each recency group.
 import { formatWaitingSince } from "@/lib/format";
+import { sessionInputWait } from "./session-rail";
 import type { Session, SessionStatus } from "@/types";
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
@@ -41,7 +42,10 @@ function hasActiveEffectiveControl(session: Session): boolean {
 
 function isEffectivelyRunning(session: Session): boolean {
   if (session.backgroundCommandActivity) return true;
-  return hasActiveEffectiveControl(session) && isRunningStatus(session.status);
+  return (
+    hasActiveEffectiveControl(session) &&
+    (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
+  );
 }
 
 /** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
@@ -229,7 +233,8 @@ function ownRailStatusCounts(
         (session.status === "running" ||
           session.status === "queued" ||
           session.status === "recovering" ||
-          session.status === "waiting_capacity"))
+          session.status === "waiting_capacity" ||
+          Boolean(sessionInputWait(session))))
         ? 1
         : 0,
     unread: session.unread ? 1 : 0,
@@ -259,7 +264,8 @@ function railStatusCounts(
     counts.attention += stats.attentionDescendants;
     counts.attentionSince = earliestIso(counts.attentionSince, stats.attentionSince);
     counts.failed += stats.unreadFailedDescendants ?? stats.failedDescendants;
-    counts.active += stats.runningDescendants + stats.queuedDescendants;
+    counts.active +=
+      stats.runningDescendants + stats.queuedDescendants + (stats.waitingDescendants ?? 0);
     counts.unread += stats.unreadDescendants ?? 0;
     counts.activeWork += stats.activelyWorkingDescendants ?? 0;
 
@@ -656,7 +662,12 @@ export type PinnedRailSections = {
 export function nodeIsActive(node: SessionTreeNode): boolean {
   const stats = node.session.treeStats;
   const summarizedActive = Boolean(
-    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+    stats &&
+    stats.runningDescendants +
+      stats.queuedDescendants +
+      (stats.waitingDescendants ?? 0) +
+      stats.attentionDescendants >
+      0,
   );
   return isEffectivelyRunning(node.session) || node.hasActiveDescendant || summarizedActive;
 }
@@ -821,6 +832,7 @@ type RemovedCounts = {
   total: number;
   running: number;
   queued: number;
+  waiting: number;
   attention: number;
   paused: number;
   failed: number;
@@ -834,6 +846,7 @@ function emptyRemovedCounts(): RemovedCounts {
     total: 0,
     running: 0,
     queued: 0,
+    waiting: 0,
     attention: 0,
     paused: 0,
     failed: 0,
@@ -847,6 +860,7 @@ function addRemovedCounts(target: RemovedCounts, source: RemovedCounts): void {
   target.total += source.total;
   target.running += source.running;
   target.queued += source.queued;
+  target.waiting += source.waiting;
   target.attention += source.attention;
   target.paused += source.paused;
   target.failed += source.failed;
@@ -862,6 +876,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     total: 1,
     running: active && (status === "running" || status === "recovering") ? 1 : 0,
     queued: active && (status === "queued" || status === "waiting_capacity") ? 1 : 0,
+    waiting: sessionInputWait(node.session) ? 1 : 0,
     attention: status === "requires_action" ? 1 : 0,
     paused: node.session.effectiveControl?.state === "paused" ? 1 : 0,
     failed: status === "failed" ? 1 : 0,
@@ -874,6 +889,7 @@ function subtreeCounts(node: SessionTreeNode): RemovedCounts {
     counts.total += stats.totalDescendants;
     counts.running += stats.runningDescendants;
     counts.queued += stats.queuedDescendants;
+    counts.waiting += stats.waitingDescendants ?? 0;
     counts.attention += stats.attentionDescendants;
     counts.paused += stats.pausedDescendants;
     counts.failed += stats.failedDescendants;
@@ -913,6 +929,9 @@ function prunePinnedSubtreesWithCounts(
           totalDescendants: Math.max(0, stats.totalDescendants - removed.total),
           runningDescendants: Math.max(0, stats.runningDescendants - removed.running),
           queuedDescendants: Math.max(0, stats.queuedDescendants - removed.queued),
+          ...(stats.waitingDescendants !== undefined
+            ? { waitingDescendants: Math.max(0, stats.waitingDescendants - removed.waiting) }
+            : {}),
           attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
           pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
           failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),

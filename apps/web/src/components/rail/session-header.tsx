@@ -15,6 +15,7 @@ import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
 import {
   CalendarClockIcon,
+  Clock3Icon,
   LockIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
@@ -22,13 +23,14 @@ import {
   PencilIcon,
   PinIcon,
 } from "lucide-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { sessionInputWait, sessionWaitLabel } from "@/lib/session-rail";
 import { displayModel } from "@/lib/format";
 import { isCodexProductModel } from "@/lib/session-model";
 import {
@@ -112,6 +114,14 @@ export function SessionHeader({
    */
   policyLoading?: boolean;
 }) {
+  const waiting = sessionInputWait({ ...session, status });
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!waiting) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(timer);
+  }, [waiting]);
   const modelId = lastStartedModel?.trim() || session.model;
   const resolvedBilling: BillingClass =
     billingClass ?? (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits");
@@ -207,7 +217,17 @@ export function SessionHeader({
               paused, admission is the headline — hide lifecycle so we don't
               imply the session is still "Running"/"Idle" under a pause gate. */}
           {session.effectiveControl.state === "active" ? (
-            <SessionStatusBadge status={status} />
+            waiting ? (
+              <span
+                className="inline-flex items-center gap-1.5 text-control font-medium text-status-running"
+                title={waiting.reason}
+              >
+                <Clock3Icon aria-hidden className="size-3.5" />
+                {sessionWaitLabel(waiting.deadlineAt, now)}
+              </span>
+            ) : (
+              <SessionStatusBadge status={status} />
+            )
           ) : (
             <WorkstreamControlIndicator session={session} />
           )}
@@ -215,7 +235,7 @@ export function SessionHeader({
         <span className="sr-only md:hidden">
           Connection {connectionState}.{" "}
           {session.effectiveControl.state === "active"
-            ? `Session ${status}.`
+            ? `Session ${waiting ? sessionWaitLabel(waiting.deadlineAt, now) : status}.`
             : "Workstream paused."}
         </span>
         {keyAuthRequired ? (
@@ -246,6 +266,19 @@ export function SessionHeader({
           )}
         </Button>
       </div>
+      {waiting ? (
+        <div
+          role="status"
+          className="flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 pb-1 text-xs text-fg-muted"
+        >
+          <span className="font-medium text-status-running md:hidden">
+            {sessionWaitLabel(waiting.deadlineAt, now)}.
+          </span>
+          {Date.parse(waiting.deadlineAt) <= now
+            ? "The scheduled recheck is due; waiting for the next turn to start."
+            : "Work is still in progress. Continues automatically on new input or at the next recheck."}
+        </div>
+      ) : null}
     </header>
   );
 }

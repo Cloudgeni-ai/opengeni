@@ -24,6 +24,8 @@ import {
   ensureCodexRotationSettings,
   evaluateGoalContinuation,
   getSessionGoalWithContinuation,
+  getSession,
+  listSessionsForSubject,
   getScheduledTargetSessionExecution,
   getScheduledTaskPersonalResourceAuthoritySubject,
   getScheduledTaskRevisionAuthority,
@@ -37,6 +39,7 @@ import {
   listSessionGoalRevisions,
   listSessionSystemUpdatesForTurn,
   materializeGoalContinuation,
+  markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   projectSessionGoalPromptField,
   recoverSessionDispatch,
@@ -2835,6 +2838,10 @@ describe("session-level wait_for_input", () => {
       expect(claimed.action).toBe("claimed");
       if (claimed.action !== "claimed") return;
       await settleClaimedIdle(ctx, claimed, attemptId);
+      // A later completed turn supersedes the wait even before asynchronous cleanup.
+      expect(
+        (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+      ).toBeNull();
 
       expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
         kind: "input-wait",
@@ -2855,6 +2862,47 @@ describe("session-level wait_for_input", () => {
       expect((await waitColumns(ctx)).input_wait_turn_id).toBeNull();
     },
   );
+
+  test("public waits and descendant counts follow the exact declaring turn", async () => {
+    const ctx = await runningGoalFixture({ withAncestor: true });
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const waiting = await wait(ctx, { timeoutSeconds: 600, reason: "Waiting for CI" });
+    expect(
+      (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+    ).toBeNull();
+    await settleIdle(ctx);
+    const read = () => getSession(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    expect((await read())?.inputWait).toEqual({
+      deadlineAt: waiting.deadlineAt,
+      reason: "Waiting for CI",
+    });
+    const rows = (
+      await listSessionsForSubject(client.db, ctx.grant.workspaceId!, {
+        subjectId: ctx.grant.subjectId,
+      })
+    ).sessions;
+    expect(rows.find((row) => row.id === ctx.session.id)?.inputWait).toEqual(
+      (await read())?.inputWait,
+    );
+    expect(rows.find((row) => row.id === ctx.ancestor!.id)?.treeStats?.waitingDescendants).toBe(1);
+    await shared.admin`update sessions set input_wait_until = now() - interval '1 second' where id = ${ctx.session.id}`;
+    expect((await read())?.inputWait).not.toBeNull();
+    await settleSessionInputWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      waitTurnId: ctx.turn.id,
+      disposition: "timeout",
+    });
+    expect((await read())?.inputWait).toBeNull();
+    expect(
+      (
+        await listSessionsForSubject(client.db, ctx.grant.workspaceId!, {
+          subjectId: ctx.grant.subjectId,
+        })
+      ).sessions.find((row) => row.id === ctx.ancestor!.id)?.treeStats?.waitingDescendants,
+    ).toBe(0);
+  });
 
   test("deadline settlement queues one typed timeout input in the same transaction", async () => {
     const ctx = await runningGoalFixture();
@@ -2901,7 +2949,127 @@ describe("session-level wait_for_input", () => {
     expect(await peekSessionWork(client.db, ctx.grant.workspaceId!, ctx.session.id)).toEqual({
       kind: "runnable",
     });
+    // A successful signal to a closing workflow must not retire the timeout
+    // before a replacement workflow actually claims its durable input.
+    const wake = (await outboxRow(ctx))!;
+    const receipt = {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: Number(wake.wake_revision),
+    };
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_machine_input",
+    });
+    expect(Number((await outboxRow(ctx))!.delivered_revision)).toBeLessThan(receipt.wakeRevision);
+    const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: receipt.temporalWorkflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "acknowledged",
+    });
   });
+
+  test("wait delivery remains pending until settlement, while Pause remains authoritative", async () => {
+    const ctx = await runningGoalFixture();
+    await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    await wait(ctx, { timeoutSeconds: 600 });
+    await settleIdle(ctx);
+    const wake = (await outboxRow(ctx))!;
+    const receipt = {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      temporalWorkflowId: `session-${ctx.session.id}`,
+      wakeRevision: Number(wake.wake_revision),
+    };
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_input_wait",
+    });
+    await withWorkspaceRls(client.db, ctx.grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as typeof db, {
+          accountId: ctx.grant.accountId,
+          workspaceId: ctx.grant.workspaceId!,
+          sessionId: ctx.session.id,
+          actor: { type: "human", subjectId: ctx.grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "acknowledged",
+    });
+    expect(
+      (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+    ).toBeNull();
+  });
+
+  test.each([true, false])(
+    "child results retain delivery until claimed only with ongoing intent: %s",
+    async (holding) => {
+      const ctx = await runningGoalFixture();
+      await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
+      if (holding) await wait(ctx, { timeoutSeconds: 600 });
+      await settleIdle(ctx);
+      const childSessionId = crypto.randomUUID();
+      await addSessionSystemUpdate(client.db, {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        kind: "child_terminal_result",
+        classification: "info",
+        sourceId: childSessionId,
+        dedupeKey: crypto.randomUUID(),
+        summary: "Child finished",
+        payload: { type: "child_terminal_result", childSessionId, status: "idle" },
+        lineage: { parentSessionId: ctx.session.id, parentTurnId: ctx.turn.id, childSessionId },
+      });
+      const wake = (await outboxRow(ctx))!;
+      const receipt = {
+        accountId: ctx.grant.accountId,
+        workspaceId: ctx.grant.workspaceId!,
+        sessionId: ctx.session.id,
+        temporalWorkflowId: `session-${ctx.session.id}`,
+        wakeRevision: Number(wake.wake_revision),
+      };
+      expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual(
+        holding
+          ? { action: "pending_admission", blocker: "pending_machine_input" }
+          : { action: "acknowledged" },
+      );
+      if (holding) {
+        const attemptId = crypto.randomUUID();
+        const claimed = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+          sessionId: ctx.session.id,
+          workflowId: receipt.temporalWorkflowId,
+          workflowRunId: crypto.randomUUID(),
+          attemptId,
+          dispatchId: crypto.randomUUID(),
+          trigger: { kind: "next" },
+        });
+        expect(claimed.action).toBe("claimed");
+        if (claimed.action !== "claimed") throw new Error("child result not claimed");
+        await settleClaimedIdle(ctx, claimed, attemptId);
+        expect(
+          (await getSession(client.db, ctx.grant.workspaceId!, ctx.session.id))?.inputWait,
+        ).toBeNull();
+        expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+          action: "acknowledged",
+        });
+      }
+    },
+  );
 
   test("rejects relative timeouts outside the 30 second to 7 day window", async () => {
     const ctx = await runningGoalFixture();

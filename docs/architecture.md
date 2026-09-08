@@ -176,7 +176,10 @@ Long external waits are session state, not workflow memory or goals.
 `wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
 then ends the turn and workflow. Durable input or the deadline outbox restarts
 it; timeout becomes typed input. `session_wait` and `command_wait` are short
-in-turn reads.
+in-turn reads. Signal delivery cannot retire a current wake while eligible
+machine input or an idle input-wait obligation remains unconsumed. Public
+`Session.inputWait` projects only the current idle wait; the rail counts it as
+ongoing work, with an explicit recheck deadline, separately from unread state.
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

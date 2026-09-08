@@ -48,6 +48,21 @@ out, is superseded, or immediate input arrives. When the database deadline
 passes unchanged, settlement clears the wait and atomically queues one typed
 `session_wait_timeout` input plus its workflow wake.
 
+A successful Temporal signal is transport delivery, not input admission. The
+current workflow-wake revision stays retryable while an eligible immediate input
+remains pending, or an idle session still owns a current input wait. A closing
+workflow cannot acknowledge away that obligation. Claim, supersession, and
+explicit control remain authoritative; deferred notices and late child results
+without ongoing intent do not create new work.
+
+Public session reads expose `inputWait` only for an idle, active-control session
+whose newest finished turn is the declaring turn. Queued/running, paused,
+terminal, or superseded waits project as null. The deadline stays visible after
+it passes until settlement: the web header and rail say “recheck due”, not
+“running”. Waiting descendants contribute to working aggregates independently
+of personal unread state. SSE wait, status, and pending-input events refresh the
+detail projection; an older status event cannot override a newer detail read.
+
 ## Wake classes and child lifecycle notices
 
 Every kind has one wake class in `SESSION_SYSTEM_UPDATE_WAKE_CLASS`

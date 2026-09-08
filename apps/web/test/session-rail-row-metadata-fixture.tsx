@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 
+import { SessionHeader } from "../src/components/rail/session-header";
+import { sessionStateLabel } from "../src/lib/session-rail";
 import { RowQuickActions } from "../src/components/rail/session-list";
 import {
   SessionRowContent,
@@ -34,6 +36,27 @@ const cases = [
 ] as const;
 
 function SessionRailRowMetadataFixture() {
+  const [waitSession, setWaitSession] = useState({
+    id: "waiting",
+    workspaceId: "workspace",
+    title: "Ship the typography PR",
+    initialMessage: "Ship the typography PR",
+    metadata: {},
+    status: "idle",
+    model: "codex/gpt-5.6-sol",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    effectiveControl: {
+      state: "active",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+    },
+    inputWait: {
+      deadlineAt: new Date(Date.now() + 600_000).toISOString(),
+      reason: "Waiting for CI",
+    },
+  } as Session);
   const [quickActionSession, setQuickActionSession] = useState({
     id: "quick-actions",
     archived: false,
@@ -125,6 +148,52 @@ function SessionRailRowMetadataFixture() {
           ))}
         </div>
       </aside>
+      <section data-testid="wait-preview" className="mt-8 border border-border">
+        <SessionHeader
+          session={waitSession}
+          ancestors={[]}
+          connectionState="live"
+          status={waitSession.status}
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+        />
+        <div data-testid="waiting-row" className="flex h-12 w-[244px] items-center px-3">
+          <SessionRowContent
+            title={waitSession.title!}
+            stateLabel={sessionStateLabel(waitSession)}
+            waiting={Boolean(waitSession.inputWait)}
+            mobile={false}
+            depthLabel={null}
+            descendantLabel={null}
+            summary={waitSession.inputWait ? active : neutral}
+            scheduled={false}
+          />
+        </div>
+        <div className="flex flex-wrap gap-3 p-4">
+          <button
+            onClick={() =>
+              setWaitSession({
+                ...waitSession,
+                inputWait: {
+                  deadlineAt: new Date(Date.now() - 60_000).toISOString(),
+                  reason: "Waiting for CI",
+                },
+              })
+            }
+          >
+            Recheck due
+          </button>
+          <button
+            onClick={() => setWaitSession({ ...waitSession, inputWait: null, status: "idle" })}
+          >
+            Complete work
+          </button>
+        </div>
+      </section>
     </main>
   );
 }

@@ -210,6 +210,7 @@ export function SessionRoute({
   const {
     events,
     sessionStatus,
+    sessionStatusSequence,
     connectionState,
     initialLoading,
     hasOlder,
@@ -268,11 +269,15 @@ export function SessionRoute({
       sessionSeed
         ? {
             ...sessionSeed,
-            status: sessionStatus ?? sessionSeed.status,
+            // Old idle events must not overwrite a fresh queued/claimed detail read.
+            status:
+              (sessionStatusSequence ?? 0) > sessionSeed.lastSequence
+                ? (sessionStatus ?? sessionSeed.status)
+                : sessionSeed.status,
             effectiveControl: queue.effectiveControl ?? sessionSeed.effectiveControl,
           }
         : null,
-    [queue.effectiveControl, sessionSeed, sessionStatus],
+    [queue.effectiveControl, sessionSeed, sessionStatus, sessionStatusSequence],
   );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
