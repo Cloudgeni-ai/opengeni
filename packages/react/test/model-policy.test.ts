@@ -36,6 +36,33 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("keeps missing-credential deployment models visible but unavailable", () => {
+    const model = catalogModel({
+      id: "openrouter/starter:free",
+      label: "Starter",
+      cost: "free",
+      billing: { upstreamPayer: "deployment", metering: "external" },
+      credentialReadiness: {
+        status: "not_ready",
+        reason: "missing_credential",
+        basis: "configuration",
+        checkedAt: null,
+      },
+      availability: {
+        status: "unavailable",
+        selectable: false,
+        reason: "missing_credential",
+        checkedAt: null,
+      },
+    });
+    const rows = projectPickerRows([model]);
+    expect(rows[0]).toMatchObject({
+      billingClassLabel: "OpenGeni",
+      selectable: false,
+      unavailableReason: "Credentials required",
+    });
+    expect(rows[0]?.catalog).toBe(model);
+  });
   test("labels organization provider billing separately from workspace BYOK", () => {
     const model = catalogModel({
       id: "organization-openrouter/openai/gpt-org",
@@ -48,6 +75,13 @@ describe("model-policy", () => {
     });
     expect(billingClassForModel(model)).toBe("organization_byok");
     expect(projectPickerRows([model])[0]?.billingClassLabel).toBe("Organization providers");
+    expect(payerSummaryForModel(model)).toBe("Billed to the organization OpenRouter account");
+    expect(payerSummaryForModel({ ...model, cost: undefined })).toBe(
+      "Billed to the organization OpenRouter account",
+    );
+    expect(payerSummaryForModel({ ...model, provider: "organization-gateway" })).toBe(
+      "Billed to the organization Vercel account",
+    );
   });
   test("omits disconnected subscription and workspace Gateway rails", () => {
     const rows = projectPickerRows([
@@ -118,23 +152,23 @@ describe("model-policy", () => {
     expect(billingClassForModel(workspaceModel)).toBe("byok");
     expect(payerSummaryForModel(workspaceModel)).toBe("Billed to the workspace OpenRouter account");
     expect(advancedSourceSummary(workspaceModel)).toBe("Workspace OpenRouter connection");
-    expect(billingClassForModel(deploymentModel)).toBe("external");
+    expect(billingClassForModel(deploymentModel)).toBe("opengeni_credits");
     expect(payerSummaryForModel(deploymentModel)).toBe("Free in this deployment");
   });
 
-  test("labels an anonymous deployment route as External", () => {
+  test("groups an anonymous deployment route under OpenGeni without assuming free access", () => {
     const model = catalogModel({
       id: "opencode/x-preview-f-free",
       label: "OpenCode Ox Alpha",
       billing: { upstreamPayer: "deployment", metering: "external" },
     });
-    expect(billingClassForModel(model)).toBe("external");
+    expect(billingClassForModel(model)).toBe("opengeni_credits");
     expect(projectPickerRows([model])[0]).toMatchObject({
-      billingClass: "external",
-      billingClassLabel: "External",
+      billingClass: "opengeni_credits",
+      billingClassLabel: "OpenGeni",
     });
-    expect(advancedSourceSummary(model)).toBe("Deployment route · no authentication");
-    expect(payerSummaryForModel(model)).toBe("External provider · no OpenGeni credits");
+    expect(advancedSourceSummary(model)).toBe("Deployment-provided connection");
+    expect(payerSummaryForModel(model)).toBe("OpenGeni · no model credits");
   });
 
   test("uses deployment cost before upstream settlement in the payer summary", () => {
