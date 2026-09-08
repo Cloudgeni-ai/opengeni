@@ -335,6 +335,7 @@ settings parsing, defaults, validation, and derived runtime configuration.
 Model catalog membership, workspace selectability, and cost are separate
 authorities. A deployment selects one membership source (`code` or the
 operator-owned database singleton); workspace policy, connection readiness,
+per-connection model permissions, organization workspace assignment,
 and provider health decide selectability; deployment cost policy decides
 `free` versus `credits` independently of upstream settlement. Workspace custom
 Gateway and OpenRouter rows are provider-qualified workspace overlays, never
@@ -352,6 +353,7 @@ tests pin intentional mirrors in clients and deployment code.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 `packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
+[`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
@@ -922,10 +924,16 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
-Managed billing uses shared usage and entitlement boundaries. Codex and SuperGrok
-pools own credentials and capacity without changing logical turns. Shared and
-Personal workspaces can inherit their organization's Codex pool. Each pool has
-one allocator boundary and grants no workspace access.
+Managed billing is an API concern over the shared usage and entitlement
+boundaries. Provider subscription pools such as Codex or SuperGrok add their
+own credential and capacity authority without changing the logical-turn model.
+Codex and SuperGrok may resolve to a workspace pool or an organization pool inherited by a
+shared or Personal workspace in the same organization; the resolved pool
+remains one complete allocator boundary and grants no workspace access.
+SuperGrok freezes that scope on accepted work; its organization management
+adapter is `packages/db/src/organization-xai-subscriptions.ts`, while runtime
+selection remains in `packages/db/src/xai-subscription.ts`. Both providers use
+shared subscription account rows and connection actions in the web settings.
 Vercel AI Gateway and OpenRouter expose separate workspace- and
 organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
@@ -1570,7 +1578,7 @@ This index intentionally routes at subsystem granularity. Use
 | --- | --- | --- |
 | Model registry, routing, pricing, provider identity, or OpenAI-compatible inference routes | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
-| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
+| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |

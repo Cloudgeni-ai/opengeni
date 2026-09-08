@@ -49,7 +49,7 @@ const COPY: Record<OrganizationAdminSection, { title: string; description: strin
   },
   models: {
     title: "Models",
-    description: "Connect organization-funded model subscriptions inherited by shared workspaces.",
+    description: "Manage subscriptions and provider accounts shared with your workspaces.",
   },
   people: {
     title: "People & invitations",
