@@ -263,6 +263,38 @@ describe("remote Skill source resolution", () => {
     ).rejects.toThrow("metadata is too large");
   });
 
+  test("preserves leading UTF-8 BOM bytes in metadata and supporting files", async () => {
+    const contents = {
+      skill: `\uFEFF${skillMarkdown}`,
+      reference: "\uFEFFKeep these exact bytes.\n",
+    };
+    const client = sourceClient(
+      [
+        { path: "folder/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null },
+        {
+          path: "folder/references/note.md",
+          type: "blob",
+          mode: "100644",
+          sha: "reference",
+          size: null,
+        },
+      ],
+      contents,
+    );
+    const resolved = await resolveSkillImport(
+      "https://skills.sh/acme/skills/release-operator",
+      client,
+    );
+    expect(resolved.files.find((file) => file.path === "SKILL.md")?.content).toBe(contents.skill);
+    expect(resolved.files.find((file) => file.path === "references/note.md")?.content).toBe(
+      contents.reference,
+    );
+    expect(resolved.preview.totalBytes).toBe(
+      new TextEncoder().encode(contents.skill).byteLength +
+        new TextEncoder().encode(contents.reference).byteLength,
+    );
+  });
+
   test("preserves network failures instead of mislabelling them invalid UTF-8", async () => {
     const client = sourceClient(
       [{ path: "one/SKILL.md", type: "blob", mode: "100644", sha: "skill", size: null }],
