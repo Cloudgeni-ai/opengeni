@@ -1,7 +1,7 @@
 import type { ClientModel, ReasoningEffort } from "@opengeni/sdk";
 import { CheckIcon, SearchIcon, ZapIcon } from "lucide-react";
 import { useRef, useState, type RefObject, type CSSProperties } from "react";
-import { Popover } from "radix-ui";
+import { Popover, RadioGroup } from "radix-ui";
 import { cn } from "../lib/cn";
 import {
   coerceReasoningEffortForModel,
@@ -34,12 +34,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
       `${row.label} ${row.id} ${row.providerLabel} ${row.billingClassLabel} ${payerSummaryForModel(row.catalog)}`.toLowerCase();
     return words.every((word) => text.includes(word));
   });
-  const groups = groupPickerRowsByBillingClass(filtered)
-    .map((group) => ({
-      ...group,
-      rows: group.rows.filter((row) => words.length > 0 || row.id !== selected?.id),
-    }))
-    .filter((group) => group.rows.length > 0);
+  const groups = groupPickerRowsByBillingClass(filtered);
   const choose = (row: ClientPickerModelRow) => {
     if (!row.selectable || props.disabled) return;
     if (row.id !== props.model) props.onModelChange(row.id);
@@ -58,16 +53,7 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     <PickerNavRow
       key={row.id}
       label={row.label}
-      hint={
-        row.billingClass === "opengeni_credits"
-          ? (row.unavailableReason ?? undefined)
-          : [
-              props.messages?.billingHints?.[row.billingClass] ?? payerSummaryForModel(row.catalog),
-              row.unavailableReason,
-            ]
-              .filter(Boolean)
-              .join(" · ")
-      }
+      hint={row.unavailableReason ?? undefined}
       disabled={props.disabled || !row.selectable}
       title={[row.label, payerSummaryForModel(row.catalog), row.unavailableReason]
         .filter(Boolean)
@@ -153,20 +139,17 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>
         ) : (
           <>
-            {selected && words.length === 0 ? (
-              <div className="border-b border-og-border/60 pb-1 mb-1">
-                <p className="px-2.5 py-1.5 text-og-control text-og-fg-subtle">
-                  {messages.currentModel}
-                </p>
-                {modelRow(selected)}
-              </div>
-            ) : null}
             {groups.map((group) => (
               <section key={group.billingClass} aria-label={group.label} className="py-1">
                 <div className="flex items-center gap-2 px-2.5 py-1.5 text-og-control font-medium text-og-fg-subtle">
                   <BillingClassMark billingClass={group.billingClass} aria-label="" />
                   {group.label}
                 </div>
+                {group.billingClass !== "opengeni_credits" ? (
+                  <p className="px-2.5 pb-2 text-og-control text-og-fg-subtle">
+                    {messages.billingHints[group.billingClass]}
+                  </p>
+                ) : null}
                 {group.rows.map(modelRow)}
               </section>
             ))}
@@ -178,9 +161,16 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
           </>
         )}
       </div>
-      {selected ? (
-        <div className="border-t border-og-border px-2 py-2">
-          {selected.catalog.capabilities?.inputModalities.includes("image") === false ? (
+      {selected &&
+      ((props.hasImageAttachments &&
+        selected.catalog.capabilities?.inputModalities.includes("image") === false) ||
+        (effortOptionsForModel(selected.catalog).length > 1 &&
+          selected.catalog.capabilities?.reasoning.runnable !== false) ||
+        (props.allowLatencyMode !== false &&
+          runnableLatencyModesForModel(selected.catalog).includes("fast"))) ? (
+        <div className="border-t border-og-border px-2.5 py-2.5">
+          {props.hasImageAttachments &&
+          selected.catalog.capabilities?.inputModalities.includes("image") === false ? (
             <p className="pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
               {messages.unsupportedAttachments}
             </p>
@@ -198,42 +188,53 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
   const efforts = effortOptionsForModel(selected.catalog);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
   const supportsFast = runnableLatencyModesForModel(selected.catalog).includes("fast");
+  const showThinking =
+    efforts.length > 1 && selected.catalog.capabilities?.reasoning.runnable !== false;
+  const showFast = supportsFast && props.allowLatencyMode !== false;
+  if (!showThinking && !showFast) return null;
   return (
-    <div
-      className="flex flex-wrap items-center gap-2 text-og-control text-og-fg-muted"
-      data-testid="model-picker-reasoning"
-    >
-      <label className="flex min-h-9 items-center gap-2">
-        {messages.thinking}
-        <select
+    <div className="space-y-2 text-og-control" data-testid="model-picker-reasoning">
+      <div className="flex min-h-7 items-center justify-between gap-3">
+        {showThinking ? <span className="text-og-fg-subtle">{messages.thinking}</span> : <span />}
+        {showFast ? (
+          <button
+            type="button"
+            data-testid="model-picker-fast"
+            disabled={props.disabled || !selected.selectable}
+            aria-pressed={props.latencyMode === "fast"}
+            title={messages.fast + " · " + messages.fastRateHint}
+            onClick={() =>
+              props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
+            }
+            className="flex min-h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 text-og-fg-muted hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+          >
+            <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
+            {messages.fast}
+            <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
+          </button>
+        ) : null}
+      </div>
+      {showThinking ? (
+        <RadioGroup.Root
           aria-label={messages.thinkingEffort}
           value={coerceReasoningEffortForModel(selected.catalog, props.effort)}
-          disabled={props.disabled || !selected.selectable || efforts.length < 2}
-          onChange={(event) => props.onEffortChange(event.target.value as ReasoningEffort)}
-          className="rounded-og-sm bg-og-surface-2 px-2 py-1.5 text-og-fg outline-hidden focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+          disabled={props.disabled || !selected.selectable}
+          onValueChange={(value) => props.onEffortChange(value as ReasoningEffort)}
+          orientation="horizontal"
+          className="flex flex-wrap gap-0.5 rounded-og-md bg-og-surface-2 p-0.5"
         >
           {efforts.map((effort) => (
-            <option key={effort} value={effort}>
-              {labelReasoningEffort(effort)}
-            </option>
+            <RadioGroup.Item
+              key={effort}
+              value={effort}
+              aria-label={labelReasoningEffort(effort)}
+              title={labelReasoningEffort(effort)}
+              className="min-h-8 min-w-10 flex-1 cursor-pointer whitespace-nowrap rounded-og-sm px-1.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 data-[state=checked]:bg-og-surface-1 data-[state=checked]:text-og-fg data-[state=checked]:shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {effort === "xhigh" ? "X-high" : labelReasoningEffort(effort)}
+            </RadioGroup.Item>
           ))}
-        </select>
-      </label>
-      {supportsFast && props.allowLatencyMode !== false ? (
-        <button
-          type="button"
-          data-testid="model-picker-fast"
-          disabled={props.disabled || !selected.selectable}
-          aria-pressed={props.latencyMode === "fast"}
-          title={`${messages.fast} · ${messages.fastRateHint}`}
-          onClick={() =>
-            props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
-          }
-          className="ml-auto flex min-h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
-        >
-          <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
-          {messages.fast} <span className="text-og-fg-subtle">{messages.fastRateHint}</span>
-        </button>
+        </RadioGroup.Root>
       ) : null}
     </div>
   );

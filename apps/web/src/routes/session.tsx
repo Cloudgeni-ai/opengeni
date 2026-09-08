@@ -2184,6 +2184,9 @@ function SessionChatPane(props: {
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
                 <ModelPicker
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
                   open={modelPickerSession === props.session.id}
                   onOpenChange={(open) => setModelPickerSession(open ? props.session.id : null)}
                   rows={modelCatalog.rows}

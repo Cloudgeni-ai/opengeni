@@ -1367,6 +1367,9 @@ function SessionsIndexRouteContent({
             actions={
               <>
                 <SessionModelControl
+                  hasImageAttachments={attachments.attachments.some(
+                    (file) => file.status !== "failed" && file.contentType.startsWith("image/"),
+                  )}
                   modelCatalog={modelCatalog}
                   policyError={newSessionPolicyError}
                   disabled={busy || newSessionDraft.loading}
@@ -1672,10 +1675,12 @@ function SessionSetupStrip({
 
 /** Keep model policy adjacent to voice/send in the bottom action row. */
 function SessionModelControl({
+  hasImageAttachments,
   modelCatalog,
   policyError,
   disabled,
 }: {
+  hasImageAttachments: boolean;
   modelCatalog: WorkspaceModelCatalogState;
   policyError: string | null;
   disabled: boolean;
@@ -1683,6 +1688,7 @@ function SessionModelControl({
   const context = useAppContext();
   return (
     <ModelPicker
+      hasImageAttachments={hasImageAttachments}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}

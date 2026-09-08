@@ -118,6 +118,86 @@ async function mount(node: React.ReactElement): Promise<HTMLElement> {
 }
 
 describe("ModelPolicyPicker", () => {
+  test("shows subscription copy once per provider and keeps selection in its group", async () => {
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={() => {}}
+        onEffortChange={() => {}}
+        onLatencyModeChange={() => {}}
+      />,
+    );
+    const group = container.querySelector('section[aria-label="Codex"]')!;
+    expect(group.textContent?.match(/ChatGPT \/ Codex plan/g)?.length).toBe(1);
+    expect(group.querySelectorAll('[data-testid^="model-picker-choice-"]').length).toBe(2);
+    expect(group.querySelector('[aria-label="Selected"]')).toBeTruthy();
+    expect(container.textContent).not.toContain("Current model");
+    for (const row of group.querySelectorAll("button"))
+      expect(row.textContent).not.toContain("subscription");
+  });
+
+  test("selects thinking inline without switching model or closing the picker", async () => {
+    const calls: unknown[] = [];
+    const container = await mount(
+      <ModelPolicyPickerMenu
+        models={MODELS}
+        model={MODELS[0]!.id}
+        effort="medium"
+        latencyMode="standard"
+        onModelChange={(id) => calls.push(["model", id])}
+        onEffortChange={(effort) => calls.push(["effort", effort])}
+        onLatencyModeChange={() => {}}
+        onOpenChange={(open) => calls.push(["open", open])}
+      />,
+    );
+    expect(container.querySelector("select")).toBeNull();
+    expect(
+      container.querySelector('[role="radio"][aria-label="Medium"]')?.getAttribute("aria-checked"),
+    ).toBe("true");
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('[role="radio"][aria-label="High"]')!.click(),
+    );
+    expect(calls).toEqual([["effort", "high"]]);
+  });
+
+  test("hides thinking for models with no runnable reasoning controls", async () => {
+    const model = {
+      ...MODELS[0]!,
+      capabilities: {
+        ...MODELS[0]!.capabilities!,
+        reasoning: { ...MODELS[0]!.capabilities!.reasoning, runnable: false },
+        latencyModes: [],
+      },
+    };
+    const container = await mount(
+      <>
+        <ModelPolicyPicker
+          models={[model]}
+          model={model.id}
+          effort="low"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+        <ModelPolicyPickerMenu
+          models={[model]}
+          model={model.id}
+          effort="low"
+          latencyMode="standard"
+          onModelChange={() => {}}
+          onEffortChange={() => {}}
+          onLatencyModeChange={() => {}}
+        />
+      </>,
+    );
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
+    expect(container.querySelector(".og-model-policy-effort")).toBeNull();
+    expect(container.textContent).not.toContain("Thinking");
+  });
   test("combines deployment providers, preserves connection groups, and badges only explicit free cost", async () => {
     const deployment = (id: string, cost?: "free" | "credits"): ClientModel => ({
       id,
@@ -249,7 +329,7 @@ describe("ModelPolicyPicker", () => {
     ]);
   });
 
-  test("commits supported effort after model selection and locks a model with only one level", async () => {
+  test("commits supported effort after model selection and hides a model with only one level", async () => {
     const calls: string[] = [];
     const lowOnly: ClientModel = {
       ...MODELS[1]!,
@@ -274,11 +354,7 @@ describe("ModelPolicyPicker", () => {
         onLatencyModeChange={() => {}}
       />,
     );
-    const effort = container.querySelector<HTMLSelectElement>(
-      'select[aria-label="Thinking effort"]',
-    )!;
-    expect(effort.disabled).toBe(true);
-    expect(Array.from(effort.options).map((option) => option.value)).toEqual(["low"]);
+    expect(container.querySelector('[role="radiogroup"]')).toBeNull();
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>('[data-testid="model-picker-choice-codex/gpt-5.6-sol"]')!
@@ -288,14 +364,19 @@ describe("ModelPolicyPicker", () => {
   });
 
   test("warns only when the selected model cannot receive images", async () => {
-    const warning = "Unsupported attachments stay in the session but are hidden from this model.";
-    for (const inputModalities of [["text"], ["text", "image"]] as const) {
+    const warning = "This model cannot view the attached images.";
+    for (const [inputModalities, hasImageAttachments] of [
+      [["text"], false],
+      [["text"], true],
+      [["text", "image"], true],
+    ] as const) {
       const model: ClientModel = {
         ...MODELS[0]!,
         capabilities: { ...MODELS[0]!.capabilities!, inputModalities: [...inputModalities] },
       };
       const container = await mount(
         <ModelPolicyPickerMenu
+          hasImageAttachments={hasImageAttachments}
           models={[model]}
           model={model.id}
           effort="medium"
@@ -305,7 +386,9 @@ describe("ModelPolicyPicker", () => {
           onLatencyModeChange={() => {}}
         />,
       );
-      expect(container.textContent?.includes(warning)).toBe(inputModalities.length === 1);
+      expect(container.textContent?.includes(warning)).toBe(
+        hasImageAttachments && inputModalities.length === 1,
+      );
       await act(async () => mounted!.root.unmount());
       container.remove();
       mounted = null;
@@ -402,6 +485,7 @@ describe("ModelPolicyPicker", () => {
         model={MODELS[0]!.id}
         effort="high"
         latencyMode="standard"
+        hasImageAttachments
         messages={{
           searchLabel: "Søk etter modell",
           searchPlaceholder: "Søk…",
@@ -425,10 +509,10 @@ describe("ModelPolicyPicker", () => {
       'input[aria-label="Søk etter modell"]',
     )!;
     expect(input.placeholder).toBe("Søk…");
-    expect(container.textContent).toContain("Valgt modell");
+    expect(container.textContent).not.toContain("Valgt modell");
     expect(container.textContent).toContain("Codex-abonnement");
     expect(container.textContent).toContain("Denne modellen kan ikke se vedleggene.");
-    expect(container.querySelector('select[aria-label="Tenkenivå"]')).toBeTruthy();
+    expect(container.querySelector('[role="radiogroup"][aria-label="Tenkenivå"]')).toBeTruthy();
     expect(container.querySelector('[aria-label="Valgt"]')).toBeTruthy();
     input.value = "no-such-model";
     const key = Object.keys(input).find((property) => property.startsWith("__reactProps$"))!;

@@ -21,6 +21,7 @@ import {
 import { cn } from "../lib/cn";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
+  effortOptionsForModel,
   findPickerRow,
   labelReasoningEffort,
   projectClientModelRows,
@@ -68,8 +69,7 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   searchPlaceholder: "Search models or providers…",
   currentModel: "Current model",
   noMatches: "No matching models. Try a model or provider name.",
-  unsupportedAttachments:
-    "Unsupported attachments stay in the session but are hidden from this model.",
+  unsupportedAttachments: "This model cannot view the attached images.",
   thinkingEffort: "Thinking effort",
   selected: "Selected",
   free: "Free",
@@ -87,6 +87,8 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
 export type ModelPolicyPickerProps = {
   /** Lightweight deployment models. Catalog rows take precedence when supplied. */
   models?: ClientModel[] | undefined;
+  /** Warn only when the draft actually contains images this model cannot view. */
+  hasImageAttachments?: boolean | undefined;
   /** Catalog-backed rows with availability and billing-class truth. */
   rows?: PickerModelRow[] | undefined;
   model: string;
@@ -391,12 +393,16 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
         <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
           {selected?.shortLabel ?? selected?.label ?? props.model}
         </span>
-        <span
-          className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
-          title={labelReasoningEffort(props.effort)}
-        >
-          {labelReasoningEffort(props.effort)}
-        </span>
+        {selected &&
+        effortOptionsForModel(selected.catalog).length > 1 &&
+        selected.catalog.capabilities?.reasoning.runnable !== false ? (
+          <span
+            className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
+            title={labelReasoningEffort(props.effort)}
+          >
+            {labelReasoningEffort(props.effort)}
+          </span>
+        ) : null}
         {props.latencyMode === "fast" ? (
           <ZapIcon
             className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
