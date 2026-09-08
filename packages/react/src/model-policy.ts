@@ -116,6 +116,12 @@ export function labelReasoningEffort(effort: ReasoningEffort): string {
   return effort.slice(0, 1).toUpperCase() + effort.slice(1);
 }
 
+/** Payment prompts must use cost policy, never the presentation group. */
+export function modelUsesCredits(model: ClientModel | undefined): boolean {
+  if (model?.cost !== undefined) return model.cost === "credits";
+  return model?.billing?.metering === "opengeni_credits";
+}
+
 export function payerSummaryForModel(model: ClientModel): string {
   if (model.cost === "free") {
     return "Free in this deployment";

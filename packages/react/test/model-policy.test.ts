@@ -8,6 +8,7 @@ import {
   effortOptionsForModel,
   groupPickerRowsByBillingClass,
   payerSummaryForModel,
+  modelUsesCredits,
   projectPickerRows,
 } from "../src/model-policy";
 
@@ -36,6 +37,36 @@ function catalogModel(
 }
 
 describe("model-policy", () => {
+  test("credit notices follow cost policy rather than the OpenGeni group", () => {
+    for (const cost of ["free", "credits", "workspace", "organization", "subscription"] as const) {
+      const model = catalogModel({
+        id: "model",
+        label: "Model",
+        cost,
+        billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+      });
+      expect(modelUsesCredits(model)).toBe(cost === "credits");
+    }
+    expect(modelUsesCredits(undefined)).toBe(false);
+    expect(
+      modelUsesCredits(
+        catalogModel({
+          id: "legacy",
+          label: "Legacy",
+          billing: { upstreamPayer: "deployment", metering: "external" },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      modelUsesCredits(
+        catalogModel({
+          id: "legacy",
+          label: "Legacy",
+          billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
+        }),
+      ),
+    ).toBe(true);
+  });
   test("keeps missing-credential deployment models visible but unavailable", () => {
     const model = catalogModel({
       id: "openrouter/starter:free",
