@@ -15,6 +15,7 @@ export const ModelContextInstructionLayerId = z.enum([
   "workspace_memory",
   "codemode",
   "git_bindings",
+  "builtin_skills",
   "genesis_title",
   "sdk_capability_instructions",
   "sandbox_preamble",

@@ -1129,8 +1129,9 @@ the existing workspace/session permission checks through first-party MCP. Pins
 and order are shared; filing changes no runtime settings or session visibility.
 `sessions_list` accepts `projectId` (null = unfiled), and `session_create` accepts
 an explicit project. The bundled `opengeni-projects` skill explains this UI model
-on managed sandboxes; Connected Machines use the self-contained tool descriptions,
-matching the existing bundled-skill filesystem boundary.
+for every agent, including Connected Machines and backend `none`. Its index entry
+is always present; `load_builtin_skill` returns the packaged Markdown directly
+from the worker without sandbox file materialization.
 
 
 Capabilities define available integration/tool shapes. Connections bind live
