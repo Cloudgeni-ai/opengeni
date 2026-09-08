@@ -4163,7 +4163,7 @@ export const sessions = pgTable(
       .notNull()
       .default("workspace_shared"),
     authorityEpoch: integer("authority_epoch").notNull().default(1),
-    // Agent-access scope (migration 0426). Declares how far a live attempt on
+    // Agent-access scope (migration 0427). Declares how far a live attempt on
     // this session may reach across the workspace and how far peers may reach
     // into it. 'workspace' is the pre-0426 behaviour; 'user' limits reach to
     // sessions carrying the same end-user label; 'session' limits it to the
@@ -10774,7 +10774,7 @@ export const scheduledTasks = pgTable(
     rigId: uuid("rig_id"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     // Frozen creator boundary for tasks created by a live agent attempt
-    // (migration 0427): generated sessions inherit these instead of the
+    // (migration 0428): generated sessions inherit these instead of the
     // deployment default. NULL for human/API creates.
     creatorFirstPartyMcpTools: jsonb("creator_first_party_mcp_tools").$type<
       FirstPartyMcpToolName[]

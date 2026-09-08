@@ -1030,7 +1030,7 @@ export function createAppComposition(deps: AppDependencies): {
         }
       }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-      // The bound session's frozen Memory selector (migration 0426) decides
+      // The bound session's frozen Memory selector (migration 0427) decides
       // which Memory tools the attempt receives and which typed layers they
       // read and write. A missing row resolves to no Memory tools.
       const sessionMemory =

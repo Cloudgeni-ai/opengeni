@@ -5389,7 +5389,7 @@ export type ScheduledTaskCreatorSessionPolicy = {
 };
 
 /**
- * Frozen creator boundary of a scheduled task (migration 0427). Every field is
+ * Frozen creator boundary of a scheduled task (migration 0428). Every field is
  * null for a human/API-created task, which keeps the deployment default for
  * its generated sessions. An agent-created task stores its creating session's
  * effective first-party selection and permission set so a narrowed session
@@ -14953,7 +14953,7 @@ export type SaveWorkspaceMemoryInput = {
   origin?: WorkspaceMemoryOrigin | undefined;
   metadata?: Record<string, unknown> | undefined;
   /**
-   * Typed selector the record is written under (migration 0426). Omitted
+   * Typed selector the record is written under (migration 0427). Omitted
    * means the shared workspace layer; `user` and `session` write one private
    * layer whose rows only that end-user label / root tree can read back.
    */
@@ -15004,7 +15004,7 @@ export type WorkspaceMemorySearchInput = {
   /** Agent-only containment. Human audit/search callers omit this. */
   agentPromptMode?: WorkspaceMemoryPromptMode | undefined;
   /**
-   * Agent-only typed read layers (migration 0426): the workspace layer plus
+   * Agent-only typed read layers (migration 0427): the workspace layer plus
    * the session's own `user` or `session` layer. Human callers omit this and
    * keep today's workspace-only read.
    */
@@ -29170,7 +29170,8 @@ export async function setSessionCodexPinInTransaction(
       codexPinnedCredentialId: pinnedCredentialId,
       // Source travels with the pin: a cleared pin (null) clears the source too.
       codexPinSource: pinnedCredentialId === null ? null : source,
-      updatedAt: new Date(),
+      // Only an explicit session account switch is conversation activity.
+      ...(source === "manual" ? { updatedAt: new Date() } : {}),
     })
     .where(and(...conditions))
     .returning({ id: schema.sessions.id });
@@ -29207,7 +29208,7 @@ export async function recordSessionActiveCodexCredential(
   await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
     await scopedDb
       .update(schema.sessions)
-      .set({ codexLastCredentialId: credentialId, updatedAt: new Date() })
+      .set({ codexLastCredentialId: credentialId })
       .where(
         and(
           eq(schema.sessions.workspaceId, workspaceId),
@@ -31141,11 +31142,11 @@ export type SessionCreateInput = {
   firstPartyMcpTools?: FirstPartyMcpToolName[];
   instructions?: string | null;
   policyRole?: string | null;
-  /** Agent-to-agent reach (migration 0426); omitted means the workspace default. */
+  /** Agent-to-agent reach (migration 0427); omitted means the workspace default. */
   agentAccess?: SessionAgentAccess;
   /** Opaque end-user label; omitted or null means none. */
   endUser?: SessionEndUser | null;
-  /** Typed Memory selector (migration 0426); omitted means the workspace layer. */
+  /** Typed Memory selector (migration 0427); omitted means the workspace layer. */
   memoryScope?: SessionMemoryScope;
   parentSessionId?: string | null;
   createIdempotencyKey?: string | null;
@@ -32517,7 +32518,7 @@ export async function deleteSessionTreeIfQuiescent(
 }
 
 /**
- * The frozen agent-access facts of one session (migration 0426). Together
+ * The frozen agent-access facts of one session (migration 0427). Together
  * with `rootSessionId` these are everything the core seam needs to decide
  * whether one live agent attempt may reach another session.
  */
@@ -33915,7 +33916,7 @@ function sessionFilters(
 }
 
 /**
- * The agent-access predicate for one calling attempt (migration 0426). It
+ * The agent-access predicate for one calling attempt (migration 0427). It
  * mirrors the pairwise rule in the core seam exactly: a caller always keeps
  * its own root tree; a `session` caller sees nothing else; a `user` caller
  * additionally sees non-`session` sessions carrying its own end-user label; a

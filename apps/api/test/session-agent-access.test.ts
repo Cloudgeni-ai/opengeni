@@ -26,7 +26,7 @@ import { createApp } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 // ---------------------------------------------------------------------------
-// End-to-end proof of the agent-access boundary (migration 0426): sessions are
+// End-to-end proof of the agent-access boundary (migration 0427): sessions are
 // created through the public HTTP create, every attempt is a real claimed turn
 // whose signed claims the seam validates against durable rows, and every read
 // goes through the same MCP tools and HTTP routes a live agent uses.

@@ -70,7 +70,7 @@ export function buildDocumentsMcpServer(
     /** Immutable human subject whose agent is making this retrieval request. */
     initiatingSubjectId: string;
     /**
-     * The bound session's typed Memory selector (migration 0426), resolved by
+     * The bound session's typed Memory selector (migration 0427), resolved by
      * the caller from the session row. `off` registers neither memory tool;
      * `user`/`session` search the workspace layer plus the own private layer.
      * Omitted keeps the workspace layer.

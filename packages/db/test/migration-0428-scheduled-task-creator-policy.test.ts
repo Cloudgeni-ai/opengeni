@@ -10,11 +10,11 @@ import {
 } from "../src";
 
 const source = readFileSync(
-  new URL("../drizzle/0427_scheduled_task_creator_policy.sql", import.meta.url),
+  new URL("../drizzle/0428_scheduled_task_creator_policy.sql", import.meta.url),
   "utf8",
 );
 
-test("0427 adds three nullable creator-policy columns as a rolling change", () => {
+test("0428 adds three nullable creator-policy columns as a rolling change", () => {
   expect(source.startsWith("-- deployment-mode: rolling\n")).toBe(true);
   expect(source.match(/ADD COLUMN/g)).toHaveLength(3);
   expect(source).toContain('ADD COLUMN "creator_first_party_mcp_tools" jsonb');
@@ -28,9 +28,9 @@ test("0427 adds three nullable creator-policy columns as a rolling change", () =
   expect(source).not.toMatch(/\bUPDATE\s+scheduled_tasks\b/i);
 });
 
-test("0427 keeps the execution digest byte-stable for NULL creator policy and re-pins search_path", () => {
+test("0428 keeps the execution digest byte-stable for NULL creator policy and re-pins search_path", () => {
   // Both digest routines strip the three keys only while NULL, so every
-  // existing row and every human/API-created task keeps its pre-0427 digest.
+  // existing row and every human/API-created task keeps its pre-0428 digest.
   for (const routine of [
     "scheduled_task_execution_digest(",
     "set_scheduled_task_execution_digest()",
@@ -60,13 +60,13 @@ test("0427 keeps the execution digest byte-stable for NULL creator policy and re
   );
 });
 
-describe("0427 creator policy (real PostgreSQL)", () => {
+describe("0428 creator policy (real PostgreSQL)", () => {
   let shared: SharedTestDatabase | null = null;
   let admin: postgres.Sql;
   let client: DbClient;
 
   beforeAll(async () => {
-    shared = await acquireSharedTestDatabase("migration-0427-creator-policy");
+    shared = await acquireSharedTestDatabase("migration-0428-creator-policy");
     if (!shared) {
       if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
         throw new Error("PostgreSQL test database unavailable while OPENGENI_REQUIRE_REAL_DB=1");
@@ -128,7 +128,7 @@ describe("0427 creator policy (real PostgreSQL)", () => {
     }
   });
 
-  test("a NULL creator policy hashes exactly like the pre-0427 whole-row digest", async () => {
+  test("a NULL creator policy hashes exactly like the pre-0428 whole-row digest", async () => {
     if (!shared) return;
     const scope = await workspace();
     const task = await createScheduledTask(client.db, taskInput(scope, "human created"));

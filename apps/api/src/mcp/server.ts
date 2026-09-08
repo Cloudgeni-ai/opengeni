@@ -329,7 +329,7 @@ export type McpServerOptions = {
   workspaceMemoryEnabled?: boolean | undefined;
   workspaceMemoryPromptMode?: WorkspaceMemoryPromptMode | undefined;
   /**
-   * The bound session's typed Memory selector (migration 0426), resolved by
+   * The bound session's typed Memory selector (migration 0427), resolved by
    * the route from the session row. `off` registers no Memory tools; `user`
    * and `session` read the workspace layer plus their own private layer and
    * save into that private layer. Omitted/null keeps the workspace layer.

@@ -69,7 +69,7 @@ function sameEndUser(left: SessionEndUser | null, right: SessionEndUser | null):
 }
 
 /**
- * The agent-to-agent reach rule (migration 0426) for one caller/target pair
+ * The agent-to-agent reach rule (migration 0427) for one caller/target pair
  * that live in DIFFERENT root trees. A caller always keeps its own tree, so
  * this is never consulted for same-root access. The most restrictive side
  * wins: a `session` side denies everything; a `user` side requires both
@@ -261,7 +261,7 @@ export async function requireSessionAuthorization(
         : actor.callerRootSessionId === target.rootSessionId;
     if (!allowed) throw new SessionAuthorizationDeniedError("forbidden");
   }
-  // Agent-access scope (migration 0426): an attempt always keeps its own root
+  // Agent-access scope (migration 0427): an attempt always keeps its own root
   // tree; across trees the most restrictive of the caller's and the target's
   // declared reach wins. Both sides are read from durable session rows, never
   // from the request, and an embedding-host port cannot widen this.
@@ -329,7 +329,7 @@ export async function requireSessionAuthorizationListScope(
   const { actor, callerAccess } = await resolveSessionAuthorizationActor(deps.db, grant);
   // Standalone agents retain compact workspace discovery only while the signed
   // caller attempt is still the exact live attempt, and only within their own
-  // declared agent-access reach (migration 0426). The viewer is derived from
+  // declared agent-access reach (migration 0427). The viewer is derived from
   // the caller session row and applied as one SQL predicate by every list.
   const viewer: SessionAgentAccessViewer | null =
     actor.kind === "agent_attempt" && callerAccess
