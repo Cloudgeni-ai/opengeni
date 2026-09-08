@@ -37,6 +37,7 @@ import {
 } from "@/lib/session-restart-operation-controller";
 import { classifySessionTenancyFailure } from "@/lib/session-tenancy";
 import { repositoryDisplayName } from "@/lib/session-tools";
+import { sessionHasVariableSetBlockingWork } from "@/lib/session-variable-set-editability";
 import type { Session, SessionEvent } from "@/types";
 
 export function SessionInspector(props: {
@@ -84,6 +85,7 @@ export function SessionInspector(props: {
     (variableSet) => !selectedVariableSetIds.includes(variableSet.id),
   );
   const saveVariableSets = async () => {
+    if (sessionHasVariableSetBlockingWork(props.session)) return;
     setSavingVariableSets(true);
     setRuntimeFailure(null);
     try {
@@ -359,12 +361,18 @@ export function SessionInspector(props: {
                     Later sets override earlier sets. Changes are allowed only between turns and
                     rotate the managed sandbox before reuse.
                   </p>
+                  {sessionHasVariableSetBlockingWork(props.session) ? (
+                    <p className="text-2xs text-fg-subtle">
+                      Variable Sets can be changed after the current and queued work finishes.
+                    </p>
+                  ) : null}
                   <Button
                     type="button"
                     size="sm"
                     variant="secondary"
                     disabled={
                       !selectedChanged ||
+                      sessionHasVariableSetBlockingWork(props.session) ||
                       savingVariableSets ||
                       restarting ||
                       Boolean(pendingRestartAttempt)

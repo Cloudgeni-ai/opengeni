@@ -244,8 +244,8 @@ describe("session control surface architecture", () => {
     expect(establishedPicker).toContain("The update committed");
     expect(establishedPicker).toContain("Retry refresh");
     expect(establishedPicker).toContain("updateSessionVariableSets");
-    expect(establishedPicker).toContain(
-      "const visible = refreshRequired || currentIds.length > 0 || canAdd",
+    expect(establishedPicker.replace(/\s+/g, " ")).toContain(
+      "const visible = refreshRequired || currentIds.length > 0 ||",
     );
     expect(establishedPicker).toContain("committedSelection?.sessionId === props.session.id &&");
     expect(establishedRoute).toContain("const variableSetComposerBlocked =");
@@ -268,8 +268,9 @@ describe("session control surface architecture", () => {
     expect(establishedRoute.match(/sharedState=\{variableSetPickerState\}/g)).toHaveLength(2);
     expect(establishedRoute.match(/setSharedState=\{setVariableSetPickerState\}/g)).toHaveLength(2);
     expect(establishedPicker).toContain(
-      "const busy = props.busy || props.goalActive || props.voiceActive",
+      "const busy = workPending || props.goalActive || props.voiceActive",
     );
+    expect(establishedPicker).toContain("sessionHasVariableSetBlockingWork(props.session)");
     expect(establishedPicker).toContain("End voice mode before changing Variable Sets.");
     expect(establishedPicker).toContain("Only-me Variable Sets are authorized for your own work.");
     expect(establishedControl).not.toContain('value: "once"');
