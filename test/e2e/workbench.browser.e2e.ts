@@ -19,6 +19,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const dockStates = [
   "warm-live",
   "cold-instant",
+  "live-file-wake-recovery",
   "waking",
   "selfhosted-offline",
   "empty",
@@ -923,6 +924,83 @@ describe("workbench browser acceptance", () => {
       await context.close();
     }
   }, 25_000);
+
+  for (const [name, width, height, mobile] of [
+    ["desktop", 1280, 800, false],
+    ["mobile", 390, 844, true],
+  ] as const) {
+    test(`failed live-file wake can retry and render a real PNG on ${name}`, async () => {
+      const context = await browser.newContext({
+        viewport: { width, height },
+        isMobile: mobile,
+        hasTouch: mobile,
+      });
+      const page = await context.newPage();
+      page.setDefaultTimeout(5_000);
+      try {
+        const problems: string[] = [];
+        page.on("pageerror", (error) => problems.push(error.message));
+        await page.goto(dockUrl(baseUrl, "live-file-wake-recovery", "light", "files"), {
+          waitUntil: "networkidle",
+        });
+        await page
+          .getByRole("treeitem")
+          .filter({ hasText: "recovery.png" })
+          .getByRole("button")
+          .click();
+        await page.getByText("On machine", { exact: true }).waitFor();
+        const viewer = page.locator("[data-opengeni-file-viewer-scroll]:visible");
+        expect(await viewer.locator("img").count()).toBe(0);
+        await page.getByRole("button", { name: "Open live file", exact: true }).click();
+        await page
+          .getByText("Fixture attach failed: retry the live file", { exact: false })
+          .first()
+          .waitFor();
+        const retry = page.getByRole("button", { name: "Retry live file", exact: true });
+        await retry.waitFor();
+        expect(await page.getByText("Waking workspace", { exact: true }).count()).toBe(0);
+        await waitForVisualStability(page);
+        await capturePageScreenshot(page, {
+          path: `/tmp/workbench-${name}-live-file-wake-failed.png`,
+          fullPage: true,
+        });
+        await retry.click();
+        const preview = viewer.getByRole("img");
+        await preview.waitFor();
+        await page.waitForFunction(
+          () => {
+            const image = document.querySelector<HTMLImageElement>(
+              "[data-opengeni-file-viewer-scroll] img",
+            );
+            return image?.complete && image.naturalWidth === 64 && image.naturalHeight === 64;
+          },
+          undefined,
+          { timeout: 5_000 },
+        );
+        expect(await retry.count()).toBe(0);
+        expect(
+          await page
+            .getByText("Fixture attach failed: retry the live file", { exact: false })
+            .count(),
+        ).toBe(0);
+        expect(await page.getByText("Waking workspace", { exact: true }).count()).toBe(0);
+        expect(problems).toEqual([]);
+        await waitForVisualStability(page);
+        await capturePageScreenshot(page, {
+          path: `/tmp/workbench-${name}-live-file-wake-recovered.png`,
+          fullPage: true,
+        });
+      } catch (error) {
+        await capturePageScreenshot(page, {
+          path: `/tmp/workbench-${name}-live-file-wake-regression.png`,
+          fullPage: true,
+        });
+        throw error;
+      } finally {
+        await context.close();
+      }
+    }, 25_000);
+  }
 
   test("file deletion uses an accessible non-blocking dialog on mobile", async () => {
     const context = await browser.newContext({
