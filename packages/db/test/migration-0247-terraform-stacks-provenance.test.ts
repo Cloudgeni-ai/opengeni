@@ -16,6 +16,11 @@ const newUrl =
   "https://github.com/hashicorp/agent-skills/tree/de4323afdfbc30d1387f287b55062fa8d82b62e8/terraform/module-generation/skills/terraform-stacks";
 const oldDigest = "d484ccc1279954e5dbcdd9b8b57bc21e6a0fa47d38dc11854ffcf8e61289e883";
 const newDigest = "3a58c98b725573b8fd524555b7ed9dbff04df4df9f8fad44e2e850bac3824809";
+// 0247 repairs one exact historical projection, not today's SKILL.md-derived
+// catalog description. Keep the historical precondition independently pinned
+// so the digest and component-resolution failure cases reach their own guards.
+const historicalDescription =
+  "Create, modify, validate, and troubleshoot Terraform Stack component and deployment configurations.";
 const oldManifest = {
   schemaVersion: 1,
   kind: "skill",
@@ -51,6 +56,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
     expect(migration).toContain("ENABLE TRIGGER capability_plugin_versions_restrict_update");
     expect(migration).toContain("ENABLE TRIGGER capability_skill_facets_immutable");
     expect(migration).toContain("skill.name <> 'terraform-stacks'");
+    expect(migration).toContain(historicalDescription);
     expect(migration).toContain(oldUrl);
     expect(migration).toContain(newUrl);
     expect(migration).toContain(oldDigest);
@@ -214,7 +220,7 @@ describe("migration 0247 Terraform Stacks provenance repair", () => {
           ${facet!.id},
           'skill:terraform-stacks',
           ${entry.name},
-          ${entry.description},
+          ${historicalDescription},
           ${oldUrl},
           ${entry.sourceCommit},
           ${entry.relativePath},
