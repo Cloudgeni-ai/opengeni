@@ -253,6 +253,18 @@ existing `bun run db:backfill-session-ownership` seam's job.
 
 ### `getWorkspaceGrant` is not an authority answer
 
+Personal owners may administer their own workspace configuration through
+`requireWorkspaceSettingsGrant` (`packages/core/src/access/index.ts`). This
+request boundary preserves ordinary workspace-admin behavior and otherwise
+requires a verified canonical managed cookie, exact authenticated subject, and
+a live active-organization membership pointing to the requested Personal
+workspace. It covers preferences, custom models/model policy, runtime control,
+and instruction/Skill autonomy, including its revision lifecycle. The returned
+grant is unchanged: no `workspace:admin`, `members:manage`, or `api_keys:manage`
+is added. Workspace deletion and access-management routes do not use this
+exception. The web's matching owner affordance uses the current server-issued
+membership tuple; it is not API authorization.
+
 `getWorkspaceGrant` (`packages/db/src/index.ts`) is a bare
 `workspace_memberships` join. Because a managed personal workspace deliberately
 has no row there, it returns `null` for the one human who always belongs. Any

@@ -14,6 +14,7 @@ import {
 } from "@opengeni/db";
 import {
   requireAccessGrant,
+  requireWorkspaceSettingsGrant,
   VIDEO_GENERATION_MODEL_CATALOG,
   videoGenerationModelSupportsFundingSource,
   videoGenerationCapabilitiesForPolicy,
@@ -58,7 +59,7 @@ export function registerVideoGenerationRoutes(app: Hono, deps: ApiRouteDeps): vo
 
   app.put("/v1/workspaces/:workspaceId/video-generation/policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = UpdateVideoGenerationPolicyRequest.parse(await c.req.json());
     const [connection, supergrokConfigured] = await Promise.all([
       getWorkspaceVercelAiGatewayConnectionMetadata(deps.db, workspaceId),

@@ -994,7 +994,9 @@ describe("organization helpers", () => {
   test("lists every org the subject can reach, default first", () => {
     const context = ctx({
       defaultAccountId: "acc-b",
-      accountGrants: [{ accountId: "acc-a", subjectId: "s", permissions: ["billing:read"] }],
+      accountGrants: [
+        { accountId: "acc-a", subjectId: "s", role: "admin", permissions: ["billing:read"] },
+      ],
     });
     const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
     expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
