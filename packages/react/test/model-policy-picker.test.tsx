@@ -135,8 +135,11 @@ describe("ModelPolicyPicker", () => {
     expect(group.querySelectorAll('[data-testid^="model-picker-choice-"]').length).toBe(2);
     expect(group.querySelector('[aria-label="Selected"]')).toBeTruthy();
     expect(container.textContent).not.toContain("Current model");
-    for (const row of group.querySelectorAll("button"))
+    for (const row of group.querySelectorAll("button")) {
       expect(row.textContent).not.toContain("subscription");
+      expect(row.getAttribute("aria-description")).toBeNull();
+      expect(row.title).not.toContain("ChatGPT / Codex plan");
+    }
   });
 
   test("selects thinking inline without switching model or closing the picker", async () => {
@@ -243,8 +246,8 @@ describe("ModelPolicyPicker", () => {
     const paid = group.querySelector<HTMLButtonElement>(
       '[data-testid="model-picker-choice-openrouter/charged:free"]',
     )!;
-    expect(paid.getAttribute("aria-description")).toBe("OpenGeni credits");
-    expect(paid.title).toBe("openrouter/charged:free · OpenGeni credits");
+    expect(paid.getAttribute("aria-description")).toBeNull();
+    expect(paid.title).toBe("openrouter/charged:free");
     await act(async () => paid.click());
     expect(calls).toEqual(["openrouter/charged:free"]);
     expect(JSON.stringify(models)).toBe(before);
@@ -266,7 +269,7 @@ describe("ModelPolicyPicker", () => {
     const row = container.querySelector('[data-testid="model-picker-choice-starter"]')!;
     expect(row.textContent).toContain("Free");
     expect(row.querySelector('[aria-label="Selected"]')).toBeTruthy();
-    expect(row.getAttribute("aria-description")).toBe("Free in this deployment");
+    expect(row.getAttribute("aria-description")).toBeNull();
   });
   test("renders the polished model, effort, and Fast trigger from ClientModel data", async () => {
     const container = await mount(
