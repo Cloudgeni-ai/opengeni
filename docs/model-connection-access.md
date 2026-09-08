@@ -39,7 +39,10 @@ unhealthy default remains selected when rotation is off, so disabling rotation
 never silently changes the billed account. Codex and SuperGrok allocation filter
 accounts by the requested model.
 The worker checks the exact selected connection again before model execution,
-including pins and recovered leases. Restrictions apply at turn startup; they do
+including pins and recovered leases. Workspace Gateway and OpenRouter key loading
+also checks the exact credential ID. Their catalog and startup checks follow the
+same canonical connection order, so permissive legacy duplicates cannot widen
+the selected connection’s policy. Restrictions apply at turn startup; they do
 not cancel an already-running model call. Media, transcription, and realtime
 capabilities retain their separate policies. A default outside a workspace's
 assigned organization pool resolves to the first eligible assigned account,

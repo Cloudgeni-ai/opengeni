@@ -1,3 +1,7 @@
+import {
+  VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
+  WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
+} from "@opengeni/config";
 import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
@@ -25,7 +29,10 @@ export async function getWorkspaceConnectionModelRestrictions(
   const [xai, xaiAuthority] = await Promise.all([
     listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
     authoritySnapshot ??
-      resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, { workspaceId, subjectId }),
+      resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, {
+        workspaceId,
+        subjectId,
+      }),
   ]);
   const xaiRotation = await getXaiRotationSettings(db, {
     workspaceId,
@@ -53,15 +60,23 @@ export async function getWorkspaceConnectionModelRestrictions(
     "organization-openrouter/": [],
   };
   await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (tx) => {
-    const rows = await rawRows<{ prefix: string; allowedModelIds: string[] | null }>(
+    const rows = await rawRows<{
+      prefix: string;
+      allowedModelIds: string[] | null;
+    }>(
       tx,
       sql`
       SELECT CASE provider_kind WHEN 'vercel_gateway' THEN 'organization-gateway/' ELSE 'organization-openrouter/' END AS prefix,
         allowed_model_ids AS "allowedModelIds" FROM organization_model_provider_connections WHERE status = 'active'
       UNION ALL
       SELECT CASE WHEN metadata->>'credentialRole' = 'vercel_ai_gateway' THEN 'workspace-gateway/' ELSE 'workspace-openrouter/' END,
-        allowed_model_ids FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
-        AND kind = 'api_key' AND status = 'active' AND metadata->>'credentialRole' IN ('vercel_ai_gateway', 'openrouter')`,
+        allowed_model_ids FROM (
+        SELECT DISTINCT ON (metadata->>'credentialRole') * FROM connections WHERE workspace_id = ${workspaceId}::uuid AND subject_id IS NULL
+        AND kind = 'api_key' AND status = 'active'
+        AND ((metadata->>'credentialRole' = 'vercel_ai_gateway' AND lower(provider_domain) = ${VERCEL_AI_GATEWAY_CONNECTION_DOMAIN})
+          OR (metadata->>'credentialRole' = 'openrouter' AND lower(provider_domain) = ${WORKSPACE_OPENROUTER_CONNECTION_DOMAIN}))
+        ORDER BY metadata->>'credentialRole', created_at DESC, id DESC
+      ) selected`,
     );
     for (const row of rows) restrictions[row.prefix] = row.allowedModelIds;
   });
@@ -85,6 +100,7 @@ export async function assertModelConnectionAllowsTurn(
     modelId: string;
     codexCredentialId?: string | null;
     xaiCredentialId?: string | null;
+    workspaceProviderConnectionId?: string;
   },
 ): Promise<void> {
   const model = input.modelId;
@@ -103,7 +119,10 @@ export async function assertModelConnectionAllowsTurn(
   } else if (model.startsWith("workspace-gateway/") || model.startsWith("workspace-openrouter/")) {
     query = sql`SELECT allowed_model_ids AS models FROM connections WHERE workspace_id = ${input.workspaceId}::uuid
       AND subject_id IS NULL AND kind = 'api_key' AND status = 'active'
-      AND metadata->>'credentialRole' = ${model.startsWith("workspace-gateway/") ? "vercel_ai_gateway" : "openrouter"}`;
+      AND metadata->>'credentialRole' = ${model.startsWith("workspace-gateway/") ? "vercel_ai_gateway" : "openrouter"}
+      AND lower(provider_domain) = ${model.startsWith("workspace-gateway/") ? VERCEL_AI_GATEWAY_CONNECTION_DOMAIN : WORKSPACE_OPENROUTER_CONNECTION_DOMAIN}
+      ${input.workspaceProviderConnectionId ? sql`AND id = ${input.workspaceProviderConnectionId}::uuid` : sql``}
+      ORDER BY created_at DESC, id DESC LIMIT 1`;
   } else return;
   const rows = await withWorkspaceSubjectRls(db, input.workspaceId, input.subjectId, (tx) =>
     rawRows<{ models: string[] | null }>(tx, query),

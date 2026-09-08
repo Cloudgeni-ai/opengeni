@@ -1,8 +1,16 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireSharedTestDatabase,
+  testSettings,
+  type SharedTestDatabase,
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 import {
   createDb,
+  createConnection,
+  encryptEnvironmentValue,
+  loadWorkspaceVercelAiGatewayApiKey,
+  loadWorkspaceOpenRouterApiKey,
   type DbClient,
   upsertOrganizationXaiSubscription,
   listOrganizationXaiSubscriptions,
@@ -397,6 +405,99 @@ realTest(
       >`select version from connections where id = ${row!.id}`;
       expect(stored!.version).toBe(row!.version);
     }
+  },
+);
+realTest.each(["vercel_gateway", "openrouter"] as const)(
+  "%s model access follows the exact credential despite legacy duplicates",
+  async (kind) => {
+    const setup = await fixture();
+    const gateway = kind === "vercel_gateway";
+    const prefix = gateway ? "workspace-gateway/" : "workspace-openrouter/";
+    const providerDomain = gateway ? "ai-gateway.vercel.sh" : "openrouter.ai";
+    const credentialRole = gateway ? "vercel_ai_gateway" : "openrouter";
+    const modelId = `${prefix}allowed`;
+    const rows = [];
+    for (const label of ["older", "selected"]) {
+      rows.push(
+        await createConnection(client.db, {
+          accountId: setup.organizationId,
+          workspaceId: setup.workspaceId,
+          subjectId: null,
+          providerDomain,
+          kind: "api_key",
+          credentialEncrypted: encryptEnvironmentValue(
+            encryptionKey,
+            JSON.stringify({ apiKey: label }),
+          ),
+          metadata: { credentialRole },
+          createdBySubjectId: setup.actorSubjectId,
+        }),
+      );
+    }
+    const [older, selected] = rows;
+    await shared.admin`update connections set created_at = now() - interval '1 day' where id = ${older!.id}`;
+    const target = {
+      accountId: setup.organizationId,
+      workspaceId: setup.workspaceId,
+      subjectId: setup.actorSubjectId,
+      kind,
+      connectionId: selected!.id,
+    };
+    const policy = (await getModelConnectionAccess(client.db, target))!;
+    await updateModelConnectionAccess(client.db, target, {
+      ...policy,
+      allowedModels: [],
+    });
+    const loadKey = gateway ? loadWorkspaceVercelAiGatewayApiKey : loadWorkspaceOpenRouterApiKey;
+    const settings = testSettings({
+      environmentsEncryptionKey: Buffer.from(encryptionKey).toString("base64"),
+    });
+    // The unrelated realtime/media loader remains outside turn-model policy.
+    expect(await loadKey(client.db, settings, setup.workspaceId)).toBe("selected");
+    await expect(loadKey(client.db, settings, setup.workspaceId, modelId)).rejects.toThrow(
+      "disabled",
+    );
+    await expect(
+      assertModelConnectionAllowsTurn(client.db, { ...target, modelId }),
+    ).rejects.toThrow("disabled");
+    expect(
+      modelAllowedByConnections(
+        await getWorkspaceConnectionModelRestrictions(
+          client.db,
+          setup.workspaceId,
+          setup.actorSubjectId,
+        ),
+        modelId,
+      ),
+    ).toBe(false);
+    await assertModelConnectionAllowsTurn(client.db, {
+      ...target,
+      modelId,
+      workspaceProviderConnectionId: older!.id,
+    });
+    await expect(
+      assertModelConnectionAllowsTurn(client.db, {
+        ...target,
+        modelId,
+        workspaceProviderConnectionId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("disabled");
+    const current = (await getModelConnectionAccess(client.db, target))!;
+    await updateModelConnectionAccess(client.db, target, {
+      ...current,
+      allowedModels: [modelId],
+    });
+    expect(await loadKey(client.db, settings, setup.workspaceId, modelId)).toBe("selected");
+    expect(
+      modelAllowedByConnections(
+        await getWorkspaceConnectionModelRestrictions(
+          client.db,
+          setup.workspaceId,
+          setup.actorSubjectId,
+        ),
+        modelId,
+      ),
+    ).toBe(true);
   },
 );
 beforeAll(async () => {

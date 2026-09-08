@@ -10,7 +10,10 @@ export {
   modelAllowedByConnections,
   type ConnectionModelRestrictions,
 } from "./workspace-model-connection-access";
-import { getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions } from "./workspace-model-connection-access";
+import {
+  assertModelConnectionAllowsTurn,
+  getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -14112,6 +14115,7 @@ async function loadWorkspaceProviderApiKey(
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
+  turnModelId?: string | null,
 ): Promise<string | null> {
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
@@ -14139,6 +14143,14 @@ async function loadWorkspaceProviderApiKey(
   ) {
     return null;
   }
+  if (turnModelId) {
+    await assertModelConnectionAllowsTurn(db, {
+      workspaceId,
+      subjectId: "worker:model-access",
+      modelId: turnModelId,
+      workspaceProviderConnectionId: connection.id,
+    });
+  }
   const apiKey = connection.credential.apiKey;
   return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
@@ -14148,8 +14160,15 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "vercel_gateway");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "vercel_gateway",
+    turnModelId?.startsWith("workspace-gateway/") ? turnModelId : null,
+  );
 }
 
 /** Resolve only the reviewed workspace-shared OpenRouter credential shape. */
@@ -14157,8 +14176,15 @@ export async function loadWorkspaceOpenRouterApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "openrouter");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "openrouter",
+    turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+  );
 }
 
 /**
