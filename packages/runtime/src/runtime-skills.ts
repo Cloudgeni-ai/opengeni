@@ -71,6 +71,7 @@ export type RuntimeSkillActivation =
 export type NativeToolSkillSet = Readonly<{
   editableArtifacts: boolean;
   sites?: boolean;
+  projects?: boolean;
   videoGeneration: boolean;
 }>;
 
@@ -310,6 +311,15 @@ function nativeToolSkillSources(nativeTools: NativeToolSkillSet): Array<{
       lazySource: localDirLazySkillSource({ src: directory }),
       names: skillDirNames(directory),
       reason: "native editable-artifact tool surface",
+    });
+  }
+  if (nativeTools.projects) {
+    const directory = packagedSkillDirectory("bundled_project_skills");
+    sources.push({
+      directory,
+      lazySource: localDirLazySkillSource({ src: directory, baseDir: directory }),
+      names: skillDirNames(directory),
+      reason: "bundled project organization skill",
     });
   }
   if (nativeTools.sites) {

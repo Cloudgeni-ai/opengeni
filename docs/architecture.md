@@ -1123,6 +1123,16 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
+Workspace projects (`channels` in storage/REST) group root sessions in the sidebar.
+`project_list/get/create/update/reorder/delete` and `session_set_project` expose
+the existing workspace/session permission checks through first-party MCP. Pins
+and order are shared; filing changes no runtime settings or session visibility.
+`sessions_list` accepts `projectId` (null = unfiled), and `session_create` accepts
+an explicit project. The bundled `opengeni-projects` skill explains this UI model
+on managed sandboxes; Connected Machines use the self-contained tool descriptions,
+matching the existing bundled-skill filesystem boundary.
+
+
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
