@@ -267,7 +267,7 @@ export function ScenarioStack({
       queuedAheadCount={queue.queue.length}
       placeholder="Send a follow-up…"
       attachments={attachments}
-      attachButtonClassName="max-sm:hidden"
+      attachButtonClassName="console-composer-wide-control max-sm:hidden"
       transcription={{
         client: fixtureClient as never,
         workspaceId: GALLERY_WORKSPACE_ID,
@@ -284,7 +284,7 @@ export function ScenarioStack({
         />
       }
       controlsStart={
-        <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5 max-sm:flex-nowrap">
+        <div className="@container/model-controls flex min-w-0 flex-1 flex-wrap items-center gap-1.5 max-sm:flex-nowrap">
           <ModelPicker
             rows={galleryModelRows}
             model={model}
@@ -300,7 +300,7 @@ export function ScenarioStack({
             firstPartyTools={galleryFirstPartyTools}
             selection={toolSelection}
             menuSide="top"
-            triggerClassName="max-sm:hidden"
+            triggerClassName="console-composer-wide-control max-sm:hidden"
             onChange={setToolSelection}
           />
         </div>
