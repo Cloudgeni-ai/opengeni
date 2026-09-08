@@ -121,6 +121,7 @@ import { TimelineAnnotationCards } from "./timeline-annotations";
 import { TooltipProvider } from "./tooltip";
 
 const TimelineAnnotationSelection = lazy(() => import("./timeline-annotation-selection"));
+const TimelineAnnotationMarkers = lazy(() => import("./timeline-annotation-markers"));
 
 export type MessageTimelineProps = {
   /** Raw session events (projected internally) … */
@@ -189,6 +190,10 @@ export type MessageTimelineProps = {
   autoFollow?: boolean | undefined;
   /** Capture a same-row text selection into the host's canonical composer draft. */
   onAnnotate?: ((annotation: DraftTimelineAnnotation) => void) | undefined;
+  /** Composer draft quotes currently attached to the next send. */
+  draftAnnotations?: readonly DraftTimelineAnnotation[] | undefined;
+  /** Open the composer review list for one numbered draft badge. */
+  onDraftAnnotationSelect?: ((id: string) => void) | undefined;
   /** Older durable history exists above the current window (see useSessionEvents). */
   hasOlder?: boolean | undefined;
   /** An older window is being fetched; shows the quiet top shimmer. */
@@ -402,6 +407,8 @@ export function MessageTimeline({
   turnSummary,
   autoFollow = true,
   onAnnotate,
+  draftAnnotations,
+  onDraftAnnotationSelect,
   hasOlder = false,
   loadingOlder = false,
   onLoadOlder,
@@ -1791,6 +1798,14 @@ export function MessageTimeline({
                         rootRef={scrollRef}
                         sources={annotationSources}
                         onAnnotate={onAnnotate}
+                      />
+                    </Suspense>
+                  ) : null}
+                  {draftAnnotations && draftAnnotations.length > 0 ? (
+                    <Suspense fallback={null}>
+                      <TimelineAnnotationMarkers
+                        annotations={draftAnnotations}
+                        onSelect={onDraftAnnotationSelect}
                       />
                     </Suspense>
                   ) : null}
@@ -3190,17 +3205,15 @@ function AgentMessageRow({
   // While streaming, copy is still useful (current text) but keep chrome calm —
   // stamp only after the message finishes (occurredAt tracks completion).
   return (
-    <div data-og-annotation-source-key={item.annotationSource?.eventId}>
-      <CopyHoverFrame
-        copyText={item.text}
-        label="Copy message"
-        align="start"
-        className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
-        trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
-      >
-        {body}
-      </CopyHoverFrame>
-    </div>
+    <CopyHoverFrame
+      copyText={item.text}
+      label="Copy message"
+      align="start"
+      className={cn(enter && "animate-og-enter", "min-w-0 text-og-md leading-7 text-og-fg")}
+      trailing={item.streaming ? null : <MessageFooterTime occurredAt={item.occurredAt} />}
+    >
+      <div data-og-annotation-source-key={item.annotationSource?.eventId}>{body}</div>
+    </CopyHoverFrame>
   );
 }
 

@@ -2,4 +2,4 @@
 "@opengeni/react": patch
 ---
 
-Keep composer timeline annotations as numbered pills: collapsed by default, popover for the note, Enter to commit, Escape to close.
+Group composer timeline annotations into one count chip, pin numbered badges on the quoted source text, and keep Add note available for long highlights that end in message chrome.

@@ -2,11 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { MessageTimeline } from "../src";
-import {
-  TimelineAnnotationDraftList,
-  TimelineAnnotationsChip,
-} from "../src/components/timeline-annotations";
-import type { UserMessageItem } from "../src/timeline";
+import { TimelineAnnotationsChip } from "../src/components/timeline-annotations";
+import type { AgentMessageItem, UserMessageItem } from "../src/timeline";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
@@ -49,6 +46,57 @@ function annotation(note = "Keep this exact constraint."): DraftTimelineAnnotati
     quote: "beta",
     note,
   };
+}
+
+function agentItem(id: string, text: string, sequence: number): AgentMessageItem {
+  return {
+    kind: "agent-message",
+    id,
+    turnId: "00000000-0000-4000-8000-000000000504",
+    text,
+    streaming: false,
+    occurredAt: "2026-08-09T12:00:00.000Z",
+    annotationSource: {
+      kind: "assistant_message",
+      eventId: id,
+      eventType: "agent.message.completed",
+      sequence,
+      turnId: "00000000-0000-4000-8000-000000000504",
+      text,
+    },
+  };
+}
+
+function stubRangeGeometry(): void {
+  const rect = {
+    left: 40,
+    right: 90,
+    top: 20,
+    bottom: 40,
+    width: 50,
+    height: 20,
+    x: 40,
+    y: 20,
+    toJSON: () => ({}),
+  };
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => rect,
+  });
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => {
+      const list = {
+        length: 1,
+        item: () => rect,
+        0: rect,
+        [Symbol.iterator]: function* () {
+          yield rect;
+        },
+      };
+      return list;
+    },
+  });
 }
 
 function selectText(node: Text, start: number, end: number): void {
@@ -215,28 +263,28 @@ describe("timeline annotations", () => {
     await rendered.unmount();
   });
 
-  test("keeps composer annotations as numbered pills until a note is opened", async () => {
+  test("keeps composer annotations as one numbered count chip", async () => {
     await import("../src/components/timeline-annotations-dialog");
     let note = "";
-    let removed = "";
+    const removed: string[] = [];
     const rendered = await renderComponent(
-      <TimelineAnnotationDraftList
+      <TimelineAnnotationsChip
         annotations={[annotation("")]}
+        editable
         focusAnnotationId="00000000-0000-4000-8000-000000000502"
         onUpdate={(_id, next) => {
           note = next;
         }}
         onRemove={(id) => {
-          removed = id;
+          removed.push(id);
         }}
       />,
     );
-    const pill = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Annotation 1, needs a note: beta"]',
+    const chip = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Review 1 annotation"]',
     );
-    expect(pill).not.toBeNull();
-    expect(pill?.textContent).toContain("1");
-    expect(pill?.textContent).toContain("beta");
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toContain("1 annotation");
     expect(rendered.container.textContent).not.toContain("Quoted note");
     expect(rendered.container.textContent).not.toContain("Add a note to send this quote.");
     expect(rendered.container.querySelector("textarea")).toBeNull();
@@ -254,14 +302,14 @@ describe("timeline annotations", () => {
     });
     expect(note).toBe("Keep this exact constraint.");
     const remove = rendered.container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Remove annotation 1"]',
+      'button[aria-label="Remove all annotations"]',
     );
     await act(async () => remove?.click());
-    expect(removed).toBe("00000000-0000-4000-8000-000000000502");
+    expect(removed).toEqual(["00000000-0000-4000-8000-000000000502"]);
     await rendered.unmount();
   });
 
-  test("keeps numbered composer pills collapsed until clicked", async () => {
+  test("keeps one grouped composer chip until the review list is opened", async () => {
     await import("../src/components/timeline-annotations-dialog");
     const second: DraftTimelineAnnotation = {
       ...annotation(""),
@@ -269,40 +317,41 @@ describe("timeline annotations", () => {
       quote: "gamma",
     };
     const rendered = await renderComponent(
-      <TimelineAnnotationDraftList
+      <TimelineAnnotationsChip
         annotations={[annotation("Keep this exact constraint."), second]}
+        editable
         onUpdate={() => undefined}
         onRemove={() => undefined}
       />,
     );
+    expect(rendered.container.textContent).toContain("2 annotations");
     expect(
-      rendered.container.querySelector('button[aria-label="Annotation 1: beta"]'),
-    ).not.toBeNull();
-    expect(
-      rendered.container.querySelector('button[aria-label="Annotation 2, needs a note: gamma"]'),
+      rendered.container.querySelector('button[aria-label="Review 2 annotations"]'),
     ).not.toBeNull();
     expect(document.body.querySelector("textarea")).toBeNull();
     await act(async () => {
       rendered.container
-        .querySelector<HTMLButtonElement>('button[aria-label="Annotation 2, needs a note: gamma"]')
+        .querySelector<HTMLButtonElement>('button[aria-label="Review 2 annotations"]')
         ?.click();
     });
     await waitFor(
       () => document.body.querySelector("textarea") !== null,
-      "annotation 2 popover did not open",
+      "annotation review list did not open",
     );
+    expect(document.body.textContent).toContain("Annotation 1");
     expect(document.body.textContent).toContain("Annotation 2");
     expect(document.body.querySelector("textarea")).not.toBeNull();
     await rendered.unmount();
   });
 
-  test("commits a completed note with Enter and closes the popover with Escape", async () => {
+  test("commits a completed note with Enter and closes the review list with Escape", async () => {
     await import("../src/components/timeline-annotations-dialog");
     function Harness() {
       const [items, setItems] = useState([annotation("")]);
       return (
-        <TimelineAnnotationDraftList
+        <TimelineAnnotationsChip
           annotations={items}
+          editable
           focusAnnotationId={items[0]?.id}
           onUpdate={(id, next) => {
             setItems((current) =>
@@ -330,42 +379,47 @@ describe("timeline annotations", () => {
     });
     await waitFor(
       () => document.body.querySelector('[role="dialog"]') === null,
-      "Enter did not close the annotation popover",
+      "Enter did not close the annotation review list",
     );
     await act(async () => {
       rendered.container
-        .querySelector<HTMLButtonElement>('button[aria-label="Annotation 1: beta"]')
+        .querySelector<HTMLButtonElement>('button[aria-label="Review 1 annotation"]')
         ?.click();
     });
     await waitFor(
       () => document.body.querySelector('[role="dialog"]') !== null,
-      "annotation popover did not reopen",
+      "annotation review list did not reopen",
     );
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     });
     await waitFor(
       () => document.body.querySelector('[role="dialog"]') === null,
-      "Escape did not close the annotation popover",
+      "Escape did not close the annotation review list",
     );
     await rendered.unmount();
   });
 
-  test("keeps a full sentence quote visible on the numbered composer pill", async () => {
+  test("keeps a full sentence quote visible in the open review list", async () => {
+    await import("../src/components/timeline-annotations-dialog");
     const rendered = await renderComponent(
-      <TimelineAnnotationDraftList
+      <TimelineAnnotationsChip
         annotations={[
           {
             ...annotation(""),
             quote: "OpenGeni stack is working.",
           },
         ]}
+        editable
+        focusAnnotationId="00000000-0000-4000-8000-000000000502"
         onUpdate={() => undefined}
         onRemove={() => undefined}
       />,
     );
-    expect(rendered.container.textContent).toContain("OpenGeni stack is working.");
-    expect(rendered.container.querySelector("textarea")).toBeNull();
+    expect(rendered.container.textContent).toContain("1 annotation");
+    expect(rendered.container.textContent).not.toContain("OpenGeni stack is working.");
+    expect(document.body.textContent).toContain("OpenGeni stack is working.");
+    expect(document.body.querySelector("textarea")).not.toBeNull();
     await rendered.unmount();
   });
 
@@ -390,6 +444,109 @@ describe("timeline annotations", () => {
     expect(addNoteButton()?.textContent).toContain("beta");
     await act(async () => action?.click());
     expect(captured?.quote).toBe("beta");
+    await rendered.unmount();
+  });
+
+  test("still offers Add note when pointerup lands outside the timeline", async () => {
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={() => undefined} />,
+    );
+    await flush();
+    const source = rendered.container.querySelector<HTMLElement>(
+      `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+    );
+    source?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    selectText(firstTextNode(source!), 6, 10);
+    document.body.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    await waitFor(
+      () => Boolean(addNoteButton()),
+      "annotation action did not appear after pointerup outside the timeline",
+    );
+    expect(addNoteButton()?.textContent).toContain("beta");
+    await rendered.unmount();
+  });
+
+  test("does not resurrect a leftover selection from a click that started outside", async () => {
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={() => undefined} />,
+    );
+    await flush();
+    const source = rendered.container.querySelector<HTMLElement>(
+      `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+    );
+    document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+    selectText(firstTextNode(source!), 6, 10);
+    source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    await flush();
+    expect(addNoteButton()).toBeUndefined();
+    await rendered.unmount();
+  });
+
+  test("clips a chrome-inclusive highlight back to the assistant sentence", async () => {
+    let captured: DraftTimelineAnnotation | null = null;
+    const text = "OpenGeni stack is working.";
+    const item = agentItem(SOURCE_EVENT_ID, text, 4);
+    const rendered = await renderComponent(
+      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+    );
+    await flush();
+    const source = rendered.container.querySelector<HTMLElement>(
+      `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+    );
+    const chrome = rendered.container.querySelector<HTMLElement>("[data-og-annotation-chrome]");
+    expect(source).not.toBeNull();
+    expect(chrome).not.toBeNull();
+    stubRangeGeometry();
+    const range = document.createRange();
+    range.setStart(firstTextNode(source!), 0);
+    range.setEnd(chrome!, 0);
+    const selection = document.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+    await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear for a long highlight");
+    const action = addNoteButton();
+    expect(action?.textContent).toContain("OpenGeni stack is working.");
+    await act(async () => action?.click());
+    expect(captured?.quote).toBe(text);
+    await rendered.unmount();
+  });
+
+  test("pins numbered badges on quoted timeline text", async () => {
+    stubRangeGeometry();
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const first = annotation("");
+    const second: DraftTimelineAnnotation = {
+      ...annotation("Keep this exact constraint."),
+      id: "00000000-0000-4000-8000-000000000522",
+      quote: "omega",
+      source: {
+        ...annotation().source,
+        startOffset: 11,
+        endOffset: 16,
+        contextBefore: "beta ",
+        contextAfter: "",
+      },
+    };
+    const selected: string[] = [];
+    const rendered = await renderComponent(
+      <MessageTimeline
+        items={[item]}
+        onAnnotate={() => undefined}
+        draftAnnotations={[first, second]}
+        onDraftAnnotationSelect={(id) => selected.push(id)}
+      />,
+    );
+    await flush();
+    const badges = [...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]")];
+    expect(badges.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Annotation 1",
+      "Annotation 2",
+    ]);
+    await act(async () => badges[1]?.click());
+    expect(selected).toEqual(["00000000-0000-4000-8000-000000000522"]);
     await rendered.unmount();
   });
 });

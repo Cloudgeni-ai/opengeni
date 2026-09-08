@@ -1832,6 +1832,8 @@ function SessionChatPane(props: {
               computeLabel={computeLabel}
               renderMessageText={renderMessageText}
               onAnnotate={composer.addAnnotation}
+              draftAnnotations={composer.annotations}
+              onDraftAnnotationSelect={composer.requestAnnotationReview}
               onOpenSession={props.onOpenSession}
               onMemoryClick={props.onMemoryClick}
               onReconnect={props.onReconnect}

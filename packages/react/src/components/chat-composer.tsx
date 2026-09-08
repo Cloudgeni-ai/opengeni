@@ -35,7 +35,7 @@ import {
   ComposerTranscriptionControl,
   type ComposerTranscriptionControlProps,
 } from "./composer-transcription-control";
-import { TimelineAnnotationDraftList } from "./timeline-annotations";
+import { TimelineAnnotationsChip } from "./timeline-annotations";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
@@ -162,8 +162,9 @@ export function ChatComposer({
             composer.updateAnnotation &&
             composer.removeAnnotation ? (
               <div className="px-3.5 pt-2 md:px-4">
-                <TimelineAnnotationDraftList
+                <TimelineAnnotationsChip
                   annotations={composer.annotations}
+                  editable
                   focusAnnotationId={composer.annotationReviewTargetId}
                   onFocusConsumed={composer.clearAnnotationReviewTarget}
                   onUpdate={composer.updateAnnotation}
