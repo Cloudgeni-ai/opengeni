@@ -1,3 +1,4 @@
+import { trackModelConnection } from "@/lib/analytics-observer";
 import type { ConnectionMetadata, WorkspaceGatewayCustomModel } from "@opengeni/sdk";
 import { WORKSPACE_GATEWAY_CUSTOM_MODEL_UPSTREAM_ID_MAX_LENGTH } from "@opengeni/contracts";
 import { OpenGeniApiError, type OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -370,6 +371,10 @@ function ModelProviderConnectionCardWithClient(
   async function save() {
     const value = apiKey.trim();
     if (!value) return;
+    const recordOutcome = trackModelConnection(
+      config.id === "openrouter" ? "openrouter" : "ai-gateway",
+      props.workspaceId,
+    );
     const operationId = crypto.randomUUID();
     connectionRequestGenerationRef.current += 1;
     setBusy(true);
@@ -396,6 +401,7 @@ function ModelProviderConnectionCardWithClient(
             operationId,
           });
     const commitSavedConnection = (saved: ConnectionMetadata) => {
+      recordOutcome("connected");
       connectionRequestGenerationRef.current += 1;
       setConnections((current) => [
         saved,
@@ -429,6 +435,7 @@ function ModelProviderConnectionCardWithClient(
       }
       await refreshConnection();
       if (!activeRef.current) return;
+      recordOutcome("outcome_unknown");
       toast.error(`Couldn't save ${config.credentialLabel} key`, {
         description: finalError instanceof Error ? finalError.message : String(finalError),
       });
@@ -674,7 +681,14 @@ function ModelProviderConnectionCardWithClient(
                   placeholder={config.keyPlaceholder(connected)}
                   aria-label={config.keyAriaLabel}
                 />
-                <Button type="button" disabled={busy || !apiKey.trim()} onClick={save}>
+                <Button
+                  type="button"
+                  disabled={busy || !apiKey.trim()}
+                  data-analytics-action={
+                    config.id === "openrouter" ? "connect_openrouter" : "connect_ai_gateway"
+                  }
+                  onClick={save}
+                >
                   {busy ? (
                     <Loader2Icon className="size-3.5 animate-spin" />
                   ) : connected ? (
