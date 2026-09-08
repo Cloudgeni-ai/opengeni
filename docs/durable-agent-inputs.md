@@ -50,7 +50,9 @@ passes unchanged, settlement clears the wait and atomically queues one typed
 
 A successful Temporal signal is transport delivery, not input admission. The
 current workflow-wake revision stays retryable while an eligible immediate input
-remains pending, or an idle session still owns a current input wait. A closing
+remains pending, or an idle session still owns an expired input wait. Future holds acknowledge
+the early signal so settlement can re-arm their deadline without retaining an
+earlier retry time. A closing
 workflow cannot acknowledge away that obligation. Claim, supersession, and
 explicit control remain authoritative; deferred notices and late child results
 without ongoing intent do not create new work.

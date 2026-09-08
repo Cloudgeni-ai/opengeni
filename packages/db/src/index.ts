@@ -72374,8 +72374,7 @@ export async function claimPendingSessionWorkflowWakes(
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
  * Agent Steer, a current wake owns a queued human/API turn, eligible machine
- * input, or an idle input-wait obligation, or
- * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * input, or a due idle input-wait obligation, or an attempt awaits quiescence, retain the revision so the bounded outbox
  * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
  * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
@@ -72514,7 +72513,9 @@ export async function markSessionWorkflowWakeDelivered(
                 )
               )
                 return { action: "pending_admission", blocker: "pending_machine_input" } as const;
-              if (wait.disposition === "held" || wait.disposition === "timeout") {
+              // A future hold is explicitly re-armed by settlement. Retaining its
+              // early transport revision would coalesce every rearm back to now.
+              if (wait.disposition === "timeout") {
                 return { action: "pending_admission", blocker: "pending_input_wait" } as const;
               }
             }

@@ -2978,10 +2978,10 @@ describe("session-level wait_for_input", () => {
     });
   });
 
-  test("wait delivery remains pending until settlement, while Pause remains authoritative", async () => {
+  test("early wakes park at the deadline, due waits retry, and Pause remains authoritative", async () => {
     const ctx = await runningGoalFixture();
     await clearSessionGoal(client.db, ctx.grant.workspaceId!, ctx.session.id);
-    await wait(ctx, { timeoutSeconds: 600 });
+    const waiting = await wait(ctx, { timeoutSeconds: 600 });
     await settleIdle(ctx);
     const wake = (await outboxRow(ctx))!;
     const receipt = {
@@ -2991,6 +2991,28 @@ describe("session-level wait_for_input", () => {
       temporalWorkflowId: `session-${ctx.session.id}`,
       wakeRevision: Number(wake.wake_revision),
     };
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "acknowledged",
+    });
+    await settleSessionInputWait(client.db, {
+      accountId: ctx.grant.accountId,
+      workspaceId: ctx.grant.workspaceId!,
+      sessionId: ctx.session.id,
+      waitTurnId: ctx.turn.id,
+      disposition: "held",
+    });
+    const parked = (await outboxRow(ctx))!;
+    expect(parked.next_attempt_at.toISOString()).toBe(waiting.deadlineAt);
+    expect(Number(parked.wake_revision)).toBeGreaterThan(Number(parked.delivered_revision));
+    // The old sender cannot retire the newly armed deadline revision.
+    expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
+      action: "acknowledged",
+    });
+    expect(Number((await outboxRow(ctx))!.delivered_revision)).toBeLessThan(
+      Number(parked.wake_revision),
+    );
+    await shared.admin`update sessions set input_wait_until = now() - interval '1 second' where id = ${ctx.session.id}`;
+    receipt.wakeRevision = Number(parked.wake_revision);
     expect(await markSessionWorkflowWakeDelivered(client.db, receipt)).toEqual({
       action: "pending_admission",
       blocker: "pending_input_wait",
