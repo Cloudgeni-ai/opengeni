@@ -426,7 +426,10 @@ const budgets = {
   // 2,321,455 raw / 647,272 gzip; the merged graph is 2,326,574 / 648,938
   // on Bun 1.4 macOS/arm64, with the same 29 files. Bound only this measured
   // feature delta with the established whole-KiB headroom.
-  directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_326_574)),
+  // Fresh main 2fb17fdd7 adds Site-origin metadata: the combined graph measures
+  // 2,329,400 raw / 649,936 gzip across 31 files. Advance only the raw envelope;
+  // the existing compressed/file caps still cover this integration.
+  directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_329_400)),
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
