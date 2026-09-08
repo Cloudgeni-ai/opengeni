@@ -1,3 +1,4 @@
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
@@ -19,7 +20,8 @@ import {
 
 import {
   SessionToolsMenuBody,
-  visibleSessionToolSelection,
+  sessionToolSelectionSummary,
+  SESSION_TOOLS_PANEL_CLASS,
   type SessionToolSelection,
 } from "@/components/pickers";
 import { Button } from "@/components/ui/button";
@@ -44,6 +46,7 @@ export function ComposerMobilePlus(props: {
   firstPartyTools: ReadonlyArray<{ id: FirstPartyMcpToolName; name: string }>;
   selection: SessionToolSelection;
   toolsDisabled?: boolean;
+  toolsSaving?: boolean;
   onToolSelectionChange: (selection: SessionToolSelection) => void;
   /** When set, Repositories appears under + and opens a drill-in panel. */
   repositories?: {
@@ -67,14 +70,8 @@ export function ComposerMobilePlus(props: {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
   const [panel, setPanel] = useState<Panel>("root");
-  const toolsTotal = props.servers.length + props.firstPartyTools.length;
-  const visible = visibleSessionToolSelection(
-    props.selection,
-    props.servers,
-    props.firstPartyTools,
-  );
-  const toolsSelected = visible.mcpServerIds.size + visible.firstPartyToolIds.size;
-  const toolsAvailable = toolsTotal > 0;
+  const toolSummary = sessionToolSelectionSummary(props);
+  const toolsAvailable = toolSummary.total > 0;
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
 
@@ -119,11 +116,15 @@ export function ComposerMobilePlus(props: {
         sideOffset={8}
         collisionPadding={12}
         className={
-          panel === "tools" || panel === "voice" || panel === "variables"
-            ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
-            : panel === "repos"
-              ? "flex w-[min(28rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-0"
-              : "min-w-52 rounded-xl"
+          panel === "tools"
+            ? SESSION_TOOLS_PANEL_CLASS
+            : panel === "variables"
+              ? "flex w-[min(24rem,calc(100vw-1.5rem))] max-h-[min(32rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-2 shadow-xl"
+              : panel === "voice"
+                ? "flex w-[min(20rem,calc(100vw-1.5rem))] max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl p-2"
+                : panel === "repos"
+                  ? REPOSITORY_PANEL_CLASS
+                  : "min-w-52 rounded-xl"
         }
       >
         {panel === "root" ? (
@@ -155,7 +156,7 @@ export function ComposerMobilePlus(props: {
                 <PlugIcon className="size-4" />
                 Tools
                 <span className="ml-auto text-2xs text-fg-subtle">
-                  {toolsSelected}/{toolsTotal}
+                  {props.toolsSaving ? "Saving…" : toolSummary.label}
                 </span>
               </DropdownMenuItem>
             ) : null}

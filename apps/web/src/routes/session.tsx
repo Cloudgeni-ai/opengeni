@@ -2107,6 +2107,7 @@ function SessionChatPane(props: {
                   servers={selectableSessionMcpServers}
                   firstPartyTools={firstPartyToolOptions}
                   selection={durableToolSelection}
+                  toolsSaving={durableToolsSaving}
                   toolsDisabled={
                     composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
                   }
