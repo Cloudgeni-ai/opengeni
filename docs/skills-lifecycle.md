@@ -67,11 +67,20 @@ actor; a stale attempt cannot use replay to regain access.
 same transaction. Callers omitting actor context fail before any write. Its
 return includes `skillReceipt`, so pending installation must not be reported as
 activated. `installSkill` alone requires an already-installed portable facet.
-Legacy last-owner uninstall fails while the unified head is active. A human
-must first deactivate the canonical head through the existing authorized
-registry lifecycle; there is no new agent deactivation operation in this seam.
-Pack-removal adapters must likewise resolve canonical head activation before
-removing distribution ownership.
+Last-owner direct, Pack, and plugin removal resolves the canonical head atomically
+with distribution cleanup through `skill-source-release.ts`. Source-managed
+workspace heads deactivate through the existing human registry lifecycle;
+customized or re-scoped heads remain active and return an explicit preservation
+warning. Immutable source bindings and history survive uninstall. Physical owners,
+including pending Pack owners, prevent cleanup even when not runtime-effective.
+The removal and upgrade-finalization APIs accept `skillActor`; removing a bound
+Skill requires a trusted `human_session` actor. Missing, service/API-key, and agent
+authority fails closed and rolls back. A subject ID is never treated as proof of
+human authority. No new agent deactivation authority is introduced here.
+Removal results expose `skillReleases` with the Skill/revision IDs, disposition,
+event ID, and warning. Pack and plugin finalizers return these receipts too;
+plugin operation replay retains them. Pack adapters must retain returned receipts
+when finalizing their operation result.
 
 ## Release
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { stableJson, type CapabilityCatalogAuthKind } from "@opengeni/contracts";
+import { stableJson, type CapabilityCatalogAuthKind, type SkillActor } from "@opengeni/contracts";
 import { and, asc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import {
@@ -9,6 +9,7 @@ import {
   lockCapabilityComponentIdentity,
 } from "./capability-components";
 import { setSubjectRlsContext, withRlsContext, withWorkspaceRls, type Database } from "./database";
+import type { SkillSourceReleaseReceipt } from "./skill-source-release";
 import {
   removeIntegrationFacetBindingOwner,
   removeIntegrationFacetBindingOwnersForOwner,
@@ -451,9 +452,10 @@ export async function finalizePluginPackageInstall(
     retainedFacetInstallationIds: string[];
     retainedBindingIds: string[];
     result: Record<string, unknown>;
+    skillActor?: SkillActor;
   },
-): Promise<void> {
-  await withRlsContext(
+): Promise<{ skillReleases: SkillSourceReleaseReceipt[] }> {
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
@@ -474,6 +476,7 @@ export async function finalizePluginPackageInstall(
             ),
           );
         const retained = new Set(input.retainedFacetInstallationIds);
+        let skillReleases: SkillSourceReleaseReceipt[] = [];
         const stale = ownedRows.filter((row) => !retained.has(row.facetInstallationId));
         if (stale.length > 0) {
           await tx.delete(schema.capabilityComponentOwners).where(
@@ -482,10 +485,11 @@ export async function finalizePluginPackageInstall(
               stale.map((row) => row.ownerId),
             ),
           );
-          await cleanupOrphanedCapabilityComponents(
+          skillReleases = await cleanupOrphanedCapabilityComponents(
             tx,
             input.workspaceId,
             stale.map((row) => row.facetInstallationId),
+            input.skillActor,
           );
         }
         const ownedBindings = await tx
@@ -521,13 +525,14 @@ export async function finalizePluginPackageInstall(
           .set({
             status: "completed",
             phase: "completed",
-            result: input.result,
+            result: { ...input.result, ...(skillReleases.length ? { skillReleases } : {}) },
             errorCode: null,
             version: sql`${schema.capabilityOperations.version} + 1`,
             completedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(schema.capabilityOperations.id, input.operationId));
+        return { skillReleases };
       });
     },
   );
@@ -861,8 +866,13 @@ export async function uninstallPluginPackage(
     pluginKey: string;
     expectedInstallationVersion: number;
     idempotencyKey: string;
+    skillActor?: SkillActor;
   },
-): Promise<{ status: "not_installed" | "uninstalled"; retainedComponents: string[] }> {
+): Promise<{
+  status: "not_installed" | "uninstalled";
+  retainedComponents: string[];
+  skillReleases?: SkillSourceReleaseReceipt[];
+}> {
   const requestDigest = sha256(
     stableJson({
       pluginKey: input.pluginKey,
@@ -904,6 +914,12 @@ export async function uninstallPluginPackage(
                   ? "not_installed"
                   : "uninstalled",
               retainedComponents: stringArray(existingOperation.result.retainedComponents),
+              ...(Array.isArray(existingOperation.result.skillReleases)
+                ? {
+                    skillReleases: existingOperation.result
+                      .skillReleases as SkillSourceReleaseReceipt[],
+                  }
+                : {}),
             };
           }
         }
@@ -937,10 +953,11 @@ export async function uninstallPluginPackage(
             ),
           )
           .returning({ facetInstallationId: schema.capabilityComponentOwners.facetInstallationId });
-        await cleanupOrphanedCapabilityComponents(
+        const skillReleases = await cleanupOrphanedCapabilityComponents(
           tx,
           input.workspaceId,
           owned.map((row) => row.facetInstallationId),
+          input.skillActor,
         );
         await tx
           .update(schema.capabilityPluginInstallations)
@@ -956,8 +973,13 @@ export async function uninstallPluginPackage(
         await completeInlineOperation(tx, input, requestDigest, {
           status: "uninstalled",
           retainedComponents,
+          ...(skillReleases.length ? { skillReleases } : {}),
         });
-        return { status: "uninstalled", retainedComponents };
+        return {
+          status: "uninstalled",
+          retainedComponents,
+          ...(skillReleases.length ? { skillReleases } : {}),
+        };
       });
     },
   );

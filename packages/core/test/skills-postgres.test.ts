@@ -395,7 +395,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         capabilityId: input.capabilityId,
         expectedInstallationVersion: refreshed.installationVersion,
       }),
-    ).rejects.toThrow("Deactivate the unified Skill head");
+    ).rejects.toThrow("requires a trusted human session actor");
     const projection = await listInstalledPortableSkills(client.db, f.context.workspaceId);
     expect(projection[0]?.name).toBe("source-skill");
     expect(projection[0]?.files).toEqual(customFiles);
@@ -403,6 +403,22 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const [owners] = await shared!
       .admin`select count(*)::integer as count from capability_component_owners where workspace_id=${f.context.workspaceId}`;
     expect(owners!.count).toBeGreaterThan(0);
+    const removed = await uninstallPortableSkill(client.db, {
+      ...f.context,
+      capabilityId: input.capabilityId,
+      expectedInstallationVersion: refreshed.installationVersion,
+      skillActor: f.human.actor,
+    });
+    expect(removed.skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: custom.skillId,
+        disposition: "preserved",
+        eventId: null,
+      }),
+    ]);
+    expect(removed.skillReleases![0]!.warning).toContain("remains active");
+    expect((await readSkill(client.db, f.context, custom.skillId))?.files).toEqual(customFiles);
+    expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toHaveLength(0);
 
     const selected = await installPortableSkill(client.db, {
       ...input,
@@ -436,5 +452,32 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         })
       ).some((skill) => skill.capabilityId.endsWith("-selected")),
     ).toBe(true);
+    await expect(
+      uninstallPortableSkill(client.db, {
+        ...f.context,
+        capabilityId: `${input.capabilityId}-selected`,
+        expectedInstallationVersion: selected.installationVersion,
+        skillActor: f.agent.actor,
+      }),
+    ).rejects.toThrow("agent removal are unsupported");
+    const sourceRemoved = await uninstallPortableSkill(client.db, {
+      ...f.context,
+      capabilityId: `${input.capabilityId}-selected`,
+      expectedInstallationVersion: selected.installationVersion,
+      skillActor: f.human.actor,
+    });
+    expect(sourceRemoved.skillReleases).toEqual([
+      expect.objectContaining({
+        skillId: selected.skillReceipt.skillId,
+        disposition: "deactivated",
+        eventId: expect.any(String),
+      }),
+    ]);
+    const [head] = await shared!
+      .admin`select status from preference_registry_preferences where id=${selected.skillReceipt.skillId}`;
+    expect(head!.status).toBe("inactive");
+    const [event] = await shared!
+      .admin`select actor_subject_id from preference_registry_events where id=${sourceRemoved.skillReleases![0]!.eventId}`;
+    expect(event!.actor_subject_id).toBe(f.human.actor.subjectId);
   });
 });

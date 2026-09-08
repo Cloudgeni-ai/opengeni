@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { applySkillLifecycle, listSkillRecords, skillFilesContentHash } from "./skills";
+import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
 import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -471,6 +472,7 @@ export * from "./governed-learning-evaluator";
 export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
+export type { SkillSourceReleaseReceipt } from "./skill-source-release";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";
@@ -6065,6 +6067,7 @@ export type UninstallPortableSkillResult = {
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: PortableSkillOwner[];
+  skillReleases?: SkillSourceReleaseReceipt[];
 };
 
 export class PortableSkillInstallationVersionConflictError extends Error {
@@ -9004,6 +9007,7 @@ export async function uninstallPortableSkill(
     workspaceId: string;
     capabilityId: string;
     expectedInstallationVersion: number;
+    skillActor?: SkillActor;
   },
 ): Promise<UninstallPortableSkillResult> {
   return await withRlsContext(
@@ -9059,32 +9063,11 @@ export async function uninstallPortableSkill(
           };
         }
 
-        const [activeSkill] = await tx
-          .select({ id: schema.preferenceRegistryPreferences.id })
-          .from(schema.skillSourceBindings)
-          .innerJoin(
-            schema.preferenceRegistryPreferences,
-            eq(schema.preferenceRegistryPreferences.id, schema.skillSourceBindings.preferenceId),
-          )
-          .innerJoin(
-            schema.capabilityFacetInstallations,
-            eq(
-              schema.capabilityFacetInstallations.facetId,
-              schema.skillSourceBindings.skillFacetId,
-            ),
-          )
-          .where(
-            and(
-              eq(schema.capabilityFacetInstallations.id, context.facetInstallationId),
-              eq(schema.skillSourceBindings.workspaceId, input.workspaceId),
-              eq(schema.preferenceRegistryPreferences.status, "active"),
-            ),
-          )
-          .limit(1);
-        if (activeSkill)
-          throw new Error(
-            "Deactivate the unified Skill head before removing its last source owner",
-          );
+        const skillReleases = await releaseOrphanedSkillHeads(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          facetInstallationIds: [context.facetInstallationId],
+          ...(input.skillActor ? { skillActor: input.skillActor } : {}),
+        });
 
         const now = new Date();
         await tx
@@ -9112,6 +9095,7 @@ export async function uninstallPortableSkill(
           capabilityId: input.capabilityId,
           status: "uninstalled",
           remainingOwners: [],
+          ...(skillReleases.length ? { skillReleases } : {}),
         };
       }),
   );
@@ -9179,15 +9163,7 @@ async function portableSkillOwners(
       removable: schema.capabilityComponentOwners.removable,
     })
     .from(schema.capabilityComponentOwners)
-    .where(
-      and(
-        eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId),
-        effectiveCapabilityOwnerSql(
-          schema.capabilityComponentOwners.ownerKind,
-          schema.capabilityComponentOwners.ownerId,
-        ),
-      ),
-    )
+    .where(eq(schema.capabilityComponentOwners.facetInstallationId, facetInstallationId))
     .orderBy(
       asc(schema.capabilityComponentOwners.ownerKind),
       asc(schema.capabilityComponentOwners.ownerId),

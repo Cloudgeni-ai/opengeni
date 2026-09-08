@@ -186,12 +186,13 @@ describe("portable Skill persistence", () => {
     await deactivateInstalledSkill(installed);
     expect(
       await uninstallPortableSkill(client.db, {
+        skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
         accountId: first.accountId,
         workspaceId: first.workspaceId,
         capabilityId: input.capabilityId,
         expectedInstallationVersion: 1,
       }),
-    ).toEqual({
+    ).toMatchObject({
       capabilityId: input.capabilityId,
       status: "uninstalled",
       remainingOwners: [],
@@ -233,6 +234,7 @@ describe("portable Skill persistence", () => {
     ).rejects.toThrow("conflicts with immutable stored content");
     await deactivateInstalledSkill(installed);
     await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       capabilityId: input.capabilityId,
@@ -266,6 +268,7 @@ describe("portable Skill persistence", () => {
 
     await deactivateInstalledSkill(installed);
     await uninstallPortableSkill(client.db, {
+      skillActor: { kind: "human", subjectId: first.subjectId, principalKind: "human_session" },
       accountId: first.accountId,
       workspaceId: first.workspaceId,
       capabilityId: input.capabilityId,
