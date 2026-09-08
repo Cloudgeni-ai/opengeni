@@ -32,6 +32,8 @@ capability may be replaced when catalog or provider authority changes, but a
 consumed capability leaves a durable hash-only operation tombstone: the same
 operation id cannot be approved again after execution may have started.
 
+First-party project tools use existing session permissions: `project_list/get` require `sessions:read`; `project_create/update/reorder/delete` require `sessions:create`; `session_set_project` requires `sessions:control` and target-session authorization. Projects, pins and order are workspace-shared. Deletion unfiles sessions without stopping or deleting them. `sessions_list(projectId)` filters membership; `session_create(projectId)` files new work. The short [project skill](../packages/runtime/src/bundled_project_skills/opengeni-projects/SKILL.md) explains the sidebar model. No new ownership model or database migration is needed.
+
 First-party OpenGeni MCP memory tools:
 
 - `memory_search` — search the workspace's shared long-lived memory with hybrid semantic + keyword retrieval.

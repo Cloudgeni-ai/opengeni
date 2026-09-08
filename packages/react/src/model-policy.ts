@@ -116,6 +116,12 @@ export function labelReasoningEffort(effort: ReasoningEffort): string {
   return effort.slice(0, 1).toUpperCase() + effort.slice(1);
 }
 
+/** Payment prompts must use cost policy, never the presentation group. */
+export function modelUsesCredits(model: ClientModel | undefined): boolean {
+  if (model?.cost !== undefined) return model.cost === "credits";
+  return model?.billing?.metering === "opengeni_credits";
+}
+
 export function payerSummaryForModel(model: ClientModel): string {
   if (model.cost === "free") {
     return "Free in this deployment";
@@ -130,6 +136,9 @@ export function payerSummaryForModel(model: ClientModel): string {
   }
   if (model.cost === "workspace") {
     return workspaceProviderPayerSummary(model);
+  }
+  if (model.cost === "organization") {
+    return organizationProviderPayerSummary(model);
   }
 
   // Older client-config payloads do not carry `cost`; preserve their existing
@@ -149,14 +158,19 @@ export function payerSummaryForModel(model: ClientModel): string {
   if (billing.upstreamPayer === "workspace") {
     return workspaceProviderPayerSummary(model);
   }
-  return "External provider · no OpenGeni credits";
+  if (billing.upstreamPayer === "organization") {
+    return organizationProviderPayerSummary(model);
+  }
+  return billing.upstreamPayer === "deployment"
+    ? "OpenGeni · no model credits"
+    : "External provider · no OpenGeni credits";
 }
 
 export function advancedSourceSummary(model: ClientModel): string | null {
   const source = model.credentialSource;
   if (!source) {
     return model.billing?.metering === "external" && model.billing.upstreamPayer === "deployment"
-      ? "Deployment route · no authentication"
+      ? "Deployment-provided connection"
       : null;
   }
   if (source.kind === "connected_subscription") {
@@ -189,6 +203,16 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
     return "Billed to the workspace Vercel account";
   }
   return "Billed to the workspace provider account";
+}
+
+function organizationProviderPayerSummary(model: ClientModel): string {
+  if (model.provider === "organization-openrouter") {
+    return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-gateway") {
+    return "Billed to the organization Vercel account";
+  }
+  return "Billed to the organization provider account";
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
