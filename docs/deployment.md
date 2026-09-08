@@ -293,6 +293,11 @@ workspace credentials.
 `OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED=true` additionally exposes the
 SuperGrok/xAI connected-subscription rail. Workspace scope is the default shared
 connection path; private user scope requires the exact managed-browser human.
+Organization owners and admins can also share subscriptions with their shared
+and Personal workspaces. Migration `0423_organization_supergrok_subscriptions.sql`
+is a maintenance cutover: drain all API/control/turn processes, apply with the
+complete runtime role list, and restart only the matching release. Older workers
+cannot parse the new accepted-work organization scope.
 The same stable environments encryption key protects its OAuth material. See
 [`supergrok-subscription.md`](supergrok-subscription.md).
 `OPENGENI_SUPERGROK_RESPONSE_STREAM_IDLE_TIMEOUT_MS` optionally overrides the
@@ -3045,9 +3050,18 @@ unattributed Connected Machine rows remain service-owned. Deploy the new API and
 worker together to enable command and wait-timeout causal admission; this source
 change does not itself deploy or authorize pre-claim recovery.
 
+### Connection access policies (migration 0424)
+
+Drain every API, control worker, and turn worker before applying
+`0424_model_connection_access.sql`. Restart only the policy-aware binary; older
+workers do not enforce per-connection model restrictions and must not be used as
+rollback images once restrictions are configured. Existing connections retain
+unrestricted models and their prior workspace reach. See
+[model connection access](model-connection-access.md).
+
 ## Feedback storage activation
 
-Migration `0423_feedback_submissions.sql` extends the exact runtime table/privilege
+Migration `0425_feedback_submissions.sql` extends the exact runtime table/privilege
 contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
 and start the feedback-aware binary. Do not restart an older binary afterward.
 See [Feedback](feedback.md) for API, privacy, and retention behavior.

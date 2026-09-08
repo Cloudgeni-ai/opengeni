@@ -1,3 +1,4 @@
+import { modelAllowedByConnections, type ConnectionModelRestrictions } from "@opengeni/db";
 import {
   applyModelCatalogDocument,
   configuredGatewayWorkspaceProductModelIds,
@@ -379,6 +380,7 @@ export type ModelCredentialReadinessObservation =
 export const MODEL_CREDENTIAL_READINESS_OBSERVATION_MAX_AGE_MS = 5 * 60_000;
 
 export type WorkspaceModelSelectionInput = {
+  connectionModelRestrictions?: ConnectionModelRestrictions;
   settings: Settings;
   policy: WorkspaceModelPolicyContract | null;
   codexSubscriptionActive: boolean;
@@ -708,10 +710,11 @@ export function resolveWorkspaceModelSelection(
 
   return configuredModels(catalogSettings).map((model) => {
     const provider = providers.get(model.providerId);
-    const policyAllowed = evaluateWorkspaceModelPolicy(input.policy, {
-      providerId: model.providerId,
-      modelId: model.id,
-    }).allowed;
+    const policyAllowed =
+      evaluateWorkspaceModelPolicy(input.policy, {
+        providerId: model.providerId,
+        modelId: model.id,
+      }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
     const credentialReadiness = credentialReadinessFor({
       model,
       provider,

@@ -63,7 +63,7 @@ to associated submissions; it is not an indefinite audit archive.
 
 ## Deployment
 
-Migration `0423_feedback_submissions.sql` adds to the exact runtime table and
+Migration `0425_feedback_submissions.sql` adds to the exact runtime table and
 privilege contract. Stop old API, control-worker, and turn-worker processes,
 apply the migration, run `db:provision-roles`, and start the feedback-aware
 runtime. Do not restart a pre-migration binary after the schema change. No

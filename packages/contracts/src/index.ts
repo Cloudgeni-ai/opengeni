@@ -1,3 +1,4 @@
+export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -12072,6 +12073,8 @@ export const Session = z.object({
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
+  // Read projection: latest turn.started policy, or creation policy before any turn starts.
+  // Accepted/queued turns and actor composer drafts retain their own explicit policy.
   model: z.string(),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,

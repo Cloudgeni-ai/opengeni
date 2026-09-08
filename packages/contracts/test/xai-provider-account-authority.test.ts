@@ -5,7 +5,7 @@ import {
 } from "../src/xai-provider-account-authority";
 
 describe("xAI provider-account authority snapshots", () => {
-  test("accepts only the two strict version-one opaque shapes", () => {
+  test("accepts only the three strict version-one opaque shapes", () => {
     expect(
       XaiProviderAccountAuthoritySnapshotV1.parse(
         WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
@@ -19,7 +19,12 @@ describe("xAI provider-account authority snapshots", () => {
       }),
     ).toEqual({ version: 1, scope: "user", authorityGeneration: 7 });
 
+    expect(
+      XaiProviderAccountAuthoritySnapshotV1.parse({ version: 1, scope: "organization" }),
+    ).toEqual({ version: 1, scope: "organization" });
+
     for (const invalid of [
+      { version: 1, scope: "organization", authorityGeneration: 1 },
       {},
       { version: 2, scope: "workspace" },
       { version: 1, scope: "user" },
