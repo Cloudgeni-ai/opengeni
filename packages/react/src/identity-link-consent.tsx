@@ -3,7 +3,7 @@ import type {
   ExternalIdentityLink,
   ConfirmExternalIdentityLinkRequest,
   ExternalIdentityLinkPreview,
-} from "@opengeni/contracts/external-identities";
+} from "@opengeni/sdk";
 
 export type IdentityLinkClient = {
   previewIdentityLink(

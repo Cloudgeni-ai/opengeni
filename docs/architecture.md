@@ -54,210 +54,11 @@ The product has several deliberately separate surfaces:
   ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
-  The optional standalone remote MCP credential adapter lives in
-  `packages/core/src/remote-mcp-credentials.ts`; it implements the existing host
-  port without changing native OAuth or inline credentials. See
-  [`remote-mcp-credentials.md`](remote-mcp-credentials.md).
-  The workspace tool gateway uses a separate opt-in `mcpGatewayCredentials`
-  callback for verified external-user/service authority without synthetic turns;
-  its broker preserves live authorization through the physical transport check.
-  Worker host credentials separately retain canonical active-attempt liveness
-  through that transport check; liveness is not durable binding delegation.
-  `packages/connect` owns the framework-neutral setup controller and its
-  transport contract. It keeps durable attempt state distinct from browser
-  navigation and from credential submission; backend adapters own admission
-  and persistence, and UI frameworks subscribe to the same controller state.
-  Its optional browser navigation adapter isolates the popup opener before
-  provider navigation; backend polling, not popup messages, determines completion.
-  `packages/react/src/connect-setup.tsx` supplies the optional unstyled setup
-  form through `@opengeni/react/connect`; `connect-chooser.tsx` supplies the
-  optional readiness-aware provider/ownership chooser. `connect-accounts.tsx`
-  supplies version-checked local disconnect confirmation; `ConnectPanel` composes
-  these surfaces with opt-in scoped `@opengeni/react/connect.css`. Hosts retain navigation and
-  paginated resource-selection ownership. The native curated-account controller
-  uses `native-connect-setup.tsx` over the same transport/setup, discovers pending
-  attempts and retains the exact named installation target/version through OAuth
-  and operation review. Legacy query callbacks remain readable for in-flight
-  old setup. Other provider families still require their dedicated adapters.
-  `packages/react/src/sites.ts` exports the optional `@opengeni/react/sites`
-  list/detail/lifecycle adapter over the existing SDK artifact client. It reuses
-  `PublishedHtmlArtifactFrame` and host-provided navigation/tool
-  bridge callbacks; read-authority refresh failure removes the frame. Native
-  route adoption and visual acceptance are not implied by this package surface.
-  Authoring prompts and buttons remain product-owned ordinary session flows:
-  native `artifact-authoring.ts` retains the console's instructions and model
-  preference composition. The embedded example owns its own prompts and links;
-  neither is a dedicated SDK authoring API.
-  Lightweight Site lifecycle HTTP methods live on the base SDK client, shared by
-  the native console and embedding products without loading the optional editable
-  document client. Model device flows share headless polling and optional React
-  presentation while retaining their separate credential-pool domains.
-  `packages/sdk/src/site-tool-bridge.ts` owns native/embedded Site catalog filtering,
-  pinned-version calls and pre-execution stale-catalog recovery. The console's
-  `site-tool-bridge.ts` is only its HTTP/error adapter, not a second bridge engine.
-  Canonical Connect wire validation is in `packages/contracts/src/connect.ts`;
-  `packages/db/src/connect-attempts.ts` owns scoped attempt creation, operation
-  claims, atomic completion receipts, expiry, and bounded metadata retention.
-  Migration 0440 freezes the credential-free external continuation privately on
-  the attempt. Claim and commit recheck both current actor authority and saved
-  origin, including on replay. The exact return destination and named installation
-  targets cannot change during setup.
-  Social connection versions fence reconnect against refresh, disconnect and
-  upstream-account substitution. Expired signed callbacks can recover navigation
-  to the saved host return URL but cannot recover credential-exchange authority.
-  Core `application/connect-authority.ts` shares
-  native, service-key and external callback checks; `prepareFikenTokenInstall`
-  shares verified Fiken token persistence between native routes and Connect.
-  First-party Atlassian and Google Drive knowledge/publication callbacks retain
-  their account/resource proofs while committing credentials and completion in
-  one transaction. The native entry points use `NativeConnectSetup`; source-sync
-  destination controls remain explicit. Public OpenAPI/GraphQL source setup stores
-  an immutable source after preview, then re-resolves revision/hash and explicit
-  selected operations through the existing installation validator. No-auth API
-  sources do not invent credentials. Custom-header MCP setup uses the runtime's
-  header validator and encrypted storage, distinct from installing server tools.
-  Fiken OAuth also uses durable claims and atomic completion, retaining its
-  company checks and workspace-only ownership. Core `application/host-mcp-owner.ts`
-  admits explicit native or external human selections using the effective owner's
-  own membership revision; service keys cannot manufacture human ownership.
-  Callers must still authenticate and reauthorize the actor before this storage
-  seam: an RLS scope is not proof of authentication.
-  The internal `packages/core/src/application/connect-operation.ts` coordinator
-  claims before provider effects and reauthorizes inside completion transactions,
-  including receipt replays. Provider adapters must supply live authority fences;
-  failed or uncertain effects leave the claim occupied rather than retrying.
-  `packages/db/src/external-identities.ts` is the internal external-identity
-  provisioning seam. It creates a stable organization-scoped opaque mapping and
-  membership/Personal-workspace anchors, but no native login or shared-workspace
-  grant. Reuse cannot reactivate suspended or revoked membership.
-  External-mode admission is resolved separately in `packages/core/src/access/`:
-  only organization-key authentication can assert an external actor, and its
-  workspace permissions intersect the live key ceiling with explicit membership.
-  `OpenGeniClient.asUser` returns an isolated server-side client; it never changes
-  a shared client's actor or grants membership. Explicit host onboarding lives in
-  `packages/core/src/application/external-workspace-members.ts` and reauthorizes
-  under the organization membership fence. External lifecycle administration
-  reuses native settlement commands; core private/Personal admission uses a
-  dedicated verified-owning-user proof. Linked-native admission remains unwired;
-  no external request is stamped as a managed-cookie login.
-  Workspace gateway admission distinguishes verified external-user and
-  organization-service-key provenance from native-human and attempt claims.
-  These new request-time lanes recheck live authority before provider invocation
-  and approval issuance; existing catalog filtering and approval rules remain
-  authoritative. This does not supply durable scheduled/binding delegation.
-  Migration 0429 adds the credential-free `host_mcp_bindings` registry with
-  FORCE-RLS external-owner scope, immutable destination/identity, idempotent
-  registration, and terminal generation-advancing revocation. Its DB seam is
-  `packages/db/src/host-mcp-bindings.ts`; the API adapter is
-  `apps/api/src/routes/host-mcp-bindings.ts`. Registration/read/revoke use verified
-  external authority, but registration is not an execution delegation. Do not infer authority
-  from a registry row, historical creator, or a host credential response.
-  Migration 0430 adds owner-scoped `host_mcp_delegations` alongside that registry.
-  Its internal DB API reuses session/always grant scopes, shared-output
-  acknowledgement, binding generation and live owner/workspace checks. Neither
-  these metadata rows nor `HostMcpAcceptedAuthority` schemas admit execution:
-  verified owner HTTP issuance now uses `/host-mcp-delegations`, with the same
-  commit-time external authority recheck as binding registration. Direct initial-turn
-  admission captures selected grants; the worker consumes captured direct-turn
-  snapshots through `authorizeDirectHostMcpUse` and fails closed without one.
-  `withDirectHostMcpAdmission` in the DB module constructs a direct-turn snapshot
-  under live owner/grant/session/turn locks and passes it to a capture callback.
-  It is not authentication or storage; production acceptance must invoke it within
-  its canonical session-activity transaction and persist an immutable snapshot.
-  Scheduled/inherited work is deliberately excluded from this direct-only seam.
-  Migration 0431 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
-  direct-turn ledger. `captureDirectHostMcpAuthority` persists the builder's
-  snapshot; its insert trigger independently reconstructs and checks canonical
-  authority. The runtime role has only SELECT/INSERT, and foreign keys retain
-  referenced bindings/delegations until accepted work is removed. Exact replay
-  cannot replace a turn/server selection. Verified create admission writes this
-  storage atomically with initial events. Worker live consumption validates
-  direct or exact same-session causal snapshots, membership/session epochs,
-  grants and destinations. Scheduled and child work use separate guarded capture
-  paths rather than relaxing the direct-turn guard.
-  `initializeSessionStartAtomically` now offers a backend-only
-  `captureInitialTurnAuthority` callback for newly inserted initial turns, under
-  the same activity transaction as initial events. Capture failure rolls back
-  both; replay never attaches authority to an existing turn, and deferred starts
-  reject this callback. Explicit public host selection uses this callback.
-  Core `createAndStartSessionWithOutcome` carries this backend callback through
-  the shared finish/repair stage with the exact persisted session and turn IDs.
-  The callback is backend-only. `createSessionForRequestWithOutcome` validates
-  public `selectedHostMcpDelegations` for a verified direct external owner with
-  connection-read authority, then matches selected tools and exact configured
-  host URL/ref under the fleet admission switch. The capture callback rechecks
-  external authority inside the canonical transaction. Service, realtime and
-  child explicit selections are rejected. Direct follow-up send/steer uses the
-  same selected-config admission helper, capturing atomically after fresh turn
-  insertion in `submitHumanPromptInTransaction`. Prompt replay identity includes
-  nonempty canonical selections; replay never invokes capture.
-  `host-mcp-task-authority.ts` freezes explicit selections against native task
-  revisions (0423), carries them through reusable-session promotion and rollback,
-  and captures scheduled turns before attempt registration. All three native
-  execution modes retain their existing scheduling rules. Agent-created tasks
-  inherit only selected live grants from the exact signed calling attempt.
-  Child initialization (0424) copies only selected `always` grants from the exact
-  stored spawning turn; session-bound grants cannot cross that boundary.
-  Scheduled origin survives descendants and is revalidated at physical use.
-  Optional native links (0425–0428) retain distinct external/native identities.
-  `asLinkedUser` explicitly selects the live native delegation; immutable linked
-  task/turn snapshots propagate through all scheduled modes, child sessions and
-  causal continuations. Runtime execution and credential-use checks deny revoked
-  links without tying durable work to the original API key. Native host binding
-  ownership (0429) resolves the effective member's own revision, not the external
-  authenticating member revision. Native-owned bindings do not expose or migrate
-  external-owned bindings. Native consent and account inventory reuse the shared
-  React link surfaces; inventory is participant-scoped and cursor-bounded.
-  Same-session goal/child-result resumptions separately copy the exact causal
-  turn's snapshot after canonical delivery and before attempt registration.
-  `inheritCausalHostMcpTurnAuthorities` and the 0422 insert guard prove the
-  consumed source, unchanged visibility/epoch and live delegation. Revoked
-  selections are omitted; no creator/latest-turn fallback is permitted.
-  The DB create/replay boundary now compares `selectedHostMcpDelegations` through
-  reserved immutable metadata, normalized by `host-selection-identity.ts` using
-  contracts validation. Caller metadata cannot override it; missing selection is
-  empty, and changed/removal replays conflict. This is replay identity only;
-  it never substitutes for live admission or worker authority validation.
-  Core `createAndStartSessionWithOutcome` now forwards internal host selections
-  into both keyed and unkeyed DB creation. Its keyed replay rejects omission,
-  changed generation or changed delegation ID without invoking capture again.
-  Early initialized replay compares the same selection without recapturing it.
-  Curated API Integration OAuth carries encrypted external continuation data in
-  signed state. `packages/core/src/application/external-continuation.ts` checks
-  the live identity, explicit membership and organization-key ceiling; the
-  credential writer rechecks under lifecycle/key locks in its transaction.
-  Generic MCP OAuth also carries this encrypted continuation and rechecks before
-  exchange and persistence. Other OAuth families still require corresponding continuation integration;
-  this is not yet a complete Connect provider surface.
-  `apps/api/src/routes/connect.ts` begins and reads durable curated and generic MCP OAuth
-  attempts. Signed callbacks bind their exact attempt; credential persistence
-  and attempt receipts commit together, and callback replay does not repeat the
-  provider exchange. Hosts poll the retained attempt ID after an exact stored
-  return URL redirect, without added query parameters. OAuth completion records
-  `connected_but_incomplete` for curated integrations, not integration readiness.
-  Generic MCP attempts collect a server URL and complete only the connection
-  requirement; no integration or blanket tool grant is implied. Curated advance reuses
-  native preview resolution and shared install validation from
-  `apps/api/src/routes/api-integrations.ts`; installation and the completion
-  receipt commit together. Tool selection uses stable IDs, and changed source
-  returns a fresh preview for explicit review. Cancellation stops setup without
-  revoking committed credentials. Catalog and other provider families still
-  require integration with these routes.
-  The manual `mcp-bearer` adapter uses the same durable attempt coordinator with
-  keyed secret-input digests and atomic encrypted credential/receipt persistence.
-  It binds the MCP URL and version-checks credential replacement. Connection-only
-  completion does not imply provider verification. Ordinary external direct
-  credential creation also rechecks its saved external authority inside the
-  credential transaction; native provider and ownership guards remain in force.
-  Initial external session creation retains server-derived identity/key/revision
-  attribution through `packages/core/src/domain/external-creation-attribution.ts`.
-  The reserved metadata field cannot be supplied by session-create callers or
-  minted from external-looking grant metadata. It is historical audit data, not
-  authority for follow-ups, scheduled work, or child sessions. Native fork
-  creation starts with empty metadata rather than copying this attribution.
-  Its wire/helper identity reference preserves case and Unicode without
-  normalization; limits are UTF-8 bytes (1,024 for IDs, 200 for namespaces), and
-  text that cannot round-trip through PostgreSQL is rejected before querying.
+  Native and host products share Connect/Sites behavior; hosts own presentation
+  and authoring prompts. External users require explicit live membership;
+  linking never merges identities. Inline credentials remain supported and
+  durable renewal is opt-in. See [embedding authority internals](embedding-authority-internals.md),
+  [product integration](product-integration.md) and [remote MCP credentials](remote-mcp-credentials.md).
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
 
@@ -714,12 +515,8 @@ producers, not consumers.
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
 
-The public SDK root exports the full client from `packages/sdk/src/embedding-client.ts`.
-It extends the artifact client with organization-key external-user, identity-link,
-Connect administration, and host-MCP binding/delegation operations. Native web
-uses the narrower `@opengeni/sdk/browser` client; artifact-only consumers use
-`@opengeni/sdk/artifacts`. Keep server-side administration out of those eager
-browser surfaces while preserving the root client's complete API and actor scope.
+The root client in `packages/sdk/src/embedding-client.ts` adds server-side
+administration; `/browser` and `/artifacts` keep narrower dependency boundaries.
 
 ### 3.11 Work discovery remains advisory and permission-first
 
@@ -1210,6 +1007,7 @@ handlers because its host owns process lifecycle.
 | Path | Package | Owns |
 | --- | --- | --- |
 | `packages/contracts` | `@opengeni/contracts` | Cross-boundary schemas, enums, permissions, events, capability descriptors, and tokens |
+| `packages/connect` | `@opengeni/connect` | Framework-neutral connection setup, navigation, polling and account-selection contracts |
 | `packages/config` | `@opengeni/config` | Settings parsing, validation, defaults, and derived runtime configuration |
 | `packages/network` | `@opengeni/network` | DNS-pinned, bounded credential-bearing HTTP transport and shared MCP OAuth discovery semantics |
 | `packages/core` | `@opengeni/core` | Framework-neutral access, domain, billing, and dependency seams |
@@ -1520,23 +1318,12 @@ proxy and optional React surfaces. Advanced in-process embedding may bind host
 identity, persistence, event, billing, credential, and worker ports, but must
 preserve the same core boundaries.
 
-The built-in `opengeni-product-integration` Pack is an opt-in implementation
-aid for those standalone integrations. Installing it adds no executable tools,
-credentials, compute, or customer-facing agent behavior. Its Skill teaches an
-implementation agent to derive the workspace isolation unit, UI surface, data
-tool boundary, runtime profile, and delivery workflow from the host product.
-The Skill uses the existing `capability_facets.activation_mode` authority as
-`session_selected`: ordinary workspace Skill resolution excludes it, and an
-explicit create-time `installedSkillIds` selection freezes the verified
-artifact into exactly one session. The web Pack action carries that immutable
-capability ID into the new-session composer; Pack installation alone cannot add
-the guidance to customer-facing chats. The activation value enters storage at
-maintenance migration 0394; old workers must be fully drained because they do
-not filter this mode. A dedicated implementation workspace
-remains an optional additional operational boundary, not a prerequisite for
-this activation guarantee. The Pack lives in
-`packages/core/src/domain/product-integration-pack.ts`, while the exact customer
-integration contract remains
+The opt-in `opengeni-product-integration` Pack adds developer guidance, not tools,
+credentials or customer-facing behavior. Its `session_selected` activation
+requires explicit create-time `installedSkillIds`; installation alone never
+injects it into chats. Migration 0394 requires draining old workers that lack
+this filter. A separate implementation workspace is optional. Canonical:
+`packages/core/src/domain/product-integration-pack.ts` and
 [`product-integration.md`](product-integration.md).
 
 Canonical: [`../packages/sdk/README.md`](../packages/sdk/README.md),
@@ -1766,26 +1553,7 @@ This index intentionally routes at subsystem granularity. Use
 
 ### Contracts, access, and persistence
 
-The external-identity contract leaf (`packages/contracts/src/external-identities.ts`)
-defines explicit external versus linked-native actor selection and separate audit
-attribution. The internal permission calculator in
-`packages/core/src/access/external-actor-authority.ts` intersects live key, actor,
-and optional native-link authority without combining identity permissions. These
-are not themselves authentication. External mode is admitted through the
-organization-key resolver in `access/index.ts`, backed by persisted organization-local
-identity mappings in `packages/db/src/external-identities.ts` (migration 0425).
-Request provenance is held on the exact resolved authorization object, not inferred
-from a subject prefix, copied grant or a fake browser-cookie flag. External
-organization/workspace lifecycle uses migrations 0426–0427 and existing native
-settlement commands. Migration 0428 admits a verified external owner to their exact
-Personal workspace and core private-session operations; it does not grant service
-keys ambient Personal access. Linked-native selection remains a contract-only
-lane and is rejected at admission until dual-proof linking is implemented.
-
-Native and embedded Site detail reads share `loadSiteSnapshot` in
-`packages/react/src/sites-ui.tsx`, pinning content to an observed version and validating
-workspace/Site identity. The native console retains its small browser client through
-an authenticated request adapter; the public SDK artifact subclass remains optional.
+External actors and Site viewer authority: [embedding authority internals](embedding-authority-internals.md).
 
 | Change area | Canonical source | Read first |
 | --- | --- | --- |

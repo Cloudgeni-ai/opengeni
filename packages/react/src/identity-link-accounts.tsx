@@ -1,8 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  ExternalIdentityLink,
-  ExternalIdentityLinkPage,
-} from "@opengeni/contracts/external-identities";
+import type { ExternalIdentityLink, ExternalIdentityLinkPage } from "@opengeni/sdk";
 
 export type IdentityLinkAccountsClient = {
   listIdentityLinks(workspaceId: string, cursor?: string): Promise<ExternalIdentityLinkPage>;

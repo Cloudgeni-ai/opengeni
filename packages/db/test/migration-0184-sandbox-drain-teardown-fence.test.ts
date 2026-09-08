@@ -29,6 +29,28 @@ const withheldMigrationNames = [
   "0408_scheduled_session_target_index.sql",
   "0414_scheduled_generated_producer_materialization.sql",
   "0416_scheduled_inherited_tool_admission.sql",
+  // These cutovers patch the exact post-0299 lifecycle wrapper and build on
+  // scheduled authority withheld above. Replay them only after those originals.
+  "0423_organization_scoped_external_workspaces.sql",
+  "0424_durable_connect_attempts.sql",
+  "0425_external_identity_provisioning.sql",
+  "0426_external_workspace_member_removal.sql",
+  "0427_external_identity_membership_lifecycle.sql",
+  "0428_external_owning_user_authority.sql",
+  "0429_host_mcp_binding_registry.sql",
+  "0430_host_mcp_delegations.sql",
+  "0431_host_mcp_turn_authorities.sql",
+  "0432_host_mcp_causal_continuation.sql",
+  "0433_host_mcp_task_authorities.sql",
+  "0434_host_mcp_child_authority.sql",
+  "0435_external_identity_link_lifecycle.sql",
+  "0436_external_identity_link_work.sql",
+  "0437_external_link_preview_and_permission_ceiling.sql",
+  "0438_external_link_scheduled_origin.sql",
+  "0439_host_mcp_native_owner.sql",
+  "0440_connect_origin_authority.sql",
+  "0441_external_link_inventory_labels.sql",
+  "0442_social_connection_versions.sql",
 ];
 
 describe("migration 0184 sandbox drain teardown fence", () => {
