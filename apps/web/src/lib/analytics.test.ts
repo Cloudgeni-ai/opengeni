@@ -1,3 +1,4 @@
+import { beginAnalyticsRequest as observeRequest } from "./analytics-observer";
 import { noteSuccessfulLogin } from "./analytics-login";
 import { describe, expect, mock, test } from "bun:test";
 
@@ -109,8 +110,20 @@ describe("analytics providers", () => {
       };
       syncAnalytics(config, "/first");
       syncAnalytics(config, "/second");
+      noteSuccessfulLogin("ga4-user", "email");
+      syncAnalyticsIdentity({ userId: "ga4-user", accountId: "ga4-account" });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
+      expect(pageViewLocations(dataLayer)).toEqual(["https://app.opengeni.ai/second"]);
+      expect(dataLayer.some((entry) => Array.isArray(entry) && entry[1] === "app_opened")).toBe(
+        true,
+      );
+      expect(
+        dataLayer.some((entry) => Array.isArray(entry) && entry[1] === "login_completed"),
+      ).toBe(true);
+      syncAnalytics(config, "/second");
+      syncAnalyticsIdentity({ userId: "ga4-user", accountId: "another-account" });
+      syncAnalytics(config, "/second");
       expect(pageViewLocations(dataLayer)).toEqual(["https://app.opengeni.ai/second"]);
 
       syncAnalytics(config, "/third");
@@ -237,9 +250,16 @@ describe("analytics providers", () => {
         "/workspaces",
       );
       syncAnalyticsIdentity({ userId: "user-1", accountId: "account-1" });
+      const finishLoadingRequest = observeRequest(
+        "/v1/workspaces/11111111-1111-4111-8111-111111111111/sessions",
+        "POST",
+      );
+      finishLoadingRequest(402);
       captureAnalyticsEvent("workspace_created", { workspace_id: "workspace-1" });
       await new Promise((resolve) => setTimeout(resolve, 0));
 
+      expect(calls.some((call) => call[1] === "session_create_attempted")).toBe(true);
+      expect(calls.some((call) => call[1] === "session_create_finished")).toBe(true);
       const initCall = calls.find(([method]) => method === "init");
       const beforeSend = (
         initCall?.[2] as {
@@ -322,10 +342,10 @@ describe("analytics providers", () => {
       finish(422);
       finish(201);
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const attempted = calls.find(
+      const attempted = calls.findLast(
         ([method, event]) => method === "capture" && event === "session_create_attempted",
       );
-      const finished = calls.find(
+      const finished = calls.findLast(
         ([method, event]) => method === "capture" && event === "session_create_finished",
       );
       expect(finished?.[2]).toMatchObject({
@@ -345,7 +365,7 @@ describe("analytics providers", () => {
         calls.filter(
           ([method, event]) => method === "capture" && event === "session_create_finished",
         ),
-      ).toHaveLength(1);
+      ).toHaveLength(2);
 
       syncAnalyticsIdentity(null);
       expect(calls).toContainEqual(["reset"]);

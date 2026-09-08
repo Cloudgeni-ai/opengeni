@@ -160,6 +160,7 @@ export function SuperGrokSubscriptionsCard({
           if (pollAbort.current === controller) pollAbort.current = null;
         });
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start xAI login");
     } finally {

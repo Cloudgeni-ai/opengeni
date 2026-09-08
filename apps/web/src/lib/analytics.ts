@@ -56,6 +56,7 @@ let ga4Active = false;
 let reoActive = false;
 let latestPathname: string | null = null;
 let latestSearch = "";
+let lastPageViewKey: string | null = null;
 let identityGeneration = 0;
 let activeIdentity: AnalyticsIdentity | null = null;
 let identifiedUserId: string | null = null;
@@ -221,6 +222,9 @@ function analyticsCollectionAllowed(): boolean {
 }
 
 function dispatchPageView(pathname: string): void {
+  const key = JSON.stringify([pathname, latestSearch]);
+  if (key === lastPageViewKey) return;
+  lastPageViewKey = key;
   const facts = journeyPage(pathname, latestSearch);
   posthogClient?.capture("$pageview", {
     $current_url: `${window.location.origin}${pathname}`,
@@ -292,23 +296,23 @@ async function initializePostHog(projectKey: string, host: string): Promise<void
 }
 
 function applyActiveIdentity(): void {
-  if (!activeIdentity || !posthogClient || !analyticsCollectionAllowed()) {
+  if (!activeIdentity || !analyticsCollectionAllowed()) {
     return;
   }
   const opened = identifiedUserId !== activeIdentity.userId;
   if (opened) {
     if (identifiedUserId) {
-      posthogClient.reset();
+      posthogClient?.reset();
     }
-    posthogClient.identify(activeIdentity.userId);
+    posthogClient?.identify(activeIdentity.userId);
     identifiedUserId = activeIdentity.userId;
     identifiedAccountId = null;
   }
   if (activeIdentity.accountId && identifiedAccountId !== activeIdentity.accountId) {
-    posthogClient.group("account", activeIdentity.accountId);
+    posthogClient?.group("account", activeIdentity.accountId);
     identifiedAccountId = activeIdentity.accountId;
   } else if (!activeIdentity.accountId && identifiedAccountId) {
-    posthogClient.resetGroups();
+    posthogClient?.resetGroups();
     identifiedAccountId = null;
   }
   if (opened) captureAnalyticsEvent("app_opened");
@@ -436,6 +440,7 @@ async function initializeGa4(measurementId: string): Promise<void> {
 }
 
 function stopProviders(): void {
+  lastPageViewKey = null;
   initializationGeneration += 1;
   initialization = null;
   providersReady = false;
@@ -483,9 +488,7 @@ function appendExternalScript(script: HTMLScriptElement): Promise<void> {
 }
 
 installAnalyticsObserver({
-  capture: (name, properties) => providersReady && captureAnalyticsEvent(name, properties),
-  request: (pathname, method) =>
-    providersReady ? beginAnalyticsRequest(pathname, method) : () => {},
-  connection: (provider, workspaceId) =>
-    providersReady ? trackModelConnection(provider, workspaceId) : () => {},
+  capture: captureAnalyticsEvent,
+  request: beginAnalyticsRequest,
+  connection: trackModelConnection,
 });
