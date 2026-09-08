@@ -12359,7 +12359,8 @@ describe("provider item id stripping", () => {
     }
 
     expect(model.calls).toBe(2);
-    expect(requestIndexes).toEqual([1, 1]);
+    // Re-entry retains monotonic capture identity without adding wrappers.
+    expect(requestIndexes).toEqual([1, 2]);
   });
 
   test("external history ownership borrows frozen input without mutating it", async () => {

@@ -17,6 +17,75 @@ export type PersistentAgentInstructionLayerDraft = {
   content: string;
 };
 
+function contextTextEstimate(value: unknown): number | null {
+  const containsNonText = (part: unknown): boolean => {
+    if (Array.isArray(part)) return part.some(containsNonText);
+    if (!part || typeof part !== "object") return false;
+    const record = part as Record<string, unknown>;
+    if (typeof record.encrypted_content === "string") return true;
+    if (
+      ["input_image", "image_url", "input_audio", "input_file", "compaction"].includes(
+        String(record.type),
+      )
+    )
+      return true;
+    return Object.values(record).some(containsNonText);
+  };
+  return containsNonText(value) ? null : estimateSerializedValueTokens(value);
+}
+
+export function buildProviderRequestSnapshot(input: {
+  provider: string;
+  body: string | null;
+  unavailableReason?: string;
+  requestIndex: number;
+}): ModelContextSnapshot {
+  let body = input.body;
+  let unavailableReason = input.unavailableReason;
+  let payload: Record<string, unknown> = {};
+  try {
+    if (body !== null) {
+      const parsed: unknown = JSON.parse(body);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      payload = parsed as Record<string, unknown>;
+    }
+  } catch {
+    body = null;
+    unavailableReason = "The provider body is not a JSON object.";
+  }
+  const parts = Object.entries(payload).map(([key, value]) => ({
+    key,
+    estimatedTokens: contextTextEstimate(value),
+    utf8Bytes: Buffer.byteLength(JSON.stringify(value), "utf8"),
+    ...(Array.isArray(value) ? { itemEstimatedTokens: value.map(contextTextEstimate) } : {}),
+  }));
+  const instructionsTokens =
+    parts.find((part) => part.key === "instructions")?.estimatedTokens ?? 0;
+  const toolsTokens = parts.find((part) => part.key === "tools")?.estimatedTokens ?? 0;
+  return {
+    version: MODEL_CONTEXT_SNAPSHOT_VERSION,
+    source: "model_request",
+    capturedAt: new Date().toISOString(),
+    requestIndex: input.requestIndex,
+    // Wire body owns the contents. Legacy prefix fields are not reconstructed.
+    instructions: "",
+    layers: [],
+    tools: [],
+    skills: [],
+    tokens: {
+      instructions: instructionsTokens,
+      tools: toolsTokens,
+      prefix: instructionsTokens + toolsTokens,
+    },
+    providerRequest: {
+      provider: input.provider,
+      body,
+      ...(unavailableReason ? { unavailableReason } : {}),
+      parts,
+    },
+  };
+}
+
 export type PersistentAgentInstructionInspection = {
   layers: readonly PersistentAgentInstructionLayerDraft[];
   composed: string;
