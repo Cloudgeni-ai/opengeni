@@ -105,13 +105,14 @@ const OPENGENI_GROUPS: CapabilityGroupDefinition[] = [
   {
     id: "agents",
     name: "Agents and delegation",
-    description: "Set goals, create workers, and coordinate other sessions.",
+    description: "Set goals, create workers, organize projects, and coordinate sessions.",
     kind: "opengeni",
     matches: (tool) =>
       tool === "set_session_title" ||
       tool === "set_other_session_title" ||
       tool === "wait_for_input" ||
       tool.startsWith("goal_") ||
+      tool.startsWith("project_") ||
       tool.startsWith("session_") ||
       tool.startsWith("sessions_") ||
       tool.startsWith("work_claim_"),

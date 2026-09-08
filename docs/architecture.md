@@ -61,9 +61,7 @@ Canonical introductions: [`../README.md`](../README.md),
 
 ## 3. Core invariants
 
-These rules cross package and process boundaries. Focused docs contain the
-complete contracts and edge cases; this section preserves the architectural
-reason each rule exists.
+Cross-package invariants; focused docs own complete contracts and edge cases.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -1124,6 +1122,8 @@ Do not move durable event authority into NATS, large bytes into relational
 conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
+
+Projects: always-indexed, worker-loaded `opengeni-projects` skill.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
