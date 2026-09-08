@@ -112,7 +112,7 @@ naturally depends on that folder being accessible.
 ### Read
 
 ```text
-skill_read({ skill, paths? })
+skill_read({ skill, paths?, listFiles? })
 ```
 
 - Omit `paths`: return `SKILL.md`.
@@ -121,8 +121,10 @@ skill_read({ skill, paths? })
 - Proposed: return files with their paths; report missing paths explicitly.
   Never silently omit files or present truncation as complete content.
 - Resolve ambiguous names explicitly rather than choosing a source silently.
-- Include a bounded way to discover available paths on demand; do not put
-  every file path into every standing prompt.
+- Set `listFiles: true` without `paths`: return only relative `paths` (at most
+  128) and available revision identity, with no file bodies and no sandbox.
+  Combining inventory with `paths` is rejected. Inventory is on demand, never
+  part of the standing prompt; omitted/false `listFiles` preserves text reads.
 
 ### Search and install
 
@@ -375,13 +377,18 @@ the latest integrated PostgreSQL run remains a release gate.
 
 Current main has been merged and the unpublished Skill migration renumbered to
 0426 without repinning published migration hashes. The browser tree-shaking fix
-is integrated; final production budget verification is still required.
-Remaining integration gates include sandbox-free supporting-path inventory,
-validation of library slug/folder resolution, and bringing main's new Projects
-guidance into the same host-controlled bundle selection and eager reader.
+is integrated and the post-merge production build passes unchanged budgets.
+Projects guidance now uses the same host-controlled bundle selection and eager
+reader, with no unconditional second index or reader tool.
 Legacy lowercased source IDs are retained for compatibility. Imports reject a
 different case-sensitive folder that would collide with an existing ID; installing
 both case variants is unsupported until a dedicated identity migration exists.
+
+Sandbox-free supporting-path inventory is implemented on `skill_read` via
+`listFiles: true`. Public skills.sh imports require a matching current
+frontmatter name (case-insensitive), never a mismatching folder-name fallback.
+Stale slugs report an exact GitHub folder URL alternative; direct folder imports
+remain exact, and duplicate frontmatter names still require that override.
 
 Frontmatter migration uses the shared YAML parser, preserves valid YAML bytes,
 and derives database descriptor columns from those files. Current legacy
