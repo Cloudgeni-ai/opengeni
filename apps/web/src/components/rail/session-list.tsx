@@ -57,6 +57,8 @@ import {
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
 import {
@@ -245,6 +247,8 @@ type MoveToChannelFn = (
   channelId: string | null,
   restoreFocusTo?: SessionFocusTarget,
 ) => Promise<void>;
+const SESSION_DRAG_TYPE = "application/x-opengeni-session";
+const PROJECT_DRAG_TYPE = "application/x-opengeni-project";
 type UpdateAttentionFn = (
   session: Session,
   update: { unread?: boolean; activelyWorking?: boolean },
@@ -2315,14 +2319,11 @@ export function SessionList() {
     { key: "matching-results", label: "matching sessions", kind: "results" },
     nextCursor,
   );
-  const defaultPagination = paginationForGroup(
-    { key: "channel:default", label: "Default", kind: "channel", channelId: null },
-    nextCursor,
-  );
-  const renderedChannelSections =
-    channelSections.some((section) => section.channelId === null) || !defaultPagination
-      ? channelSections
-      : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  // Default is also a move destination: keep its header when its last row
+  // leaves, even if there is no next page of unfiled sessions.
+  const renderedChannelSections = channelSections.some((section) => section.channelId === null)
+    ? channelSections
+    : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
   const renderedGroupedBuckets =
     browseGroupBy === "creator"
       ? forest.grouped
@@ -3120,6 +3121,7 @@ function SessionGroup(props: {
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
 }) {
+  const [sessionDragOver, setSessionDragOver] = useState(false);
   const sectionId = `session-group-${
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
@@ -3142,23 +3144,45 @@ function SessionGroup(props: {
           onDragStart={(event: DragEvent<HTMLDivElement>) => {
             if (!props.project) return;
             event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", props.project.id);
+            event.dataTransfer.setData(PROJECT_DRAG_TYPE, props.project.id);
             props.onProjectDragStart?.(props.project.id);
           }}
           onDragOver={(event: DragEvent<HTMLDivElement>) => {
-            if (!props.project) return;
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              if (props.allowNewSession === false) return;
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "move";
+              setSessionDragOver(true);
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
             props.onProjectDragOver?.(props.project.id);
           }}
           onDrop={(event: DragEvent<HTMLDivElement>) => {
-            if (!props.project) return;
+            setSessionDragOver(false);
+            if (event.dataTransfer.types.includes(SESSION_DRAG_TYPE)) {
+              event.preventDefault();
+              event.stopPropagation();
+              if (props.allowNewSession === false) return;
+              const session = props.flat.find(
+                (candidate) => candidate.id === event.dataTransfer.getData(SESSION_DRAG_TYPE),
+              );
+              if (session && session.parentSessionId === null && !session.archived) {
+                void props.onMoveToChannel(session, props.channelId ?? null, "row");
+              }
+              return;
+            }
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
-            const sourceProjectId = event.dataTransfer.getData("text/plain");
+            const sourceProjectId = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
             if (sourceProjectId) props.onProjectDrop?.(sourceProjectId, props.project.id);
           }}
           onDragEnd={props.onProjectDragEnd}
+          onDragLeave={() => setSessionDragOver(false)}
           className={cn(
+            sessionDragOver && "bg-accent ring-1 ring-ring",
             "group/section relative flex h-8 w-full min-w-0 items-center rounded-md pr-1 text-fg hover:bg-surface-2 pointer-coarse:h-11",
             props.project && "cursor-grab active:cursor-grabbing",
             props.project && props.draggedProjectId === props.project.id && "opacity-45",
@@ -3575,6 +3599,16 @@ function SessionRow(props: {
             <HoverCardTrigger asChild>
               <Link
                 to="/workspaces/$workspaceId/sessions/$sessionId"
+                draggable={props.session.parentSessionId === null && !props.session.archived}
+                onDragStart={(event) => {
+                  if (props.session.parentSessionId !== null || props.session.archived) {
+                    event.preventDefault();
+                    return;
+                  }
+                  event.stopPropagation();
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
+                }}
                 params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
                 data-session-index={props.index}
                 data-session-focus
@@ -3765,6 +3799,29 @@ function SessionRow(props: {
             <Trash2Icon className="size-4" />
             Delete workstream
           </ContextMenuItem>
+        ) : null}
+        {props.channels.length > 0 &&
+        props.session.parentSessionId === null &&
+        !props.session.archived ? (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuLabel className="text-2xs font-medium uppercase tracking-wider text-fg-subtle">
+              Move to project
+            </ContextMenuLabel>
+            {[...props.channels, { id: null, name: "Default" }].map((channel) => (
+              <ContextMenuItem
+                key={channel.id ?? "default"}
+                className="pointer-coarse:min-h-11"
+                disabled={props.session.channelId === channel.id}
+                onSelect={() => {
+                  contextPinSelection.current = true;
+                  void props.onMoveToChannel(props.session, channel.id, "row");
+                }}
+              >
+                <span className="truncate">{channel.name}</span>
+              </ContextMenuItem>
+            ))}
+          </>
         ) : null}
       </ContextMenuContent>
     </ContextMenu>
