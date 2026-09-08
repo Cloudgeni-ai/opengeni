@@ -911,6 +911,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,

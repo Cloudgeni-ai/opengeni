@@ -1975,6 +1975,10 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/inference-control",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
+  },
+  {
     pattern:
       /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/fs\/(list|list-batch|read|write|delete|move|mkdir)$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/fs/:operation",

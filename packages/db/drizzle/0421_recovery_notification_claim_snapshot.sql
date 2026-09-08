@@ -271,7 +271,7 @@ BEGIN
     RETURN;
   END IF;
   IF pg_catalog.md5(current_body) IS DISTINCT FROM 'a82b87db0e2ca832ab87c51f351f4ba6' THEN
-    RAISE EXCEPTION '0420 recovery notification claim prerequisite definition drift'
+    RAISE EXCEPTION '0421 recovery notification claim prerequisite definition drift'
       USING ERRCODE = '55000';
   END IF;
   EXECUTE pg_catalog.replace(definition, current_body, replacement_body);

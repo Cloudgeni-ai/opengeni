@@ -581,10 +581,10 @@ describe("migration 0363 organization recovery custody", () => {
     });
   }, 60_000);
 
-  test("0420 preserves installed schema and ACL metadata and replays without changing evidence", async () => {
+  test("0421 preserves installed schema and ACL metadata and replays without changing evidence", async () => {
     if (!owned) return;
     const migration = readFileSync(
-      new URL("../drizzle/0420_recovery_notification_claim_snapshot.sql", import.meta.url),
+      new URL("../drizzle/0421_recovery_notification_claim_snapshot.sql", import.meta.url),
       "utf8",
     );
     const schemaName = `recovery_claim_${crypto.randomUUID().replaceAll("-", "")}`;

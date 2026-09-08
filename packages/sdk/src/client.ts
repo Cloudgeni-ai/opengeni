@@ -2474,6 +2474,13 @@ export class OpenGeniClient {
     });
   }
 
+  async setWorkspacePauseTimer(
+    workspaceId: string,
+    request: import("./types").WorkspacePauseTimerRequest,
+  ): Promise<{ ok: boolean }> {
+    return await this.requestJson("POST", `/v1/workspaces/${workspaceId}/pause-timer`, request);
+  }
+
   async setWorkspaceInferenceState(
     workspaceId: string,
     request: {

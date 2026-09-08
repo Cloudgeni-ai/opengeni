@@ -53,13 +53,16 @@ bun add --exact $(bun -e 'const pins=await Bun.file("/workspace/.agents/opengeni
 Use the skill's actual location if different. Keep these exact dependencies
 in saved source. Missing expected exports indicate a package mismatch, not a
 reason to replace the standard conversation component with custom wiring.
+The pins include `@opengeni/ogtool`. Run `bun run ogtool ...` from this
+project for discovery and calls; a sandbox-global CLI can predate the deployment.
 
 Local development only: if `/opt/opengeni/site-packages/sdk.tgz` exists, these
 are unreleased checkout packages. Skip the registry command above for OpenGeni.
 After ordinary dependencies, install these packages with
 `bun add --no-save /opt/opengeni/site-packages/sdk.tgz /opt/opengeni/site-packages/react.tgz /opt/opengeni/site-packages/codemode.tgz`.
 Remove stale OpenGeni overrides; repeat this step after `bun install`. Do not
-save sandbox archive paths in published source.
+save sandbox archive paths in published source. In this local-development
+exception, use the image's `ogtool` directly: it is built from the same checkout.
 
 For a tool-using local preview, add a small Bun host which serves the HTML and
 mounts `createCodemodeSiteRequestHandler()` at
@@ -133,16 +136,18 @@ const issues = await client.tools.linear.issues_list({ state: "Todo" });
 
 For embedded conversations, `site.client` is the ordinary OpenGeni SDK client;
 `site.workspaceId` is a host-resolved routing alias. Use the normal React
-provider and complete conversation surface—do not implement session REST or SSE yourself:
+complete conversation surface—do not implement session REST or SSE yourself:
 
 ```tsx
-import { OpenGeniProvider, SessionConversation } from "@opengeni/react";
+import { SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const site = createOpenGeniSiteClient();
-<OpenGeniProvider client={site.client} workspaceId={site.workspaceId}>
-  <SessionConversation sessionId={sessionId} />
-</OpenGeniProvider>
+<SessionConversation
+  client={site.client}
+  workspaceId={site.workspaceId}
+  sessionId={sessionId}
+/>
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
@@ -160,8 +165,9 @@ timeline scrolling and the bottom composer—do not add fixed/sticky positioning
 or another timeline scroller. Expand steps, stream messages, and resize the
 preview: history should scroll without pushing the composer down the page.
 
-Import `OpenGeniProvider` and the needed components from `@opengeni/react`, and
-`@opengeni/react/compiled.css` once. Session creation, history, live events,
+Use the narrow `@opengeni/react/session-ui` entry for chat, not the broad root
+entry that pulls unrelated editor/terminal peers. Import compiled CSS once.
+Session creation, history, live events,
 composer drafts, Send/Steer and queue/control use this client. The same local
 Bun handler above forwards them using the agent's current Codemode token;
 published Sites use the viewing user's host auth. Agent authority remains
@@ -182,10 +188,10 @@ identities. Friendly names are never authority.
 
 ## Request the smallest tool set
 
-1. Find relevant tools with `ogtool list --query <keyword> --limit 10`, then
-   inspect selected tools with `ogtool show <path>`. Do not dump the full
+1. Find relevant tools with `bun run ogtool list --query <keyword> --limit 10`, then
+   inspect selected tools with `bun run ogtool show <path>`. Do not dump the full
    catalog into model context. Generate local types with
-   `ogtool declarations <path>` and read only the relevant declarations.
+   `bun run ogtool declarations <path>` and read only the relevant declarations.
 2. Use the same catalog paths while authoring and record each exact canonical
    identity in the Site's `requestedTools` publish field.
 3. Do not request tools the Site does not call. A Site with no direct workspace

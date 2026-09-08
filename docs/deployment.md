@@ -1215,6 +1215,11 @@ content-hashed `/assets/*` responses are served with immutable one-year caching,
 while the HTML shell revalidates. The API compresses JSON responses and leaves
 SSE and other streaming transports uncompressed.
 
+Web assets, the React demo, and the server bundle compile once on BuildKit's
+native build platform. The amd64 and arm64 web images copy those portable
+outputs into their respective Bun runtime images without executing target
+architecture build steps. Web image publication therefore does not need QEMU.
+
 Build local OpenGeni workload images:
 
 ```bash
@@ -1232,7 +1237,7 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 `main` is the daily integration branch and remains GitHub's default branch.
 
 Site authoring installs exact registry versions. Stable builds use their source
-SDK/React/Codemode manifest versions. Before a canary rollout, publish packages
+SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
 from the same source using `publish-canary.yml`, then set
 `OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
 `site-package-versions-<sha>` artifact. The runtime includes these pins beside
