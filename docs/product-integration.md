@@ -520,6 +520,15 @@ human-input request, which it answers through `POST <handlerUrl>/respond`. The
 `conversation` prop travels as the `x-opengeni-conversation` header; the handler
 scopes it to the user `resolve` returned.
 
+Changing authenticated `headers` values resets messages, pending cards, drafts
+and in-flight requests before restoring the new identity's conversation.
+Header callbacks are evaluated on each host render, so re-render when their
+credentials change. When authentication uses cookies or can change without
+changing those header values, pass a stable `authKey`, for example
+`authKey={JSON.stringify([tenantId, userId])}`, and change it on sign-in,
+sign-out and tenant switches. This key is local to React and is not sent to
+the handler; server-side `resolve` still owns authorization.
+
 Use `@opengeni/react/session` for headless session semantics, or the focused
 styled subpaths when the product wants packaged OpenGeni visuals. The React
 client contracts are structural: implement only the SDK methods required by

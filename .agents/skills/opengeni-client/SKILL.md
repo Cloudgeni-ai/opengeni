@@ -86,7 +86,10 @@ const reply = await chat.send("hello"); // reply.text; chat.stream(...) yields c
 Browser: `<OpenGeniChat handlerUrl="/api/chat" conversation="c_9" />` from
 `@opengeni/react/chat` (no provider, no SDK client); it sends the
 `x-opengeni-conversation` header and restores history on reload with `GET` on
-the same handler. Every customer gets one workspace (`tenant`), every
+the same handler. Supply `authKey={JSON.stringify([tenantId, userId])}` for
+cookie authentication and change it on sign-in, sign-out and tenant switches.
+Changed `headers` values also reset the chat; header callbacks are resolved on
+each host render, so re-render when their credentials change. Every customer gets one workspace (`tenant`), every
 conversation one deterministic session, and each session picks its own
 isolation. Conversation ids are namespaced per `user`: the handler scopes a
 client conversation id to the user `resolve` returned, and without a `user`,

@@ -38,7 +38,17 @@ export type OpenGeniChatProps = {
   handlerUrl: string;
   /** Sent as the `x-opengeni-conversation` header so the host's `resolve` can pick it up. */
   conversation?: string | undefined;
+  /**
+   * Host authentication headers, resolved on each host render. Changed values
+   * reset the chat. Re-render the host when a callback's credentials change.
+   */
   headers?: Record<string, string> | (() => Record<string, string>) | undefined;
+  /**
+   * Stable authenticated user/tenant identity. Change this on sign-in, sign-out
+   * or tenant switches when authentication uses cookies or otherwise changes
+   * without changing the headers. This resets local state; it is not sent.
+   */
+  authKey?: string | undefined;
   placeholder?: string | undefined;
   className?: string | undefined;
   renderMessage?: ((message: OpenGeniChatMessage) => ReactNode) | undefined;
@@ -113,13 +123,13 @@ function uid(): string {
     : Math.random().toString(36).slice(2);
 }
 
-type HostHeaders = OpenGeniChatProps["headers"];
+type HostHeaders = Record<string, string>;
 
 function requestHeaders(conversation: string | undefined, headers: HostHeaders) {
   return {
     [CHAT_FORMAT_HEADER]: "native",
     ...(conversation ? { [CHAT_CONVERSATION_HEADER]: conversation } : {}),
-    ...(typeof headers === "function" ? headers() : (headers ?? {})),
+    ...headers,
   };
 }
 
@@ -137,14 +147,35 @@ function restoredMessages(payload: unknown): OpenGeniChatMessage[] {
   return restored;
 }
 
-export function OpenGeniChat({
+export function OpenGeniChat(props: OpenGeniChatProps) {
+  // Normalize actual HTTP values so an inline object/callback or header casing
+  // change does not erase a draft. Resolve callbacks once per host render: GET
+  // and POST must use the same authentication snapshot as the displayed state.
+  const headers = Object.fromEntries(
+    [...new Headers(typeof props.headers === "function" ? props.headers() : props.headers)]
+      .map(([name, value]) => [name.toLowerCase(), value] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const identity = JSON.stringify([
+    props.handlerUrl,
+    props.conversation ?? null,
+    props.authKey ?? null,
+    headers,
+  ]);
+  // A keyed boundary drops private state in the same commit, before effects
+  // run. Unmount cleanup aborts old history and streams; late completions can
+  // only address the unmounted instance, never the new user's conversation.
+  return <ChatConversation key={identity} {...props} headers={headers} />;
+}
+
+function ChatConversation({
   handlerUrl,
   conversation,
   headers,
   placeholder = "Message",
   className,
   renderMessage,
-}: OpenGeniChatProps) {
+}: Omit<OpenGeniChatProps, "headers"> & { headers: HostHeaders }) {
   const [messages, setMessages] = useState<OpenGeniChatMessage[]>([]);
   const [pendingRequests, setPendingRequests] = useState<ChatPending[]>([]);
   const pending = pendingRequests[0] ?? null;
