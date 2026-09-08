@@ -1,6 +1,5 @@
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import {
-  loadSkillManagementSkill,
   readSkillFiles,
   SKILL_READ_MAX_PATHS,
   type SkillTextFile,
@@ -26,7 +25,7 @@ export function createSkillReadAttemptToolDefinition(input: {
     codemodePath: ["opengeni", SKILL_READ_TOOL_NAME],
     title: "Read Skill files",
     description:
-      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Read opengeni-skills to learn how to discover and use lazy Skill management tools.",
+      "Read Skill text without starting a sandbox. Omit paths to read SKILL.md; provide relative paths to read exactly those files, never implicitly adding SKILL.md. Use an id or name from the Skill index or skill_search. Management tools are lazy; when listed, opengeni-skills explains how to use them.",
     inputSchema: {
       type: "object",
       properties: {
@@ -61,10 +60,7 @@ export function createSkillReadAttemptToolDefinition(input: {
         throw new Error("skill_read requires a Skill identifier and optional relative paths.");
       }
       await input.authorize();
-      const loaded =
-        args.skill === "opengeni-skills" || args.skill === "builtin:opengeni-skills"
-          ? loadSkillManagementSkill().files
-          : await input.load(args.skill);
+      const loaded = await input.load(args.skill);
       const metadata = "files" in loaded ? loaded : null;
       const selected = readSkillFiles(
         metadata ? metadata.files : (loaded as readonly SkillTextFile[]),

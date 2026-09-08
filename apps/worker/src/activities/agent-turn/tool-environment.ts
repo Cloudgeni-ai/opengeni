@@ -577,6 +577,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const sharedSkillDescriptors = await listSkillDescriptors(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
+    ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
   });
   const skillCatalog = [
     ...sharedSkillDescriptors
@@ -597,6 +598,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     settings: runSettings,
     accountId: input.accountId,
     workspaceId: input.workspaceId,
+    ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
     actor: {
       kind: "agent",
       sessionId: input.sessionId,

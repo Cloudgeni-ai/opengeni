@@ -1413,7 +1413,9 @@ describe("OpenAI/Azure native client tool search", () => {
       const agent = new Agent({
         name: "sandbox-free-skills",
         model: "scripted",
-        instructions: formatSkillCatalog([]),
+        instructions: formatSkillCatalog([
+          { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
+        ]),
         tools: [reader],
       });
       const runtime = installLazyToolRuntime(

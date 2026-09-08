@@ -314,6 +314,21 @@ workspace agents. These defaults do not constitute the proposed public host
 allowlist. A stalled-discovery regression test now exercises first-request
 index visibility and eager reads on all three lazy-tool transports.
 
+Management guidance now enters through that same selector: the formatter and
+reader do not inject it independently. The selected management folder is also
+available to search and checkout. This removes the hidden read/index exception;
+it does not ship or approve a new public host-selection field.
+
+Implementation verification in progress (September 8): the shared web editor
+and SDK/API folder routes are wired. Component tests cover metadata-first reads,
+supporting-file retention, read-only controls, and stale workspace responses.
+The desktop browser fixture covers edit, cancelled discard, save, and supporting
+file readback. Real-PostgreSQL HTTP tests have been added for partial save,
+replay, stale-head conflicts, restore, and invalid input; their execution is a
+remaining gate, not implied by the browser fixture. API-key/service installation
+compatibility, bounded catalog pagination, composite Pack/Plugin pending
+outcomes, and the public bundled-selection control remain integration work.
+
 ## 6. Current implementation: verified baseline
 
 Paths below refer to the main commit recorded at the top, not necessarily this

@@ -75,7 +75,7 @@ describe("skill_read gateway definition", () => {
     });
   });
 
-  test("reads built-in management guidance without loading workspace files", async () => {
+  test("does not bypass source selection for built-in management names", async () => {
     const environment = createAttemptToolEnvironment({
       scope,
       generation: 1,
@@ -83,17 +83,18 @@ describe("skill_read gateway definition", () => {
         createSkillReadAttemptToolDefinition({
           authorize: async () => {},
           load: async () => {
-            throw new Error("unexpected workspace load");
+            throw new Error("Skill is excluded by source selection");
           },
         }),
       ],
     });
-    const output = await environment.callModel({
-      modelName: "skill_read",
-      arguments: { skill: "opengeni-skills" },
-      subjectId: "agent:test",
-    });
-    expect(JSON.stringify(output)).toContain("Management tools are lazy");
+    await expect(
+      environment.callModel({
+        modelName: "skill_read",
+        arguments: { skill: "opengeni-skills" },
+        subjectId: "agent:test",
+      }),
+    ).rejects.toThrow("excluded by source selection");
   });
 
   test("rechecks attempt authority before loading any content", async () => {

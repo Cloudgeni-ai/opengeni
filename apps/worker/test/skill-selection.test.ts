@@ -16,6 +16,7 @@ test("bundled selection uses configured names, not prepared schemas or optional 
     },
   };
   expect(configuredBundledSkillNames(context)).toEqual([
+    "opengeni-skills",
     "opengeni-documents",
     "opengeni-spreadsheets",
     "opengeni-presentations",
@@ -28,20 +29,20 @@ test("bundled selection uses configured names, not prepared schemas or optional 
 test("Sites, video and artifact defaults have independent inclusion conditions", () => {
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: false }),
-  ).toEqual([]);
+  ).toEqual(["opengeni-skills"]);
   expect(
     configuredBundledSkillNames({ firstPartyTools: [], videoGenerationEnabled: true }),
-  ).toEqual(["opengeni-video-generation"]);
+  ).toEqual(["opengeni-skills", "opengeni-video-generation"]);
   expect(
     configuredBundledSkillNames({
       firstPartyTools: ["artifacts_create", "artifacts_publish"],
       videoGenerationEnabled: false,
     }),
-  ).toEqual(["opengeni-sites"]);
+  ).toEqual(["opengeni-skills", "opengeni-sites"]);
   expect(
     configuredBundledSkillNames({
       firstPartyTools: ["editable_artifact_get"],
       videoGenerationEnabled: false,
     }),
-  ).toEqual([]);
+  ).toEqual(["opengeni-skills"]);
 });

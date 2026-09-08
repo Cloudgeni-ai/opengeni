@@ -3,7 +3,6 @@ import type { Settings } from "@opengeni/config";
 import type { SkillActor } from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
-  getPortableSkillUninstallPreview,
   installPortableSkill,
   listSkillDescriptors,
   type Database,
@@ -40,13 +39,18 @@ export function createWorkspaceSkillTools(input: {
   settings: Settings;
   accountId: string;
   workspaceId: string;
+  subjectId?: string;
   actor: Extract<SkillActor, { kind: "agent" }>;
   selected: readonly { id: string; artifact: RuntimeSkillArtifact }[];
   filesystem: () => Promise<
     Pick<SandboxChannelAService, "fsList" | "fsRead" | "fsWrite" | "fsMkdir">
   >;
 }) {
-  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  const context = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    ...(input.subjectId ? { subjectId: input.subjectId } : {}),
+  };
   const authorize = () => assertSkillReadAttempt(input.db, { ...context, actor: input.actor });
   const selected = new Map(input.selected.map((entry) => [entry.id, entry.artifact]));
   const list = async () =>
@@ -185,21 +189,15 @@ export function createWorkspaceSkillTools(input: {
             files: fileMetadata(resolved.files),
           };
         }
-        const current = await getPortableSkillUninstallPreview(
-          input.db,
-          input.workspaceId,
-          source.capabilityId,
-        );
         const installed = await installPortableSkill(input.db, {
           ...context,
           ...source,
           subjectId: `service:skill-attempt:${input.actor.attemptId}`,
           skillActor: input.actor,
           skillOperationId: request.operationId,
-          ...((request.expectedInstallationVersion ?? current.installationVersion) !== null
+          ...(request.expectedInstallationVersion !== undefined
             ? {
-                expectedInstallationVersion:
-                  request.expectedInstallationVersion ?? current.installationVersion!,
+                expectedInstallationVersion: request.expectedInstallationVersion,
               }
             : {}),
         });

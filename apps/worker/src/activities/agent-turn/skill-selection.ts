@@ -1,4 +1,5 @@
 import { loadNativeToolSkillArtifacts } from "@opengeni/runtime";
+import { loadSkillManagementSkill } from "@opengeni/runtime/skill-library";
 
 export type BundledSkillConfiguration = {
   /** Already resolved names, not discovered schemas or an attempt catalog. */
@@ -11,6 +12,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
   const tools = new Set(context.firstPartyTools);
   const artifacts = () => tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
   const definitions = [
+    { name: "opengeni-skills", include: () => true },
     { name: "opengeni-documents", include: artifacts },
     { name: "opengeni-spreadsheets", include: artifacts },
     { name: "opengeni-presentations", include: artifacts },
@@ -27,7 +29,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
 
 export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) {
   const names = new Set(configuredBundledSkillNames(context));
-  return loadNativeToolSkillArtifacts({
+  const artifacts = loadNativeToolSkillArtifacts({
     editableArtifacts: [
       "opengeni-documents",
       "opengeni-spreadsheets",
@@ -35,7 +37,8 @@ export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) 
     ].some((name) => names.has(name)),
     sites: names.has("opengeni-sites"),
     videoGeneration: names.has("opengeni-video-generation"),
-  })
+  });
+  return [...artifacts, ...(names.has("opengeni-skills") ? [loadSkillManagementSkill()] : [])]
     .filter((artifact) => names.has(artifact.name))
     .map((artifact) => ({ id: `builtin:${artifact.name}`, artifact }));
 }

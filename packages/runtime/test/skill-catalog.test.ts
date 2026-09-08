@@ -6,6 +6,7 @@ import { formatSkillCatalog, SKILL_CATALOG_MAX_BYTES } from "../src/skill-catalo
 describe("sandbox-independent Skill catalog", () => {
   test("includes management guidance and short descriptors, never bodies or paths", () => {
     const catalog = formatSkillCatalog([
+      { id: "builtin:opengeni-skills", name: "opengeni-skills", description: "Manage Skills" },
       { id: "workspace:deploy", name: "deploy", description: "Deploy services" },
     ]);
     expect(catalog).toContain("builtin:opengeni-skills");
@@ -37,7 +38,13 @@ describe("sandbox-independent Skill catalog", () => {
     );
     expect(Buffer.byteLength(catalog)).toBeLessThanOrEqual(SKILL_CATALOG_MAX_BYTES);
     expect(catalog).toContain("additional Skills are omitted");
-    expect(catalog).toContain("builtin:opengeni-skills");
+    expect(catalog).not.toContain("builtin:opengeni-skills");
+  });
+
+  test("an empty host selection does not inject hidden management guidance", () => {
+    const catalog = formatSkillCatalog([]);
+    expect(catalog).toContain("skill_read");
+    expect(catalog).not.toContain("opengeni-skills");
   });
 
   test("composes through the ordinary no-sandbox instruction path", () => {
