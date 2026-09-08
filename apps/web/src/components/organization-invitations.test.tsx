@@ -73,7 +73,7 @@ function invitation(input: {
   revision: number;
 }) {
   const createdAt = "2026-09-01T12:00:00.000Z";
-  const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
+  const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
   return {
     ...input,
     targetEmail: "member@example.test",

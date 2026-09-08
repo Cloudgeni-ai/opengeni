@@ -451,10 +451,15 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
-    // Timeline-annotation UX merged onto current main (d06450ca3) measured
-    // 652,180 gzip bytes same-origin and 652,195 with a configured loopback API
-    // URL. Bind the worse configured graph with 1.5 KiB headroom; file count stays
-    // unchanged.
+    // Unchanged d06450ca3 browser source measures 647,170–647,174 gzip
+    // bytes in Linux/x64 acceptance builds with randomized loopback API ports.
+    // Restore the established whole-KiB headroom; keep every other cap fixed.
+    wholeKibEnvelope(647_174),
+    // Timeline-annotation UX (grouped composer chip + numbered
+    // MessageTimeline badges) plus the first current-main merge's
+    // unified-gateway rebound of this same graph (170045166): 652,195
+    // configured gzip. Keep this envelope so the annotation graph is
+    // not judged against `d06450ca3`'s smaller gzip pin.
     wholeKibEnvelope(652_195, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
