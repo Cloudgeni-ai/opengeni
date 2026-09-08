@@ -858,11 +858,20 @@ fences. Approval-required tools remain approval-required regardless of access
 path.
 
 The closed always-visible local first-request set is `exec_command`,
-`write_stdin`, `apply_patch`, `view_image`, `load_skill`,
+`write_stdin`, `apply_patch`, `view_image`, `load_skill`, `skill_read`,
 `request_human_input`, and `list_models`. The last tool returns the current
 workspace's selectable model IDs and deployment-defined costs; it does not
 switch the session model. Other non-MCP function tools and non-eager MCP schemas
 remain behind progressive search.
+
+The server-backed Skill reader is an ordinary first-party gateway definition,
+not a filesystem capability. Hosts supplying `BuildAgentOptions.skillCatalog`
+compose a bounded descriptor-only `skill_catalog` instruction layer even without
+a sandbox. File selection and partial-edit primitives live in runtime
+`skill-files.ts`; the worker's `skill-transfer.ts` uses the existing structured
+filesystem service only for optional checkout/publish. These foundations do not
+themselves migrate stored Skills or activate the new tools in a live worker;
+the unified-system rollout is tracked in [the Skill design](design/skills-system.md).
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no

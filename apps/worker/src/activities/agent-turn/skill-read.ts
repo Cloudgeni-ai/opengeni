@@ -55,7 +55,7 @@ export function createSkillReadAttemptToolDefinition(input: {
       }
       await input.authorize();
       const files =
-        args.skill === "opengeni-skills"
+        args.skill === "opengeni-skills" || args.skill === "builtin:opengeni-skills"
           ? loadSkillManagementSkill().files
           : await input.load(args.skill);
       const output = readSkillFiles(files, args.paths as string[] | undefined);

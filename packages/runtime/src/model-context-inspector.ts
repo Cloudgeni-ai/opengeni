@@ -23,6 +23,7 @@ export type PersistentAgentInstructionInspection = {
 };
 
 const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
+  skill_catalog: "Skills",
   operational_contract: "Operational contract",
   persona_and_core: "Persona and CORE",
   workspace_governance: "Workspace governance",

@@ -1,5 +1,7 @@
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
+import { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
+export { formatSkillCatalog, type SkillCatalogDescriptor } from "./skill-catalog";
 import {
   createLocalMcpBridgeFromAdapters,
   IntegrationInvocationError,
@@ -1867,6 +1869,8 @@ export type BuildAgentOptions = {
    * executable tool catalog.
    */
   skillActivations?: readonly RuntimeSkillActivation[];
+  /** Server-backed Skill descriptors, independent of sandbox capabilities. */
+  skillCatalog?: readonly SkillCatalogDescriptor[];
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -2077,9 +2081,13 @@ export function inspectPersistentAgentInstructions(
       });
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
   } else {
     push("workspace_governance", "Workspace governance", options.workspaceGovernance);
+    if (options.skillCatalog)
+      push("skill_catalog", "Skills", formatSkillCatalog(options.skillCatalog));
     push("session_instructions", "Session instructions", options.sessionInstructions);
     if (codemodeIsAvailable(options)) {
       layers.push({
