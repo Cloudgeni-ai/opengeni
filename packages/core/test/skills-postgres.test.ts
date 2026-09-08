@@ -17,6 +17,9 @@ import {
   assertSkillReadAttempt,
   listSkillDescriptors,
   replayPortableSkillInstall,
+  createPreferenceRegistryProposal,
+  activatePreferenceRegistryRevision,
+  correctPreferenceRegistry,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
@@ -26,6 +29,22 @@ import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "..
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
+async function expectDatabaseGuard(operation: Promise<unknown>, message: string) {
+  let rejected = false;
+  try {
+    await operation;
+  } catch (error) {
+    rejected = true;
+    const messages: string[] = [];
+    let current: unknown = error;
+    while (current instanceof Error) {
+      messages.push(current.message);
+      current = current.cause;
+    }
+    expect(messages.join("\n")).toContain(message);
+  }
+  expect(rejected).toBe(true);
+}
 beforeAll(async () => {
   const adminUrl = process.env.OPENGENI_SKILLS_TEST_ADMIN_URL;
   if (adminUrl) {
@@ -147,6 +166,85 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("legacy correction and activation cannot discard authored folders; explicit restore preserves history", async () => {
+    if (!client) return;
+    const f = await fixture("off");
+    const governance = {
+      ...f.context,
+      actorSubjectId: f.human.actor.subjectId,
+      principalKind: "human_session",
+      authorizeScope: () => {},
+      expectedScopeVersion: 1,
+      reason: "Legacy folder guard test",
+    };
+    const legacyFields = {
+      title: "Legacy authored Skill",
+      description: "Pre-unification text",
+      content: "Historical instructions",
+      precedenceRank: 0,
+      conflictStrategy: "override" as const,
+      conflictsWith: [],
+      expiresAt: null,
+    };
+    const legacy = await createPreferenceRegistryProposal(client.db, {
+      ...governance,
+      ...legacyFields,
+      stableKey: f.input.stableKey,
+      scope: "workspace",
+      provenanceSource: "human",
+      provenanceSourceId: null,
+    });
+    const [historical] = await shared!
+      .admin`select id,content_hash,skill_files from preference_registry_revisions where preference_id=${legacy.id}`;
+    expect(historical!.skill_files).toBeNull();
+    await activatePreferenceRegistryRevision(client.db, {
+      ...governance,
+      preferenceId: legacy.id,
+      revisionId: historical!.id,
+      expectedCurrentRevisionId: null,
+    });
+    const folder = await saveSkill(client.db, {
+      ...f.input,
+      skillId: legacy.id,
+      expectedRevisionId: historical!.id,
+    });
+    await expectDatabaseGuard(
+      correctPreferenceRegistry(client.db, {
+        ...governance,
+        ...legacyFields,
+        preferenceId: legacy.id,
+        expectedCurrentRevisionId: folder.revisionId,
+      }),
+      "Skill folder saves require the unified file lifecycle",
+    );
+    await expectDatabaseGuard(
+      activatePreferenceRegistryRevision(client.db, {
+        ...governance,
+        preferenceId: legacy.id,
+        revisionId: historical!.id,
+        expectedCurrentRevisionId: folder.revisionId,
+      }),
+      "Skill folder activation requires a files-bearing revision",
+    );
+    expect((await readSkill(client.db, f.context, legacy.id))?.files).toEqual(f.input.files);
+    const restored = await restoreSkill(client.db, {
+      ...f.human,
+      operationId: crypto.randomUUID(),
+      skillId: legacy.id,
+      revisionId: historical!.id,
+      expectedRevisionId: folder.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Explicitly restore historical text as a folder",
+    });
+    expect(restored.revisionId).not.toBe(historical!.id);
+    expect((await readSkill(client.db, f.context, legacy.id))?.files).toEqual([
+      { path: "SKILL.md", content: legacyFields.content },
+    ]);
+    const [unchanged] = await shared!
+      .admin`select content_hash,skill_files from preference_registry_revisions where id=${historical!.id}`;
+    expect(unchanged).toEqual({ content_hash: historical!.content_hash, skill_files: null });
+  }, 30_000);
+
   test("portable retries replay before distribution CAS or moving-source resolution", async () => {
     if (!client) return;
     const f = await fixture("automatic");

@@ -99,6 +99,13 @@ when finalizing their operation result.
 
 ## Release
 
+Once any authored or installed head has unified-folder history, legacy single-text
+revision insertion and activation of historical null-files revisions fail closed.
+This also protects inactive/pending folder history, not just the current head.
+Historical rows and hashes remain unchanged. Use explicit unified restore to
+create a new files-bearing revision from older text; activating an already
+files-bearing revision remains compatible with human governance.
+
 Migration `0423_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
