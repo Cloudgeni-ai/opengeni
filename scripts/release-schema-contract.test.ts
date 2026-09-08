@@ -748,6 +748,11 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0420_workspace_pause_timers.sql",
       };
+    if (recoveryNotificationClaimSnapshot)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0421_recovery_notification_claim_snapshot.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       ...(sandboxDeadlineRotationPreemption
         ? { latestMigration: "0397_sandbox_deadline_rotation_preemption.sql" }
@@ -1010,11 +1015,11 @@ describe("release schema contract", () => {
       ...(backgroundCommandLaunchAuthority
         ? { latestMigration: "0419_background_command_launch_authority.sql" }
         : {}),
+      ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
+      ...(workspacePauseTimers ? { latestMigration: "0420_workspace_pause_timers.sql" } : {}),
       ...(recoveryNotificationClaimSnapshot
         ? { latestMigration: "0421_recovery_notification_claim_snapshot.sql" }
         : {}),
-      ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
-      ...(workspacePauseTimers ? { latestMigration: "0420_workspace_pause_timers.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
@@ -1706,6 +1711,11 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0420_workspace_pause_timers.sql",
       };
+    if (recoveryNotificationClaimSnapshot)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0421_recovery_notification_claim_snapshot.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
         (workspacePauseTimers ? 1 : 0) +
@@ -1967,11 +1977,11 @@ describe("release schema contract", () => {
       ...(backgroundCommandLaunchAuthority
         ? { latestMigration: "0419_background_command_launch_authority.sql" }
         : {}),
+      ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
+      ...(workspacePauseTimers ? { latestMigration: "0420_workspace_pause_timers.sql" } : {}),
       ...(recoveryNotificationClaimSnapshot
         ? { latestMigration: "0421_recovery_notification_claim_snapshot.sql" }
         : {}),
-      ...(sessionFilterActivity ? { latestMigration: "0413_session_filter_activity.sql" } : {}),
-      ...(workspacePauseTimers ? { latestMigration: "0420_workspace_pause_timers.sql" } : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(
       organizationUserSetupTokenTransport
