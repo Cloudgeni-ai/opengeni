@@ -60,8 +60,6 @@ export function SkillsPanelContent({
   const [files, setFiles] = useState<SkillRecord["files"]>([]);
   const [path, setPath] = useState("SKILL.md");
   const [newPath, setNewPath] = useState("");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [history, setHistory] = useState<PreferenceRegistryRevisionSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -72,9 +70,7 @@ export function SkillsPanelContent({
   const generation = useRef(0);
   const dirty = Boolean(
     record &&
-    (title !== (record.title ?? "") ||
-      description !== (record.description ?? "") ||
-      files.length !== record.files.length ||
+    (files.length !== record.files.length ||
       files.some(
         (file, index) =>
           file.path !== record.files[index]?.path || file.content !== record.files[index]?.content,
@@ -153,8 +149,6 @@ export function SkillsPanelContent({
     setRecord(next);
     setFiles(next.files);
     setPath("SKILL.md");
-    setTitle(next.title ?? "");
-    setDescription(next.description ?? "");
     setNewPath("");
   }
   async function open(skillId: string, revisionId?: string) {
@@ -224,8 +218,6 @@ export function SkillsPanelContent({
               skillId: record.id,
               scope: record.scope,
               stableKey: record.stableKey || `authored-${record.id.replaceAll("-", "")}`,
-              title,
-              description,
               files,
               deletions: record.files
                 .filter((file) => !files.some((next) => next.path === file.path))
@@ -341,24 +333,10 @@ export function SkillsPanelContent({
               : "Authored Skill"}{" "}
             · {record.scope}
           </p>
-          <label className="block text-sm">
-            Name
-            <Input
-              value={title}
-              maxLength={120}
-              disabled={!editable || busy}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-          </label>
-          <label className="block text-sm">
-            When to use this Skill
-            <Input
-              value={description}
-              maxLength={240}
-              disabled={!editable || busy}
-              onChange={(event) => setDescription(event.target.value)}
-            />
-          </label>
+          <p className="text-sm text-muted-foreground">
+            Edit the name and description in SKILL.md frontmatter. The Skill index is updated from
+            that file when this revision becomes active.
+          </p>
           {history.length ? (
             <label className="block text-sm">
               History
@@ -440,7 +418,9 @@ export function SkillsPanelContent({
                 Remove selected file
               </Button>
               <Button
-                disabled={busy || !title.trim() || !description.trim()}
+                disabled={
+                  busy || !files.some((file) => file.path === "SKILL.md" && file.content.trim())
+                }
                 onClick={() => void mutate("save")}
               >
                 Save Skill

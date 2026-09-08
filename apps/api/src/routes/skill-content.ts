@@ -13,7 +13,7 @@ import {
   validateSkillFiles,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { applySkillFileChanges } from "@opengeni/runtime/skill-library";
+import { applySkillFileChanges, buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import { authorizePreferenceRegistryScopeMutation } from "./preference-registry";
 
 const scopeSchema = z.enum(["workspace", "organization", "user"]);
@@ -25,8 +25,6 @@ const saveRequest = z
     expectedScopeVersion: z.number().int().nonnegative(),
     scope: scopeSchema.default("workspace"),
     stableKey: z.string().min(1).max(120),
-    title: z.string().min(1).max(120),
-    description: z.string().min(1).max(240),
     files: z.array(SkillFile).max(128),
     deletions: z.array(z.string().min(1).max(512)).max(128).default([]),
     reason: z.string().min(1).max(2000),
@@ -146,10 +144,11 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
           request.deletions,
         ),
       );
+      buildPortableSkillArtifact(files);
     } catch {
       throw new HTTPException(400, {
         message:
-          "Invalid Skill folder. Use unique relative text-file paths, keep SKILL.md, and respect the file and folder size limits.",
+          "Invalid Skill folder. SKILL.md requires valid YAML frontmatter with a name and description. Use unique relative text-file paths and respect the file and folder size limits.",
       });
     }
     const receipt = await skillMutation(() =>
@@ -163,8 +162,6 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
         expectedScopeVersion: request.expectedScopeVersion,
         scope: request.scope,
         stableKey: current?.stableKey ?? request.stableKey,
-        title: request.title,
-        description: request.description,
         files,
         reason: request.reason,
       }),

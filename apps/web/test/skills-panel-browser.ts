@@ -14,9 +14,11 @@ try {
     console.error(error.message);
   });
   await page.goto(`${baseUrl}/test/skills-panel.html`);
-  await page.getByRole("button", { name: "Release checks · workspace", exact: true }).click();
+  await page.getByRole("button", { name: "release-checks · workspace", exact: true }).click();
   const contents = page.getByRole("textbox", { name: "Contents of SKILL.md" });
-  await contents.fill("# Updated release checks\n\nRun every required check.\n");
+  await contents.fill(
+    "---\nname: release-checks\ndescription: Verify a release before publishing\n---\n# Updated release checks\n\nRun every required check.\n",
+  );
   await page.getByRole("button", { name: "New Skill", exact: true }).click();
   await page.getByRole("dialog").waitFor();
   await page.getByRole("button", { name: "Cancel", exact: true }).click();

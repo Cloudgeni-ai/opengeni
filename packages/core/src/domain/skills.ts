@@ -4,6 +4,7 @@ import type {
   SkillRevisionInput,
   SkillSaveInput,
 } from "@opengeni/contracts";
+import { buildPortableSkillArtifact } from "@opengeni/runtime/skill-library";
 import {
   applySkillLifecycle,
   listSkillRecords,
@@ -71,13 +72,16 @@ export async function readSkill(
 }
 export async function saveSkill(db: Database, input: SkillSaveInput) {
   const { accountId, workspaceId, actor, ...request } = input;
+  const artifact = buildPortableSkillArtifact(validateSkillFiles(input.files));
   return applySkillLifecycle(
     db,
     { accountId, workspaceId, actor },
     {
       ...request,
       operation: "save",
-      files: validateSkillFiles(input.files),
+      files: artifact.files,
+      title: artifact.name,
+      description: artifact.description,
     },
   );
 }

@@ -105,8 +105,6 @@ export function createWorkspaceSkillTools(input: {
       actor: input.actor,
       files: [...artifact.files],
       stableKey: base?.stableKey ?? `authored-${request.skillId.replaceAll("-", "")}`,
-      title: artifact.name,
-      description: artifact.description.slice(0, 240),
     });
   };
   return [

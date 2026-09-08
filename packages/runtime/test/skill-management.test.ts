@@ -1,5 +1,23 @@
 import { expect, test } from "bun:test";
-import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
+import {
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
+  loadSkillManagementSkill,
+  readSkillFiles,
+  parsePortableSkillFrontmatter,
+} from "../src/skill-library";
+
+test("curated library descriptors come from the pinned SKILL.md, not handwritten summaries", () => {
+  const entries = listSkillLibraryEntries();
+  expect(entries).toHaveLength(9);
+  for (const entry of entries) {
+    const { skill } = loadSkillLibrarySkill(entry.id);
+    const main = skill.files.find((file) => file.path === "SKILL.md")!;
+    const metadata = parsePortableSkillFrontmatter(main.content);
+    expect({ name: entry.name, description: entry.description }).toEqual(metadata);
+    expect({ name: skill.name, description: skill.description }).toEqual(metadata);
+  }
+});
 
 test("management guidance is a readable text Skill without a sandbox", () => {
   const skill = loadSkillManagementSkill();

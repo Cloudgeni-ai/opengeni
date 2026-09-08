@@ -350,6 +350,7 @@
       "version": "2.13.0",
       "dependencies": {
         "@noble/hashes": "^1.8.0",
+        "yaml": "2.9.0",
         "zod": "^4.2.1",
       },
       "devDependencies": {

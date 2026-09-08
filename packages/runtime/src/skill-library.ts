@@ -3,6 +3,11 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
+import {
+  parseSkillFrontmatter as parsePortableSkillFrontmatter,
+  readSkillMetadata,
+} from "@opengeni/contracts";
+export { parseSkillFrontmatter as parsePortableSkillFrontmatter } from "@opengeni/contracts";
 
 export {
   applySkillFileChanges,
@@ -67,7 +72,6 @@ export type SkillLibrarySkill = Readonly<{
 export const PORTABLE_SKILL_MAX_FILES = 128;
 export const PORTABLE_SKILL_MAX_FILE_BYTES = 256 * 1024;
 export const PORTABLE_SKILL_MAX_TOTAL_BYTES = 1024 * 1024;
-const portableSkillName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 
 export type PortableSkillArtifact = Readonly<{
   name: string;
@@ -77,13 +81,12 @@ export type PortableSkillArtifact = Readonly<{
   totalBytes: number;
 }>;
 
-const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
+type SkillLibrarySourceEntry = Omit<SkillLibraryEntry, "name" | "description">;
+
+const skillLibraryEntries: readonly SkillLibrarySourceEntry[] = Object.freeze([
   Object.freeze({
     id: "checkov",
-    name: "checkov",
     version: "1.0.0",
-    description:
-      "Use Checkov to scan Terraform and infrastructure-as-code repositories, explain findings, apply safe fixes, and verify remediations.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "security", "opt-in"]),
     contentSha256: "0331b987cd609946c4b95928fec9982b96b0a8614a95e5e628a531efb8ad8577",
@@ -102,10 +105,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "document-parsing",
-    name: "document-parsing",
     version: "1.0.0",
-    description:
-      "Extract readable Markdown from local office documents, ebooks, CSV files, and text-based PDFs with the pinned AnyDoc runtime.",
     category: "documents",
     tags: Object.freeze(["skill", "documents", "parsing", "markdown", "opt-in"]),
     contentSha256: "5494b5bbb1629001dad8ab823afb2401efc7a6e76679644d211df8a5164f9d1a",
@@ -125,10 +125,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "refactor-module",
-    name: "refactor-module",
     version: "0.0.1",
-    description:
-      "Transform monolithic Terraform configurations into reusable, maintainable modules following HashiCorp module-design practices.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "modules", "opt-in"]),
     contentSha256: "cc6d70034c4d11ef6a496c0081ca28219cbd310283d77e327914bcd2f27f3a09",
@@ -147,10 +144,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "social-media-marketing",
-    name: "social-media-marketing",
     version: "1.0.0",
-    description:
-      "Analyze connected social accounts, content performance, audience signals, campaigns, and daily media activity without inventing unavailable metrics.",
     category: "marketing",
     tags: Object.freeze(["skill", "marketing", "social", "analysis", "opt-in"]),
     contentSha256: "66893de1fd2110f18d9be69b1e0adb61193e0a736a88f0c0725168465d2b06a3",
@@ -170,10 +164,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "terraform-search-import",
-    name: "terraform-search-import",
     version: "0.1.0",
-    description:
-      "Discover existing cloud resources with Terraform Search and bring supported resources under Terraform management.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "import", "opt-in"]),
     contentSha256: "994d7a48dd6a610daa8a4dbdf4b0f0e52eaf8662a509b6a163bc6e76611227f9",
@@ -192,10 +183,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "terraform-stacks",
-    name: "terraform-stacks",
     version: "0.0.1",
-    description:
-      "Create, modify, validate, and troubleshoot Terraform Stack component and deployment configurations.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "stacks", "opt-in"]),
     contentSha256: "0a6244ecddf1cce0357db41b41b3b20a1bfa71f331092ebc8bbd15e649733d35",
@@ -214,10 +202,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "terraform-style-guide",
-    name: "terraform-style-guide",
     version: "1.0.0",
-    description:
-      "Generate and review Terraform HCL using HashiCorp's official style conventions and maintainability practices.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "style", "opt-in"]),
     contentSha256: "1453c4f11636d2d88c5186a4ce2d7532d4b2056a861ed69653df21e8e45e19cd",
@@ -236,10 +221,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "terraform-test",
-    name: "terraform-test",
     version: "0.0.2",
-    description:
-      "Write and run Terraform tests with assertions, mocked providers, data sources, and plan/apply scenarios.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "testing", "opt-in"]),
     contentSha256: "61be0fa43c48f49980fee28c64215f593c4ab55d55a93c8f2e514d9ca566a97b",
@@ -258,10 +240,7 @@ const skillLibraryEntries: readonly SkillLibraryEntry[] = Object.freeze([
   }),
   Object.freeze({
     id: "azure-verified-modules",
-    name: "azure-verified-modules",
     version: "1.0.0",
-    description:
-      "Azure Verified Modules (AVM) requirements and best practices for certified Terraform modules.",
     category: "infrastructure",
     tags: Object.freeze(["skill", "infrastructure", "terraform", "azure", "opt-in"]),
     contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
@@ -315,7 +294,7 @@ export function loadSkillManagementSkill(): SkillLibrarySkill {
   return { name: metadata.name, description: metadata.description, files: artifact.files };
 }
 
-function entryDirectory(entry: SkillLibraryEntry): string | null {
+function entryDirectory(entry: SkillLibrarySourceEntry): string | null {
   const root = skillLibraryRoot();
   if (!root) return null;
   const directory = join(root, entry.relativePath);
@@ -333,7 +312,10 @@ function entryDirectory(entry: SkillLibraryEntry): string | null {
 
 /** Return only entries whose reviewed artifact is present in this deployment. */
 export function listSkillLibraryEntries(): readonly SkillLibraryEntry[] {
-  return skillLibraryEntries.filter((entry) => reviewedArtifactIsAvailable(entry));
+  return skillLibraryEntries.flatMap((entry) => {
+    const resolved = resolveSkillLibraryEntry(entry);
+    return resolved ? [resolved] : [];
+  });
 }
 
 /** Return whether an id belongs to the immutable library, even if its artifact is unavailable. */
@@ -346,7 +328,7 @@ export function getSkillLibraryEntry(id: string, version?: string): SkillLibrary
   const entry = skillLibraryEntries.find(
     (candidate) => candidate.id === id && (version === undefined || candidate.version === version),
   );
-  return entry && reviewedArtifactIsAvailable(entry) ? entry : null;
+  return entry ? resolveSkillLibraryEntry(entry) : null;
 }
 
 /**
@@ -433,17 +415,7 @@ export function buildPortableSkillArtifact(
   if (skillMarkdown === undefined) {
     throw new Error("Skill artifact is missing a top-level SKILL.md");
   }
-  const metadata = parsePortableSkillFrontmatter(skillMarkdown);
-  if (!metadata.name || !portableSkillName.test(metadata.name)) {
-    throw new Error("Skill artifact SKILL.md must declare a safe name");
-  }
-  if (
-    !metadata.description ||
-    metadata.description.length > 2_048 ||
-    /[\r\n]/u.test(metadata.description)
-  ) {
-    throw new Error("Skill artifact SKILL.md must declare a single-line description");
-  }
+  const metadata = readSkillMetadata(skillMarkdown);
   return Object.freeze({
     name: metadata.name,
     description: metadata.description,
@@ -512,52 +484,6 @@ function materializePortableSkillFiles(inputFiles: readonly SkillLibraryFile[]):
   return { materialized, totalBytes };
 }
 
-export function parsePortableSkillFrontmatter(markdown: string): {
-  name: string | null;
-  description: string | null;
-} {
-  const lines = markdown.split(/\r?\n/u);
-  if (lines[0]?.trim() !== "---") return { name: null, description: null };
-  const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (end === -1) return { name: null, description: null };
-  let name: string | null = null;
-  let description: string | null = null;
-  for (let index = 1; index < end; index += 1) {
-    const line = lines[index]!;
-    const separator = line.indexOf(":");
-    if (separator < 1) continue;
-    const key = line.slice(0, separator).trim();
-    const raw = line.slice(separator + 1).trim();
-    if (key === "name") {
-      name = unquotePortableFrontmatterValue(raw);
-      continue;
-    }
-    if (key !== "description") continue;
-    if (raw !== ">" && raw !== ">-" && raw !== "|" && raw !== "|-") {
-      description = unquotePortableFrontmatterValue(raw);
-      continue;
-    }
-    const block: string[] = [];
-    while (index + 1 < end && /^\s+\S/u.test(lines[index + 1]!)) {
-      index += 1;
-      block.push(lines[index]!.trim());
-    }
-    description = block.join(" ").trim() || null;
-  }
-  return { name: name?.trim() || null, description: description?.trim() || null };
-}
-
-function unquotePortableFrontmatterValue(value: string): string {
-  if (value.length >= 2) {
-    const first = value[0];
-    const last = value[value.length - 1];
-    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
-      return value.slice(1, -1);
-    }
-  }
-  return value;
-}
-
 /** Verify a reviewed artifact against its immutable catalog digest. */
 export function verifySkillLibraryArtifact(
   root: string,
@@ -613,14 +539,17 @@ function materializeSkillLibraryFiles(root: string, current = ""): MaterializedS
     });
 }
 
-function reviewedArtifactIsAvailable(entry: SkillLibraryEntry): boolean {
+function resolveSkillLibraryEntry(entry: SkillLibrarySourceEntry): SkillLibraryEntry | null {
   const directory = entryDirectory(entry);
-  if (!directory) return false;
+  if (!directory) return null;
   try {
-    verifySkillLibraryArtifact(directory, entry.contentSha256, entry);
-    return true;
+    const artifact = verifySkillLibraryArtifact(directory, entry.contentSha256, entry);
+    const metadata = readSkillMetadata(
+      artifact.files.find((file) => file.path === "SKILL.md")!.content,
+    );
+    return Object.freeze({ ...entry, ...metadata });
   } catch {
-    return false;
+    return null;
   }
 }
 

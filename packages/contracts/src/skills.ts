@@ -1,4 +1,5 @@
 import { z } from "zod";
+export { parseSkillFrontmatter, readSkillMetadata } from "./skill-metadata";
 
 /** Files are UTF-8 text, relative to the Skill root. No executable authority. */
 export const SkillFile = z.object({ path: z.string().min(1).max(512), content: z.string() });
@@ -26,8 +27,6 @@ export type SkillSaveInput = SkillWriteContext & {
   expectedRevisionId: string | null;
   expectedScopeVersion: number;
   stableKey: string;
-  title: string;
-  description: string;
   files: SkillFile[];
   scope?: SkillScope;
   reason: string;

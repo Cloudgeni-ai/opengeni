@@ -39,8 +39,6 @@ export type SaveWorkspaceSkillRequest = {
   expectedScopeVersion: number;
   scope?: SkillScope;
   stableKey: string;
-  title: string;
-  description: string;
   files: SkillFile[];
   deletions?: string[];
   reason: string;

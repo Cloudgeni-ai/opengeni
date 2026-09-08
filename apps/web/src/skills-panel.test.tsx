@@ -24,12 +24,15 @@ const record: SkillRecord = {
   status: "active",
   activeRevisionId: "22222222-2222-4222-8222-222222222222",
   revisionId: "22222222-2222-4222-8222-222222222222",
-  title: "Example",
+  title: "example",
   description: "Use for examples",
   contentHash: "a".repeat(64),
   source: null,
   files: [
-    { path: "SKILL.md", content: "Instructions" },
+    {
+      path: "SKILL.md",
+      content: "---\nname: example\ndescription: Use for examples\n---\nInstructions",
+    },
     { path: "references/example.txt", content: "Supporting text" },
   ],
 };
@@ -101,8 +104,8 @@ test("Skills list loads metadata first and saves the full edited folder without 
   const view = await mount(context);
   try {
     expect(calls.map((call) => call.method)).toEqual(["list"]);
-    await view.click("Example");
-    expect(view.container.querySelector("textarea")?.value).toBe("Instructions");
+    await view.click("example");
+    expect(view.container.querySelector("textarea")?.value).toBe(record.files[0]!.content);
     await view.click("Save Skill");
     expect(calls.find((call) => call.method === "save")?.request).toMatchObject({
       skillId: record.id,
@@ -112,6 +115,12 @@ test("Skills list loads metadata first and saves the full edited folder without 
       deletions: [],
     });
     expect(view.container.textContent).toContain("Skill saved and active.");
+    const saved = calls.find((call) => call.method === "save")!.request as Record<string, unknown>;
+    expect(saved).not.toHaveProperty("title");
+    expect(saved).not.toHaveProperty("description");
+    expect(view.container.textContent).toContain(
+      "Edit the name and description in SKILL.md frontmatter",
+    );
   } finally {
     await view.dispose();
   }
@@ -125,7 +134,7 @@ test("a save finishing after workspace navigation cannot read or display old-wor
   const { context, calls } = fixture({ saveWorkspaceSkill: () => pending });
   const view = await mount(context);
   try {
-    await view.click("Example");
+    await view.click("example");
     await view.click("Save Skill");
     await view.render("two");
     const readCount = calls.filter((call) => call.method === "read").length;
@@ -151,7 +160,7 @@ test("workspace readers can inspect Skill files without edit controls", async ()
   const { context } = fixture({}, false);
   const view = await mount(context);
   try {
-    await view.click("Example");
+    await view.click("example");
     expect(view.container.querySelector("textarea")?.disabled).toBe(true);
     expect(view.container.textContent).not.toContain("Save Skill");
     expect(view.container.textContent).not.toContain("Add text file");
@@ -174,7 +183,7 @@ test("catalog pagination appends metadata without opening Skill files", async ()
   try {
     await view.click("Load more Skills");
     expect(cursors).toEqual([undefined, "page-two"]);
-    expect(view.container.textContent).toContain("Example");
+    expect(view.container.textContent).toContain("example");
     expect(view.container.textContent).toContain("Another Skill");
     expect(view.container.textContent).not.toContain("Load more Skills");
     expect(calls.filter((call) => call.method === "read")).toHaveLength(0);

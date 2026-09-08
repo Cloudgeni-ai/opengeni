@@ -206,6 +206,36 @@ prefer one reader where bytes are available without a sandbox, but do not promis
 remote reads of repository files that only exist on a machine. Define any
 temporary filesystem-loader exception explicitly before retiring `load_skill`.
 
+### Frontmatter is the metadata authority
+
+User clarification, September 8: a usable Skill must have valid `SKILL.md`
+frontmatter. Its `name` and `description` are the only authored index metadata.
+Database title/description columns are parsed projections of that exact immutable
+revision, not another place to edit or shorten the description. There is no
+independent "short description". Storage identity (UUID/source binding) is
+separate from the authored name; renaming does not create another Skill.
+
+All save, publish, import, and activation paths must use the same parser and
+validation. The API and agent save requests accept files, not a competing
+title/description pair. The simple editor edits frontmatter in the file. A future
+form may edit that same frontmatter, never a separate field. Use a real YAML
+parser so quoted, escaped, and block values have one interpretation. Validate
+the Agent Skills name and description constraints; do not silently truncate a
+valid description to fit a smaller database column.
+
+The initial context index uses the parsed name/description from the active
+revision, without transferring the whole folder or starting a sandbox.
+Pending edits cannot change that active index. Reading explicit paths still
+returns only those paths; metadata storage does not add SKILL.md implicitly.
+
+Legacy conversion is required rollout work, not a permanent frontmatter-free
+exception. Keep historical rows and hashes immutable. Convert legacy active
+content through new valid revisions, preserving the body and using existing
+metadata where frontmatter is absent; existing valid frontmatter wins over
+conflicting database labels. Invalid or ambiguous inputs need explicit repair,
+not silent omission. Conversion, restore, inline/Pack compatibility, and
+database projection consistency must be verified before this cutover ships.
+
 ### Bundled guidance: one selector, individual inclusion rules
 
 The September 8 implementation review identified inconsistent bundled selection:

@@ -14,7 +14,7 @@ let record: SkillRecord = {
   status: "active",
   activeRevisionId: "22222222-2222-4222-8222-222222222222",
   revisionId: "22222222-2222-4222-8222-222222222222",
-  title: "Release checks",
+  title: "release-checks",
   description: "Verify a release before publishing it.",
   contentHash: "a".repeat(64),
   source: null,
@@ -57,16 +57,12 @@ const context = {
       _workspaceId: string,
       request: {
         files: SkillRecord["files"];
-        title: string;
-        description: string;
         operationId: string;
       },
     ) {
       record = {
         ...record,
         files: request.files,
-        title: request.title,
-        description: request.description,
       };
       return {
         skillId: record.id,

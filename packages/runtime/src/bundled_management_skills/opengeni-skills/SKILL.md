@@ -32,7 +32,11 @@ merely to get past a conflict.
 ## Create and edit
 
 Use `skill_save` for small changes to any text file, not only `SKILL.md`.
-Creating a Skill requires a `SKILL.md` with a useful name and description.
+Every Skill requires `name` and `description` in `SKILL.md` YAML frontmatter.
+That file is the source of truth: edit its frontmatter to change how the Skill
+appears in the index. There is no separately editable short description. Saves
+derive the index metadata from the same revision; supporting-file edits leave
+it unchanged. Invalid or missing frontmatter is an error, not a fallback.
 Choose a fresh UUID `skillId`, set `expectedRevisionId` to null and
 `expectedScopeVersion` to 1, and retain the operation id for retries.
 Keep the main instructions focused; place longer references or scripts in

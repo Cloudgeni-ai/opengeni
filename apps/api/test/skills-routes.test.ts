@@ -137,8 +137,6 @@ describe("portable Skill routes", () => {
       expectedRevisionId: null,
       expectedScopeVersion: 1,
       stableKey: `authored-${skillId}`,
-      title: "Release checks",
-      description: "Check a release",
       files: [
         { path: "SKILL.md", content: skillMarkdown },
         { path: "references/checks.txt", content: "Original checks" },
@@ -172,7 +170,10 @@ describe("portable Skill routes", () => {
     const second = await saved.json();
     const read = await request(`/skills/content/${skillId}`);
     expect(read.status).toBe(200);
-    expect((await read.json()).files).toEqual([
+    const currentContent = await read.json();
+    expect(currentContent.title).toBe("release-operator");
+    expect(currentContent.description).toBe("Prepare, verify, and publish a safe release.");
+    expect(currentContent.files).toEqual([
       { path: "SKILL.md", content: skillMarkdown },
       { path: "references/checks.txt", content: "Updated checks" },
     ]);
@@ -211,6 +212,25 @@ describe("portable Skill routes", () => {
       }),
     });
     expect(invalid.status).toBe(400);
+    const missingFrontmatter = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        files: [{ path: "SKILL.md", content: "Instructions without metadata" }],
+      }),
+    });
+    expect(missingFrontmatter.status).toBe(400);
+    const separateMetadata = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        title: "Competing name",
+        description: "Competing summary",
+      }),
+    });
+    expect(separateMetadata.status).toBe(422);
     const malformed = await request("/skills/content/save", { method: "POST", body: "{" });
     expect(malformed.status).toBe(422);
     const secondSkillId = crypto.randomUUID();

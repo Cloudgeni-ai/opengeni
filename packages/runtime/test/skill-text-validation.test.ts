@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPortableSkillArtifact } from "../src/skill-library";
+import { buildPortableSkillArtifact, parsePortableSkillFrontmatter } from "../src/skill-library";
 
 const main = {
   path: "SKILL.md",
@@ -7,6 +7,69 @@ const main = {
 };
 
 describe("portable Skill text validation", () => {
+  test("requires frontmatter and derives exact metadata including long descriptions", () => {
+    expect(() =>
+      buildPortableSkillArtifact([{ path: "SKILL.md", content: "Instructions" }]),
+    ).toThrow("safe name");
+    const description = "Read before deployment. ".repeat(30).trim();
+    const content = `---\nname: deploy-check\ndescription: ${JSON.stringify(description)}\n---\nInstructions`;
+    const artifact = buildPortableSkillArtifact([{ path: "SKILL.md", content }]);
+    expect(artifact.name).toBe("deploy-check");
+    expect(artifact.description).toBe(description);
+    expect(artifact.description.length).toBeGreaterThan(240);
+    expect(artifact.files[0]!.content).toBe(content);
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: `---\nname: deploy\ndescription: ${"x".repeat(1025)}\n---\n` },
+      ]),
+    ).toThrow("1024");
+  });
+
+  test("uses YAML semantics for quotes, blocks and duplicate-key validation", () => {
+    expect(
+      parsePortableSkillFrontmatter(
+        '---\nname: deploy\ndescription: "Run \\"checks\\" before deploying"\n---\n',
+      ),
+    ).toEqual({
+      name: "deploy",
+      description: 'Run "checks" before deploying',
+    });
+    expect(
+      parsePortableSkillFrontmatter(
+        "---\nname: deploy\ndescription: >-\n  Run checks\n  before deploying.\n---\n",
+      ).description,
+    ).toBe("Run checks before deploying.");
+    expect(
+      parsePortableSkillFrontmatter(
+        "---\nname: deploy\ndescription: |-\n  First line\n  Second line\n---\n",
+      ).description,
+    ).toBe("First line\nSecond line");
+    expect(() =>
+      parsePortableSkillFrontmatter("---\nname: deploy\nname: shadow\ndescription: Checks\n---\n"),
+    ).toThrow("invalid YAML");
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: "---\nname: deploy\ndescription: true\n---\n" },
+      ]),
+    ).toThrow("description");
+  });
+
+  test.each([
+    "Uppercase",
+    "bad_name",
+    "bad.name",
+    "-start",
+    "end-",
+    "two--hyphens",
+    '" padded "',
+    "a".repeat(65),
+  ])("rejects invalid Skill name %s", (name) => {
+    expect(() =>
+      buildPortableSkillArtifact([
+        { path: "SKILL.md", content: `---\nname: ${name}\ndescription: Instructions\n---\n` },
+      ]),
+    ).toThrow("safe name");
+  });
   test("accepts text regardless of extension and preserves Unicode and BOM", () => {
     const files = [
       main,
