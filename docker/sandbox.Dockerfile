@@ -35,8 +35,8 @@ RUN set -eux; \
     dpkg --add-architecture "$(xx-info debian-arch)"; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-      linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"; \
-    xx-apt-get install -y --no-install-recommends xx-c-essentials
+      linux-libc-dev/bookworm "linux-libc-dev:$(xx-info debian-arch)/bookworm"
+RUN xx-apt-get install -y --no-install-recommends xx-c-essentials
 COPY agent .
 # Cache mounts keep the crates.io registry and the per-target build directory
 # between builds so an edit under agent/ recompiles only the changed crates.
