@@ -39,3 +39,19 @@ export function skillInstallerActor(access: AccessGrantAuthorization): SkillActo
       "Skill installation requires a human session or a live agent attempt; service principals cannot be attributed as humans.",
   });
 }
+
+/** Non-Skill component removals remain available to their existing callers. */
+export function skillRemovalActor(access: AccessGrantAuthorization): SkillActorType | undefined {
+  const grant = requireResolvedAccessGrantAuthorization(access, access.grant.workspaceId);
+  if (
+    grant.principalKind !== "human_session" ||
+    grant.serviceInitiator ||
+    grant.serviceInitiatorContext ||
+    grant.subjectId.startsWith("api_key:") ||
+    ["sessionId", "turnId", "attemptId", "executionGeneration"].some(
+      (key) => grant.metadata?.[key] !== undefined,
+    )
+  )
+    return undefined;
+  return skillInstallerActor(access);
+}

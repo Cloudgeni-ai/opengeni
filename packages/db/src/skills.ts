@@ -120,7 +120,13 @@ export async function listSkillDescriptors(
 export async function listSkillRecords(
   db: Database,
   context: SkillReadContext,
-  options: { skillId?: string; revisionId?: string; limit?: number; metadataOnly?: boolean } = {},
+  options: {
+    skillId?: string;
+    revisionId?: string;
+    limit?: number;
+    metadataOnly?: boolean;
+    after?: { stableKey: string; id: string };
+  } = {},
 ): Promise<SkillRecord[]> {
   const run = async (tx: Database) => {
     const rows = await rawRows<{ skill: SkillRecord }>(
@@ -157,6 +163,8 @@ export async function listSkillRecords(
           OR (h.scope='user' AND h.scope_subject_id=${context.subjectId ?? null}))
         AND (${options.skillId ?? null}::uuid IS NULL OR h.id=${options.skillId ?? null}::uuid)
         AND (${options.revisionId ?? null}::uuid IS NULL OR r.id IS NOT NULL)
+        AND (${options.after?.id ?? null}::uuid IS NULL OR
+          (h.stable_key,h.id) > (${options.after?.stableKey ?? ""},${options.after?.id ?? null}::uuid))
       ORDER BY h.stable_key,h.id LIMIT ${Math.min(Math.max(options.limit ?? 128, 1), 1000)}
     `,
     );

@@ -326,8 +326,15 @@ The desktop browser fixture covers edit, cancelled discard, save, and supporting
 file readback. Real-PostgreSQL HTTP tests have been added for partial save,
 replay, stale-head conflicts, restore, and invalid input; their execution is a
 remaining gate, not implied by the browser fixture. API-key/service installation
-compatibility, bounded catalog pagination, composite Pack/Plugin pending
+compatibility, composite Pack/Plugin pending
 outcomes, and the public bundled-selection control remain integration work.
+
+The catalog now has cursor-based metadata pagination end to end. Source-removal
+receipts are surfaced by Skill, Pack, and Plugin API responses and UI messages;
+customized guidance remaining active is distinguished from deactivation.
+Worker install retries consult their original-request receipt before remote
+source resolution. Startup contribution accounting now uses the actual bounded
+index text rather than loading every installed Skill folder.
 
 ## 6. Current implementation: verified baseline
 

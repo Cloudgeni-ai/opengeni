@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
 import { accessGrantAuthorizationFromContext } from "@opengeni/core";
-import { skillInstallerActor } from "../src/routes/skill-install-authority";
+import { skillInstallerActor, skillRemovalActor } from "../src/routes/skill-install-authority";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const accountId = "22222222-2222-4222-8222-222222222222";
@@ -65,4 +65,14 @@ test("service and key principals cannot acquire human Skill authority", () => {
       }),
     ),
   ).toThrow();
+});
+
+test("removal propagates actual human authority without blocking unrelated service-owned components", () => {
+  expect(skillRemovalActor(authorization())).toEqual(skillInstallerActor(authorization()));
+  expect(skillRemovalActor(authorization({ principalKind: "service" }))).toBeUndefined();
+  expect(skillRemovalActor(authorization({ principalKind: "agent_attempt" }))).toBeUndefined();
+  expect(
+    skillRemovalActor(authorization({ metadata: { sessionId: "signed-attempt" } })),
+  ).toBeUndefined();
+  expect(() => skillRemovalActor(authorization({}, "user:another"))).toThrow();
 });

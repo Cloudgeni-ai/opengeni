@@ -25,6 +25,13 @@ export type SkillWriteReceipt = {
   outcome: "applied" | "pending" | "preserved";
   replayed: boolean;
 };
+export type SkillSourceReleaseReceipt = {
+  skillId: string;
+  revisionId: string | null;
+  disposition: "deactivated" | "preserved" | "inactive";
+  eventId: string | null;
+  warning: string | null;
+};
 export type SaveWorkspaceSkillRequest = {
   operationId: string;
   skillId: string;

@@ -38,6 +38,7 @@ import { toast } from "sonner";
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
 import { SkillsPanel } from "./skills-panel";
+import { skillReleaseMessage } from "@/components/capabilities/skill-release-message";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
@@ -1181,9 +1182,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
       onRuntimeChanged();
       toast.success(`Removed ${skillRemoval.item.name}`, {
         description:
-          result.status === "retained_by_other_owners"
+          skillReleaseMessage(result.skillReleases) ??
+          (result.status === "retained_by_other_owners"
             ? "Another Plugin or Pack still owns this Skill, so it remains available."
-            : "The Skill is no longer active in this workspace.",
+            : "The Skill is no longer active in this workspace."),
       });
       setSkillRemoval(null);
       setSelected(null);
@@ -1592,7 +1594,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   ): Promise<boolean> {
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.installPack(workspaceId, pack.id, {
+      const installed = await client.installPack(workspaceId, pack.id, {
         expectedManifestDigest: preview.manifestDigest,
         idempotencyKey,
         ...selection,
@@ -1608,6 +1610,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
           : preview.action === "update"
             ? `Updated ${pack.name}`
             : `Repaired ${pack.name}`,
+        { description: skillReleaseMessage(installed.skillReleases) },
       );
       return true;
     } catch (error) {
@@ -1640,13 +1643,15 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     if (preview.installationVersion === null) return false;
     setBusyId(`pack:${pack.id}`);
     try {
-      await client.uninstallPack(workspaceId, pack.id, {
+      const result = await client.uninstallPack(workspaceId, pack.id, {
         expectedInstallationVersion: preview.installationVersion,
         idempotencyKey,
       });
       await Promise.all([packs.refresh(), refresh()]);
       onRuntimeChanged();
-      toast.success(`Uninstalled ${pack.name}`);
+      toast.success(`Uninstalled ${pack.name}`, {
+        description: skillReleaseMessage(result.skillReleases),
+      });
       return true;
     } catch (error) {
       const copy = capabilityErrorToast(error, "Failed to uninstall pack");

@@ -123,6 +123,30 @@ describe("Company Brain model contribution receipts", () => {
     expect(modelVisibleCompanyBrainSkillActivations("modal", activations)).toBe(activations);
   });
 
+  test("server-backed index receipts use the actual bounded text without reading folders or duplicating preference descriptors", () => {
+    const text = "## Skills\nA bounded, sandbox-independent index";
+    const receipt = buildCompanyBrainContributionReceipt({
+      contextSelectionReceiptId: identity(),
+      attemptId: identity(),
+      turnId: identity(),
+      nestedAgentDepth: 0,
+      memoryPromptMode: "retrieval_only",
+      instructionPolicy: policy(),
+      workspaceAgentInstructions: null,
+      preferences: preferences(),
+      companyProfile: profile(),
+      companyProfileIncluded: false,
+      workspaceMemory: null,
+      skillActivations: [],
+      skillCatalogText: text,
+    });
+    expect(receipt.contributions.map((item) => item.source)).toEqual([
+      "workspace_instruction_policy",
+      "runtime_skill_catalog",
+    ]);
+    expect(receipt.contributions[1]?.utf8Bytes).toBe(Buffer.byteLength(text));
+  });
+
   test("contained children retain rules and guide catalogs but omit standing knowledge", () => {
     const receipt = buildCompanyBrainContributionReceipt({
       contextSelectionReceiptId: identity(),

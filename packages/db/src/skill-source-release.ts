@@ -11,6 +11,16 @@ export type SkillSourceReleaseReceipt = {
   warning: string | null;
 };
 
+export class SkillSourceRemovalAuthorityError extends Error {
+  readonly code = "skill_source_removal_requires_human";
+  constructor() {
+    super(
+      "Skill source removal requires a trusted human session actor; service/API-key and agent removal are unsupported.",
+    );
+    this.name = "SkillSourceRemovalAuthorityError";
+  }
+}
+
 /**
  * Called inside the source-owner removal transaction, with source installations
  * locked. Distribution identity/history stays bound after uninstall, so reinstall
@@ -35,9 +45,7 @@ export async function releaseOrphanedSkillHeads(
   if (!bindings.length) return [];
   const actor = input.skillActor;
   if (actor?.kind !== "human" || actor.principalKind !== "human_session") {
-    throw new Error(
-      "Skill source removal requires a trusted human session actor; service/API-key and agent removal are unsupported",
-    );
+    throw new SkillSourceRemovalAuthorityError();
   }
   return withWorkspaceSubjectRls(db, input.workspaceId, actor.subjectId, async (tx) => {
     // The established definer lock capability accepts at most two heads; acquire

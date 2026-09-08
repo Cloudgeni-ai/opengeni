@@ -55,6 +55,7 @@ export function SkillsPanelContent({
           hasAccountPermission(context.accessContext, grant.accountId, "account:admin"))),
     );
   const [skills, setSkills] = useState<SkillSummary[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [record, setRecord] = useState<SkillRecord | null>(null);
   const [files, setFiles] = useState<SkillRecord["files"]>([]);
   const [path, setPath] = useState("SKILL.md");
@@ -89,11 +90,15 @@ export function SkillsPanelContent({
     setNotice(null);
     setDiscardAction(null);
     setSkills([]);
+    setNextCursor(null);
     setError(null);
     void client
       .listWorkspaceSkills(workspaceId)
       .then((result) => {
-        if (generation.current === current) setSkills(result.skills);
+        if (generation.current === current) {
+          setSkills(result.skills);
+          setNextCursor(result.nextCursor ?? null);
+        }
       })
       .catch((reason) => {
         if (generation.current === current)
@@ -122,6 +127,26 @@ export function SkillsPanelContent({
   function navigate(action: () => void) {
     if (dirty) setDiscardAction(() => action);
     else action();
+  }
+
+  async function loadMore() {
+    if (!nextCursor || busy) return;
+    const current = generation.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const page = await client.listWorkspaceSkills(workspaceId, { cursor: nextCursor });
+      if (generation.current !== current) return;
+      setSkills((previous) => [
+        ...new Map([...previous, ...page.skills].map((skill) => [skill.id, skill])).values(),
+      ]);
+      setNextCursor(page.nextCursor);
+    } catch (reason) {
+      if (generation.current === current)
+        setError(reason instanceof Error ? reason.message : "Could not load more Skills");
+    } finally {
+      if (generation.current === current) setBusy(false);
+    }
   }
 
   function show(next: SkillRecord) {
@@ -220,6 +245,7 @@ export function SkillsPanelContent({
       if (generation.current !== current) return;
       show(updated);
       setSkills(inventory.skills);
+      setNextCursor(inventory.nextCursor ?? null);
       setHistory(detail.revisions);
       setNotice(
         receipt.outcome === "pending"
@@ -301,6 +327,11 @@ export function SkillsPanelContent({
             {skill.pendingRevisionIds.length ? " · pending changes" : ""}
           </Button>
         ))}
+        {nextCursor ? (
+          <Button variant="outline" disabled={busy} onClick={() => void loadMore()}>
+            Load more Skills
+          </Button>
+        ) : null}
       </div>
       {record ? (
         <div className="space-y-4">

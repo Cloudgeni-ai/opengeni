@@ -29,6 +29,7 @@ import {
   getWorkspacePack,
   getSocialConnection,
   installPortableSkill,
+  SkillSourceRemovalAuthorityError,
   listPackInstallations,
   listSocialConnections,
   PackManifestChangedError,
@@ -51,7 +52,7 @@ import { getDocumentBase } from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
-import { skillInstallerActor } from "./skill-install-authority";
+import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { validateVariableSetAttachment } from "@opengeni/core";
@@ -253,7 +254,15 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: "The completed Pack operation lost its installation record",
         });
       }
-      return c.json(PackInstallation.parse(replayed), 200);
+      return c.json(
+        PackInstallation.parse({
+          ...replayed,
+          ...(Array.isArray(prepared.replayResult.skillReleases)
+            ? { skillReleases: prepared.replayResult.skillReleases }
+            : {}),
+        }),
+        200,
+      );
     }
 
     const retainedComponentKeys: string[] = [];
@@ -327,7 +336,9 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
       activeComponentKey = "ownership-finalize";
       await heartbeat();
-      await finalizePackComponentOwnership(db, {
+      const removalActor = skillRemovalActor(access);
+      const { skillReleases } = await finalizePackComponentOwnership(db, {
+        ...(removalActor ? { skillActor: removalActor } : {}),
         accountId: grant.accountId,
         workspaceId,
         packInstallationId: prepared.installation.id,
@@ -348,10 +359,14 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           packId: pack.id,
           manifestDigest: preview.manifestDigest,
           componentCount: retainedComponentKeys.length,
+          ...(skillReleases.length ? { skillReleases } : {}),
         },
       });
       return c.json(
-        PackInstallation.parse(finalized),
+        PackInstallation.parse({
+          ...finalized,
+          ...(skillReleases.length ? { skillReleases } : {}),
+        }),
         preview.installationVersion === null ? 201 : 200,
       );
     } catch (error) {
@@ -374,7 +389,10 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           message: `Pack component ${activeComponentKey} is pinned by another installed owner. Resolve that version conflict and retry with the same idempotency key.`,
         });
       }
-      if (error instanceof PackOperationClaimLostError) {
+      if (
+        error instanceof PackOperationClaimLostError ||
+        error instanceof SkillSourceRemovalAuthorityError
+      ) {
         throw packMutationHttpError(error);
       }
       if (error instanceof HTTPException) throw error;
@@ -405,7 +423,14 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/packs/:packId/installation", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillRemovalActor(access);
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
     const payload = UninstallPackRequest.parse(await c.req.json());
     const requestDigest = sha256(
@@ -437,6 +462,9 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
           retainedComponents: Array.isArray(prepared.replayResult.retainedComponents)
             ? prepared.replayResult.retainedComponents
             : [],
+          ...(Array.isArray(prepared.replayResult.skillReleases)
+            ? { skillReleases: prepared.replayResult.skillReleases }
+            : {}),
         }),
       );
     }
@@ -448,6 +476,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         operationVersion: prepared.operationVersion,
       });
       const released = await releasePackComponents(db, {
+        ...(skillActor ? { skillActor } : {}),
         accountId: grant.accountId,
         workspaceId,
         packInstallationId: prepared.installation.id,
@@ -462,6 +491,7 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         packId: pack.id,
         status: "uninstalled",
         retainedComponents: [...new Set(released.retainedComponents)],
+        ...(released.skillReleases?.length ? { skillReleases: released.skillReleases } : {}),
       });
       await finalizePackUninstallOperation(db, {
         accountId: grant.accountId,
@@ -483,7 +513,10 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
         phase: "uninstall_failed",
         errorCode: packFailureCode(error),
       }).catch(() => undefined);
-      if (error instanceof PackOperationClaimLostError) {
+      if (
+        error instanceof PackOperationClaimLostError ||
+        error instanceof SkillSourceRemovalAuthorityError
+      ) {
         throw packMutationHttpError(error);
       }
       if (error instanceof HTTPException) throw error;
@@ -639,6 +672,8 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 }
 
 function packMutationHttpError(error: unknown): HTTPException {
+  if (error instanceof SkillSourceRemovalAuthorityError)
+    return new HTTPException(403, { message: error.message });
   if (error instanceof PackManifestChangedError) {
     return new HTTPException(409, {
       message: "The Pack manifest changed after preview. Review the updated installation plan.",

@@ -25,6 +25,7 @@ import {
   PortableSkillInstallationVersionConflictError,
   PortableSkillInstallationVersionRequiredError,
   uninstallPortableSkill,
+  SkillSourceRemovalAuthorityError,
 } from "@opengeni/db";
 import { loadSkillLibrarySkill, skillLibraryRepositoryUrl } from "@opengeni/runtime/skill-library";
 import { createHash } from "node:crypto";
@@ -33,7 +34,7 @@ import type { Hono } from "hono";
 
 import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
 import { registerSkillContentRoutes } from "./skill-content";
-import { skillInstallerActor } from "./skill-install-authority";
+import { skillInstallerActor, skillRemovalActor } from "./skill-install-authority";
 
 export type SkillRouteOverrides = Readonly<{
   github?: GitHubSkillSourceClient;
@@ -224,13 +225,21 @@ export function registerSkillRoutes(
 
   app.delete("/v1/workspaces/:workspaceId/skills/:capabilityId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillRemovalActor(access);
     const capabilityId = decodeURIComponent(c.req.param("capabilityId"));
     const payload = UninstallSkillRequest.parse(await c.req.json());
     try {
       return c.json(
         UninstallSkillResult.parse(
           await uninstallPortableSkill(deps.db, {
+            ...(skillActor ? { skillActor } : {}),
             accountId: grant.accountId,
             workspaceId,
             capabilityId,
@@ -244,6 +253,8 @@ export function registerSkillRoutes(
           message: "The Skill changed after preview. Review uninstall impact again.",
         });
       }
+      if (error instanceof SkillSourceRemovalAuthorityError)
+        throw new HTTPException(403, { message: error.message });
       throw error;
     }
   });

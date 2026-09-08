@@ -19,6 +19,7 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+import { skillReleaseMessage } from "./skill-release-message";
 
 import {
   initialSourceImportState,
@@ -192,7 +193,7 @@ export function useSourcePackages({
         });
       } else {
         const preview = sourceImport.pluginPreview!;
-        await client.installPlugin(workspaceId, {
+        const installed = await client.installPlugin(workspaceId, {
           url: sourceImport.url.trim(),
           expectedManifestDigest: preview.manifestDigest,
           expectedComponents: preview.components.map((component) => ({
@@ -210,7 +211,9 @@ export function useSourcePackages({
             ? `${preview.manifest.name} updated`
             : `${preview.manifest.name} installed`,
           {
-            description: `${preview.components.length} immutable components are owned by this Plugin installation.`,
+            description:
+              skillReleaseMessage(installed.skillReleases) ??
+              `${preview.components.length} immutable components are owned by this Plugin installation.`,
           },
         );
       }
@@ -278,9 +281,10 @@ export function useSourcePackages({
         });
         toast.success(`${removeTarget.skill.name} direct installation removed`, {
           description:
-            result.status === "retained_by_other_owners"
+            skillReleaseMessage(result.skillReleases) ??
+            (result.status === "retained_by_other_owners"
               ? "The runtime Skill remains available because another Plugin or Pack still owns it."
-              : "The reviewed Skill files are no longer active in this workspace.",
+              : "The reviewed Skill files are no longer active in this workspace."),
         });
       } else {
         const result = await client.uninstallPlugin(workspaceId, removeTarget.plugin.pluginKey, {
@@ -289,9 +293,10 @@ export function useSourcePackages({
         });
         toast.success(`${removeTarget.plugin.name} removed`, {
           description:
-            result.retainedComponents.length > 0
+            skillReleaseMessage(result.skillReleases) ??
+            (result.retainedComponents.length > 0
               ? `${result.retainedComponents.length} shared components remain because another owner still uses them.`
-              : "Its Plugin-owned components were removed; Connections were retained.",
+              : "Its Plugin-owned components were removed; Connections were retained."),
         });
       }
       setRemoveTarget(null);

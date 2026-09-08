@@ -213,6 +213,26 @@ describe("portable Skill routes", () => {
     expect(invalid.status).toBe(400);
     const malformed = await request("/skills/content/save", { method: "POST", body: "{" });
     expect(malformed.status).toBe(422);
+    const secondSkillId = crypto.randomUUID();
+    const additional = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: secondSkillId,
+        operationId: crypto.randomUUID(),
+        stableKey: `authored-${secondSkillId}`,
+      }),
+    });
+    expect(additional.status).toBe(200);
+    const firstPage = await request("/skills/content?limit=1").then((response) => response.json());
+    expect(firstPage.skills).toHaveLength(1);
+    expect(firstPage.nextCursor).toBeString();
+    const secondPage = await request(
+      `/skills/content?limit=1&cursor=${encodeURIComponent(firstPage.nextCursor)}`,
+    ).then((response) => response.json());
+    expect(secondPage.skills).toHaveLength(1);
+    expect(secondPage.skills[0].id).not.toBe(firstPage.skills[0].id);
+    expect((await request("/skills/content?cursor=invalid")).status).toBe(422);
   }, 60_000);
 
   test("installs and lists an exact reviewed curated-library Skill", async () => {

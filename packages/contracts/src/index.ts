@@ -1,5 +1,5 @@
 export * from "./skills";
-import { SkillWriteReceipt } from "./skills";
+import { SkillWriteReceipt, SkillSourceReleaseReceipt } from "./skills";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -10131,6 +10131,7 @@ export const PackInstallationStatus = z.enum([
 export type PackInstallationStatus = z.infer<typeof PackInstallationStatus>;
 
 export const PackInstallation = z.object({
+  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   id: z.string().uuid(),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -10486,6 +10487,7 @@ export type UninstallPackRequest = z.infer<typeof UninstallPackRequest>;
 
 export const UninstallPackResult = z
   .object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     packId: z.string().min(1),
     status: z.enum(["not_installed", "uninstalled"]),
     retainedComponents: z.array(z.string().min(1).max(512)).max(160),
@@ -11253,6 +11255,7 @@ export const UninstallSkillRequest = z.object({
 export type UninstallSkillRequest = z.infer<typeof UninstallSkillRequest>;
 
 export const UninstallSkillResult = z.object({
+  skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
   capabilityId: z.string().min(1),
   status: z.enum(["not_installed", "uninstalled", "retained_by_other_owners"]),
   remainingOwners: z.array(CapabilityComponentOwner),
@@ -11853,6 +11856,7 @@ export type InstallPluginRequest = z.infer<typeof InstallPluginRequest>;
 
 export const InstalledPlugin = z
   .object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     version: z.string().min(1),
     pluginId: z.string().uuid(),
@@ -11916,6 +11920,7 @@ export type UninstallPluginRequest = z.infer<typeof UninstallPluginRequest>;
 
 export const UninstallPluginResult = z
   .object({
+    skillReleases: z.array(SkillSourceReleaseReceipt).optional(),
     pluginKey: z.string().min(1),
     status: z.enum(["not_installed", "uninstalled"]),
     retainedComponents: z.array(z.string().min(1)),

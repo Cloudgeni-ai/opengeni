@@ -372,6 +372,7 @@ export type {
   SkillRecord,
   SkillSummary,
   SkillWriteReceipt,
+  SkillSourceReleaseReceipt,
   SaveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";

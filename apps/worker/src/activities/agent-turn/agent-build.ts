@@ -8,6 +8,7 @@ import {
   loadWorkspaceVercelAiGatewayCredentialLease,
 } from "@opengeni/db";
 import {
+  formatSkillCatalog,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -34,10 +35,7 @@ import { VideoReferenceInputError } from "../video-reference-staging";
 import { rigProviderImageSourceImage } from "../packs";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import { recordTurnStartupPhase } from "../../observability-metrics";
-import {
-  modelVisibleCompanyBrainSkillActivations,
-  summarizeCompanyBrainContributions,
-} from "../../model-context-contributions";
+import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { executeGatewayImageGeneration } from "../gateway-image-generation";
@@ -110,8 +108,6 @@ export type BuildTurnAgentDeps = {
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
   rigVersion: GovernanceModelOk["rigVersion"];
   rigName: GovernanceModelOk["rigName"];
-  packRuntime: GovernanceModelOk["packRuntime"];
-  installedSkillRuntime: GovernanceModelOk["installedSkillRuntime"];
   buildCompanyBrainContributionReceiptFor: GovernanceModelOk["buildCompanyBrainContributionReceiptFor"];
   promptCacheKey: CompactionPrepOk["promptCacheKey"];
   workspaceVariableSet: Awaited<ReturnType<typeof loadWorkspaceEnvironmentForRunWithCredentials>>;
@@ -171,8 +167,6 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     workspaceMemory,
     rigVersion,
     rigName,
-    packRuntime,
-    installedSkillRuntime,
     buildCompanyBrainContributionReceiptFor,
     promptCacheKey,
     workspaceVariableSet,
@@ -560,30 +554,10 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
-  const runtimeSkillActivations = [
-    ...installedSkillRuntime.activations,
-    ...packRuntime.skillActivations,
-    ...session.skills.map((skill) => ({
-      source: "session" as const,
-      id: `session:${session.id}:${skill.name}`,
-      artifact: {
-        name: skill.name,
-        description: skill.description ?? null,
-        files: skill.files.map((file) => ({
-          path: file.path,
-          content: file.content,
-        })),
-      },
-      reason: "attached to session",
-    })),
-  ];
-  const modelVisibleRuntimeSkillActivations = modelVisibleCompanyBrainSkillActivations(
-    eventing.modelRunSettings.sandboxBackend,
-    runtimeSkillActivations,
-  );
+  const modelVisibleSkillCatalogText = formatSkillCatalog(deps.skillCatalog);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor(modelVisibleRuntimeSkillActivations),
+      buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
     );
   } catch {
     // Contribution telemetry must never change model execution semantics.
@@ -772,7 +746,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   }
   return {
     agent,
-    modelVisibleRuntimeSkillActivations,
+    modelVisibleSkillCatalogText,
     postAgentPreparationStartedAt,
   };
 }

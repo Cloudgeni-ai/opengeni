@@ -471,7 +471,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const {
         runtimePreparationStartedAt,
         packRuntime,
-        installedSkillRuntime,
         rigVersion,
         rigName,
         agentHumanInputEnabled,
@@ -1227,8 +1226,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         workspaceMemory,
         rigVersion,
         rigName,
-        packRuntime,
-        installedSkillRuntime,
         buildCompanyBrainContributionReceiptFor,
         promptCacheKey,
         workspaceVariableSet,
@@ -1250,8 +1247,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         postToolPreparationStartedAt,
         codexContext,
       });
-      const { agent, modelVisibleRuntimeSkillActivations, postAgentPreparationStartedAt } =
-        builtAgent;
+      const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
 
       await bindLazySandboxProvisioner({
         ...sandboxRoute,
@@ -1307,7 +1303,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         companyBrainContributionReceiptRecorded = true;
         try {
           const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
-            modelVisibleRuntimeSkillActivations,
+            modelVisibleSkillCatalogText,
           );
           eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
             companyBrainContributionReceipt,

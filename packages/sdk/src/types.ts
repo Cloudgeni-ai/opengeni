@@ -6443,6 +6443,7 @@ export type WorkspaceRegisteredPack = {
 export type PackInstallationStatus = "installing" | "active" | "needs_attention" | "disabled";
 
 export type PackInstallation = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   id: string;
   accountId: string;
   workspaceId: string;
@@ -6650,6 +6651,7 @@ export type UninstallPackRequest = {
 };
 
 export type UninstallPackResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   packId: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];
@@ -6938,6 +6940,7 @@ export type UninstallSkillRequest = {
 };
 
 export type UninstallSkillResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   capabilityId: string;
   status: "not_installed" | "uninstalled" | "retained_by_other_owners";
   remainingOwners: CapabilityComponentOwner[];
@@ -7277,6 +7280,7 @@ export type InstallPluginRequest = {
 };
 
 export type InstalledPlugin = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   version: string;
   pluginId: string;
@@ -7325,6 +7329,7 @@ export type UninstallPluginRequest = {
 };
 
 export type UninstallPluginResult = {
+  skillReleases?: import("./skills").SkillSourceReleaseReceipt[] | undefined;
   pluginKey: string;
   status: "not_installed" | "uninstalled";
   retainedComponents: string[];

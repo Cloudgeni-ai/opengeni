@@ -478,6 +478,7 @@ export * from "./slack-task-policy";
 export * from "./preference-registry";
 export * from "./skills";
 export type { SkillSourceReleaseReceipt } from "./skill-source-release";
+export { SkillSourceRemovalAuthorityError } from "./skill-source-release";
 export * from "./memory-governance";
 export * from "./memory-slack-delivery";
 export * from "./scoped-knowledge";

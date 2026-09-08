@@ -70,7 +70,7 @@ The shared human file editor uses `apps/api/src/routes/skill-content.ts`
 `listWorkspaceSkills`, `readWorkspaceSkill`, `saveWorkspaceSkill`,
 `approveWorkspaceSkill`, and `restoreWorkspaceSkill`. Both web destinations use
 `apps/web/src/routes/skills-panel.tsx`; file bodies are fetched on opening a
-Skill, not while listing the catalog. Existing registry scope authorization
+Skill, not while listing the cursor-paginated catalog. Existing registry scope authorization
 still gates human mutations. Legacy agent preference-write tools return a
 redirect to `skill_save` without creating Knowledge evidence or a second Skill.
 Authored and installed Skills share the preference registry head/history;
@@ -886,9 +886,11 @@ a sandbox. File selection and partial-edit primitives live in runtime
 filesystem service only for optional checkout/publish. The turn worker registers
 the six Skill gateway tools through `skill-tools.ts`, puts `skill_read` in the
 preparation-independent set, and builds its short index from metadata-only
-registry descriptors and configured bundled/session/Pack sources. API/UI and
-legacy-write cutover remain separate rollout work tracked in
-[the Skill design](design/skills-system.md).
+registry descriptors and configured bundled/session/Pack sources. Startup no
+longer loads installed folders merely to count their contribution: telemetry
+uses the actual bounded index text, including on the no-sandbox path. The
+shared API/UI and legacy agent-write redirect use that same content lifecycle;
+remaining integration gates are tracked in [the Skill design](design/skills-system.md).
 `runtime-skills.ts` also exposes `loadNativeToolSkillArtifacts` to read packaged
 native guidance without staging files or selecting a compute backend, including
 the generated Sites package-version file. Worker bundled selection uses

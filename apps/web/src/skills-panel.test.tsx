@@ -159,3 +159,26 @@ test("workspace readers can inspect Skill files without edit controls", async ()
     await view.dispose();
   }
 });
+
+test("catalog pagination appends metadata without opening Skill files", async () => {
+  const cursors: Array<string | undefined> = [];
+  const { context, calls } = fixture({
+    async listWorkspaceSkills(_workspaceId: string, options?: { cursor?: string }) {
+      cursors.push(options?.cursor);
+      return options?.cursor
+        ? { skills: [{ ...record, id: "another-skill", title: "Another Skill" }], nextCursor: null }
+        : { skills: [record], nextCursor: "page-two" };
+    },
+  });
+  const view = await mount(context);
+  try {
+    await view.click("Load more Skills");
+    expect(cursors).toEqual([undefined, "page-two"]);
+    expect(view.container.textContent).toContain("Example");
+    expect(view.container.textContent).toContain("Another Skill");
+    expect(view.container.textContent).not.toContain("Load more Skills");
+    expect(calls.filter((call) => call.method === "read")).toHaveLength(0);
+  } finally {
+    await view.dispose();
+  }
+});

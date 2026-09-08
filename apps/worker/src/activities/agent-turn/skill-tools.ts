@@ -4,6 +4,7 @@ import type { SkillActor } from "@opengeni/contracts";
 import {
   assertSkillReadAttempt,
   installPortableSkill,
+  replayPortableSkillInstall,
   listSkillDescriptors,
   type Database,
   type InstallPortableSkillInput,
@@ -142,6 +143,20 @@ export function createWorkspaceSkillTools(input: {
     createSkillInstallAttemptToolDefinition({
       authorize,
       install: async (request) => {
+        const requestIdentity = {
+          operation: "skill_install",
+          source: request.source,
+          expectedInstallationVersion: request.expectedInstallationVersion ?? null,
+          reason: request.reason,
+          owner: "direct",
+        };
+        const replay = await replayPortableSkillInstall(input.db, {
+          ...context,
+          actor: input.actor,
+          operationId: request.operationId,
+          requestIdentity,
+        });
+        if (replay) return replay.skillReceipt;
         let source: Omit<InstallPortableSkillInput, "accountId" | "workspaceId" | "subjectId">;
         if (request.source.startsWith("library:")) {
           const loaded = loadSkillLibrarySkill(request.source.slice("library:".length));
@@ -195,6 +210,7 @@ export function createWorkspaceSkillTools(input: {
           subjectId: `service:skill-attempt:${input.actor.attemptId}`,
           skillActor: input.actor,
           skillOperationId: request.operationId,
+          skillRequestIdentity: requestIdentity,
           ...(request.expectedInstallationVersion !== undefined
             ? {
                 expectedInstallationVersion: request.expectedInstallationVersion,

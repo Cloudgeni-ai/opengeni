@@ -53,6 +53,14 @@ export const SkillWriteReceipt = z.object({
   replayed: z.boolean(),
 });
 export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;
+export const SkillSourceReleaseReceipt = z.object({
+  skillId: z.uuid(),
+  revisionId: z.uuid().nullable(),
+  disposition: z.enum(["deactivated", "preserved", "inactive"]),
+  eventId: z.uuid().nullable(),
+  warning: z.string().nullable(),
+});
+export type SkillSourceReleaseReceipt = z.infer<typeof SkillSourceReleaseReceipt>;
 export type SkillRecord = {
   activationMode: "workspace_managed" | "session_selected";
   pendingRevisionIds: string[];

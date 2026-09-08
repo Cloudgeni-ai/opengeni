@@ -61,14 +61,39 @@ export function registerSkillContentRoutes(app: Hono, deps: ApiRouteDeps): void 
   app.get(base, async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(250).default(100),
+        cursor: z.string().max(2048).optional(),
+      })
+      .safeParse(c.req.query());
+    if (!query.success) throw new HTTPException(422, { message: "Invalid Skill list query" });
+    let after: { stableKey: string; id: string } | undefined;
+    if (query.data.cursor !== undefined) {
+      try {
+        after = z
+          .object({ stableKey: z.string().min(1).max(128), id: z.uuid() })
+          .strict()
+          .parse(JSON.parse(Buffer.from(query.data.cursor, "base64url").toString("utf8")));
+      } catch {
+        throw new HTTPException(422, { message: "Invalid Skill list cursor" });
+      }
+    }
+    const rows = await listSkills(
+      deps.db,
+      { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+      { limit: query.data.limit + 1, metadataOnly: true, ...(after ? { after } : {}) },
+    );
+    const page = rows.slice(0, query.data.limit);
+    const last = page.at(-1);
     return c.json({
-      skills: (
-        await listSkills(
-          deps.db,
-          { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-          { limit: 1000, metadataOnly: true },
-        )
-      ).map(({ files: _files, ...summary }) => summary),
+      skills: page.map(({ files: _files, ...summary }) => summary),
+      nextCursor:
+        rows.length > query.data.limit && last
+          ? Buffer.from(JSON.stringify({ stableKey: last.stableKey, id: last.id })).toString(
+              "base64url",
+            )
+          : null,
     });
   });
   app.get(`${base}/:skillId`, async (c) => {
