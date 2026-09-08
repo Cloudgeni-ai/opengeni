@@ -52,10 +52,10 @@ export function OrganizationSettingsSwitcher({
           return (
             <DropdownMenuItem
               key={organization.accountId}
-              disabled={!target}
+              disabled={!target || !organization.canManage}
               aria-current={selected ? "true" : undefined}
               onSelect={() => {
-                if (!target || selected) return;
+                if (!target || !organization.canManage || selected) return;
                 context.resetSessionView();
                 void navigate({
                   to: "/workspaces/$workspaceId/organization",
@@ -70,6 +70,8 @@ export function OrganizationSettingsSwitcher({
               </span>
               {!target ? (
                 <span className="text-2xs text-fg-subtle">No accessible workspace</span>
+              ) : !organization.canManage ? (
+                <span className="text-2xs text-fg-subtle">Admin access required</span>
               ) : null}
               {selected ? <CheckIcon aria-hidden="true" className="size-4 text-brand" /> : null}
             </DropdownMenuItem>

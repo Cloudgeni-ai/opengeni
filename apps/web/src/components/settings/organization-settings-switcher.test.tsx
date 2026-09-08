@@ -6,6 +6,7 @@ import type { Workspace } from "@/types";
 import { organizationSettingsWorkspaceId } from "@/lib/org";
 
 const workspaces = [
+  { id: "ws-member", accountId: "member", name: "Member workspace" },
   { id: "ws-a", accountId: "a", name: "Main" },
   { id: "ws-b-z", accountId: "b", name: "Zulu" },
   { id: "ws-b-a", accountId: "b", name: "Alpha" },
@@ -32,8 +33,11 @@ mock.module("@/context", () => ({
     workspaces,
     resetSessionView,
     accessContext: {
-      accountGrants: ["a", "b", "empty"].map((accountId) => ({
+      subjectId: "user:test",
+      accountGrants: ["a", "b", "empty", "member"].map((accountId) => ({
         accountId,
+        subjectId: "user:test",
+        role: accountId === "member" ? "member" : "owner",
         permissions: ["account:read"],
         metadata: { accountName: `Organization ${accountId}` },
       })),
@@ -91,6 +95,11 @@ test("switches organization while preserving settings section and resetting sess
         .find((item) => item.textContent?.includes("Organization empty"))
         ?.hasAttribute("data-disabled"),
     ).toBe(true);
+    const member = items.find((item) => item.textContent?.includes("Organization member"))!;
+    expect(member.hasAttribute("data-disabled")).toBe(true);
+    await act(async () => member.click());
+    expect(navigate).not.toHaveBeenCalled();
+    expect(resetSessionView).not.toHaveBeenCalled();
     await act(async () => items.find((item) => item.textContent === "Organization a")!.click());
     expect(navigate).not.toHaveBeenCalled();
     // Reopen after selecting the current organization.
@@ -118,10 +127,10 @@ test("organization heading settings links target their own organization", async 
   const unmount = await render(
     <WorkspaceMenu
       collapsed={false}
-      orgs={["a", "b", "empty"].map((accountId) => ({
+      orgs={["a", "b", "empty", "member"].map((accountId) => ({
         accountId,
         label: `Organization ${accountId}`,
-        canManage: true,
+        canManage: accountId !== "member",
       }))}
       workspaces={workspaces.map(
         (workspace) => ({ ...workspace, inferenceControl: { state: "active" } }) as Workspace,
@@ -137,6 +146,9 @@ test("organization heading settings links target their own organization", async 
     </WorkspaceMenu>,
   );
   try {
+    expect(
+      document.querySelector('a[aria-label="Organization settings for Organization member"]'),
+    ).toBeNull();
     expect(
       document
         .querySelector('a[aria-label="Organization settings for Organization a"]')

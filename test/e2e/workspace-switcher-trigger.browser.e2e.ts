@@ -69,7 +69,6 @@ describe("Workspace switcher trigger in Chromium", () => {
       "New workspace…",
       "New organization…",
       "Organization settings for CloudGeni Product Engineering and Reliability",
-      "Organization settings for CloudGeni Research",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
@@ -79,8 +78,8 @@ describe("Workspace switcher trigger in Chromium", () => {
           name: "Organization settings for CloudGeni Research",
           exact: true,
         })
-        .getAttribute("href"),
-    ).toBe("/workspaces/workspace-research/organization?section=overview");
+        .count(),
+    ).toBe(0);
     const personalMenuItem = page.getByRole("menuitem", {
       name: "Personal workspace Personal workspace",
       exact: true,

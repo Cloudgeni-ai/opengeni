@@ -203,11 +203,9 @@ export function WorkspaceMenu(props: {
   const grouped = props.orgs.map((org) => ({
     org,
     workspaces: workspacesInOrg(props.workspaces, org.accountId),
-    settingsWorkspaceId: organizationSettingsWorkspaceId(
-      props.workspaces,
-      org.accountId,
-      props.activeWorkspaceId,
-    ),
+    settingsWorkspaceId: org.canManage
+      ? organizationSettingsWorkspaceId(props.workspaces, org.accountId, props.activeWorkspaceId)
+      : null,
   }));
   const trigger = <DropdownMenuTrigger asChild>{props.children}</DropdownMenuTrigger>;
   return (

@@ -1,14 +1,14 @@
+import { organizationAdministrationAccountIds } from "@/lib/permissions";
 // Organization (the tenant formerly surfaced as "account") helpers for the
 // rail's org switcher. The wire model has no account *name*, so a display
 // label is derived from the access grant — preferring a human subjectLabel,
 // falling back to a short, stable id fragment.
-import { hasAccountPermission } from "@/lib/permissions";
 import type { AccessContext, AccountGrant, Workspace } from "@/types";
 
 export type OrgOption = {
   accountId: string;
   label: string;
-  /** Whether the subject can open this org's settings (read billing/members). */
+  /** Whether the subject has the owner/admin authority required by organization settings. */
   canManage: boolean;
 };
 
@@ -36,6 +36,7 @@ export function organizationsForSubject(
   context: AccessContext,
   workspaces: Workspace[],
 ): OrgOption[] {
+  const administeredIds = new Set(organizationAdministrationAccountIds(context));
   const ids = new Set<string>();
   for (const grant of context.accountGrants) {
     ids.add(grant.accountId);
@@ -55,9 +56,7 @@ export function organizationsForSubject(
   return ordered.map((accountId) => ({
     accountId,
     label: orgLabel(accountId, context.accountGrants),
-    canManage:
-      hasAccountPermission(context, accountId, "billing:read") ||
-      hasAccountPermission(context, accountId, "account:read"),
+    canManage: administeredIds.has(accountId),
   }));
 }
 

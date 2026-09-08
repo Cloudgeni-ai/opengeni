@@ -354,3 +354,14 @@ export function canManageWorkspaceSettings(
     personalWorkspaceMembership(workspace, selfContext),
   );
 }
+
+export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
+  return accessContext.accountGrants
+    .filter(
+      (grant) =>
+        grant.subjectId === accessContext.subjectId &&
+        (grant.role === "owner" || grant.role === "admin"),
+    )
+    .map((grant) => grant.accountId)
+    .sort();
+}

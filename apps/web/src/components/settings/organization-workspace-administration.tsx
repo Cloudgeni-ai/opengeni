@@ -1,3 +1,5 @@
+import { organizationAdministrationAccountIds } from "@/lib/permissions";
+export { organizationAdministrationAccountIds } from "@/lib/permissions";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import {
   createContext,
@@ -28,17 +30,6 @@ const OrganizationWorkspaceAdministrationContext =
 
 export function useOrganizationWorkspaceAdministration(): OrganizationWorkspaceAdministration | null {
   return useContext(OrganizationWorkspaceAdministrationContext);
-}
-
-export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
-  return accessContext.accountGrants
-    .filter(
-      (grant) =>
-        grant.subjectId === accessContext.subjectId &&
-        (grant.role === "owner" || grant.role === "admin"),
-    )
-    .map((grant) => grant.accountId)
-    .sort();
 }
 
 export function OrganizationWorkspaceAdministrationBoundary(props: {
