@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   parseSkillFrontmatter as parsePortableSkillFrontmatter,
   readSkillMetadata,
+  validateSkillTextFiles,
 } from "@opengeni/contracts";
 export { parseSkillFrontmatter as parsePortableSkillFrontmatter } from "@opengeni/contracts";
 
@@ -69,9 +70,11 @@ export type SkillLibrarySkill = Readonly<{
   files: readonly SkillLibraryFile[];
 }>;
 
-export const PORTABLE_SKILL_MAX_FILES = 128;
-export const PORTABLE_SKILL_MAX_FILE_BYTES = 256 * 1024;
-export const PORTABLE_SKILL_MAX_TOTAL_BYTES = 1024 * 1024;
+export {
+  SKILL_MAX_FILES as PORTABLE_SKILL_MAX_FILES,
+  SKILL_MAX_FILE_BYTES as PORTABLE_SKILL_MAX_FILE_BYTES,
+  SKILL_MAX_TOTAL_BYTES as PORTABLE_SKILL_MAX_TOTAL_BYTES,
+} from "@opengeni/contracts";
 
 export type PortableSkillArtifact = Readonly<{
   name: string;
@@ -439,48 +442,14 @@ function materializePortableSkillFiles(inputFiles: readonly SkillLibraryFile[]):
   materialized: Array<Readonly<{ path: string; content: string; bytes: Uint8Array }>>;
   totalBytes: number;
 } {
-  if (inputFiles.length === 0 || inputFiles.length > PORTABLE_SKILL_MAX_FILES) {
-    throw new Error(`Skill artifact must contain 1-${PORTABLE_SKILL_MAX_FILES} files`);
-  }
-  const paths = new Set<string>();
-  let totalBytes = 0;
+  const { totalBytes } = validateSkillTextFiles(inputFiles);
   const materialized = inputFiles
     .map((file) => {
-      const path = normalizeSkillLibraryRelativePath(file.path);
-      if (paths.has(path)) {
-        throw new Error(`Skill artifact contains duplicate file path: ${path}`);
-      }
-      paths.add(path);
+      const path = file.path;
       const bytes = new TextEncoder().encode(file.content);
-      if (file.content.includes("\u0000")) {
-        throw new Error(`Skill artifact contains NUL bytes: ${path}`);
-      }
-      if (
-        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) !== file.content
-      ) {
-        throw new Error(`Skill artifact contains malformed Unicode text: ${path}`);
-      }
-      if (bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES) {
-        throw new Error(
-          `Skill artifact file exceeds ${PORTABLE_SKILL_MAX_FILE_BYTES} bytes: ${path}`,
-        );
-      }
-      totalBytes += bytes.byteLength;
-      if (totalBytes > PORTABLE_SKILL_MAX_TOTAL_BYTES) {
-        throw new Error(`Skill artifact exceeds ${PORTABLE_SKILL_MAX_TOTAL_BYTES} bytes`);
-      }
       return Object.freeze({ path, content: file.content, bytes });
     })
     .sort((left, right) => compareCanonicalPath(left.path, right.path));
-  for (const path of paths) {
-    const segments = path.split("/");
-    for (let index = 1; index < segments.length; index += 1) {
-      const prefix = segments.slice(0, index).join("/");
-      if (paths.has(prefix)) {
-        throw new Error(`Skill artifact uses a path as both a file and a directory: ${prefix}`);
-      }
-    }
-  }
   return { materialized, totalBytes };
 }
 

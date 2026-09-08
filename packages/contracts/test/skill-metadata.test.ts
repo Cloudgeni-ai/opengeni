@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { CapabilityPackSkill, SessionSkill, SessionSkills } from "../src/index";
+import {
+  AutomationSessionTemplate,
+  CapabilityPackSkill,
+  SessionSkill,
+  SessionSkills,
+} from "../src/index";
 
 const files = [
   {
@@ -44,4 +49,53 @@ test("missing frontmatter cannot enter session or Pack context through inline co
 
 test("session deduplication compares the derived metadata and exact files", () => {
   expect(SessionSkills.parse([{ files }, { files, name: "deploy" }])).toHaveLength(1);
+});
+
+test("automation admission uses the same authoritative Skill contract as dispatch", () => {
+  const template = AutomationSessionTemplate.parse({
+    prompt: "Deploy safely",
+    skills: [{ files }, { files, name: "deploy" }],
+  });
+  expect(template.skills).toEqual(SessionSkills.parse([{ files }]));
+  for (const skill of [
+    { name: "deploy", files: [{ path: "SKILL.md", content: "Missing frontmatter" }] },
+    { files, description: "Competing summary" },
+    { files: [...files, ...files] },
+  ]) {
+    expect(
+      AutomationSessionTemplate.safeParse({ prompt: "Deploy safely", skills: [skill] }).success,
+    ).toBe(false);
+  }
+});
+
+test("every inline admission rejects non-text, oversized and conflicting folder content", () => {
+  const invalidFiles = [
+    [...files, { path: "data.bin", content: "a\u0000b" }],
+    [...files, { path: "bad.txt", content: "\ud800" }],
+    [...files, { path: "big.txt", content: "é".repeat(140_000) }],
+    [...files, { path: "scripts", content: "file" }, { path: "scripts/run", content: "code" }],
+    [...files, { path: "bad:path", content: "text" }],
+    [...files, { path: "bad\ud800path", content: "text" }],
+    [
+      ...files,
+      ...Array.from({ length: 5 }, (_, index) => ({
+        path: `part-${index}`,
+        content: "x".repeat(250_000),
+      })),
+    ],
+  ];
+  for (const candidate of invalidFiles) {
+    expect(SessionSkill.safeParse({ files: candidate }).success).toBe(false);
+    expect(CapabilityPackSkill.safeParse({ files: candidate }).success).toBe(false);
+    expect(
+      AutomationSessionTemplate.safeParse({ prompt: "Use Skill", skills: [{ files: candidate }] })
+        .success,
+    ).toBe(false);
+  }
+  const text = [
+    ...files,
+    { path: "no-extension", content: "日本語\n" },
+    { path: "custom.bin", content: "\ufeffThis is text." },
+  ];
+  expect(SessionSkill.parse({ files: text }).files).toEqual(text);
 });

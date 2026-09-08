@@ -1,6 +1,7 @@
 export * from "./skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
+import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -9461,46 +9462,6 @@ export const SignedJsonAutomationEnvelope = z
   .strict();
 export type SignedJsonAutomationEnvelope = z.infer<typeof SignedJsonAutomationEnvelope>;
 
-const AutomationSessionSkill = z
-  .object({
-    name: z
-      .string()
-      .min(1)
-      .max(64)
-      .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    description: z.string().min(1).max(2048).optional(),
-    files: z
-      .array(
-        z.object({
-          path: z
-            .string()
-            .min(1)
-            .max(512)
-            .refine(
-              (path) =>
-                !path.startsWith("/") &&
-                !path.includes("\\") &&
-                path
-                  .split("/")
-                  .every((segment) => segment.length > 0 && segment !== "." && segment !== ".."),
-              "automation skill file path must be a safe relative POSIX path",
-            ),
-          content: z.string().max(256 * 1024),
-        }),
-      )
-      .min(1)
-      .max(64),
-  })
-  .superRefine((skill, context) => {
-    if (!skill.files.some((file) => file.path === "SKILL.md")) {
-      context.addIssue({
-        code: "custom",
-        path: ["files"],
-        message: "automation skill must include a top-level SKILL.md file",
-      });
-    }
-  });
-
 export const AutomationSessionTemplate = z
   .object({
     prompt: z
@@ -9516,7 +9477,9 @@ export const AutomationSessionTemplate = z
       .nullable()
       .default(null),
     resources: z.array(ResourceRef).max(100).default([]),
-    skills: z.array(AutomationSessionSkill).max(32).default([]),
+    // Resolve the shared contract after module initialization, rather than
+    // maintaining a second, weaker Skill definition for scheduled dispatch.
+    skills: z.lazy(() => SessionSkills).default([]),
     tools: z.array(ToolRef).max(128).default([]),
     firstPartyMcpTools: z.array(FirstPartyMcpToolName).max(128).default([]),
     firstPartyMcpPermissions: z.array(Permission).max(128).default([]),
@@ -9784,7 +9747,7 @@ export type CapabilityPackScheduledTaskTemplate = z.infer<
 // manifest, which is also how registered packs persist it (the manifest JSONB
 // row in workspace_packs is the storage of record for pack skills).
 export const CapabilityPackSkillFile = z.object({
-  path: z.string().min(1).max(512).refine(isSafePackSkillRelativePath, {
+  path: z.string().min(1).max(512).refine(isSafeSkillRelativePath, {
     message: "skill file path must be a safe relative POSIX path without '..' segments",
   }),
   content: z.string().max(256 * 1024),
@@ -9806,17 +9769,6 @@ export const CapabilityPackSkill = z
     files: z.array(CapabilityPackSkillFile).min(1).max(128),
   })
   .transform((skill, ctx) => {
-    const seen = new Set<string>();
-    skill.files.forEach((file, index) => {
-      if (seen.has(file.path)) {
-        ctx.addIssue({
-          code: "custom",
-          message: `duplicate skill file path: ${file.path}`,
-          path: ["files", index, "path"],
-        });
-      }
-      seen.add(file.path);
-    });
     const main = skill.files.find((file) => file.path === "SKILL.md");
     if (!main) {
       ctx.addIssue({
@@ -9828,6 +9780,7 @@ export const CapabilityPackSkill = z
     }
     let metadata: ReturnType<typeof readSkillMetadata>;
     try {
+      validateSkillTextFiles(skill.files);
       metadata = readSkillMetadata(main.content);
     } catch (error) {
       ctx.addIssue({
@@ -9888,15 +9841,6 @@ export const SessionSkills = z
     }
     return [...selected.values()].map(({ skill }) => skill);
   });
-
-function isSafePackSkillRelativePath(path: string): boolean {
-  if (path.startsWith("/") || path.includes("\\")) {
-    return false;
-  }
-  return path
-    .split("/")
-    .every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
-}
 
 const CapabilityPackVariableSet = z
   .object({
