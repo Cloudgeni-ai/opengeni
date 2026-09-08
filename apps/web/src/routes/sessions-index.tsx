@@ -115,6 +115,7 @@ import {
 import {
   effortOptionsForModel,
   findPickerRow,
+  modelUsesCredits,
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
@@ -1286,7 +1287,7 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
-        {selectedPolicyRow?.billingClass === "opengeni_credits" &&
+        {modelUsesCredits(selectedPolicyRow?.catalog) &&
         hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:read") ? (
           <div className="mt-6">
             <Suspense fallback={null}>

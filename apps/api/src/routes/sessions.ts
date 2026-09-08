@@ -1953,6 +1953,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    await requireSessionAuthorization(deps, grant, {
+      sessionId,
+      operation: "session.control",
+      surface: "http",
+    });
     const payload = UpdateSessionChannelRequest.parse(await c.req.json());
     try {
       const updated = await setSessionChannel(db, {

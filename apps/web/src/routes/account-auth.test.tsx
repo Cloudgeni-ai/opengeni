@@ -71,7 +71,7 @@ describe("isolated browser account authentication", () => {
       organizationId: "00000000-0000-4000-8000-000000000010",
       organizationName: "Northwind Research",
       targetEmail: "invited@example.test",
-      expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     });
     Object.defineProperty(window, "opener", { configurable: true, value: window });
     globalThis.fetch = (async () =>
