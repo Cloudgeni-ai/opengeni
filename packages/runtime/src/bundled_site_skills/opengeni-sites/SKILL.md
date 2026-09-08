@@ -143,11 +143,14 @@ import { SessionConversation } from "@opengeni/react/session-ui";
 import "@opengeni/react/compiled.css";
 
 const site = createOpenGeniSiteClient();
+// Match the theme to your chat panel; omit this wrapper for the dark default.
+<div data-og-theme="light" style={{ height: "100%", minHeight: 0 }}>
 <SessionConversation
   client={site.client}
   workspaceId={site.workspaceId}
   sessionId={sessionId}
 />
+</div>
 ```
 
 `sessionId` is the existing session or the id returned by `site.client.createSession`.
@@ -158,6 +161,12 @@ pairing it with a timeline does not create the queue UI.
 Use the lower-level hooks/components only for intentionally custom behavior.
 
 The host owns the chat's available space; `SessionConversation` fills it.
+The SDK defaults to dark colors. On a light panel, set `data-og-theme="light"`
+on its wrapper; changing the Site's body background does not select the SDK
+theme, and the outer OpenGeni app's theme does not cross the iframe. Keep
+foreground and background on the same SDK tokens rather than overriding
+message/button colors individually. Check a real assistant reply, expanded
+steps, composer and menus for readable contrast in the chosen theme.
 For a full-height page, use a `height: 100dvh` flex-column layout with the
 chat panel `flex: 1; min-height: 0` below its header. Keep intervening
 flex/grid children shrinkable (`min-height: 0; min-width: 0`). The SDK owns

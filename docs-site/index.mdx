@@ -1,0 +1,46 @@
+---
+title: "Introduction"
+description: "OpenGeni is an open, self-hostable runtime for long-running AI agents."
+icon: "house"
+---
+
+OpenGeni is the platform layer that makes long-running AI agents safe to trust with real work: durable, replayable sessions; human approvals; governed credentials and memory; and a choice of where every session runs, either a managed sandbox or your own hardware.
+
+OpenGeni is the runtime, not the agent. It exposes a session-based API for creating, steering, observing, interrupting, and replaying agent runs, agnostic to what the agent does. The included web app is one client for that API. Your own products call the same API and let OpenGeni own durable session state, event history, approvals, and outputs.
+
+## Two ways to use it
+
+<CardGroup cols={2}>
+  <Card title="Managed" icon="cloud" href="/quickstart">
+    Sign in at app.opengeni.ai, connect a model, and start a session in minutes.
+  </Card>
+  <Card title="Self-hosted" icon="server" href="/guides/self-host">
+    Run the whole control plane yourself. Apache-2.0, a Helm chart, and reference Terraform for
+    Azure, AWS, and GCP.
+  </Card>
+</CardGroup>
+
+## What you get
+
+- **Durable, replayable sessions.** Every event lands in a Postgres event log. Live streams backfill from it, so a browser reload, a new client, or an audit replays the same history.
+- **Sessions that finish the job.** A session can carry a goal with success criteria. Stopping is an explicit act: the agent completes the goal with evidence, pauses it with a rationale, or a human interrupts.
+- **Governance built in.** Human approvals gate tool use, agents pause durably for structured answers, and credentials are brokered per session.
+- **Your hardware as a first-class target.** A Connected Machine runs sessions on a computer you enroll. It only dials out, receives no platform credentials, and can be revoked with one click.
+- **Workspace memory and knowledge.** Agents save and correct durable facts, and workspace documents are indexed for retrieval.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Concepts" icon="book" href="/concepts/sessions">
+    Sessions, turns, goals, approvals, compute targets, and memory.
+  </Card>
+  <Card title="Integrate your product" icon="plug" href="/guides/integrate-your-product">
+    Put agent sessions behind your own backend with the TypeScript SDK and React components.
+  </Card>
+  <Card title="Connect a machine" icon="laptop" href="/guides/connect-a-machine">
+    Enroll a laptop, build server, or GPU box and run sessions on it directly.
+  </Card>
+  <Card title="Source on GitHub" icon="github" href="https://github.com/Cloudgeni-ai/opengeni">
+    The runtime, web app, SDK, deployment artifacts, and deeper engineering docs.
+  </Card>
+</CardGroup>

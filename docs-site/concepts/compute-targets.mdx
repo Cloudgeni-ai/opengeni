@@ -1,0 +1,37 @@
+---
+title: "Compute targets"
+description: "Every session runs on a managed sandbox or on a Connected Machine you own."
+icon: "microchip"
+---
+
+Every session picks where its commands, files, and tools run. Two kinds of target are co-equal and first-class.
+
+|                   | Managed sandbox                    | Connected Machine                                    |
+| ----------------- | ---------------------------------- | ---------------------------------------------------- |
+| Ownership         | Platform-owned, ephemeral          | User-owned, persistent                               |
+| Provisioning      | OpenGeni creates and tears it down | OpenGeni attaches to what is already there           |
+| Repositories      | Cloned into `/workspace`           | Not cloned; the machine uses its own git credentials |
+| Working directory | `/workspace`                       | A per-session folder under the agent's launch root   |
+| Network           | Provisioned inside the deployment  | The machine dials out; nothing is exposed inbound    |
+
+## Managed sandboxes
+
+A managed sandbox is a fresh box OpenGeni provisions for the session. Backends are pluggable: Docker (the local default), Modal, an in-process local provider, and several cloud sandbox providers. The stock image ships Terraform, Checkov, the Azure and GitHub CLIs, git, and common shell tools, and opt-in preparation profiles can pre-authenticate those CLIs.
+
+Sandboxes are swappable within a session, and a session's files can be recovered from a snapshot or archive after the box is gone. A session can also run with no compute attached when the task needs only model and tool calls.
+
+## Connected Machines
+
+A Connected Machine is a computer you enroll: a laptop, a workstation, a build server, a GPU box. When a session targets it, the agent runs there directly. There is no cloud box behind it.
+
+- **Your credentials stay yours.** No platform-minted token, Git credential, or setup hook crosses to the machine. It uses its own SSH, `gh`, or credential helper.
+- **Your files stay in place.** Repositories are never cloned onto the machine. Each session works in a folder you choose under the agent's root.
+- **Dial-out only.** The enrolled agent connects out to OpenGeni's control plane and stream relay. Nothing on the machine needs to be reachable from the internet.
+- **Loud consent, one-click revocation.** Enrollment asks for whole-machine access explicitly, screen control is a separate consent, and revoking a machine invalidates every grant at once.
+- **Never cold-created or killed.** An offline machine is offline, not missing. OpenGeni never provisions a replacement box for it and never stops it.
+
+Connected Machines are off by default in a self-hosted deployment until an operator enables them. See [Connect a machine](/guides/connect-a-machine).
+
+## Choosing at session creation
+
+The web app and the API let you target a specific enrolled machine, and a working directory on it, when creating a session, or swap the active target later. Child sessions inherit their parent's machine route when placement is omitted.

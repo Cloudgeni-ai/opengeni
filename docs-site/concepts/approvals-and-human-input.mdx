@@ -1,0 +1,37 @@
+---
+title: "Approvals and human input"
+description: "Two ways a running session waits on a person, and how each resumes."
+icon: "hand"
+---
+
+A session can stop mid-turn and wait for a human in two distinct ways. Both are durable: the wait survives worker restarts, and the answer resumes the exact same turn.
+
+## Tool approvals
+
+Tools can be classified so that a proposed call must be approved before it runs. When the agent proposes such a call, the session enters `requires_action` and the timeline shows the pending call.
+
+- A human approves or rejects it. Rejection returns to the agent as the tool's outcome, so it can adapt.
+- Approvals are human-only. An agent cannot approve its own or another session's tool calls.
+
+## Structured human input
+
+Agents have a built-in `request_human_input` tool for questions that need an answer before the turn can continue. One request holds up to 20 questions of three kinds: free text, single select, and multi select. Select questions accept an inline "Other" free-text answer. A request can allow Skip and can carry an expiry deadline.
+
+The outcome is delivered to the agent as ordinary tool output:
+
+| Outcome     | When                                          |
+| ----------- | --------------------------------------------- |
+| `answered`  | The person submitted validated answers        |
+| `skipped`   | The person skipped and the request allowed it |
+| `expired`   | The deadline passed first                     |
+| `cancelled` | The owning turn was replaced or terminated    |
+
+No outcome creates a synthetic user message or starts a new turn. Workspace admins can disable the tool with the `agentHumanInputEnabled` workspace setting.
+
+## Sending a message while the session waits
+
+If you send an ordinary message while the session is waiting on an approval or a question, the pending wait is cancelled and your message is delivered as a Steer. That makes "actually, do this instead" a single action.
+
+## Where the wait shows up
+
+Both waits appear on the session timeline in the web app, on embedded timelines built with `@opengeni/react`, and in the session's events through the API. A structured question from a child session can also be answered by an authorized agent in another session; tool approvals never can.

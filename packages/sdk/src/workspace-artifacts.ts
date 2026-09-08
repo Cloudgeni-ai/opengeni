@@ -62,6 +62,7 @@ export type WorkspaceArtifactEvent = {
 };
 
 export type WorkspaceArtifactListOptions = {
+  sourceSessionId?: string;
   limit?: number;
   cursor?: string;
   status?: WorkspaceArtifact["status"];
