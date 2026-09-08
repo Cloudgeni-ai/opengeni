@@ -15,6 +15,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
   const artifacts = () => tools.has("editable_artifact_list") && tools.has("editable_artifact_get");
   const definitions = [
     { name: "opengeni-skills", include: () => true },
+    { name: "opengeni-projects", include: () => true },
     { name: "opengeni-documents", include: artifacts },
     { name: "opengeni-spreadsheets", include: artifacts },
     { name: "opengeni-presentations", include: artifacts },
@@ -37,6 +38,7 @@ export function configuredBundledSkillNames(context: BundledSkillConfiguration):
 export function loadConfiguredBundledSkills(context: BundledSkillConfiguration) {
   const names = new Set(configuredBundledSkillNames(context));
   const artifacts = loadNativeToolSkillArtifacts({
+    projects: names.has("opengeni-projects"),
     editableArtifacts: [
       "opengeni-documents",
       "opengeni-spreadsheets",

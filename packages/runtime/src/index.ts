@@ -277,9 +277,6 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
-  builtinSkillIndex,
-  builtinSkillLoader,
-  BUILTIN_PROJECT_SKILL_SELECTION,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
@@ -2064,7 +2061,6 @@ export function inspectPersistentAgentInstructions(
       content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
-    { id: "builtin_skills", title: "Built-in skills", content: builtinSkillIndex() },
   ];
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
@@ -2439,7 +2435,6 @@ export function buildOpenGeniAgent(
           },
         });
   const agentTools = [
-    builtinSkillLoader(),
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
     ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
@@ -2507,7 +2502,6 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
-    agentSkillSelections.set(agent, [BUILTIN_PROJECT_SKILL_SELECTION]);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
