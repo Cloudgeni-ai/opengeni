@@ -2138,45 +2138,60 @@ async function selectAccount(
   current: AccountFixture,
   target: AccountFixture,
 ): Promise<void> {
-  let lastGestureError: unknown;
-  let clicked = false;
-  for (let attempt = 0; attempt < 3 && !clicked; attempt += 1) {
+  const targetWorkspace = new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`);
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const targetTriggerVisible = await accountMenuTrigger(page, target.displayName)
+      .isVisible()
+      .catch(() => false);
+    if (targetTriggerVisible && targetWorkspace.test(page.url())) return;
+    if (targetTriggerVisible) {
+      try {
+        await page.waitForURL(targetWorkspace, { timeout: 12_000 });
+        return;
+      } catch (error) {
+        lastError = error;
+        await page.keyboard.press("Escape").catch(() => undefined);
+        await page.waitForTimeout(150);
+        continue;
+      }
+    }
+    let clicked = false;
     try {
       const menu = await openAccountMenu(page, current.displayName);
       const slot = menu.getByRole("menuitem", {
         name: new RegExp(target.displayName),
       });
       await slot.hover({ timeout: 5_000 });
+      // Current-slot "Use this account" is disabled. Clicking `.last()` can
+      // hit that inert item when WebKit keeps a previous submenu mounted.
       await page
-        .getByRole("menuitem", { name: "Use this account" })
-        .last()
+        .getByRole("menuitem", { name: "Use this account", disabled: false })
         .click({ timeout: 5_000 });
       clicked = true;
     } catch (error) {
-      lastGestureError = error;
+      lastError = error;
       await page.keyboard.press("Escape").catch(() => undefined);
       await page.waitForTimeout(100);
     }
+    if (!clicked) continue;
+    try {
+      await Promise.all([
+        accountMenuTrigger(page, target.displayName).waitFor({ timeout: 12_000 }),
+        page.waitForURL(targetWorkspace, { timeout: 12_000 }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+      await page.keyboard.press("Escape").catch(() => undefined);
+      await page.waitForTimeout(150);
+    }
   }
-  if (!clicked) {
-    throw new Error(`account selection gesture did not settle for ${target.displayName}`, {
-      cause: lastGestureError,
-    });
-  }
-  try {
-    await Promise.all([
-      accountMenuTrigger(page, target.displayName).waitFor({ timeout: 30_000 }),
-      page.waitForURL(new RegExp(`/workspaces/${target.workspaceId}(?:/|$)`), {
-        timeout: 30_000,
-      }),
-    ]);
-  } catch (error) {
-    const projection = await sessionSet(page);
-    throw new Error(
-      `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
-      { cause: error },
-    );
-  }
+  const projection = await sessionSet(page);
+  throw new Error(
+    `account selection did not reach ${target.displayName}: url=${page.url()} projection=${JSON.stringify({ actorEpoch: projection.actorEpoch, generation: projection.generation, selected: projection.slots.find((slot) => slot.id === projection.selectedSlotId)?.displayName ?? null, slots: projection.slots.map(({ displayName, state }) => ({ displayName, state })) })} body=${JSON.stringify((await page.locator("body").innerText()).slice(0, 2_000))}`,
+    { cause: lastError },
+  );
 }
 
 async function sessionSet(page: Page): Promise<ManagedAuthSessionSetProjection> {
