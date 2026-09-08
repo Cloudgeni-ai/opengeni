@@ -1346,9 +1346,6 @@
 :where(.og-root).h-\[min\(28rem\,50dvh\)\],:where(.og-root) .h-\[min\(28rem\,50dvh\)\] {
     height: min(28rem, 50dvh);
   }
-:where(.og-root).h-\[var\(--og-model-picker-effort-height\)\],:where(.og-root) .h-\[var\(--og-model-picker-effort-height\)\] {
-    height: var(--og-model-picker-effort-height);
-  }
 :where(.og-root).h-\[var\(--og-model-picker-trigger-height\)\],:where(.og-root) .h-\[var\(--og-model-picker-trigger-height\)\] {
     height: var(--og-model-picker-trigger-height);
   }
@@ -1411,6 +1408,9 @@
   }
 :where(.og-root).max-h-\[min\(32rem\,70vh\)\],:where(.og-root) .max-h-\[min\(32rem\,70vh\)\] {
     max-height: min(32rem, 70vh);
+  }
+:where(.og-root).max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\],:where(.og-root) .max-h-\[min\(32rem\,var\(--radix-popover-content-available-height\)\)\] {
+    max-height: min(32rem, var(--radix-popover-content-available-height));
   }
 :where(.og-root).max-h-full,:where(.og-root) .max-h-full {
     max-height: 100%;
@@ -1502,6 +1502,9 @@
 :where(.og-root).w-\[3\.75rem\],:where(.og-root) .w-\[3\.75rem\] {
     width: 3.75rem;
   }
+:where(.og-root).w-\[22rem\],:where(.og-root) .w-\[22rem\] {
+    width: 22rem;
+  }
 :where(.og-root).w-\[52px\],:where(.og-root) .w-\[52px\] {
     width: 52px;
   }
@@ -1516,9 +1519,6 @@
   }
 :where(.og-root).w-\[min\(36rem\,calc\(100vw-2rem\)\)\],:where(.og-root) .w-\[min\(36rem\,calc\(100vw-2rem\)\)\] {
     width: min(36rem, calc(100vw - 2rem));
-  }
-:where(.og-root).w-\[var\(--og-model-picker-menu-width\)\],:where(.og-root) .w-\[var\(--og-model-picker-menu-width\)\] {
-    width: var(--og-model-picker-menu-width);
   }
 :where(.og-root).w-auto,:where(.og-root) .w-auto {
     width: auto;
@@ -1639,6 +1639,9 @@
   }
 :where(.og-root).shrink-0,:where(.og-root) .shrink-0 {
     flex-shrink: 0;
+  }
+:where(.og-root).shrink-\[9999\],:where(.og-root) .shrink-\[9999\] {
+    flex-shrink: 9999;
   }
 :where(.og-root).grow,:where(.og-root) .grow {
     flex-grow: 1;
@@ -2155,6 +2158,12 @@
     border-color: var(--og-color-border);
     @supports (color: color-mix(in lab, red, red)) {
       border-color: color-mix(in oklab, var(--og-color-border) 50%, transparent);
+    }
+  }
+:where(.og-root).border-og-border\/60,:where(.og-root) .border-og-border\/60 {
+    border-color: var(--og-color-border);
+    @supports (color: color-mix(in lab, red, red)) {
+      border-color: color-mix(in oklab, var(--og-color-border) 60%, transparent);
     }
   }
 :where(.og-root).border-og-border\/70,:where(.og-root) .border-og-border\/70 {
@@ -5096,6 +5105,16 @@
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
   }
+:where(.og-root).\@max-\[20rem\]\/model-controls\:block,:where(.og-root) .\@max-\[20rem\]\/model-controls\:block {
+    @container model-controls (width < 20rem) {
+      display: block;
+    }
+  }
+:where(.og-root).\@max-\[20rem\]\/model-controls\:hidden,:where(.og-root) .\@max-\[20rem\]\/model-controls\:hidden {
+    @container model-controls (width < 20rem) {
+      display: none;
+    }
+  }
 :where(.og-root).dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20,:where(.og-root) .dark\:data-\[variant\=destructive\]\:focus\:bg-destructive\/20 {
     @media (prefers-color-scheme: dark) {
       &[data-variant="destructive"] {
@@ -5467,7 +5486,7 @@
 }
 :where(.og-root).og-model-policy-menu,:where(.og-root) .og-model-policy-menu {
   box-sizing: border-box;
-  width: min( var(--og-model-picker-menu-width), calc(var(--og-portal-source-inline-size, 100vw) - 1rem), var(--radix-dropdown-menu-content-available-width, 100vw) );
+  width: min( var(--og-model-picker-menu-width), calc(var(--og-portal-source-inline-size, 100vw) - 1rem), var(--radix-popover-content-available-width, 100vw) );
   max-width: calc(100vw - 1rem);
 }
 :where(.og-root).og-realtime-menu,:where(.og-root) .og-realtime-menu {

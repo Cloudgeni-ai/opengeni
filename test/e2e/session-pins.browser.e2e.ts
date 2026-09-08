@@ -1708,7 +1708,8 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await chooseModel.waitFor();
       await waitFor(async () => !(await chooseModel.isDisabled()));
       await chooseModel.click();
-      await page.getByRole("menu").waitFor();
+      await page.getByRole("dialog", { name: "Model and effort", exact: true }).waitFor();
+      await page.getByRole("textbox", { name: "Search models or providers" }).waitFor();
       await page.keyboard.press("Escape");
       const continueButton = banner.getByRole("button", { name: "Continue", exact: true });
       await waitFor(async () => !(await continueButton.isDisabled()));

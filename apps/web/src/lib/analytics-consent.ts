@@ -4,6 +4,8 @@ export type AnalyticsConsent = "granted" | "denied";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 
+export const ANALYTICS_COLLECTION_ENABLED_EVENT = "opengeni:analytics-collection-enabled";
+
 const CONSENT_STORAGE_KEY = "opengeni.analyticsConsent";
 
 /** Dispatched when Account menu asks to reopen the consent sheet. */

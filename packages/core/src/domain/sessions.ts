@@ -795,7 +795,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // firstPartyMcpPermissions and the target resource checks.
   firstPartyMcpTools: FirstPartyMcpToolName[];
   // Agent-access scope, opaque end-user label, and typed Memory selector
-  // (migration 0423), already resolved against the parent by the caller.
+  // (migration 0425), already resolved against the parent by the caller.
   // Omitted keeps the workspace defaults for internal lifecycle callers.
   agentAccess?: SessionAgentAccess;
   endUser?: SessionEndUser | null;
@@ -1632,7 +1632,10 @@ export async function postUserMessageTurn(
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
-  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  // Acceptance already froze this policy before resource/credential validation.
+  // A different turn starting meanwhile must not change the model we gate here.
+  const effectiveModelForGate =
+    input.turnExecutionPolicy?.productModelId ?? requestedModel ?? sessionForModelGate.model;
   const freshWorkspaceCustomModel =
     requestedModel !== null &&
     isWorkspaceCustomModelId(settings, requestedModel) &&
@@ -1831,7 +1834,7 @@ const MEMORY_SCOPE_WIDTH: Record<SessionMemoryScope, number> = {
 
 /**
  * Resolve a new session's agent-access scope, end-user label, and Memory
- * selector (migration 0423). A top-level request takes its own values. An
+ * selector (migration 0425). A top-level request takes its own values. An
  * agent-created child inherits every omitted value from its trusted parent
  * and may only NARROW an explicit one: agent access workspace > user >
  * session, memory workspace > user > session > off, and the label must equal

@@ -245,6 +245,13 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["artifacts:read", "files:upload"],
   },
+  project_list: { allOf: ["sessions:read"] },
+  project_get: { allOf: ["sessions:read"] },
+  project_create: { allOf: ["sessions:create"] },
+  project_update: { allOf: ["sessions:create"] },
+  project_reorder: { allOf: ["sessions:create"] },
+  project_delete: { allOf: ["sessions:create"] },
+  session_set_project: { allOf: ["sessions:control"] },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

@@ -15,7 +15,7 @@ type AssociatedInteractionSession = {
  * entries a live agent attempt may reach. Every attach-by-id route already
  * authorizes the exact source session through the core seam; the list is the
  * discovery surface behind `interaction_discover scope=workspace`, so it must
- * apply the same seam (private sessions, Slack ownership, and the 0423
+ * apply the same seam (private sessions, Slack ownership, and the 0425
  * agent-access scope) to each associated session instead of exposing every
  * peer's identity. Humans, API keys, and service principals keep the complete
  * workspace inventory exactly as before.

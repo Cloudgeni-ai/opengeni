@@ -477,12 +477,12 @@ export type { ModelPickerProps } from "./components/model-picker";
 export {
   BillingClassMark,
   ModelPolicyPicker,
-  ModelPolicyPickerMenu,
   PickerAnimatedPage,
   PickerBackHeader,
   PickerNavRow,
   defaultModelPolicyPickerMessages,
 } from "./components/model-policy-picker";
+export { ModelPolicyPickerMenu } from "./components/model-policy-picker-menu";
 export type {
   ModelPolicyPickerMessages,
   ModelPolicyPickerProps,
@@ -500,6 +500,7 @@ export {
   labelLatencyMode,
   labelReasoningEffort,
   payerSummaryForModel,
+  modelUsesCredits,
   projectClientModelRows,
   projectPickerRows,
   runnableLatencyModesForModel,

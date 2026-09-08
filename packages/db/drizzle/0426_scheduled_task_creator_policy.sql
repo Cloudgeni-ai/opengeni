@@ -7,7 +7,7 @@
 -- leave every column NULL and keep today's deployment-default behaviour.
 --
 -- Rolling: additive nullable columns only. The execution digest keeps its
--- exact pre-0424 bytes for every existing row and for every NULL-policy task:
+-- exact pre-0426 bytes for every existing row and for every NULL-policy task:
 -- the digest functions strip the three keys while they are NULL and include
 -- them only once a creator policy is actually frozen, so a run admitted before
 -- this migration still matches its task head afterwards.

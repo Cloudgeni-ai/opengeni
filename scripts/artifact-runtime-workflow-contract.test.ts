@@ -180,6 +180,15 @@ describe("artifact runtime workflow contract", () => {
         "build-args"
       ],
     ).toBe("OPENGENI_SOURCE_SHA=${{ github.sha }}");
+    const desktopBuild = parsed.jobs["desktop-image"]?.steps?.find(
+      (step) => step.id === "desktop_image",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.revision=${{ github.sha }}",
+    );
+    expect(desktopBuild?.with?.labels).toContain(
+      "org.opencontainers.image.source=https://github.com/${{ github.repository }}",
+    );
     for (const glob of [
       "packages/artifact-tool/**",
       "packages/artifact-kernel-wasm-document/**",

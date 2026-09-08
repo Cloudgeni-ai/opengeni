@@ -366,7 +366,7 @@ export function registerMachineRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     // Registered before the session route module, so its authorization
     // middleware does not cover this path: an agent attempt must pass the
-    // core seam (including the 0423 agent-access scope) before it may repoint
+    // core seam (including the 0425 agent-access scope) before it may repoint
     // another session's compute.
     if (grantHasAgentAttemptAuthority(grant)) {
       try {

@@ -199,20 +199,20 @@ export function SessionInspector(props: {
 
       <Tabs defaultValue="overview" className="min-h-0 min-w-0 flex-1 gap-0 overflow-hidden">
         <div className="min-w-0 border-b border-border px-2 py-2">
-          <TabsList className="grid h-8 w-full min-w-0 grid-cols-5 rounded-md bg-bg p-1">
-            <TabsTrigger value="overview" className="h-6 min-w-0 rounded px-1 text-2xs">
+          <TabsList className="flex !h-auto w-full min-w-0 flex-wrap justify-start gap-1 rounded-md bg-bg p-1">
+            <TabsTrigger value="overview" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Overview
             </TabsTrigger>
-            <TabsTrigger value="context" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="context" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Context
             </TabsTrigger>
-            <TabsTrigger value="events" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="events" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Events
             </TabsTrigger>
-            <TabsTrigger value="timeline" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="timeline" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Timeline
             </TabsTrigger>
-            <TabsTrigger value="raw" className="h-6 min-w-0 rounded px-1 text-2xs">
+            <TabsTrigger value="raw" className="h-7 min-w-max flex-none rounded px-2 text-2xs">
               Raw
             </TabsTrigger>
           </TabsList>
@@ -458,6 +458,7 @@ export function SessionInspector(props: {
             workspaceId={props.session.workspaceId}
             sessionId={props.session.id}
             events={displayEvents}
+            isRunning={props.session.status === "running"}
           />
         </TabsContent>
 

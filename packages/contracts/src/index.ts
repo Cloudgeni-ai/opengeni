@@ -1,3 +1,4 @@
+export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -803,6 +804,13 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "run_on",
   "sandbox_provision",
   "connected_machine_remove",
+  "project_list",
+  "project_get",
+  "project_create",
+  "project_update",
+  "project_reorder",
+  "project_delete",
+  "session_set_project",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -5381,7 +5389,7 @@ export const KnowledgeMemory = z.object({
   status: KnowledgeMemoryStatus,
   kind: KnowledgeMemoryKind,
   scope: z.string(),
-  /** Typed selector (migration 0152/0423): workspace, user, session, role, ephemeral, legacy. */
+  /** Typed selector (migration 0152/0425): workspace, user, session, role, ephemeral, legacy. */
   scopeType: z.string().optional(),
   /** `end_user:<source>:<id>` for a session end-user layer; null otherwise. */
   scopeSubjectId: z.string().nullable().optional(),
@@ -12172,6 +12180,8 @@ export const Session = z.object({
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
   createdByContext: TurnInitiatorContext,
+  // Read projection: latest turn.started policy, or creation policy before any turn starts.
+  // Accepted/queued turns and actor composer drafts retain their own explicit policy.
   model: z.string(),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,

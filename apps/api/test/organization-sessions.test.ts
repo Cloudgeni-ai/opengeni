@@ -640,7 +640,7 @@ describe("organization-wide session list", () => {
     if (!shared || !client || !app || !fixture) return;
     if (!fixture.endUserColumnsPresent) {
       console.warn(
-        "[organization-sessions] skipped: sessions.end_user_id is not present yet (slice B migration 0423)",
+        "[organization-sessions] skipped: sessions.end_user_id is not present yet (slice B migration 0425)",
       );
       return;
     }

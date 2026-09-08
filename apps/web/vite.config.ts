@@ -34,6 +34,38 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Inspector changes must not pull account-management forms into
+              // the direct-session graph through entry-aware chunk merging.
+              name: "model-connection-settings",
+              test: /(?:components[\\/](?:codex-source-settings|connection-access-settings|model-connection-section|subscription-account-row|subscription-connect-action)\.tsx$|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:external-link|route|ticket-check)\.mjs$)/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // Keep context and its virtual reader in the lazy debug inspector.
+              name: "context-inspector",
+              test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+/]virtual-core|@tanstack[\\+/]react-virtual)/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // Workspace forms, provider marks, and administration links are
+              // shared route primitives. They must not pull the settings
+              // implementation into the workspace shell or direct sessions.
+              name: "workspace-form-primitives",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/](?:ui[\\/](?:dialog|confirm-dialog|skeleton|textarea)|brand-mark|chatgpt-mark|settings[\\/]organization-workspace-administration)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 20,
+            },
+            {
+              // The searchable picker mounts this overlay only when opened.
+              // Keep Popover itself lazy; shared Radix scopes stay in ui-runtime.
+              name: "model-picker-popover",
+              test: /@radix-ui[\\/+]react-popover(?:@|[\\/])/,
+              includeDependenciesRecursively: false,
+              priority: 16,
+            },
+            {
               // Keep Radix, Lucide's eager icon factory, and the two class-name
               // helpers (web `cn` and @opengeni/react `cn` with clsx and
               // tailwind-merge) in one UI runtime. entriesAware route merging
@@ -67,7 +99,7 @@ export default defineConfig({
               // Its shared helpers remain available for normal consumer-aware
               // splitting without pulling the full rail implementation in.
               name: "session-rail",
-              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]session-list\.tsx$/,
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:session-list|workspace-switcher|workspace-name-dialog)\.tsx$/,
               includeDependenciesRecursively: false,
               priority: 3,
             },
@@ -75,9 +107,10 @@ export default defineConfig({
               // A few tiny primitives are shared by the initial composer and
               // the active-session route. Pin that boundary so entry-aware
               // merging cannot use an icon or label helper to pull the full
-              // session workbench into startup.
+              // session workbench into startup. The personal-workspace badge and
+              // session title contract must not carry settings-only dependencies.
               name: "session-shared-primitives",
-              test: /(?:apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
+              test: /(?:packages[\\/]contracts[\\/]src[\\/]session-titles\.ts|apps[\\/]web[\\/]src[\\/]lib[\\/](?:format|machine-selectability)\.ts|apps[\\/]web[\\/]src[\\/]components[\\/]personal-workspace-badge\.tsx|packages[\\/]react[\\/]src[\\/](?:hooks[\\/]use-machines|workstream-control-event)\.ts|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:chevron-up|git-branch|rotate-ccw|rotate-cw|save|server)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 16,
             },
@@ -106,15 +139,15 @@ export default defineConfig({
               // The session workbench is the primary interactive route. Keep
               // its static graph route-aware, but coalesce tiny shared groups
               // so a cold navigation does not fan out into dozens of requests.
-              // 192 KiB (up from 92) keeps the initial and direct-session file
-              // counts inside the budget after the capabilities route stopped
-              // importing several small shared modules; the smaller threshold
-              // left three sub-50 KiB shared chunks in both graphs.
+              // Coalesce the small shared chunks left after explicitly isolating
+              // workspace administration and the on-demand model menu. The
+              // 512 KiB merge threshold reduces duplicate wrappers and request
+              // fan-out; the unchanged post-build graph/chunk budgets still gate it.
               name: "session",
               test: /src[\\/]routes[\\/]session\.tsx$/,
               includeDependenciesRecursively: true,
               entriesAware: true,
-              entriesAwareMergeThreshold: 192 * 1024,
+              entriesAwareMergeThreshold: 512 * 1024,
               priority: 2,
             },
             {

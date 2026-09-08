@@ -215,6 +215,7 @@ export async function listWorkspaceArtifacts(
     limit?: number;
     cursor?: string;
     status?: "active" | "archived";
+    sourceSessionId?: string;
   } = {},
 ): Promise<{
   artifacts: WorkspaceArtifact[];
@@ -226,6 +227,14 @@ export async function listWorkspaceArtifacts(
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
     const visibility = and(
       eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+      ...(options.sourceSessionId
+        ? [
+            sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
+              where published_version.artifact_id = ${schema.workspaceArtifacts.id}
+                and published_version.workspace_id = ${schema.workspaceArtifacts.workspaceId}
+                and published_version.source_session_id = ${options.sourceSessionId}::uuid)`,
+          ]
+        : []),
       ...(options.status ? [eq(schema.workspaceArtifacts.status, options.status)] : []),
       ...(cursor
         ? [

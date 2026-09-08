@@ -274,7 +274,12 @@ function failureDiagnostics(page: Page): string {
 
 async function waitForSubscriptionsHeading(page: Page): Promise<void> {
   try {
-    await page.locator("#codex-subscriptions-heading").waitFor({ timeout: 20_000 });
+    await page
+      .locator('[data-testid="codex-connection-card"] > summary')
+      .waitFor({ timeout: 20_000 });
+    const section = page.getByTestId("codex-connection-card");
+    if (!(await section.evaluate((element) => element.hasAttribute("open"))))
+      await section.locator(":scope > summary").click();
   } catch (error) {
     const [title, body] = await Promise.all([
       page.title().catch(() => "<unavailable>"),
@@ -590,7 +595,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
         waitUntil: "domcontentloaded",
       },
     );
-    const subscriptionsHeading = page.locator("#codex-subscriptions-heading");
+    const subscriptionsHeading = page.locator('[data-testid="codex-connection-card"] > summary');
     await waitForSubscriptionsHeading(page);
     await subscriptionsHeading.scrollIntoViewIfNeeded();
     const initialAccountCount = await page
@@ -664,7 +669,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(aria).toContain('radio "Use Detailed account as active subscription"');
     expect(aria).toContain('checkbox "Use Detailed account for new automatic turns"');
     expect(aria).toContain('button "Redeem Full reset"');
-    await expectNoWcagAxeViolations(page, 'section[aria-labelledby="codex-subscriptions-heading"]');
+    await expectNoWcagAxeViolations(page, '[data-testid="codex-connection-card"]');
     await page.screenshot({
       path: `${EVIDENCE_DIR}/codex-quota-desktop-dark.png`,
       fullPage: true,
@@ -699,7 +704,9 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
         waitUntil: "domcontentloaded",
       },
     );
-    const mobileSubscriptionsHeading = mobile.locator("#codex-subscriptions-heading");
+    const mobileSubscriptionsHeading = mobile.locator(
+      '[data-testid="codex-connection-card"] > summary',
+    );
     await waitForSubscriptionsHeading(mobile);
     await mobileSubscriptionsHeading.scrollIntoViewIfNeeded();
     const initialMobileAccountCount = await mobile
@@ -732,10 +739,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
     );
-    await expectNoWcagAxeViolations(
-      mobile,
-      'section[aria-labelledby="codex-subscriptions-heading"]',
-    );
+    await expectNoWcagAxeViolations(mobile, '[data-testid="codex-connection-card"]');
     await mobile.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
     await mobile.screenshot({
       path: `${EVIDENCE_DIR}/codex-quota-mobile-light.png`,
@@ -824,8 +828,10 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
         waitUntil: "domcontentloaded",
       },
     );
-    const recoverySubscriptionsHeading = recoveryPage.locator("#codex-subscriptions-heading");
-    await recoverySubscriptionsHeading.waitFor({ timeout: 20_000 });
+    const recoverySubscriptionsHeading = recoveryPage.locator(
+      '[data-testid="codex-connection-card"] > summary',
+    );
+    await waitForSubscriptionsHeading(recoveryPage);
     await recoverySubscriptionsHeading.scrollIntoViewIfNeeded();
     const initialRecoveryAccountCount = await recoveryPage
       .getByRole("article", { name: "Detailed account Codex subscription" })
@@ -872,10 +878,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(
       await recoveryPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
-    await expectNoWcagAxeViolations(
-      recoveryPage,
-      'section[aria-labelledby="codex-subscriptions-heading"]',
-    );
+    await expectNoWcagAxeViolations(recoveryPage, '[data-testid="codex-connection-card"]');
     await recoveryContext.close();
 
     // A third session also starts without local state. Durable completion must
@@ -902,8 +905,10 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
         waitUntil: "domcontentloaded",
       },
     );
-    const completedSubscriptionsHeading = completedPage.locator("#codex-subscriptions-heading");
-    await completedSubscriptionsHeading.waitFor({ timeout: 20_000 });
+    const completedSubscriptionsHeading = completedPage.locator(
+      '[data-testid="codex-connection-card"] > summary',
+    );
+    await waitForSubscriptionsHeading(completedPage);
     await completedSubscriptionsHeading.scrollIntoViewIfNeeded();
     const initialCompletedAccountCount = await completedPage
       .getByRole("article", { name: "Detailed account Codex subscription" })
@@ -922,10 +927,7 @@ describe("Codex quota real browser/API/Postgres reset overview", () => {
     expect(
       await completedPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
     ).toBe(true);
-    await expectNoWcagAxeViolations(
-      completedPage,
-      'section[aria-labelledby="codex-subscriptions-heading"]',
-    );
+    await expectNoWcagAxeViolations(completedPage, '[data-testid="codex-connection-card"]');
     await completedContext.close();
   }, 120_000);
 });

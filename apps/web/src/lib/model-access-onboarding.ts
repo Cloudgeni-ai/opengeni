@@ -15,7 +15,9 @@ export function preferredConnectedModelId(
   models: readonly WorkspaceModelCatalogModel[],
 ): string | null {
   const connected = sortPickerRows(projectPickerRows([...models])).filter(
-    (row) => row.selectable && CONNECTED_BILLING_CLASSES.has(row.billingClass),
+    (row) =>
+      row.selectable &&
+      (row.catalog.cost === "free" || CONNECTED_BILLING_CLASSES.has(row.billingClass)),
   );
   return connected[0]?.id ?? null;
 }

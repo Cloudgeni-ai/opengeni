@@ -5,7 +5,7 @@ import { sessionAuthorizationOperationForHttp } from "../apps/api/src/routes/ses
 import { FIRST_PARTY_TOOL_AUTHORIZATION } from "../apps/api/src/mcp/first-party-tool-permissions";
 
 // ---------------------------------------------------------------------------
-// Agent-access scope contract surface (migration 0423).
+// Agent-access scope contract surface (migration 0425).
 //
 // A session's agentAccess ("session" | "user" | "workspace") and end-user
 // label are enforced in exactly one place: the core session-authorization

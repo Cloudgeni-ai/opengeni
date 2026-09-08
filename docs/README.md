@@ -13,6 +13,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Product agent | Curated opt-in Skills in `packages/runtime/src/curated_skill_library` plus native tool-bound Skills in `packages/runtime/src/bundled_artifact_skills`, `packages/runtime/src/bundled_site_skills`, and `packages/runtime/src/bundled_video_skills` | Versioned product content; not covered by this freshness system. |
 | Operator | `docs/deployment.md`, deployment contracts and chart docs | People deploying and operating OpenGeni. |
 | Record | `docs/design/**` | Public-safe point-in-time architecture and product-design records; never raw operator evidence. |
+| Product user / evaluator | `docs-site/` (published at docs.opengeni.ai) | Public product docs built with Mintlify from `main`; concept and workflow level, linking to the canonical homes below for volatile details. |
 
 ## Canonical Homes
 
@@ -64,6 +65,7 @@ This map defines who each doc tier serves and where volatile facts belong.
 | Model providers and OpenAI-compatible inference routes | `docs/model-providers.md` (start at § Configuring inference) | `README.md` Configuration and `.env.example` should link instead of restating `OPENGENI_MODEL_PROVIDERS_JSON`. |
 | Model catalog pricing audit | `docs/model-providers.md` § Price audit (`bun run check:model-pricing`) | Debit authority stays in `packages/config` `defaultModelPricing`; llm-prices is a canary only. |
 | Provider-aware image generation | `docs/image-generation.md` | Runtime, worker, artifact, SDK, and React summaries should link instead of restating provider and recovery semantics. |
+| Public documentation site (docs.opengeni.ai) | `docs-site/` (`docs.json` + MDX; Mintlify deploys it from `main` with subdirectory `/docs-site`) | Site pages link to the canonical homes in this table instead of restating commands, env vars, or SDK signatures. |
 
 ## Rules
 

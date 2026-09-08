@@ -6,6 +6,7 @@ export type ModelContextInstructionLayerId =
   | "workspace_memory"
   | "codemode"
   | "git_bindings"
+  | "builtin_skills"
   | "genesis_title"
   | "sdk_capability_instructions"
   | "sandbox_preamble"
@@ -50,6 +51,19 @@ export type ModelContextTokenCounts = {
 };
 
 export type ModelContextSnapshot = {
+  providerRequest?:
+    | {
+        provider: string;
+        body: string | null;
+        unavailableReason?: string | undefined;
+        parts: {
+          key: string;
+          estimatedTokens: number | null;
+          utf8Bytes: number;
+          itemEstimatedTokens?: (number | null)[] | undefined;
+        }[];
+      }
+    | undefined;
   version: 1;
   capturedAt: string;
   source: "model_request";

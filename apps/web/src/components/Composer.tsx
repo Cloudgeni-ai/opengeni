@@ -50,6 +50,7 @@ export function ConsoleComposer(props: {
   const voiceInputEnabled = resolveWorkspaceVoiceInputEnabled(workspace?.settings) ?? true;
   return (
     <ChatComposer
+      responsiveBasis="container"
       composer={props.composer}
       effectiveControl={props.effectiveControl}
       queuedAheadCount={props.queuedAheadCount}
@@ -64,8 +65,8 @@ export function ConsoleComposer(props: {
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       {...(props.controlsLeading ? { controlsLeading: props.controlsLeading } : {})}
       {...(props.header ? { header: props.header } : {})}
-      // Desktop keeps the paperclip; mobile reaches attach via the “+” menu.
-      attachButtonClassName="max-sm:hidden"
+      // Wide panes keep the paperclip; narrow panes use the “+” menu.
+      attachButtonClassName="console-composer-wide-control max-sm:hidden"
       controlsStart={props.controls}
       actionsStart={props.actions}
       transcriptionSuppressed={props.transcriptionSuppressed === true}

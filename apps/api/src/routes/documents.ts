@@ -1003,7 +1003,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const attemptId =
         typeof grant.metadata?.attemptId === "string" ? grant.metadata.attemptId : undefined;
       // A session-bound caller reads Memory through its frozen selector
-      // (migration 0423); a missing row resolves to no Memory tools.
+      // (migration 0425); a missing row resolves to no Memory tools.
       const memory =
         sessionId !== undefined
           ? ((await resolveSessionMemoryAgentScope(db, workspaceId, sessionId)) ?? {

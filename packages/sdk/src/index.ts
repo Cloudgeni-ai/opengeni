@@ -1,3 +1,4 @@
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export { OpenGeniClient } from "./artifact-client";
 export {
   OpenGeniToolCallError,

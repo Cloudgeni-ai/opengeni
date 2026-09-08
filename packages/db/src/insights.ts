@@ -1,3 +1,4 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { and, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
@@ -1056,6 +1057,8 @@ export async function listFloorSessions(
         directControlState: schema.sessions.directControlState,
         nestedAgentDepth: schema.sessions.nestedAgentDepth,
         model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
         sandboxBackend: schema.sessions.sandboxBackend,
         updatedAt: schema.sessions.updatedAt,
         createdAt: schema.sessions.createdAt,
@@ -1064,7 +1067,7 @@ export async function listFloorSessions(
       .where(eq(schema.sessions.workspaceId, workspaceId))
       .orderBy(desc(schema.sessions.updatedAt))
       .limit(limit);
-    return rows;
+    return await withLatestStartedSessionPolicy(scopedDb, workspaceId, rows);
   });
 }
 

@@ -1,6 +1,5 @@
 import type { ClientModel, LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import {
-  CheckIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
@@ -9,11 +8,11 @@ import {
   ZapIcon,
 } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
-import { DropdownMenu } from "radix-ui";
 import {
-  useEffect,
+  Suspense,
+  lazy,
   useMemo,
-  useRef,
+  useId,
   useState,
   type CSSProperties,
   type ReactNode,
@@ -22,28 +21,20 @@ import {
 import { cn } from "../lib/cn";
 import { usePortalTokenSource, usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
-  effortOptionsForModel,
   findPickerRow,
-  groupPickerRowsByBillingClass,
   labelReasoningEffort,
-  payerSummaryForModel,
   projectClientModelRows,
-  runnableLatencyModesForModel,
   type PickerBillingClass,
   type PickerModelRow,
 } from "../model-policy";
 
+const LazyModelPolicyPickerMenu = lazy(() =>
+  import("./model-policy-picker-menu").then(({ ModelPolicyPickerPopover }) => ({
+    default: ModelPolicyPickerPopover,
+  })),
+);
+
 type ClientPickerModelRow = PickerModelRow<ClientModel>;
-
-type NavLevel = "providers" | "models" | "thinking";
-
-type PickerNavState = {
-  level: NavLevel;
-  rail: PickerBillingClass | null;
-  modelId: string | null;
-};
-
-type NavUpdater = PickerNavState | ((previous: PickerNavState) => PickerNavState);
 
 export type ModelPolicyPickerMessages = {
   label: string;
@@ -53,6 +44,15 @@ export type ModelPolicyPickerMessages = {
   fast: string;
   fastRateHint: string;
   codexOnly: string;
+  searchLabel?: string;
+  searchPlaceholder?: string;
+  currentModel?: string;
+  noMatches?: string;
+  unsupportedAttachments?: string;
+  thinkingEffort?: string;
+  selected?: string;
+  free?: string;
+
   billingHints: Record<PickerBillingClass, string>;
 };
 
@@ -64,8 +64,18 @@ export const defaultModelPolicyPickerMessages: ModelPolicyPickerMessages = {
   fast: "Fast",
   fastRateHint: "2× rate",
   codexOnly: "Codex-only session",
+  searchLabel: "Search models or providers",
+  searchPlaceholder: "Search models or providers…",
+  currentModel: "Current model",
+  noMatches: "No matching models. Try a model or provider name.",
+  unsupportedAttachments:
+    "Unsupported attachments stay in the session but are hidden from this model.",
+  thinkingEffort: "Thinking effort",
+  selected: "Selected",
+  free: "Free",
+
   billingHints: {
-    opengeni_credits: "Will use credits",
+    opengeni_credits: "Provided by OpenGeni",
     external: "Provider terms and limits apply",
     codex_subscription: "ChatGPT / Codex plan",
     supergrok_subscription: "SuperGrok / xAI plan",
@@ -92,7 +102,7 @@ export type ModelPolicyPickerProps = {
   onOpenChange?: ((open: boolean) => void) | undefined;
   /** Non-Codex models stay visible but cannot be selected. */
   codexOnly?: boolean | undefined;
-  /** Resets drill-down navigation when the session scope changes. */
+  /** Identity of the current session scope. */
   sessionKey?: string | undefined;
   /** Prefer bottom on new-chat surfaces and top for bottom-docked composers. */
   menuSide?: "top" | "bottom" | undefined;
@@ -227,40 +237,10 @@ function applyCodexOnly(
   );
 }
 
-function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
+export function effectiveRows(props: ModelPolicyPickerProps): ClientPickerModelRow[] {
   const rows = props.rows !== undefined ? props.rows : projectClientModelRows(props.models ?? []);
   const messages = { ...defaultModelPolicyPickerMessages, ...props.messages };
   return applyCodexOnly(rows, props.codexOnly === true, messages.codexOnly);
-}
-
-function defaultNavState(rows: ClientPickerModelRow[], modelId: string): PickerNavState {
-  const selected = findPickerRow(rows, modelId);
-  if (!selected) {
-    const rails = new Set(rows.map((row) => row.billingClass));
-    const onlyRail = rails.size === 1 ? rows[0]?.billingClass : null;
-    return onlyRail
-      ? { level: "models", rail: onlyRail, modelId: null }
-      : { level: "providers", rail: null, modelId: null };
-  }
-  return {
-    level: "thinking",
-    rail: selected.billingClass,
-    modelId: selected.id,
-  };
-}
-
-function usePickerNavState(
-  sessionKey: string | undefined,
-  rows: ClientPickerModelRow[],
-  model: string,
-): [PickerNavState, (next: NavUpdater) => void] {
-  const [state, setState] = useState<PickerNavState>(() => defaultNavState(rows, model));
-  useEffect(() => {
-    setState(defaultNavState(rows, model));
-    // The menu deliberately preserves its drill-down while the same session is mounted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionKey]);
-  return [state, setState];
 }
 
 export function PickerNavRow(props: {
@@ -271,6 +251,7 @@ export function PickerNavRow(props: {
   showChevron?: boolean | undefined;
   disabled?: boolean | undefined;
   title?: string | undefined;
+  description?: string | undefined;
   active?: boolean | undefined;
   testId?: string | undefined;
   onClick: () => void;
@@ -280,6 +261,7 @@ export function PickerNavRow(props: {
       type="button"
       disabled={props.disabled}
       title={props.title}
+      aria-description={props.description}
       onClick={props.onClick}
       data-testid={props.testId}
       className={cn(
@@ -348,265 +330,26 @@ export function PickerAnimatedPage(props: {
   );
 }
 
-export function ModelPolicyPickerMenu(
-  props: ModelPolicyPickerProps & {
-    nav?: PickerNavState | undefined;
-    onNavChange?: ((next: NavUpdater) => void) | undefined;
-  },
-) {
-  const messages = useMemo(
-    () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
-    [props.messages],
-  );
-  const rows = effectiveRows(props);
-  const groups = useMemo(() => groupPickerRowsByBillingClass(rows), [rows]);
-  const [localNav, setLocalNav] = usePickerNavState(
-    props.nav === undefined ? props.sessionKey : undefined,
-    rows,
-    props.model,
-  );
-  const nav = props.nav ?? localNav;
-  const setNav = props.onNavChange ?? setLocalNav;
-  const [direction, setDirection] = useState<1 | -1>(1);
-
-  const effectiveNav =
-    nav.level === "providers" && groups.length === 1
-      ? {
-          level: "models" as const,
-          rail: groups[0]!.billingClass,
-          modelId: null,
-        }
-      : nav;
-  const activeGroup =
-    effectiveNav.rail === null
-      ? undefined
-      : groups.find((group) => group.billingClass === effectiveNav.rail);
-  const focusModel =
-    effectiveNav.modelId === null ? undefined : findPickerRow(rows, effectiveNav.modelId);
-  const selectedRow = findPickerRow(rows, props.model);
-
-  const go = (next: PickerNavState, nextDirection: 1 | -1) => {
-    setDirection(nextDirection);
-    setNav(next);
-  };
-
-  const selectEffort = (row: ClientPickerModelRow, effort: ReasoningEffort) => {
-    if (!row.selectable) return;
-    if (row.id !== props.model) props.onModelChange(row.id);
-    props.onEffortChange(effort);
-  };
-
-  const pageKey =
-    effectiveNav.level === "providers"
-      ? "providers"
-      : effectiveNav.level === "models"
-        ? `models:${effectiveNav.rail ?? ""}`
-        : `thinking:${effectiveNav.modelId ?? ""}`;
-
-  let body: ReactNode;
-  if (props.loading) {
-    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.loading}</p>;
-  } else if (groups.length === 0) {
-    body = <p className="px-2 py-3 text-og-control text-og-fg-subtle">{messages.noModels}</p>;
-  } else if (effectiveNav.level === "providers") {
-    body = (
-      <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
-        {groups.map((group) => (
-          <PickerNavRow
-            key={group.billingClass}
-            label={group.label}
-            hint={messages.billingHints[group.billingClass]}
-            icon={<BillingClassMark billingClass={group.billingClass} />}
-            active={selectedRow?.billingClass === group.billingClass}
-            testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
-          />
-        ))}
-      </div>
-    );
-  } else if (effectiveNav.level === "models" && activeGroup) {
-    body = (
-      <div data-testid="model-picker-models">
-        {groups.length > 1 ? (
-          <PickerBackHeader
-            label={activeGroup.label}
-            icon={<BillingClassMark billingClass={activeGroup.billingClass} />}
-            onBack={() => go({ level: "providers", rail: null, modelId: null }, -1)}
-          />
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          {activeGroup.rows.map((row) => (
-            <PickerNavRow
-              key={`${row.billingClass}:${row.id}`}
-              label={row.label}
-              hint={row.unavailableReason ?? payerSummaryForModel(row.catalog)}
-              disabled={!row.selectable}
-              title={row.unavailableReason ?? undefined}
-              active={row.id === props.model}
-              testId={`model-picker-choice-${row.id}`}
-              onClick={() => {
-                if (row.selectable) {
-                  go(
-                    {
-                      level: "thinking",
-                      rail: row.billingClass,
-                      modelId: row.id,
-                    },
-                    1,
-                  );
-                }
-              }}
-            />
-          ))}
-        </div>
-      </div>
-    );
-  } else if (effectiveNav.level === "thinking" && focusModel) {
-    const activeModel = focusModel.id === props.model;
-    const supportsFast = runnableLatencyModesForModel(focusModel.catalog).includes("fast");
-    body = (
-      <div data-testid="model-picker-reasoning">
-        <PickerBackHeader
-          label={focusModel.label}
-          icon={<BillingClassMark billingClass={focusModel.billingClass} />}
-          onBack={() => go({ level: "models", rail: focusModel.billingClass, modelId: null }, -1)}
-          trailing={
-            supportsFast && props.allowLatencyMode !== false ? (
-              <button
-                type="button"
-                disabled={!focusModel.selectable}
-                aria-pressed={activeModel && props.latencyMode === "fast"}
-                aria-label={
-                  activeModel && props.latencyMode === "fast"
-                    ? `Disable ${messages.fast}`
-                    : `Enable ${messages.fast}`
-                }
-                title={`${messages.fast} · ${messages.fastRateHint}`}
-                data-testid="model-picker-fast"
-                onClick={() => {
-                  if (!activeModel) {
-                    props.onModelChange(focusModel.id);
-                  }
-                  props.onLatencyModeChange(
-                    activeModel && props.latencyMode === "fast" ? "standard" : "fast",
-                  );
-                }}
-                className={cn(
-                  "flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-og-sm text-og-fg-subtle outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
-                  activeModel && props.latencyMode === "fast" && "text-og-fg",
-                )}
-              >
-                <ZapIcon
-                  className={cn(
-                    "size-3.5",
-                    activeModel && props.latencyMode === "fast" && "fill-current",
-                  )}
-                />
-              </button>
-            ) : null
-          }
-        />
-        <p className="px-2.5 pt-1 pb-1 text-og-control font-medium tracking-wide text-og-fg-subtle uppercase">
-          {messages.thinking}
-        </p>
-        {focusModel.catalog.capabilities?.inputModalities.includes("image") === false ? (
-          <p className="px-2.5 pb-1.5 text-og-control leading-relaxed text-og-fg-subtle">
-            Unsupported attachments stay in the session but are hidden from this model.
-          </p>
-        ) : null}
-        <div className="flex flex-col gap-0.5">
-          {effortOptionsForModel(focusModel.catalog).map((effort) => {
-            const selected = activeModel && effort === props.effort;
-            return (
-              <button
-                key={effort}
-                type="button"
-                disabled={!focusModel.selectable}
-                onClick={() => selectEffort(focusModel, effort)}
-                className={cn(
-                  "flex h-[var(--og-model-picker-effort-height)] w-full cursor-pointer items-center rounded-og-sm px-[var(--og-model-picker-row-padding-x)] text-left text-og-menu text-og-fg outline-hidden transition-colors hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50",
-                  selected && "bg-og-surface-2",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate">{labelReasoningEffort(effort)}</span>
-                {selected ? (
-                  <CheckIcon
-                    className="ml-auto size-3.5 shrink-0"
-                    data-testid="model-picker-effort-check"
-                  />
-                ) : null}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    );
-  } else {
-    body = (
-      <div className="flex flex-col gap-0.5" data-testid="model-picker-providers">
-        {groups.map((group) => (
-          <PickerNavRow
-            key={group.billingClass}
-            label={group.label}
-            hint={messages.billingHints[group.billingClass]}
-            icon={<BillingClassMark billingClass={group.billingClass} />}
-            testId={`model-picker-rail-${group.billingClass}`}
-            onClick={() => go({ level: "models", rail: group.billingClass, modelId: null }, 1)}
-          />
-        ))}
-      </div>
-    );
-  }
-
-  return (
-    <div data-testid="model-picker-menu" className="relative overflow-hidden">
-      {props.error ? (
-        <p className="px-2 py-1 text-og-control text-og-status-failed" role="alert">
-          {props.error}
-        </p>
-      ) : null}
-      <PickerAnimatedPage pageKey={pageKey} direction={direction}>
-        {body}
-      </PickerAnimatedPage>
-    </div>
-  );
-}
-
-/** @internal Shared state seam kept outside the Radix portal for deterministic testing. */
+/** @internal Shared controlled/uncontrolled state seam. */
 export function useModelPolicyPickerState(props: ModelPolicyPickerProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(props.defaultOpen ?? false);
   const open = props.open ?? uncontrolledOpen;
-  const rows = effectiveRows(props);
-  const [nav, setNav] = usePickerNavState(props.sessionKey, rows, props.model);
-  const previousControlledOpen = useRef(props.open);
-  useEffect(() => {
-    const wasOpen = previousControlledOpen.current;
-    previousControlledOpen.current = props.open;
-    if (props.open === true && wasOpen !== true) {
-      setNav(defaultNavState(rows, props.model));
-    }
-    // Reset only on the controlled closed-to-open edge; ordinary rerenders
-    // deliberately preserve the current drill-down page.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.open]);
   const setOpen = (next: boolean) => {
-    if (next) {
-      setNav(defaultNavState(rows, props.model));
-    }
     if (props.open === undefined) setUncontrolledOpen(next);
     props.onOpenChange?.(next);
   };
-  return { open, setOpen, rows, nav, setNav };
+  return { open, setOpen, rows: effectiveRows(props) };
 }
 
 export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
+  const contentId = useId();
   const trigger = usePortalTokenSource<HTMLButtonElement>();
   const portalStyle = usePortalTokenStyle(trigger.source);
   const messages = useMemo(
     () => ({ ...defaultModelPolicyPickerMessages, ...props.messages }),
     [props.messages],
   );
-  const { open, setOpen, rows, nav, setNav } = useModelPolicyPickerState(props);
+  const { open, setOpen, rows } = useModelPolicyPickerState(props);
   const selected = findPickerRow(rows, props.model);
 
   if (props.loading) {
@@ -622,60 +365,59 @@ export function ModelPolicyPicker(props: ModelPolicyPickerProps) {
     );
   }
   return (
-    <DropdownMenu.Root open={open} onOpenChange={setOpen}>
-      <DropdownMenu.Trigger asChild>
-        <button
-          ref={trigger.ref}
-          type="button"
-          disabled={props.disabled}
-          aria-label={messages.label}
-          className={cn(
-            "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
-            props.className,
-          )}
+    <>
+      <button
+        ref={trigger.ref}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? contentId : undefined}
+        data-state={open ? "open" : "closed"}
+        onClick={() => setOpen(!open)}
+        disabled={props.disabled}
+        aria-label={messages.label}
+        className={cn(
+          "og-root og-model-policy-trigger inline-flex h-[var(--og-model-picker-trigger-height)] min-w-0 max-w-64 items-center gap-1 rounded-full border border-transparent px-2.5 text-og-control text-og-fg-muted outline-hidden transition-colors hover:border-og-border hover:bg-og-surface-2 hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:cursor-not-allowed disabled:opacity-50 max-sm:h-11 max-sm:max-w-[7.5rem] max-sm:px-2",
+          props.className,
+        )}
+      >
+        <BillingClassMark
+          billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
+          className="text-og-fg"
+        />
+        <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden @max-[20rem]/model-controls:hidden">
+          {selected?.label ?? props.model}
+        </span>
+        <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden @max-[20rem]/model-controls:block">
+          {selected?.shortLabel ?? selected?.label ?? props.model}
+        </span>
+        <span
+          className="og-model-policy-effort min-w-0 shrink-[9999] truncate"
+          title={labelReasoningEffort(props.effort)}
         >
-          <BillingClassMark
-            billingClass={selected?.billingClass ?? billingClassForMissingSelection(props.model)}
-            className="text-og-fg"
+          {labelReasoningEffort(props.effort)}
+        </span>
+        {props.latencyMode === "fast" ? (
+          <ZapIcon
+            className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
+            aria-label={messages.fast}
+            data-testid="model-picker-fast-icon"
           />
-          <span className="og-model-policy-label-full min-w-0 truncate font-medium text-og-fg max-sm:hidden">
-            {selected?.label ?? props.model}
-          </span>
-          <span className="og-model-policy-label-short min-w-0 truncate font-medium text-og-fg sm:hidden">
-            {selected?.shortLabel ?? selected?.label ?? props.model}
-          </span>
-          <span className="og-model-policy-effort max-sm:hidden">
-            {labelReasoningEffort(props.effort)}
-          </span>
-          {props.latencyMode === "fast" ? (
-            <ZapIcon
-              className="size-3.5 shrink-0 fill-current stroke-current text-og-fg"
-              aria-label={messages.fast}
-              data-testid="model-picker-fast-icon"
-            />
-          ) : null}
-          <ChevronDownIcon className="size-3 shrink-0" />
-        </button>
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Portal>
-        <DropdownMenu.Content
-          align="start"
-          side={props.menuSide ?? "bottom"}
-          sideOffset={8}
-          collisionPadding={12}
-          onCloseAutoFocus={(event) => event.preventDefault()}
-          className={cn(
-            "og-root og-model-policy-menu z-50 flex max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-[var(--og-model-picker-menu-width)] max-w-[calc(100vw-16px)] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 p-[var(--og-model-picker-menu-padding)] text-og-fg shadow-og-lg",
-            props.contentClassName,
-          )}
-          style={{ ...portalStyle, ...props.contentStyle }}
-          data-testid="model-picker-content"
-        >
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <ModelPolicyPickerMenu {...props} nav={nav} onNavChange={setNav} />
-          </div>
-        </DropdownMenu.Content>
-      </DropdownMenu.Portal>
-    </DropdownMenu.Root>
+        ) : null}
+        <ChevronDownIcon className="size-3 shrink-0" />
+      </button>
+
+      {open ? (
+        <Suspense fallback={null}>
+          <LazyModelPolicyPickerMenu
+            {...props}
+            anchor={trigger.currentRef}
+            contentId={contentId}
+            portalStyle={portalStyle}
+            onOpenChange={setOpen}
+          />
+        </Suspense>
+      ) : null}
+    </>
   );
 }

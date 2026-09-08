@@ -1,5 +1,6 @@
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError } from "@opengeni/contracts";
+import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -1026,7 +1027,7 @@ export function createAppComposition(deps: AppDependencies): {
         }
       }
       const mcpDeps = await resolveWorkspaceMcpRouteDeps(routeDeps, grant);
-      // The bound session's frozen Memory selector (migration 0423) decides
+      // The bound session's frozen Memory selector (migration 0425) decides
       // which Memory tools the attempt receives and which typed layers they
       // read and write. A missing row resolves to no Memory tools.
       const sessionMemory =
@@ -1259,6 +1260,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
   registerTranscriptionRoutes(app, routeDeps);
   registerEditableArtifactRoutes(app, routeDeps);

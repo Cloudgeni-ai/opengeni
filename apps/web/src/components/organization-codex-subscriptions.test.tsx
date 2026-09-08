@@ -107,6 +107,11 @@ describe("organization Codex subscriptions", () => {
         {},
       ]);
 
+      const details = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Backup subscription",
+      );
+      expect(details).toBeDefined();
+      await act(async () => details!.click());
       const disconnect = container.querySelector<HTMLButtonElement>(
         'button[aria-label="Disconnect Backup subscription"]',
       );

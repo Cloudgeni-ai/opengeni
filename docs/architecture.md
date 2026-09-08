@@ -57,9 +57,9 @@ The product has several deliberately separate surfaces:
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
 
-The core design goal is not merely to call a model. It is to make a long-lived,
-interruptible, multi-tenant agent run durable and recoverable without turning
-live transports, workflow memory, or provider state into accidental authority.
+OpenGeni makes long-lived, interruptible, multi-tenant agent runs durable and
+recoverable without turning live transports, workflow memory, or provider state
+into authority.
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
@@ -332,11 +332,11 @@ Canonical: `packages/core/src/access/index.ts`,
 shapes, capability descriptors, and token envelopes. `@opengeni/config` owns
 settings parsing, defaults, validation, and derived runtime configuration.
 
-Model catalog membership, workspace selectability, and cost are separate
-authorities. A deployment selects one membership source (`code` or the
-operator-owned database singleton); workspace policy, connection readiness,
-and provider health decide selectability; deployment cost policy decides
-`free` versus `credits` independently of upstream settlement. Workspace custom
+Catalog membership, selectability, and cost are separate authorities. Deployment
+membership comes from `code` or an operator-owned database singleton. Workspace
+policy, connection readiness and model permissions, organization workspace assignments, and
+provider health determine selectability; deployment cost policy sets `free`/`credits`
+independently of upstream settlement. Workspace custom
 Gateway and OpenRouter rows are provider-qualified workspace overlays, never
 deployment catalog or billing rows. Deployment-managed `openrouter/*` and
 workspace-managed `workspace-openrouter/*` remain separate provider and billing
@@ -352,6 +352,7 @@ tests pin intentional mirrors in clients and deployment code.
 
 Canonical: `packages/contracts/src/index.ts`, `packages/config/src/index.ts`,
 `packages/core/src/model-catalog.ts`, [`model-providers.md`](model-providers.md),
+[`model-connection-access.md`](model-connection-access.md),
 and `packages/sdk/test/contract-parity.test.ts`.
 
 ### 3.8 A Connected Machine is first-class primary compute
@@ -674,6 +675,8 @@ lifecycle and still loses to a human rename. Custom runtimes without the
 optional auxiliary seam retain the serialized `set_session_title` compatibility
 path.
 
+`packages/db/src/session-execution-policy.ts` derives execution/display policy from the latest started turn, otherwise creation defaults.
+
 ### 5.2 Lifecycle overview
 
 ```mermaid
@@ -922,10 +925,10 @@ Each new fact also freezes provider cost and equivalent OpenGeni credit price as
 separate nullable comparisons, while `priced_cost_micros` remains the actual
 credits-path price and is zero for externally billed calls.
 
-Managed billing uses shared usage and entitlement boundaries. Codex and SuperGrok
-pools own credentials and capacity without changing logical turns. Shared and
-Personal workspaces can inherit their organization's Codex pool. Each pool has
-one allocator boundary and grants no workspace access.
+Codex and SuperGrok pools own credentials and capacity without changing logical
+turns. Shared and Personal workspaces inherit same-organization pools; each
+forms one allocator boundary and grants no workspace access. SuperGrok freezes
+scope on acceptance.
 Vercel AI Gateway and OpenRouter expose separate workspace- and
 organization-owned BYOK products. Organization products use dedicated encrypted
 FORCE-RLS storage, inherit only into same-organization shared workspaces, and
@@ -1031,8 +1034,8 @@ handlers because its host owns process lifecycle.
 
 | Path | Package | Owns |
 | --- | --- | --- |
-| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example: one handler, one page |
-| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference: server-side SDK proxy, product MCP, React embedding, independent event streams |
+| `examples/chat-quickstart` | `@opengeni/example-chat-quickstart` | Smallest integration example |
+| `examples/northstar-support` | `@opengeni/example-northstar-support` | Standalone-product integration reference: SDK proxy, product MCP, React embedding, independent event streams |
 | `examples/site-session-embed` | `@opengeni/example-site-session-embed` | Site SDK/React embed and sandbox preview reference |
 
 ### 6.4 Rust agent and relay
@@ -1057,6 +1060,9 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
   `deploy/stacks/` wraps external dependencies.
 - `docs/` contains current topic docs and point-in-time records; its canonical
   index is [`README.md`](README.md).
+- `docs-site/` is the public documentation site (Mintlify; published at
+  docs.opengeni.ai from `main`, subdirectory `/docs-site`). It is product-facing
+  and links to `docs/` for engineering detail rather than restating it.
 - `scripts/` owns development, static checks, release mechanics, deployment
   helpers, and operator-only utilities.
 - `test/` contains integration, end-to-end, and live suites; package-local
@@ -1117,6 +1123,8 @@ Do not move durable event authority into NATS, large bytes into relational
 conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
+
+Projects: always-indexed, worker-loaded `opengeni-projects` skill.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
@@ -1258,11 +1266,11 @@ Historical `ComputerUse`, `on-turn`, and `computer_screenshot` contract shapes
 remain parseable for old events, SDK clients, and retained evidence, but they do
 not register a runnable legacy computer tool.
 
-Sites retain immutable HTML, optional source, tool allowlists and rollback;
-they remain separate from Documents and editable artifacts. Agents upload through
-signed URLs and publish upload IDs, without hashes or byte counts. Source JSON
-is capped at 64 MiB; HTML is streamed within storage limits. Retrieval returns
-download URLs; viewing loads HTML into the existing opaque-origin srcDoc frame.
+Sites retain immutable HTML, optional source, tool allowlists and rollback,
+separately from Documents/editable artifacts. Agents publish signed-upload IDs,
+without hashes/sizes. Source JSON allows 64 MiB; HTML follows storage limits.
+Retrieval yields download URLs; the opaque-origin srcDoc viewer/bridge also
+serves session docks, filtered before pagination by version `sourceSessionId`.
 
 Canonical: [`artifact-engine.md`](artifact-engine.md),
 [`artifact-collaboration.md`](artifact-collaboration.md), and
@@ -1273,9 +1281,10 @@ Canonical: [`artifact-engine.md`](artifact-engine.md),
 `@opengeni/sdk` owns client contracts; `@opengeni/react` owns hooks/UI.
 `apps/web` consumes them, never owns hidden domain semantics.
 
-`SessionConversation` is the complete embed: event feed, queue/actions, durable
-composer, model policy, human-input forms, and history. `ChatComposer` is input
-only. Sites use the same component with their Site-bound client.
+`SessionConversation` includes feed, queue/actions, durable composer, model policy,
+human-input forms and history. `ChatComposer` is input-only. Sites supply their
+Site-bound client. Foreground/background share tokens; light embeds set
+`data-og-theme="light"` inside the iframe.
 
 Sites install exact SDK/React/Codemode/CLI versions from virtual skill file
 `package-versions.json`: source-manifest defaults or canary
@@ -1540,7 +1549,7 @@ This index intentionally routes at subsystem granularity. Use
 | --- | --- | --- |
 | Session workflow, wake delivery, or `continueAsNew` | `apps/worker/src/workflows/session.ts` | [`run-lifecycle.md`](run-lifecycle.md) |
 | Turn claim, execution, settlement, or recovery | `apps/worker/src/activities/agent-turn/` | [`run-lifecycle.md`](run-lifecycle.md) |
-| Session Debug model-visible context | `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/inspector.tsx` | this map §4 and [`run-lifecycle.md`](run-lifecycle.md) |
+| Session Debug model-visible context | `packages/runtime/src/model-request-capture.ts`, `packages/runtime/src/model-provider-client.ts`, `packages/runtime/src/model-context-inspector.ts`, `apps/web/src/components/session/model-context-inspector.tsx`, `apps/web/src/components/session/context-text-reader.tsx` | [`run-lifecycle.md`](run-lifecycle.md#debug-context-capture) |
 | Goals and continuations | `apps/worker/src/activities/goals.ts`, `packages/db/src/` | [`goals.md`](goals.md) |
 | Approval or structured human input | `apps/worker/src/activities/agent-turn/stream-attempt.ts`, `apps/api/src/routes/sessions.ts` | [`human-input.md`](human-input.md) |
 | Schedules | `packages/core/src/domain/scheduled-tasks.ts`, `apps/worker/src/activities/scheduled-tasks.ts` | [`reliability-fixes.md`](reliability-fixes.md) |
@@ -1557,7 +1566,7 @@ This index intentionally routes at subsystem granularity. Use
 | Setting, default, or boot validation | `packages/config/src/index.ts` | [`deployment.md`](deployment.md) when operator-visible |
 | Authentication or workspace grants | `packages/core/src/access/index.ts`, `apps/api/src/http/auth.ts` | [`../SECURITY.md`](../SECURITY.md) |
 | Managed browser login actors or session sets | `packages/contracts/src/managed-auth-session-sets.ts`, `packages/core/src/managed-auth-session-sets.ts`, `apps/api/src/routes/managed-auth-session-sets.ts` | [`browser-login-session-sets.md`](browser-login-session-sets.md) |
-| Agent access to peer sessions, `agentAccess`, or memory scope | `packages/core/src/session-authorization.ts`, `packages/db/src/session-control.ts`, `test/session-agent-access-contract-surface.test.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
+| Agent access to peer sessions, `agentAccess`, or memory scope | `packages/core/src/session-authorization.ts`, `test/session-agent-access-contract-surface.test.ts` | [`agent-session-authority.md`](agent-session-authority.md) |
 | Advisory work discovery or durable work claims | `packages/contracts/src/work-claims.ts`, `packages/db/src/work-claims.ts`, `packages/db/src/index.ts`, `apps/api/src/` | [`work-discovery.md`](work-discovery.md), [`agent-session-authority.md`](agent-session-authority.md) |
 | Schema, repository, RLS, or migration | `packages/db/src/`, `packages/db/drizzle/` | [`force-rls-migration-backfills.md`](force-rls-migration-backfills.md) |
 | Organization, personal resources, or private sessions | `packages/db/src/`, `packages/core/src/access/` | [`organization-tenancy.md`](organization-tenancy.md) |
@@ -1571,7 +1580,7 @@ This index intentionally routes at subsystem granularity. Use
 | --- | --- | --- |
 | Model registry, routing, pricing, provider identity, or OpenAI-compatible inference routes | `packages/config/src/index.ts`, `packages/runtime/src/model-provider*.ts` | [`model-providers.md`](model-providers.md) (start at Configuring inference) |
 | Codex subscription authority or capacity | `packages/codex/`, `apps/worker/src/activities/codex-rotation.ts` | [`codex-subscription-rotation.md`](codex-subscription-rotation.md) |
-| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
+| SuperGrok/xAI subscription authority or capacity | `packages/xai-subscription/`, `packages/db/src/xai-subscription.ts`, `packages/db/src/organization-xai-subscriptions.ts` | [`supergrok-subscription.md`](supergrok-subscription.md) |
 | First-party MCP, Codemode, or tool selection | `apps/api/src/mcp/`, `packages/codemode/`, `packages/runtime/src/` | [`mcp-surfaces.md`](mcp-surfaces.md) |
 | Compact MCP session discovery and child management | `packages/contracts/src/session-mcp-projections.ts`, `apps/api/src/mcp/session-view.ts`, `apps/api/src/mcp/server.ts`, `packages/db/src/index.ts` | [`session-monitoring-mcp.md`](session-monitoring-mcp.md) |
 | Per-session MCP or action approval | `packages/core/src/domain/sessions.ts`, `apps/worker/src/activities/agent-turn/tool-environment.ts` | [`session-mcp-servers.md`](session-mcp-servers.md) |

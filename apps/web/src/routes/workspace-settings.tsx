@@ -522,20 +522,6 @@ function OperationalWorkspaceSettingsRoute({
 
         {section === "models" ? (
           <>
-            <section className="rounded-lg border border-border bg-surface px-4 py-3">
-              <p className="text-xs leading-5 text-fg-muted">
-                Organization Vercel AI Gateway and OpenRouter models appear here when connected by
-                an organization admin. Workspace-only connections below remain independent.
-              </p>
-              <Link
-                to="/workspaces/$workspaceId/organization"
-                params={{ workspaceId }}
-                search={{ section: "models" }}
-                className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
-              >
-                Open organization model settings <ArrowUpRightIcon className="size-3.5" />
-              </Link>
-            </section>
             <section className="grid gap-2">
               <div>
                 <h2 className="text-sm font-medium">Default model</h2>
@@ -551,33 +537,55 @@ function OperationalWorkspaceSettingsRoute({
                 />
               </div>
             </section>
+            <section className="grid gap-2" aria-labelledby="model-connections-heading">
+              <div>
+                <h2 id="model-connections-heading" className="text-sm font-medium">
+                  Connections
+                </h2>
+                <p className="mt-1 text-xs leading-5 text-fg-muted">
+                  Connect subscriptions or provider accounts for this workspace. Your organization
+                  can also make connections available here. Choose model access on each connected
+                  account.
+                </p>
+                <Link
+                  to="/workspaces/$workspaceId/organization"
+                  params={{ workspaceId }}
+                  search={{ section: "models" }}
+                  className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-brand hover:underline"
+                >
+                  Manage organization connections <ArrowUpRightIcon className="size-3.5" />
+                </Link>
+              </div>
+              <div className="min-w-0">
+                {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
+                <CodexSubscriptionsCard
+                  key={`codex-subscriptions:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <SuperGrokSubscriptionsCard
+                  key={`supergrok:${workspaceId}`}
+                  workspaceId={workspaceId}
+                  canManage={canManageConnections}
+                />
+                <AiGatewayConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+                />
+                <OpenRouterConnectionCard
+                  workspaceId={workspaceId}
+                  canManageConnection={canManageConnections}
+                  canManageCustomModels={canManageSettings}
+                  onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
+                />
+              </div>
+            </section>
             <ModelAccessPolicySection
               key={`model-access:${workspaceId}:${gatewayRevision}`}
               workspaceId={workspaceId}
               canManage={canManageSettings}
-            />
-            {/* Codex live overview is intentionally once-per-mount; remount at tenant boundary. */}
-            <CodexSubscriptionsCard
-              key={`codex-subscriptions:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <SuperGrokSubscriptionsCard
-              key={`supergrok:${workspaceId}`}
-              workspaceId={workspaceId}
-              canManage={canManageConnections}
-            />
-            <AiGatewayConnectionCard
-              workspaceId={workspaceId}
-              canManageConnection={canManageConnections}
-              canManageCustomModels={canManageSettings}
-              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
-            />
-            <OpenRouterConnectionCard
-              workspaceId={workspaceId}
-              canManageConnection={canManageConnections}
-              canManageCustomModels={canManageSettings}
-              onConnectionChange={() => setGatewayRevision((revision) => revision + 1)}
             />
           </>
         ) : null}

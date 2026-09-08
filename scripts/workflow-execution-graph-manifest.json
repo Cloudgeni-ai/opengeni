@@ -38,7 +38,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "91e6afce122cee775b47b8c85f2ee8037f66748f40914ab41dad6542f1ec4385"
+      "sha256": "618b14b658e115b68f44207afee16c16069f5c89b9b55fc073c75ebe6aa2a48f"
     },
     {
       "path": ".github/workflows/publish-packages.yml",

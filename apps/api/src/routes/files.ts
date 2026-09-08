@@ -446,7 +446,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   // These two retained-screenshot routes are registered before the session
   // route module, so its `/sessions/:sessionId/*` authorization middleware
   // does not cover them: an agent attempt must pass the same core seam here
-  // (private sessions, Slack ownership, and the 0423 agent-access scope) so a
+  // (private sessions, Slack ownership, and the 0425 agent-access scope) so a
   // known artifact id cannot read into a tree the attempt may not reach.
   const requireAgentSessionAccess = async (
     c: Context,
