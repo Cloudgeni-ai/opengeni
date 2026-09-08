@@ -15,6 +15,12 @@ import {
   removeIntegrationFacetBindingOwnersForOwner,
 } from "./integration-bindings";
 import * as schema from "./schema";
+import {
+  lockSkillPublication,
+  prepareSkillPublication,
+  readSkillPublications,
+} from "./skill-publication";
+import type { SkillPublicationReceipt } from "@opengeni/contracts";
 
 export type PluginBomComponent = {
   key: string;
@@ -204,6 +210,7 @@ export async function preparePluginPackageInstall(
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await lockSkillPublication(tx, input.workspaceId);
         await tx.execute(
           sql`select pg_advisory_xact_lock(hashtextextended(${`capability-operation:${input.workspaceId}:${input.idempotencyKey}`}, 0))`,
         );
@@ -454,7 +461,10 @@ export async function finalizePluginPackageInstall(
     result: Record<string, unknown>;
     skillActor?: SkillActor;
   },
-): Promise<{ skillReleases: SkillSourceReleaseReceipt[] }> {
+): Promise<{
+  skillReleases: SkillSourceReleaseReceipt[];
+  skillPublications: SkillPublicationReceipt[];
+}> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -462,6 +472,54 @@ export async function finalizePluginPackageInstall(
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        await prepareSkillPublication(tx, input.workspaceId, input.operationId);
+        const [publicationOperation] = await tx
+          .select()
+          .from(schema.capabilityOperations)
+          .where(
+            and(
+              eq(schema.capabilityOperations.id, input.operationId),
+              eq(schema.capabilityOperations.workspaceId, input.workspaceId),
+              eq(schema.capabilityOperations.accountId, input.accountId),
+              eq(schema.capabilityOperations.targetKind, "plugin"),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!publicationOperation)
+          throw new PluginOperationIdempotencyError("Plugin finalization operation unavailable");
+        const [publicationParent] = await tx
+          .select({ key: schema.capabilityPlugins.pluginKey })
+          .from(schema.capabilityPluginInstallations)
+          .innerJoin(
+            schema.capabilityPlugins,
+            eq(schema.capabilityPlugins.id, schema.capabilityPluginInstallations.pluginId),
+          )
+          .where(
+            and(
+              eq(schema.capabilityPluginInstallations.id, input.pluginInstallationId),
+              eq(schema.capabilityPluginInstallations.workspaceId, input.workspaceId),
+            ),
+          )
+          .limit(1);
+        if (publicationParent?.key !== publicationOperation.targetId)
+          throw new PluginOperationIdempotencyError("Plugin finalization target changed");
+        if (publicationOperation.status === "completed")
+          return {
+            skillReleases:
+              (
+                publicationOperation.result as {
+                  skillReleases?: SkillSourceReleaseReceipt[];
+                } | null
+              )?.skillReleases ?? [],
+            skillPublications: await readSkillPublications(
+              tx,
+              input.workspaceId,
+              input.operationId,
+            ),
+          };
+        if (publicationOperation.status !== "running")
+          throw new PluginOperationIdempotencyError("Plugin finalization operation is not running");
         const ownedRows = await tx
           .select({
             ownerId: schema.capabilityComponentOwners.id,
@@ -520,19 +578,28 @@ export async function finalizePluginPackageInstall(
           .update(schema.capabilityPluginInstallations)
           .set({ status: "active", updatedAt: new Date() })
           .where(eq(schema.capabilityPluginInstallations.id, input.pluginInstallationId));
+        const skillPublications = await readSkillPublications(
+          tx,
+          input.workspaceId,
+          input.operationId,
+        );
         await tx
           .update(schema.capabilityOperations)
           .set({
             status: "completed",
             phase: "completed",
-            result: { ...input.result, ...(skillReleases.length ? { skillReleases } : {}) },
+            result: {
+              ...input.result,
+              ...(skillReleases.length ? { skillReleases } : {}),
+              ...(skillPublications.length ? { skillPublications } : {}),
+            },
             errorCode: null,
             version: sql`${schema.capabilityOperations.version} + 1`,
             completedAt: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(schema.capabilityOperations.id, input.operationId));
-        return { skillReleases };
+        return { skillReleases, skillPublications };
       });
     },
   );

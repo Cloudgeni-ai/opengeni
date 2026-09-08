@@ -21,11 +21,17 @@ import {
   activatePreferenceRegistryRevision,
   correctPreferenceRegistry,
   applySkillLifecycle,
+  preparePackInstallationOperation,
+  finalizePackInstallationOperation,
+  preparePluginPackageInstall,
+  finalizePluginPackageInstall,
+  type Database,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import type { SkillSaveInput } from "@opengeni/contracts";
+import { CapabilityPack, stableJson } from "@opengeni/contracts";
 import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "../src/domain/skills";
 
 let shared: SharedTestDatabase | null = null;
@@ -167,6 +173,284 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  for (const kind of ["pack", "plugin"] as const) {
+    for (const scenario of [
+      "suggest",
+      "automatic",
+      "customized",
+      "policy_off",
+      "superseded",
+      "human_off",
+      "attempt_ended",
+    ] as const) {
+      test(`${kind} finalization atomically handles ${scenario} guidance and preserves historical snapshots`, async () => {
+        if (!client) return;
+        const mode = scenario === "suggest" ? "suggest" : "automatic";
+        const f = await fixture(scenario === "human_off" ? "off" : mode);
+        const key = crypto.randomUUID();
+        const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+        const scope = { ...f.context, subjectId: f.human.actor.subjectId };
+        const pack = CapabilityPack.parse({
+          id: `composite-${key}`,
+          name: "Composite test",
+          description: "Composite publication test",
+          role: "test",
+          category: "test",
+          version: "1",
+        });
+        const packInput = {
+          ...scope,
+          pack,
+          manifestDigest: digest(stableJson(pack)),
+          selectedRigId: null,
+          metadata: {},
+          idempotencyKey: crypto.randomUUID(),
+          requestDigest: digest(key),
+        };
+        const pluginInput = {
+          ...scope,
+          pluginKey: `plugin/composite/${key}`,
+          version: "1",
+          name: "Composite test",
+          description: "Composite publication test",
+          category: "test",
+          tags: [],
+          manifestDigest: digest(stableJson(pack)),
+          manifest: { components: [], bom: [] },
+          idempotencyKey: crypto.randomUUID(),
+          requestDigest: digest(key),
+        };
+        const preparedPack =
+          kind === "pack" ? await preparePackInstallationOperation(client.db, packInput) : null;
+        const preparedPlugin =
+          kind === "plugin" ? await preparePluginPackageInstall(client.db, pluginInput) : null;
+        const ownerId = preparedPack?.installation.id ?? preparedPlugin!.pluginInstallationId;
+        const content = skillMarkdown("Do not publish before composite commit");
+        const install: InstallPortableSkillInput = {
+          ...scope,
+          skillActor: scenario === "human_off" ? f.human.actor : f.agent.actor,
+          skillOperationId: crypto.randomUUID(),
+          capabilityId: `skill:${key}`,
+          pluginKey: `skill/composite/${key}`,
+          source: "github",
+          sourceUrl: "https://example.test/composite",
+          repositoryUrl: "https://example.test/composite",
+          sourceCommit: "a".repeat(40),
+          sourcePath: key,
+          name: "test-skill",
+          description: "Test Skill folder",
+          contentSha256: digest(content),
+          totalBytes: Buffer.byteLength(content),
+          files: [
+            {
+              path: "SKILL.md",
+              content,
+              byteSize: Buffer.byteLength(content),
+              contentSha256: digest(content),
+            },
+          ],
+          owner: { kind, id: ownerId, removable: false },
+        };
+        const child = await installPortableSkill(client.db, install);
+        expect(child.skillReceipt.outcome).toBe("pending");
+        expect(child.skillReceipt.pendingReason).toBe(
+          mode === "automatic" ? "source_finalization" : undefined,
+        );
+        expect(await listSkillDescriptors(client.db, f.context)).toEqual([]);
+        expect(await listInstalledPortableSkills(client.db, f.context.workspaceId)).toEqual([]);
+        await expectDatabaseGuard(
+          approveSkill(client.db, {
+            ...f.human,
+            operationId: crypto.randomUUID(),
+            skillId: child.skillReceipt.skillId,
+            revisionId: child.skillReceipt.revisionId,
+            expectedRevisionId: null,
+            expectedScopeVersion: 1,
+            reason: "Cannot approve unfinished owner",
+          }),
+          "finalized source owner",
+        );
+        await expectDatabaseGuard(
+          activatePreferenceRegistryRevision(client.db, {
+            ...f.context,
+            actorSubjectId: scope.subjectId,
+            principalKind: "human_session",
+            preferenceId: child.skillReceipt.skillId,
+            revisionId: child.skillReceipt.revisionId,
+            expectedCurrentRevisionId: null,
+            expectedScopeVersion: 1,
+            authorizeScope: () => {},
+            reason: "Legacy approval cannot bypass owner finalization",
+          }),
+          "finalized source owner",
+        );
+        const [clock] = await shared!.admin`SELECT clock_timestamp() AS at`;
+        let retainedChild = child;
+        if (scenario === "superseded") {
+          const changedContent = skillMarkdown("Newest deferred source wins");
+          retainedChild = await installPortableSkill(client.db, {
+            ...install,
+            skillOperationId: crypto.randomUUID(),
+            sourceCommit: "b".repeat(40),
+            contentSha256: digest(changedContent),
+            totalBytes: Buffer.byteLength(changedContent),
+            files: [
+              {
+                path: "SKILL.md",
+                content: changedContent,
+                byteSize: Buffer.byteLength(changedContent),
+                contentSha256: digest(changedContent),
+              },
+            ],
+          });
+        }
+        if (scenario === "customized") {
+          await saveSkill(client.db, {
+            ...f.input,
+            skillId: child.skillReceipt.skillId,
+            operationId: crypto.randomUUID(),
+            files: [{ path: "SKILL.md", content: skillMarkdown("Human customization wins") }],
+          });
+        } else if (scenario === "policy_off") {
+          const [policyHead] = await shared!
+            .admin`SELECT revision_id,activation_version FROM workspace_learning_policy_heads WHERE workspace_id=${f.context.workspaceId}`;
+          const policy = await createWorkspaceLearningPolicyRevision(client.db, {
+            ...f.context,
+            workspaceMode: "off",
+            actorSubjectId: scope.subjectId,
+            principalKind: "human_session",
+          });
+          await activateWorkspaceLearningPolicyRevision(client.db, {
+            ...f.context,
+            revisionId: policy.id,
+            expectedCurrentRevisionId: policyHead!.revision_id,
+            expectedActivationVersion: Number(policyHead!.activation_version),
+            actorSubjectId: scope.subjectId,
+            principalKind: "human_session",
+            reason: "Downgrade Learning before source finalization",
+          });
+        } else if (scenario === "attempt_ended") {
+          await shared!
+            .admin`UPDATE session_turn_attempts SET state='closed',outcome='completed',closed_at=now() WHERE id=${f.agent.actor.attemptId}`;
+        }
+        const finalize = async (db: Database) =>
+          preparedPack
+            ? finalizePackInstallationOperation(db, {
+                ...scope,
+                operationId: preparedPack.operationId,
+                operationVersion: preparedPack.operationVersion,
+                packInstallationId: ownerId,
+                packId: pack.id,
+                result: { status: "installed", packId: pack.id },
+              })
+            : finalizePluginPackageInstall(db, {
+                ...scope,
+                operationId: preparedPlugin!.operationId,
+                pluginInstallationId: ownerId,
+                retainedFacetInstallationIds: [retainedChild.facetInstallationId],
+                retainedBindingIds: [],
+                result: { status: "installed" },
+              });
+        await expect(
+          client.db.transaction(async (tx) => {
+            await finalize(tx as unknown as Database);
+            throw new Error("simulated parent finalization rollback");
+          }),
+        ).rejects.toThrow("simulated parent finalization rollback");
+        expect(await listSkillDescriptors(client.db, f.context)).toHaveLength(
+          scenario === "customized" ? 1 : 0,
+        );
+        expect(
+          await shared!
+            .admin`SELECT operation_id FROM skill_write_receipts WHERE receipt->>'sourceOperationId'=${install.skillOperationId!}`,
+        ).toHaveLength(0);
+        const [finalized, concurrentReplay] = await Promise.all([
+          finalize(client.db),
+          scenario === "attempt_ended"
+            ? Promise.resolve(child)
+            : installPortableSkill(client.db, install),
+        ]);
+        expect(concurrentReplay.skillReceipt.outcome).toBe("pending");
+        const finalizedReplay = await finalize(client.db);
+        expect(finalizedReplay.skillPublications ?? []).toEqual(finalized.skillPublications ?? []);
+        expect(finalized.skillPublications ?? []).toHaveLength(
+          scenario === "superseded" ? 2 : mode === "automatic" ? 1 : 0,
+        );
+        if (mode === "automatic")
+          expect(
+            finalized.skillPublications!.find(
+              (entry) => entry.sourceOperationId === install.skillOperationId,
+            ),
+          ).toMatchObject({
+            sourceOperationId: install.skillOperationId,
+            outcome:
+              scenario === "customized" || scenario === "superseded"
+                ? "preserved"
+                : scenario === "policy_off" || scenario === "attempt_ended"
+                  ? "pending"
+                  : "applied",
+            revisionId: child.skillReceipt.revisionId,
+          });
+        expect(await listSkillDescriptors(client.db, f.context)).toHaveLength(
+          scenario === "automatic" ||
+            scenario === "customized" ||
+            scenario === "superseded" ||
+            scenario === "human_off"
+            ? 1
+            : 0,
+        );
+        if (scenario === "human_off") {
+          const governance = await getCurrentPreferenceRegistryGovernanceMetadata(client.db, {
+            workspaceId: scope.workspaceId,
+            subjectId: scope.subjectId,
+          });
+          expect(governance.descriptors).toContainEqual(
+            expect.objectContaining({
+              id: child.skillReceipt.skillId,
+              activationAuthority: "human_confirmed",
+            }),
+          );
+        }
+        if (scenario === "superseded")
+          expect(
+            (await readSkill(client.db, f.context, child.skillReceipt.skillId))?.revisionId,
+          ).toBe(retainedChild.skillReceipt.revisionId);
+        const [historical] = await shared!
+          .admin`SELECT * FROM preference_registry_canonical_snapshot_at(${f.context.accountId},${f.context.workspaceId},${scope.subjectId},${clock!.at})`;
+        expect(historical!.canonical_descriptors).toEqual([]);
+        const replay = preparedPack
+          ? await preparePackInstallationOperation(client.db, packInput)
+          : await preparePluginPackageInstall(client.db, pluginInput);
+        expect(replay.replayResult?.skillPublications ?? []).toEqual(
+          finalized.skillPublications ?? [],
+        );
+        if (scenario === "attempt_ended") {
+          await expectDatabaseGuard(installPortableSkill(client.db, install), "live attempt");
+        } else {
+          const childReplay = await installPortableSkill(client.db, install);
+          expect(childReplay.skillReceipt.outcome).toBe("pending");
+          expect(childReplay.skillReceipt).not.toHaveProperty("deferredPublication");
+        }
+        if (mode === "suggest" || scenario === "policy_off" || scenario === "attempt_ended") {
+          const approved = await approveSkill(client.db, {
+            ...f.human,
+            operationId: crypto.randomUUID(),
+            skillId: child.skillReceipt.skillId,
+            revisionId: child.skillReceipt.revisionId,
+            expectedRevisionId: null,
+            expectedScopeVersion: 1,
+            reason: "Approve after parent finalization",
+          });
+          expect(approved.outcome).toBe("applied");
+        }
+        expect(
+          await shared!
+            .admin`SELECT id FROM preference_registry_events WHERE preference_id=${child.skillReceipt.skillId} AND type='activated'`,
+        ).toHaveLength(1);
+      }, 30_000);
+    }
+  }
+
   for (const mode of ["off", "suggest", "automatic"] as const) {
     test(`truthful machine install principals obey ${mode} and cannot perform other lifecycle operations`, async () => {
       if (!client) return;

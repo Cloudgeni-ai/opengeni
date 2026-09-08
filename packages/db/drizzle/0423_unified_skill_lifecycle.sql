@@ -129,6 +129,26 @@ BEGIN
 END $config_receipt_grants$;
 
 -- This is a separate truthful agent lifecycle, not a human-session impersonation.
+-- Used only at publication boundaries, never to reinterpret historical snapshots.
+CREATE FUNCTION skill_source_has_effective_owner(p_account_id uuid,p_workspace_id uuid,p_facet_id uuid)
+RETURNS boolean LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM capability_facet_installations fi
+    JOIN capability_plugin_installations child ON child.id=fi.plugin_installation_id
+    JOIN capability_component_owners owner ON owner.facet_installation_id=fi.id
+      AND owner.account_id=fi.account_id AND owner.workspace_id=fi.workspace_id
+    WHERE fi.account_id=p_account_id AND fi.workspace_id=p_workspace_id AND fi.facet_id=p_facet_id
+      AND fi.status='active' AND child.status='active'
+      AND (owner.owner_kind NOT IN ('pack','plugin')
+        OR (owner.owner_kind='pack' AND (owner.owner_id !~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+          OR EXISTS(SELECT 1 FROM pack_installations parent WHERE parent.id::text=owner.owner_id
+            AND parent.account_id=p_account_id AND parent.workspace_id=p_workspace_id AND parent.status='active')))
+        OR (owner.owner_kind='plugin' AND EXISTS(SELECT 1 FROM capability_plugin_installations parent
+          WHERE parent.id::text=owner.owner_id AND parent.account_id=p_account_id AND parent.workspace_id=p_workspace_id AND parent.status='active')))
+  )
+$$;
+REVOKE ALL ON FUNCTION skill_source_has_effective_owner(uuid,uuid,uuid) FROM PUBLIC;
+
 -- The caller supplies trusted HTTP identity or host-bound exact attempt claims.
 -- Machine credentials may install sources only, under workspace Learning mode.
 CREATE FUNCTION skill_apply_lifecycle(p_account_id uuid, p_workspace_id uuid, p_actor jsonb, p_request jsonb)
@@ -146,6 +166,7 @@ DECLARE
   title text := p_request->>'title'; description text := p_request->>'description';
   stable_key text := p_request->>'stableKey'; outcome text; source_id text;
   activation_mode text := 'workspace_managed';
+  deferred_publication jsonb; source_effective boolean := true;
 BEGIN
   IF p_account_id IS DISTINCT FROM nullif(current_setting('opengeni.account_id',true),'')::uuid
     OR p_workspace_id IS DISTINCT FROM nullif(current_setting('opengeni.workspace_id',true),'')::uuid
@@ -154,6 +175,7 @@ BEGIN
   THEN RAISE EXCEPTION 'Skill lifecycle requires exact tenant context' USING ERRCODE='42501'; END IF;
   PERFORM 1 FROM workspaces WHERE id=p_workspace_id AND account_id=p_account_id FOR KEY SHARE;
   IF NOT FOUND THEN RAISE EXCEPTION 'Skill workspace unavailable' USING ERRCODE='42501'; END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('skill-publication:'||p_workspace_id,0));
   IF p_actor->>'kind' = 'agent' THEN
     IF scope <> 'workspace' OR operation = 'approve' THEN
       RAISE EXCEPTION 'Agents manage workspace Skills only and cannot approve' USING ERRCODE='42501'; END IF;
@@ -187,7 +209,7 @@ BEGIN
   IF FOUND THEN
     IF prior.fingerprint <> fingerprint OR prior.account_id <> p_account_id THEN
       RAISE EXCEPTION 'Skill operation key reused with different input' USING ERRCODE='23505'; END IF;
-    RETURN (prior.receipt - 'portableInstall') || jsonb_build_object('replayed',true);
+    RETURN (prior.receipt - 'portableInstall' - 'deferredPublication') || jsonb_build_object('replayed',true);
   END IF;
   IF p_actor->>'kind' IN ('agent','service') THEN
     SELECT r.workspace_mode INTO mode FROM workspace_learning_policy_heads h
@@ -209,6 +231,7 @@ BEGIN
         AND i.workspace_id=p_workspace_id AND i.status='active'
       GROUP BY f.facet_key,f.activation_mode,v.plugin_id,sf.facet_id;
     IF NOT FOUND THEN RAISE EXCEPTION 'Skill source is not installed in this workspace' USING ERRCODE='42501'; END IF;
+    source_effective := skill_source_has_effective_owner(p_account_id,p_workspace_id,source.facet_id);
     PERFORM pg_advisory_xact_lock(hashtextextended('skill-source:'||p_workspace_id||':'||source.plugin_id||':'||source.facet_key,0));
     SELECT * INTO binding FROM skill_source_bindings b WHERE b.workspace_id=p_workspace_id
       AND b.plugin_id=source.plugin_id AND b.facet_key=source.facet_key;
@@ -256,6 +279,11 @@ BEGIN
       files := coalesce(rev.skill_files,jsonb_build_array(jsonb_build_object('path','SKILL.md','content',rev.content)));
       title := p_request->>'title'; description := p_request->>'description';
       activation_mode := coalesce(rev.skill_activation_mode,'workspace_managed');
+      IF operation='approve' AND rev.provenance_source='portable_skill' AND EXISTS(
+        SELECT 1 FROM skill_source_bindings b WHERE b.preference_id=skill_id AND b.account_id=p_account_id
+          AND NOT skill_source_has_effective_owner(p_account_id,b.workspace_id,rev.provenance_source_id::uuid)) THEN
+        RAISE EXCEPTION 'Skill approval requires a finalized source owner' USING ERRCODE='42501';
+      END IF;
     END IF;
     IF NOT skill_files_valid(files) THEN RAISE EXCEPTION 'Invalid Skill text folder' USING ERRCODE='22023'; END IF;
     SELECT f->>'content' INTO main_content FROM jsonb_array_elements(files) f WHERE f->>'path'='SKILL.md';
@@ -276,7 +304,11 @@ BEGIN
       VALUES(p_account_id,skill_id,'proposal_created',next_event,revision_id,head.scope,head.scope_workspace_id,head.scope_subject_id,actor_subject,p_request->>'reason');
       next_event := next_event+1;
     END IF;
-    IF mode='automatic' THEN
+    IF mode='automatic' AND operation='install' AND NOT source_effective THEN
+      deferred_publication := jsonb_build_object('expectedRevisionId',head.active_revision_id,
+        'expectedScopeVersion',head.scope_version,'sourceFacetId',source.facet_id);
+    END IF;
+    IF mode='automatic' AND deferred_publication IS NULL THEN
       PERFORM set_config('opengeni.preference_lifecycle_head_id',skill_id::text,true);
       PERFORM set_config('opengeni.preference_lifecycle_operation','activate',true);
       UPDATE preference_registry_preferences h SET status='active',active_revision_id=revision_id,
@@ -296,10 +328,12 @@ BEGIN
       WHERE b.workspace_id=p_workspace_id AND b.plugin_id=source.plugin_id AND b.facet_key=source.facet_key;
   END IF;
   result := jsonb_build_object('operationId',operation_id,'skillId',skill_id,'revisionId',revision_id,'outcome',outcome,'replayed',false);
+  IF deferred_publication IS NOT NULL THEN result := result || jsonb_build_object('pendingReason','source_finalization'); END IF;
   INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt,activation_event_id)
     VALUES(p_account_id,p_workspace_id,operation_id,fingerprint,p_actor,
-      CASE WHEN operation='install' AND p_request ? 'portableInstall'
-        THEN result || jsonb_build_object('portableInstall',p_request->'portableInstall') ELSE result END,
+      (CASE WHEN operation='install' AND p_request ? 'portableInstall'
+        THEN result || jsonb_build_object('portableInstall',p_request->'portableInstall') ELSE result END)
+      || CASE WHEN deferred_publication IS NOT NULL THEN jsonb_build_object('deferredPublication',deferred_publication) ELSE '{}'::jsonb END,
       activation_event_id);
   RETURN result;
 END $body$;
@@ -310,6 +344,113 @@ BEGIN
   REVOKE ALL ON FUNCTION skill_apply_lifecycle(uuid,uuid,jsonb,jsonb) FROM PUBLIC;
 END $secure$;
 
+-- Parent status and these immutable completion receipts commit in one transaction.
+-- There is intentionally no runtime EXECUTE grant for this publication capability.
+CREATE FUNCTION skill_publish_finalized_owner() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+DECLARE
+  publication_owner_kind text := CASE TG_TABLE_NAME WHEN 'pack_installations' THEN 'pack' ELSE 'plugin' END;
+  pending record; head preference_registry_preferences%ROWTYPE; revision preference_registry_revisions%ROWTYPE;
+  publication_id uuid; publication_hash text; publication_operation uuid; expected_fingerprint text; event_id uuid;
+  next_event integer; result jsonb; disposition text; current_mode text; parent_target text;
+  publication_actor jsonb := jsonb_build_object('kind','service','subjectId','service:skill-publication','principalKind','service');
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended('skill-publication:'||NEW.workspace_id,0));
+  FOR pending IN
+    SELECT DISTINCT receipt.* FROM skill_write_receipts receipt
+    JOIN skill_source_bindings binding ON binding.preference_id=(receipt.receipt->>'skillId')::uuid
+      AND binding.account_id=receipt.account_id AND binding.workspace_id=receipt.workspace_id
+    JOIN capability_facet_installations fi ON fi.facet_id=binding.skill_facet_id
+      AND fi.account_id=binding.account_id AND fi.workspace_id=binding.workspace_id
+    JOIN capability_component_owners owner ON owner.facet_installation_id=fi.id
+      AND owner.account_id=fi.account_id AND owner.workspace_id=fi.workspace_id
+    WHERE receipt.account_id=NEW.account_id AND receipt.workspace_id=NEW.workspace_id
+      AND receipt.receipt ? 'deferredPublication' AND owner.owner_kind=publication_owner_kind AND owner.owner_id=NEW.id::text
+    ORDER BY receipt.created_at,receipt.operation_id
+  LOOP
+    publication_hash := md5('skill-publication:'||pending.operation_id);
+    publication_id := (substr(publication_hash,1,12)||'5'||substr(publication_hash,14,3)||'a'||substr(publication_hash,18,15))::uuid;
+    expected_fingerprint := encode(sha256(convert_to('skill-publication:'||pending.fingerprint,'UTF8')),'hex');
+    IF EXISTS(SELECT 1 FROM skill_write_receipts existing WHERE existing.workspace_id=NEW.workspace_id AND existing.operation_id=publication_id) THEN
+      IF NOT EXISTS(SELECT 1 FROM skill_write_receipts existing WHERE existing.workspace_id=NEW.workspace_id AND existing.operation_id=publication_id
+        AND existing.fingerprint=expected_fingerprint AND existing.receipt->>'sourceOperationId'=pending.operation_id::text) THEN
+        RAISE EXCEPTION 'Skill publication operation identity collision' USING ERRCODE='23505';
+      END IF;
+      CONTINUE;
+    END IF;
+    publication_operation := nullif(current_setting('opengeni.skill_publication_operation_id',true),'')::uuid;
+    IF publication_owner_kind='pack' THEN parent_target := NEW.pack_id;
+    ELSE SELECT plugin_key INTO parent_target FROM capability_plugins WHERE id=NEW.plugin_id; END IF;
+    IF publication_operation IS NULL OR NOT EXISTS(SELECT 1 FROM capability_operations operation
+      WHERE operation.id=publication_operation AND operation.account_id=NEW.account_id AND operation.workspace_id=NEW.workspace_id
+        AND operation.target_kind=publication_owner_kind AND operation.target_id=parent_target AND operation.status='running') THEN
+      RAISE EXCEPTION 'Skill publication requires a claimed parent finalization' USING ERRCODE='42501';
+    END IF;
+    SELECT * INTO head FROM preference_registry_preferences WHERE id=(pending.receipt->>'skillId')::uuid AND account_id=NEW.account_id FOR UPDATE;
+    SELECT * INTO revision FROM preference_registry_revisions WHERE id=(pending.receipt->>'revisionId')::uuid AND account_id=NEW.account_id;
+    disposition := 'preserved'; event_id := NULL; current_mode := 'automatic';
+    IF pending.actor->>'kind' <> 'human' THEN
+      SELECT policy.workspace_mode INTO current_mode FROM workspace_learning_policy_heads policy_head
+      JOIN workspace_learning_policy_revisions policy ON policy.id=policy_head.revision_id AND policy.account_id=policy_head.account_id
+      WHERE policy_head.account_id=NEW.account_id AND policy_head.workspace_id=NEW.workspace_id FOR SHARE OF policy_head;
+      current_mode := coalesce(current_mode,'suggest');
+    END IF;
+    IF pending.actor->>'kind'='agent' THEN
+      PERFORM 1 FROM sessions session JOIN session_turns turn ON turn.id=session.active_turn_id AND turn.session_id=session.id
+        JOIN session_turn_attempts attempt ON attempt.id=turn.active_attempt_id AND attempt.turn_id=turn.id
+      WHERE session.id=(pending.actor->>'sessionId')::uuid AND session.account_id=NEW.account_id AND session.workspace_id=NEW.workspace_id
+        AND turn.id=(pending.actor->>'turnId')::uuid AND turn.account_id=NEW.account_id AND turn.workspace_id=NEW.workspace_id
+        AND turn.status IN ('running','requires_action','recovering','waiting_capacity')
+        AND attempt.id=(pending.actor->>'attemptId')::uuid AND attempt.account_id=NEW.account_id AND attempt.workspace_id=NEW.workspace_id
+        AND attempt.session_id=session.id AND attempt.execution_generation=(pending.actor->>'executionGeneration')::integer
+        AND turn.execution_generation=attempt.execution_generation AND attempt.state IN ('claimed','running')
+        AND NOT EXISTS(SELECT 1 FROM session_attempt_interruptions interruption WHERE interruption.workspace_id=NEW.workspace_id
+          AND interruption.attempt_id=attempt.id AND interruption.state IN ('pending','delivered','acknowledged'))
+      FOR SHARE OF session,turn,attempt;
+      IF NOT FOUND THEN current_mode := 'suggest'; END IF;
+    END IF;
+    IF head.status NOT IN ('rejected','superseded') AND head.scope='workspace' AND head.scope_workspace_id=NEW.workspace_id
+      AND head.scope_version=(pending.receipt->'deferredPublication'->>'expectedScopeVersion')::integer
+      AND head.active_revision_id IS NOT DISTINCT FROM (pending.receipt->'deferredPublication'->>'expectedRevisionId')::uuid
+      AND revision.revision=(SELECT max(r.revision) FROM preference_registry_revisions r WHERE r.preference_id=head.id)
+      AND (revision.expires_at IS NULL OR revision.expires_at>clock_timestamp())
+      AND EXISTS(SELECT 1 FROM skill_source_bindings binding WHERE binding.preference_id=head.id
+        AND binding.skill_facet_id=(pending.receipt->'deferredPublication'->>'sourceFacetId')::uuid)
+      AND skill_source_has_effective_owner(NEW.account_id,NEW.workspace_id,(pending.receipt->'deferredPublication'->>'sourceFacetId')::uuid)
+    THEN
+      IF current_mode='automatic' THEN
+        PERFORM set_config('opengeni.preference_lifecycle_head_id',head.id::text,true);
+        PERFORM set_config('opengeni.preference_lifecycle_operation','activate',true);
+        UPDATE preference_registry_preferences SET status='active',active_revision_id=revision.id,
+          active_revision=revision.revision,active_content_hash=revision.content_hash,activation_version=activation_version+1,updated_at=clock_timestamp()
+          WHERE id=head.id;
+        SELECT coalesce(max(version),0)+1 INTO next_event FROM preference_registry_events WHERE preference_id=head.id;
+        INSERT INTO preference_registry_events(account_id,preference_id,type,version,old_revision_id,new_revision_id,actor_subject_id,reason)
+          VALUES(NEW.account_id,head.id,'activated',next_event,head.active_revision_id,revision.id,'service:skill-publication',
+            'Publish previously authorized Skill after composite owner finalization') RETURNING id INTO event_id;
+        disposition := 'applied';
+      ELSE disposition := 'pending'; END IF;
+    END IF;
+    result := jsonb_build_object('operationId',publication_id,'sourceOperationId',pending.operation_id,
+      'skillId',pending.receipt->>'skillId','revisionId',pending.receipt->>'revisionId','outcome',disposition,
+      'activationEventId',event_id,'replayed',false,'publicationOperationId',publication_operation);
+    IF disposition='pending' THEN result := result || jsonb_build_object('pendingReason','approval'); END IF;
+    INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt,activation_event_id)
+      VALUES(NEW.account_id,NEW.workspace_id,publication_id,expected_fingerprint,publication_actor,result,event_id);
+  END LOOP;
+  RETURN NEW;
+END $$;
+DO $publication_secure$
+BEGIN
+  EXECUTE format('ALTER FUNCTION skill_source_has_effective_owner(uuid,uuid,uuid) SET search_path = %I, pg_catalog, pg_temp',current_schema());
+  EXECUTE format('ALTER FUNCTION skill_publish_finalized_owner() SET search_path = %I, pg_catalog, pg_temp',current_schema());
+  REVOKE ALL ON FUNCTION skill_publish_finalized_owner() FROM PUBLIC;
+END $publication_secure$;
+CREATE TRIGGER skill_publish_pack_owner AFTER UPDATE OF status ON pack_installations
+FOR EACH ROW WHEN (NEW.status='active' AND OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION skill_publish_finalized_owner();
+CREATE TRIGGER skill_publish_plugin_owner AFTER UPDATE OF status ON capability_plugin_installations
+FOR EACH ROW WHEN (NEW.status='active' AND OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION skill_publish_finalized_owner();
+
 -- Backfill by immutable portable identity, never by matching names or bytes.
 -- Distribution owners/manifests/files remain untouched and keep their upstream history.
 -- FORCE RLS also binds the non-superuser migration owner. Relax only that owner
@@ -318,6 +459,8 @@ ALTER TABLE capability_plugin_installations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_facets NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_skill_facets NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_skill_files NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_component_owners NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_facet_installations NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_preferences NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_revisions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events NO FORCE ROW LEVEL SECURITY;
@@ -348,6 +491,9 @@ BEGIN
     WHERE i.status='active'
   LOOP
     IF NOT skill_files_valid(source.files) THEN RAISE EXCEPTION 'Installed Skill % has invalid text folder; repair before cutover',source.facet_id USING ERRCODE='22023'; END IF;
+    IF NOT skill_source_has_effective_owner(source.account_id,source.workspace_id,source.facet_id) THEN
+      RAISE EXCEPTION '0423 requires completing or disabling unfinished composite Skill source %',source.facet_id USING ERRCODE='55000';
+    END IF;
     skill_id := gen_random_uuid(); revision_id := gen_random_uuid();
     SELECT f->>'content' INTO main_content FROM jsonb_array_elements(source.files) f WHERE f->>'path'='SKILL.md';
     INSERT INTO preference_registry_preferences(id,account_id,stable_key,scope,scope_workspace_id,created_by_subject_id)
@@ -407,6 +553,8 @@ ALTER TABLE capability_plugin_installations FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_facets FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_skill_facets FORCE ROW LEVEL SECURITY;
 ALTER TABLE capability_skill_files FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_component_owners FORCE ROW LEVEL SECURITY;
+ALTER TABLE capability_facet_installations FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_preferences FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_revisions FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events FORCE ROW LEVEL SECURITY;
@@ -437,6 +585,13 @@ FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_revision();
 -- INSERT protection alone cannot stop legacy activation of a pre-cutover revision.
 CREATE FUNCTION skill_guard_legacy_activation() RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
+  IF NEW.active_revision_id IS NOT NULL AND (TG_OP='INSERT' OR NEW.active_revision_id IS DISTINCT FROM OLD.active_revision_id)
+    AND EXISTS(SELECT 1 FROM preference_registry_revisions target JOIN skill_source_bindings binding
+      ON binding.preference_id=target.preference_id AND binding.account_id=target.account_id
+      WHERE target.id=NEW.active_revision_id AND target.provenance_source='portable_skill'
+        AND NOT skill_source_has_effective_owner(binding.account_id,binding.workspace_id,target.provenance_source_id::uuid)) THEN
+    RAISE EXCEPTION 'Skill activation requires a finalized source owner' USING ERRCODE='42501';
+  END IF;
   IF NEW.active_revision_id IS NOT NULL
     AND EXISTS(SELECT 1 FROM preference_registry_revisions target
       WHERE target.account_id=NEW.account_id AND target.preference_id=NEW.id
@@ -453,7 +608,11 @@ FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_activation();
 -- activation cannot inherit an earlier Automatic receipt for the same revision.
 CREATE FUNCTION skill_revision_activation_authority(p_revision_id uuid, p_at timestamptz)
 RETURNS text LANGUAGE sql STABLE SET search_path FROM CURRENT AS $$
-  SELECT CASE r.actor->>'kind' WHEN 'agent' THEN 'automatic' ELSE 'human_confirmed' END
+  SELECT CASE WHEN r.actor->>'kind'='human' OR EXISTS(
+    SELECT 1 FROM skill_write_receipts original WHERE original.account_id=r.account_id AND original.workspace_id=r.workspace_id
+      AND original.operation_id::text=r.receipt->>'sourceOperationId' AND original.actor->>'kind'='human'
+      AND original.receipt ? 'deferredPublication' AND original.receipt->>'revisionId'=revision.id::text
+  ) THEN 'human_confirmed' ELSE 'automatic' END
   FROM preference_registry_revisions revision
   JOIN LATERAL (
     SELECT e.id,e.new_revision_id FROM preference_registry_events e
