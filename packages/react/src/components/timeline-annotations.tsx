@@ -9,10 +9,7 @@ import {
   type TimelineAnnotationLike,
 } from "./timeline-annotation-chrome";
 import { ANNOTATION_CARD_STACK_SCROLL_AT } from "./timeline-annotation-layout";
-import {
-  annotationDisplayOrdinal,
-  annotationHasNote,
-} from "./timeline-annotation-shared";
+import { annotationDisplayOrdinal, annotationHasNote } from "./timeline-annotation-shared";
 
 export type { TimelineAnnotationLike } from "./timeline-annotation-chrome";
 

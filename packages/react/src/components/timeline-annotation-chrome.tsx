@@ -119,7 +119,9 @@ export function AnnotationNotePreview({
           className="mt-0.5 inline-flex min-h-7 items-center rounded-og-sm px-1 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
           aria-expanded={expanded}
           aria-controls={contentId}
-          aria-label={expanded ? `Show less annotation ${ordinal}` : `Show more annotation ${ordinal}`}
+          aria-label={
+            expanded ? `Show less annotation ${ordinal}` : `Show more annotation ${ordinal}`
+          }
           onClick={() => setExpanded((current) => !current)}
         >
           {expanded ? "Show less" : "Show more"}

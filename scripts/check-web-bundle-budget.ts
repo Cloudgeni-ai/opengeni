@@ -451,6 +451,11 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
+    // Timeline-annotation UX on Linux CI 8ea93c686 measured 650,292 gzip
+    // bytes for the default same-origin build and 650,299 with a configured
+    // loopback API URL. Bind the worse configured graph with 1.5 KiB headroom;
+    // file count stays unchanged.
+    wholeKibEnvelope(650_299, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

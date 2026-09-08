@@ -91,10 +91,7 @@ export function annotationBadgePackGap(
     1,
     viewport.right - ANNOTATION_REVIEW_MARGIN_PX - (viewport.left + ANNOTATION_REVIEW_MARGIN_PX),
   );
-  const height = Math.max(
-    1,
-    viewport.bottom - ANNOTATION_REVIEW_MARGIN_PX - (viewport.top + 8),
-  );
+  const height = Math.max(1, viewport.bottom - ANNOTATION_REVIEW_MARGIN_PX - (viewport.top + 8));
   let gap = preferred;
   const capacity = (step: number) =>
     (Math.floor(width / step) + 1) * (Math.floor(height / step) + 1);
@@ -144,8 +141,7 @@ export function layoutAnnotationBadges(
     pushCandidate(originLeft, originTop);
     for (const [dx, dy] of ANNOTATION_BADGE_SHIFT_DIRS) {
       const colliders = [...placed].sort(
-        (left, right) =>
-          right.left * dx + right.top * dy - (left.left * dx + left.top * dy),
+        (left, right) => right.left * dx + right.top * dy - (left.left * dx + left.top * dy),
       );
       for (const collider of colliders) {
         pushCandidate(collider.left + dx * gap, collider.top + dy * gap);

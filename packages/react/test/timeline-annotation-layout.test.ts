@@ -111,12 +111,12 @@ describe("timeline annotation density layout", () => {
       right: 800,
       bottom: 500,
     });
-    expect(
-      annotationBoxIntersects({ left: 40, right: 90, top: 20, bottom: 40 }, viewport),
-    ).toBe(false);
-    expect(
-      annotationBoxIntersects({ left: 40, right: 90, top: 120, bottom: 140 }, viewport),
-    ).toBe(true);
+    expect(annotationBoxIntersects({ left: 40, right: 90, top: 20, bottom: 40 }, viewport)).toBe(
+      false,
+    );
+    expect(annotationBoxIntersects({ left: 40, right: 90, top: 120, bottom: 140 }, viewport)).toBe(
+      true,
+    );
   });
 
   test("keeps a tall review list inside the viewport below the composer", () => {

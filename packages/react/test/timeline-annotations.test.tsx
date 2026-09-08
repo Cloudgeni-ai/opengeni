@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { MessageTimeline } from "../src";
-import { TimelineAnnotationsChip, TimelineAnnotationCards } from "../src/components/timeline-annotations";
+import {
+  TimelineAnnotationsChip,
+  TimelineAnnotationCards,
+} from "../src/components/timeline-annotations";
 import type { AgentMessageItem, UserMessageItem } from "../src/timeline";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
@@ -506,7 +509,10 @@ describe("timeline annotations", () => {
     selection?.removeAllRanges();
     selection?.addRange(range);
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
-    await waitFor(() => Boolean(addNoteButton()), "annotation action did not appear for a long highlight");
+    await waitFor(
+      () => Boolean(addNoteButton()),
+      "annotation action did not appear for a long highlight",
+    );
     const action = addNoteButton();
     expect(action?.textContent).toContain("OpenGeni stack is working.");
     await act(async () => action?.click());
@@ -540,7 +546,9 @@ describe("timeline annotations", () => {
       />,
     );
     await flush();
-    const badges = [...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]")];
+    const badges = [
+      ...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]"),
+    ];
     expect(badges.map((button) => button.getAttribute("aria-label"))).toEqual([
       "Annotation 1",
       "Annotation 2",
@@ -554,7 +562,9 @@ describe("timeline annotations", () => {
   test("keeps a dense long-annotation review list inside one scrollable panel", async () => {
     await import("../src/components/timeline-annotations-dialog");
     const items: DraftTimelineAnnotation[] = Array.from({ length: 12 }, (_, index) => ({
-      ...annotation(index === 11 ? `${"Keep this exact constraint. ".repeat(24).trim()}` : "Keep this."),
+      ...annotation(
+        index === 11 ? `${"Keep this exact constraint. ".repeat(24).trim()}` : "Keep this.",
+      ),
       id: `00000000-0000-4000-8000-${String(0x502 + index).padStart(12, "0")}`,
       quote:
         index === 0

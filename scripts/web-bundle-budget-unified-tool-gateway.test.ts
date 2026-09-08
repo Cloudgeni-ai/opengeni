@@ -3,6 +3,8 @@ import { describe, expect, test } from "bun:test";
 import {
   EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
   KIB,
+  TIMELINE_ANNOTATION_UX_RAW_BUDGET,
+  TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT,
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_BUDGET,
   UNIFIED_TOOL_GATEWAY_BROWSER_RAW_MEASUREMENT,
 } from "./web-bundle-budget-unified-tool-gateway";
@@ -19,7 +21,12 @@ describe("unified tool gateway web bundle budget", () => {
     );
   });
   test("fits the measured session-history graph with bounded headroom", () => {
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2260 * KIB);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_312_535).toBe(1_705);
+    expect(TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(2_333_299);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET).toBe(2280 * KIB);
+    expect(TIMELINE_ANNOTATION_UX_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(1_421);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2280 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - TIMELINE_ANNOTATION_UX_RAW_MEASUREMENT).toBe(
+      1_421,
+    );
   });
 });

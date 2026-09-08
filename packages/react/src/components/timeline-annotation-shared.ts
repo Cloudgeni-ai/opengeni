@@ -120,7 +120,10 @@ function pointAt(
     const span = spans[index]!;
     const local = offset - span.start;
     if (local < 0) continue;
-    if (local < span.length || (local === span.length && (stickEnd || index === spans.length - 1))) {
+    if (
+      local < span.length ||
+      (local === span.length && (stickEnd || index === spans.length - 1))
+    ) {
       return { node: span.node, offset: local };
     }
   }

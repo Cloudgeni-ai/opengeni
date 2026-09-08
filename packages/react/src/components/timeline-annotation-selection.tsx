@@ -72,7 +72,9 @@ function resolveSourceBoundary(range: Range, root: HTMLElement): HTMLElement | n
 function isWhollyInsideControl(range: Range, boundary: HTMLElement): boolean {
   const start = selectionElement(range.startContainer)?.closest(CONTROL_SELECTOR);
   const end = selectionElement(range.endContainer)?.closest(CONTROL_SELECTOR);
-  return start instanceof Element && start === end && boundary.contains(start) && start !== boundary;
+  return (
+    start instanceof Element && start === end && boundary.contains(start) && start !== boundary
+  );
 }
 
 function annotationId(): string {

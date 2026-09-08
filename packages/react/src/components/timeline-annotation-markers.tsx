@@ -38,7 +38,10 @@ function lastVisibleRect(range: Range): DOMRect | null {
   return null;
 }
 
-function occurrenceForAnnotation(sourceEl: HTMLElement, annotation: DraftTimelineAnnotation): number {
+function occurrenceForAnnotation(
+  sourceEl: HTMLElement,
+  annotation: DraftTimelineAnnotation,
+): number {
   const { text } = annotatableText(sourceEl);
   const quote = matchingQuoteInSource(text, annotation.quote) ?? annotation.quote;
   const offsets = occurrenceOffsets(text, quote);
