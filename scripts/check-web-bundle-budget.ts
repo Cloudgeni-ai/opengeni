@@ -421,7 +421,12 @@ const budgets = {
   // visual/E2E checks and moved the exact Linux/x64 Bun 1.4 graph to 2,284,597
   // raw bytes. Advance only the raw policy envelope, retaining 1,995 bytes of
   // headroom; gzip and every unrelated cap remain fixed.
-  directSessionRaw: EFFECTIVE_DIRECT_SESSION_RAW_BUDGET,
+  // Composer action consolidation and picker polish, after keeping repository
+  // editor imports behind their existing boundary: main 19d3f195b measures
+  // 2,321,455 raw / 647,272 gzip; the merged graph is 2,326,574 / 648,938
+  // on Bun 1.4 macOS/arm64, with the same 29 files. Bound only this measured
+  // feature delta with the established whole-KiB headroom.
+  directSessionRaw: Math.max(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET, wholeKibEnvelope(2_326_574)),
   directSessionGzip: 610 * kib,
   directSessionFiles: 31,
   lazyChunkRaw: 800 * kib,
@@ -451,6 +456,7 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
+    wholeKibEnvelope(648_938),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

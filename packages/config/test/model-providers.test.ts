@@ -254,7 +254,7 @@ describe("curated AI Gateway catalogue", () => {
       resolvedOpenRouterModelsJson: undefined,
     };
     const model = configuredModels(settings).find(
-      (model) => model.id === "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+      (candidate) => candidate.id === "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     )!;
     expect(model.capabilities.reasoning).toEqual({
       upstream: "supported",

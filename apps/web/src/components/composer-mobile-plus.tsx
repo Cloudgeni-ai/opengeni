@@ -1,4 +1,4 @@
-import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker";
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
 import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,

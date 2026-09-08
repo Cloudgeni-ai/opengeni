@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { REPOSITORY_PANEL_CLASS } from "@/components/repository-picker-layout";
 
 import {
   ManualRepositoryEditor,
@@ -712,9 +713,6 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
     </div>
   );
 }
-
-export const REPOSITORY_PANEL_CLASS =
-  "flex w-[min(560px,calc(100vw-2rem))] max-h-[min(70vh,var(--radix-dropdown-menu-content-available-height))] flex-col overflow-hidden rounded-xl border-border bg-surface p-0 shadow-2xl";
 
 export function RepositoryContextPicker(props: RepositoryContextPickerProps) {
   const selectedInstalledCount = props.selectedRepoIds.size;
