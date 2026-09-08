@@ -480,6 +480,14 @@ function materializePortableSkillFiles(inputFiles: readonly SkillLibraryFile[]):
       }
       paths.add(path);
       const bytes = new TextEncoder().encode(file.content);
+      if (file.content.includes("\u0000")) {
+        throw new Error(`Skill artifact contains NUL bytes: ${path}`);
+      }
+      if (
+        new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes) !== file.content
+      ) {
+        throw new Error(`Skill artifact contains malformed Unicode text: ${path}`);
+      }
       if (bytes.byteLength > PORTABLE_SKILL_MAX_FILE_BYTES) {
         throw new Error(
           `Skill artifact file exceeds ${PORTABLE_SKILL_MAX_FILE_BYTES} bytes: ${path}`,
@@ -492,6 +500,15 @@ function materializePortableSkillFiles(inputFiles: readonly SkillLibraryFile[]):
       return Object.freeze({ path, content: file.content, bytes });
     })
     .sort((left, right) => compareCanonicalPath(left.path, right.path));
+  for (const path of paths) {
+    const segments = path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      const prefix = segments.slice(0, index).join("/");
+      if (paths.has(prefix)) {
+        throw new Error(`Skill artifact uses a path as both a file and a directory: ${prefix}`);
+      }
+    }
+  }
   return { materialized, totalBytes };
 }
 
@@ -569,7 +586,7 @@ type MaterializedSkillLibraryFile = Readonly<{
   bytes: Uint8Array;
 }>;
 
-const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 function materializeSkillLibraryFiles(root: string, current = ""): MaterializedSkillLibraryFile[] {
   const directory = current ? join(root, current) : root;
