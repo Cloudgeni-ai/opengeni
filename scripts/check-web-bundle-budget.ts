@@ -457,6 +457,10 @@ const effectiveBudgets = {
     wholeKibEnvelope(650_609, 1.5 * kib),
     // Same graph plus main0c39126f's subscription/model-access contract.
     wholeKibEnvelope(653_880, 1.5 * kib),
+    // Unchanged d06450ca3 browser source measures 647,170–647,174 gzip
+    // bytes in Linux/x64 acceptance builds with randomized loopback API ports.
+    // Restore the established whole-KiB headroom; keep every other cap fixed.
+    wholeKibEnvelope(647_174),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
