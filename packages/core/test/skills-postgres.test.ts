@@ -25,6 +25,8 @@ import {
   finalizePackInstallationOperation,
   preparePluginPackageInstall,
   finalizePluginPackageInstall,
+  deleteWorkspace,
+  withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
@@ -957,6 +959,182 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       saveSkill(client.db, { ...f.input, ...f.agent, operationId: crypto.randomUUID() }),
     ).rejects.toThrow();
   });
+  test("workspace cascade removes only portable-origin history and keeps direct deletion forbidden", async () => {
+    if (!client) return;
+    async function workspace() {
+      const key = crypto.randomUUID();
+      const subjectId = `user:cascade-${key}`;
+      const grant = (
+        await bootstrapWorkspace(client!.db, {
+          accountExternalSource: "test",
+          accountExternalId: key,
+          accountName: "Cascade test",
+          workspaceExternalSource: "test",
+          workspaceExternalId: key,
+          workspaceName: "Cascade test",
+          subjectId,
+        })
+      ).workspaceGrants[0]!;
+      return {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        actor: { kind: "human", subjectId, principalKind: "human_session" } as const,
+      };
+    }
+    const human = await workspace();
+    const other = await workspace();
+    const content = skillMarkdown("Portable deletion fixture");
+    const digest = createHash("sha256").update(content).digest("hex");
+    const installed = await installPortableSkill(client.db, {
+      ...human,
+      subjectId: human.actor.subjectId,
+      skillActor: human.actor,
+      capabilityId: `skill:${human.workspaceId}`,
+      pluginKey: `skill/test/${human.workspaceId}`,
+      source: "github",
+      sourceUrl: "https://example.test/skills",
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: "skill",
+      name: "test-skill",
+      description: "Test Skill folder",
+      contentSha256: digest,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: digest },
+      ],
+    });
+    const saveInput = {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: installed.skillReceipt.skillId,
+      expectedRevisionId: installed.skillReceipt.revisionId,
+      expectedScopeVersion: 1,
+      files: [{ path: "SKILL.md", content: skillMarkdown("Customized portable fixture") }],
+      reason: "Customize",
+    };
+    const customized = await saveSkill(client.db, saveInput);
+    const restored = await restoreSkill(client.db, {
+      ...human,
+      operationId: crypto.randomUUID(),
+      skillId: customized.skillId,
+      revisionId: installed.skillReceipt.revisionId!,
+      expectedRevisionId: customized.revisionId,
+      expectedScopeVersion: 1,
+      reason: "Restore original",
+    });
+    expect(restored.outcome).toBe("applied");
+    const authored = await saveSkill(client.db, {
+      ...other,
+      operationId: crypto.randomUUID(),
+      skillId: crypto.randomUUID(),
+      stableKey: "authored-retained",
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      files: [{ path: "SKILL.md", content }],
+      reason: "Authored retention control",
+    });
+    for (const table of [
+      "preference_registry_preferences",
+      "preference_registry_revisions",
+      "preference_registry_events",
+      "skill_write_receipts",
+    ]) {
+      await expect(
+        shared!.admin.begin(async (tx) => {
+          if (table === "preference_registry_preferences")
+            await tx`DELETE FROM preference_registry_preferences WHERE id=${customized.skillId}`;
+          else if (table === "skill_write_receipts")
+            await tx`DELETE FROM skill_write_receipts WHERE workspace_id=${human.workspaceId}`;
+          else await tx.unsafe(`DELETE FROM ${table} WHERE preference_id=$1`, [customized.skillId]);
+        }),
+      ).rejects.toThrow();
+    }
+    const runtime = postgres(shared!.appUrl, { max: 1 });
+    try {
+      for (const fn of [
+        "guard_portable_skill_parent_delete",
+        "guard_skill_history_parent_delete",
+      ]) {
+        const [access] =
+          await runtime`SELECT has_function_privilege(current_user,${`opengeni_private.${fn}()`},'EXECUTE') AS allowed`;
+        expect(access!.allowed).toBe(false);
+      }
+      await expect(runtime`DELETE FROM preference_registry_preferences`.execute()).rejects.toThrow(
+        "permission denied",
+      );
+    } finally {
+      await runtime.end();
+    }
+    await expectDatabaseGuard(
+      withWorkspaceRls(client.db, other.workspaceId, (tx) =>
+        deleteWorkspace(tx, other.workspaceId),
+      ),
+      "authored or scope-moved",
+    );
+    expect((await readSkill(client.db, other, authored.skillId))?.revisionId).toBe(
+      authored.revisionId,
+    );
+    // A restrictive authored sibling rolls back the whole parent cascade,
+    // including portable history and its distribution/receipt graph.
+    await expectDatabaseGuard(
+      withWorkspaceRls(client.db, human.workspaceId, async (tx) => {
+        await saveSkill(tx, {
+          ...human,
+          operationId: crypto.randomUUID(),
+          skillId: crypto.randomUUID(),
+          stableKey: "retained-sibling",
+          expectedRevisionId: null,
+          expectedScopeVersion: 1,
+          files: [{ path: "SKILL.md", content }],
+          reason: "Rollback control",
+        });
+        await deleteWorkspace(tx, human.workspaceId);
+      }),
+      "authored or scope-moved",
+    );
+    expect((await readSkill(client.db, human, restored.skillId))?.revisionId).toBe(
+      restored.revisionId,
+    );
+    await expectDatabaseGuard(
+      withWorkspaceRls(client.db, other.workspaceId, (tx) =>
+        deleteWorkspace(tx, human.workspaceId),
+      ),
+      "tenant context mismatch",
+    );
+    expect((await readSkill(client.db, human, restored.skillId))?.revisionId).toBe(
+      restored.revisionId,
+    );
+    await withWorkspaceRls(client.db, human.workspaceId, (tx) =>
+      deleteWorkspace(tx, human.workspaceId),
+    );
+    expect(
+      await shared!.admin`SELECT id FROM workspaces WHERE id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_preferences WHERE id=${customized.skillId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${customized.skillId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT id FROM preference_registry_events WHERE preference_id=${customized.skillId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT operation_id FROM skill_write_receipts WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect(
+      await shared!
+        .admin`SELECT preference_id FROM skill_source_bindings WHERE workspace_id=${human.workspaceId}`,
+    ).toHaveLength(0);
+    expect((await readSkill(client.db, other, authored.skillId))?.revisionId).toBe(
+      authored.revisionId,
+    );
+  }, 30_000);
   test("concurrent writers have one CAS winner and runtime cannot directly mutate receipts", async () => {
     if (!client) return;
     const f = await fixture("automatic");

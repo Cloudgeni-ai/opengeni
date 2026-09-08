@@ -1827,4 +1827,24 @@ describe("runtime database posture evaluator", () => {
       ]),
     );
   });
+  test("Skill parent cascade guards never require or permit runtime EXECUTE", () => {
+    const posture = safePosture();
+    for (const name of [
+      "guard_portable_skill_parent_delete()",
+      "guard_skill_history_parent_delete()",
+    ]) {
+      posture.privateRoutines.push({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: name.includes("portable"),
+      });
+    }
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    posture.privateRoutines.at(-1)!.execute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime or PUBLIC has forbidden EXECUTE on Skill cascade guard guard_skill_history_parent_delete()",
+    );
+  });
 });

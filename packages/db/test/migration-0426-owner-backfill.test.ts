@@ -11,6 +11,7 @@ import { readSkillMetadata } from "@opengeni/contracts";
 import { createDb } from "../src/database";
 import { listSkillDescriptors, listSkillRecords } from "../src/skills";
 import { migrateLegacySkillConfigurations } from "../src/skill-config-migration";
+import { deleteWorkspace, withWorkspaceRls } from "../src/index";
 
 const cutover = "0426_unified_skill_lifecycle.sql";
 const windowTables = [
@@ -105,7 +106,8 @@ describe("0426 owner-only Skill backfill", () => {
         title: string;
         description: string;
       }> = [];
-      for (let index = 0; index < 2; index++) {
+      let installedOnly: (typeof fixtures)[number] | undefined;
+      for (let index = 0; index < 3; index++) {
         const accountId = crypto.randomUUID();
         const workspaceId = crypto.randomUUID();
         const pluginId = crypto.randomUUID();
@@ -133,8 +135,19 @@ describe("0426 owner-only Skill backfill", () => {
           values(${facetInstallationId},${accountId},${workspaceId},${installationId},${facetId},'active')`;
         await admin`insert into capability_component_owners(account_id,workspace_id,facet_installation_id,owner_kind,owner_id,removable)
           values(${accountId},${workspaceId},${facetInstallationId},'direct',${ownerId},true)`;
-        fixtures.push({ accountId, workspaceId, pluginId, facetId, installationId, ownerId });
+        const fixture = { accountId, workspaceId, pluginId, facetId, installationId, ownerId };
+        if (index < 2) fixtures.push(fixture);
+        else installedOnly = fixture;
       }
+      // The exact installed-only graph was deletable before this cutover.
+      await expect(
+        admin.begin(async (tx) => {
+          expect(
+            await tx`DELETE FROM workspaces WHERE id=${installedOnly!.workspaceId} RETURNING id`,
+          ).toHaveLength(1);
+          throw new Error("retain installed-only fixture for migration");
+        }),
+      ).rejects.toThrow("retain installed-only fixture");
       const seedLegacy = async (
         scope: string,
         content: string,
@@ -318,6 +331,47 @@ describe("0426 owner-only Skill backfill", () => {
       await expect(migrate(ownerUrl)).rejects.toThrow("automation-run:");
       await admin`UPDATE automation_runs SET status='skipped' WHERE id=${runId}`;
       await migrate(ownerUrl);
+      const [installedHead] =
+        await admin`SELECT id,active_revision_id FROM preference_registry_preferences
+        WHERE scope_workspace_id=${installedOnly!.workspaceId}`;
+      expect(installedHead).toBeDefined();
+      await expect(
+        admin`DELETE FROM preference_registry_preferences WHERE id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("cannot be deleted");
+      await expect(
+        admin`DELETE FROM preference_registry_revisions WHERE preference_id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("immutable");
+      await expect(
+        admin`DELETE FROM preference_registry_events WHERE preference_id=${installedHead!.id}`.execute(),
+      ).rejects.toThrow("immutable");
+      // Exercise the exported delete boundary under the physical non-superuser
+      // migration owner: the SECURITY DEFINER guard remains FORCE-RLS bound.
+      const deletionClient = createDb(ownerUrl, { max: 1 });
+      try {
+        await withWorkspaceRls(deletionClient.db, installedOnly!.workspaceId, (tx) =>
+          deleteWorkspace(tx, installedOnly!.workspaceId),
+        );
+      } finally {
+        await deletionClient.close();
+      }
+      expect(
+        await admin`SELECT id FROM workspaces WHERE id=${installedOnly!.workspaceId}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM preference_registry_preferences WHERE id=${installedHead!.id}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM preference_registry_revisions WHERE preference_id=${installedHead!.id}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM preference_registry_events WHERE preference_id=${installedHead!.id}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT preference_id FROM skill_source_bindings WHERE workspace_id=${installedOnly!.workspaceId}`,
+      ).toHaveLength(0);
+      expect(
+        await admin`SELECT id FROM capability_plugins WHERE id=${installedOnly!.pluginId}`,
+      ).toHaveLength(0);
       expect(
         (
           await admin`SELECT session_template FROM automation_trigger_revisions WHERE trigger_id=${triggerId}`

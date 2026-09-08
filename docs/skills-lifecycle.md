@@ -251,3 +251,21 @@ artifact still requires explicit valid replacement; no read-time synthesis or
 silent rebinding is supported. Deployment/host configuration outside these DB
 sources needs its own validation. This maintenance inventory materializes source
 JSON in memory and has not been load-tested on a large production dataset.
+
+## Portable Skill workspace deletion
+
+Migration 0426 preserves the pre-cutover ability to delete an installed-only
+workspace. Only the owning workspace's referential cascade can delete a Skill
+whose immutable initial proposal was a portable installation in that same
+workspace and whose history contains no scope change. Human customization and
+restoration do not change that original ownership. Eligible heads, revisions,
+events, source bindings, and workspace write receipts are removed atomically;
+direct head/history deletion and history updates remain forbidden. The private
+delete guards have no runtime EXECUTE grant, and no runtime DELETE grant is added.
+
+This is not a general registry-retention change. Authored-origin or scope-moved
+heads, historical snapshots, and cross-Skill references retain their existing
+restrictive behavior and can still prevent workspace deletion. A failed cascade
+rolls back the complete deletion, including portable content. Supporting general
+deletion in those cases requires a separate retention decision; the portable
+compatibility fix does not archive, reinterpret, or erase that unrelated history.
