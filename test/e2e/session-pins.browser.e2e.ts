@@ -148,6 +148,43 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await shared?.release();
   }, 60_000);
 
+  test("moves sessions using the context menu and folder drag targets", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const project = await createChannelThroughApi(page, apiBaseUrl, workspaceId, "Move target");
+      const session = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Movable session",
+      );
+      await page.reload();
+      const row = page.locator(`a[data-session-row="${session.id}"]`);
+      await row.click({ button: "right" });
+      const menu = page.locator(`[data-session-menu="${session.id}"]`);
+      await menu.getByText("Move to project", { exact: true }).waitFor();
+      await menu.getByRole("menuitem", { name: project.name, exact: true }).click();
+      const projectGroup = page.getByRole("group", { name: project.name, exact: true });
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      // Real HTML dragging must move the session, not reorder its project.
+      const defaultGroup = page.getByRole("group", { name: "Default", exact: true });
+      await row.dragTo(defaultGroup.locator(":scope > div[draggable]").first());
+      await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      await row.dragTo(projectGroup.locator(":scope > div[draggable]").first());
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      await page.reload();
+      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("renders goal landmarks through the production session chunk graph", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
