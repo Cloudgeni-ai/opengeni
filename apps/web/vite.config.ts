@@ -44,7 +44,7 @@ export default defineConfig({
             {
               // Keep context and its virtual reader in the lazy debug inspector.
               name: "context-inspector",
-              test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+\/]virtual-core|@tanstack[\\+\/]react-virtual)/,
+              test: /(?:components[\\/]session[\\/](?:model-context-inspector|context-text-reader)\.tsx$|@tanstack[\\+/]virtual-core|@tanstack[\\+/]react-virtual)/,
               includeDependenciesRecursively: false,
               priority: 20,
             },
