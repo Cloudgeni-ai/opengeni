@@ -567,8 +567,10 @@ On August 27, 2026, OpenRouter advertised that slug with a 262,144-token context
 window, a 235,929-token completion ceiling, text input/output, function tools,
 tool choice, structured outputs, and reasoning controls. A live forced-function
 probe completed with `finish_reason=tool_calls`. OpenGeni therefore marks
-function calling and structured output runnable, while reasoning effort remains
-non-runnable until a reviewed effort vocabulary is mapped.
+function calling and structured output runnable. On September 8, 2026, OpenRouter
+`GET /api/v1/models` explicitly advertised reasoning efforts `low` and `medium`,
+with `medium` as default. Both are runnable; the Chat Completions adapter sends
+the selected value as `reasoning_effort`. Higher levels are not exposed.
 
 OpenRouter membership is curated and production never mirrors `GET /models`.
 The v1 database schema accepts reviewed `:free` slugs only; a key does not make
