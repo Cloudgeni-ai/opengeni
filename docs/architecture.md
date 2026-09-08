@@ -14,26 +14,23 @@
 
 ## 1. Scope
 
-Product shape, invariants, execution paths, and source ownership. Exact inventories live in code.
+Product shape, invariants, execution paths, and ownership; inventories live in code.
 
 ---
 
 ## 2. What OpenGeni is
 
-OpenGeni is a self-hostable, session-based managed agent runtime. It runs
-side-effectful agents while owning the durable control plane around them:
-identity, tenancy, session state, human intervention, long-running goals,
-recovery, compute routing, files, artifacts, usage, and observability.
+OpenGeni is a self-hostable, session-based agent runtime. Its durable control
+plane owns identity, tenancy, sessions, human intervention, goals, recovery,
+compute, files, artifacts, usage, and observability.
 
-Public control and authorization begin at the HTTP API. After the API grants a
-bounded capability, high-bandwidth browser data planes may connect directly to
-object storage, a sandbox/provider or relay stream, Codex WebRTC, or the AI
-Gateway realtime WebSocket. Agent execution happens in a worker, either inside
-a provisioned sandbox or directly on a Connected Machine. Postgres holds durable
-truth, Temporal coordinates long-lived work, and NATS provides reconstructible
-live fanout plus Connected Machine transport.
+The HTTP API authorizes public control and bounded direct browser access to
+storage, sandboxes, relays, Codex WebRTC, and Gateway realtime WebSockets.
+Workers execute agents in provisioned sandboxes or Connected Machines.
+Postgres owns durable truth; Temporal coordinates work; NATS transports
+reconstructible live updates and Connected Machine traffic.
 
-The product has several deliberately separate surfaces:
+Separate surfaces:
 
 - **Sessions and turns** provide Send, Steer, Pause, Resume, Cancel, queues,
   goals, approvals, structured human input, durable semantic titles, and
@@ -54,12 +51,9 @@ The product has several deliberately separate surfaces:
   ComputerSession interaction, terminals, and published outputs.
 - **Embedding and clients** expose a framework-neutral SDK, React surfaces, a
   stock web console, and advanced in-process host seams.
+- **[Feedback](feedback.md)**.
 - **Operations** include usage metering, entitlement admission, billing,
   deployment contracts, observability, and release evidence.
-
-OpenGeni makes long-lived, interruptible, multi-tenant agent runs durable and
-recoverable without turning live transports, workflow memory, or provider state
-into authority.
 
 Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
@@ -68,9 +62,7 @@ Canonical introductions: [`../README.md`](../README.md),
 
 ## 3. Core invariants
 
-These rules cross package and process boundaries. Focused docs contain the
-complete contracts and edge cases; this section preserves the architectural
-reason each rule exists.
+Cross-package invariants; focused docs own complete contracts and edge cases.
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
@@ -833,6 +825,15 @@ The accepted turn freezes its public model choice, provider/deployment routing,
 billing attribution, governance context, initiating authority, and relevant
 tool/connection delegations. Recovery reuses that accepted truth rather than
 sampling mutable workspace defaults again.
+
+Workspace built-in tool and MCP-server defaults inherit independently when
+their respective `settings.sessionToolDefaults` key is absent. Existing arrays
+remain exact custom selections (including empty arrays). The settings API
+merges these nested keys atomically; explicit `null` removes only that override.
+The UI requires deliberate customization and exposes partial selections;
+saving plugin defaults never freezes built-in defaults. Persistence lives in
+`packages/db/src/workspace-tool-defaults.ts`; deployment ceilings still apply,
+and changing defaults never rewrites existing sessions or accepted attempts.
 
 A fresh session selecting a workspace Gateway or OpenRouter custom model, an
 existing session explicitly switching from another model, a new/materially

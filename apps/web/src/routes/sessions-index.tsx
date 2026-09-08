@@ -219,7 +219,7 @@ function SessionsIndexRouteContent({
   );
   const defaultFirstPartyMcpTools = useMemo(
     () =>
-      configuredToolDefaults?.firstPartyMcpTools.filter((tool) =>
+      configuredToolDefaults?.firstPartyMcpTools?.filter((tool) =>
         firstPartyMcpToolPolicy.allowed.includes(tool),
       ) ?? firstPartyMcpToolPolicy.default,
     [configuredToolDefaults, firstPartyMcpToolPolicy],

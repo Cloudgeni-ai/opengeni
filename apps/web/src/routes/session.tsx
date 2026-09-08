@@ -152,6 +152,10 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const SessionFeedback = lazy(() =>
+  import("@/components/feedback").then((module) => ({ default: module.SessionFeedback })),
+);
+
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
     default: module.FailedSessionBanner,
@@ -1999,6 +2003,21 @@ function SessionChatPane(props: {
           </div>
         </>
       )}
+
+      {hasWorkspacePermission(
+        context.accessContext,
+        props.session.workspaceId,
+        "sessions:create",
+      ) ? (
+        <Suspense fallback={null}>
+          <SessionFeedback
+            key={props.session.id}
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+          />
+        </Suspense>
+      ) : null}
 
       {/* Live decision strip: only while the session is actually paused on
           an approval — a replayed log or a stale stream must never render

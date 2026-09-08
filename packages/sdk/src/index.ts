@@ -1210,3 +1210,10 @@ export type {
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
 } from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";
