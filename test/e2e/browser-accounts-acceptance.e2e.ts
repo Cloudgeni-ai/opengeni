@@ -4063,6 +4063,14 @@ describe("provider-neutral browser account acceptance", () => {
         [
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+          // WebKit can restore page visibility after closing the popup as well
+          // as remounting the actor. useSessionCapabilities renegotiates once
+          // on that page-live transition. Budget only this exact denied read.
+          ...(engine === "webkit"
+            ? [
+                `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 404 (Not Found) @ /v1/workspaces/${beta.workspaceId}/sessions/${beta.sessionId}/stream-capabilities`,
+              ]
+            : []),
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
           `[slot-revocation-reauthentication] Failed to load resource: the server responded with a status of 503 (Service Unavailable) @ /v1/workspaces/${beta.workspaceId}/editable-artifacts`,
