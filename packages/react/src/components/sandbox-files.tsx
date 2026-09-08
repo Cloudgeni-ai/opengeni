@@ -527,18 +527,27 @@ export function SandboxFiles({
               )
             ) : // Nothing selected — the tree shows the whole workspace; pick a file.
             requestedPath && !requestedPathReady ? (
-              <Notice
-                icon={
-                  <LoaderCircleIcon
-                    className="size-5 animate-spin motion-reduce:animate-none"
-                    aria-hidden
-                  />
-                }
-                title="Waking sandbox"
-                announce="status"
-              >
-                Opening {requestedPath} when the live workspace is ready…
-              </Notice>
+              workspaceError ? (
+                <Notice title="Could not open live file" announce="alert">
+                  <p>{workspaceError.message}</p>
+                  {onWakeWorkspace ? (
+                    <WakeButton onClick={onWakeWorkspace}>Retry live file</WakeButton>
+                  ) : null}
+                </Notice>
+              ) : (
+                <Notice
+                  icon={
+                    <LoaderCircleIcon
+                      className="size-5 animate-spin motion-reduce:animate-none"
+                      aria-hidden
+                    />
+                  }
+                  title="Waking sandbox"
+                  announce="status"
+                >
+                  Opening {requestedPath} when the live workspace is ready…
+                </Notice>
+              )
             ) : (
               <Notice icon={<FileCode2Icon className="size-5" aria-hidden />} title="Choose a file">
                 Select a file in the tree to preview it.

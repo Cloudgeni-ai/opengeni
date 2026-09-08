@@ -444,6 +444,42 @@ describe("SandboxFiles guarded-file routing", () => {
     await r.unmount();
   });
 
+  test("a pending guarded file surfaces wake failure and retries before selection", async () => {
+    let wakeCalls = 0;
+    const props = {
+      files: filesResult({ source: "capture" }),
+      requestedPath: "README.md",
+      requestedPathRequestId: 1,
+      requestedPathReady: false,
+      liveWorkspaceReady: false,
+      onWakeWorkspace: () => {
+        wakeCalls += 1;
+      },
+    };
+    const r = await renderComponent(<SandboxFiles {...props} />);
+    await flush();
+    expect(r.container.textContent).toContain("Waking sandbox");
+    await r.rerender(<SandboxFiles {...props} workspaceError={new Error("Guarded wake failed")} />);
+    await flush();
+    expect(r.container.textContent).toContain("Guarded wake failed");
+    expect(r.container.textContent).not.toContain("Waking sandbox");
+    await actRun(() =>
+      Array.from(r.container.querySelectorAll("button"))
+        .find((button) => button.textContent === "Retry live file")!
+        .click(),
+    );
+    expect(wakeCalls).toBe(1);
+    await r.rerender(<SandboxFiles {...props} />);
+    await flush();
+    expect(r.container.textContent).toContain("Waking sandbox");
+    await r.rerender(<SandboxFiles {...props} requestedPathReady liveWorkspaceReady />);
+    await flush();
+    expect(selectedFile(r.container)).toBe("README.md");
+    expect(r.container.textContent).not.toContain("Waking sandbox");
+    expect(r.container.textContent).not.toContain("Guarded wake failed");
+    await r.unmount();
+  });
+
   test("a failed workspace wake without a capture offers a retry", async () => {
     const r = await renderComponent(
       <SandboxFiles
