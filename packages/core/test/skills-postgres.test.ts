@@ -166,6 +166,39 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("stores full 1024-character description projections and rejects overflow without truncation", async () => {
+    if (!client) return;
+    const f = await fixture("off");
+    const description = "d".repeat(1024);
+    const files = [
+      {
+        path: "SKILL.md",
+        content: `---\nname: test-skill\ndescription: ${description}\n---\nSkill body`,
+      },
+    ];
+    const saved = await saveSkill(client.db, { ...f.input, description, files });
+    expect((await readSkill(client.db, f.context, saved.skillId))?.description).toBe(description);
+    expect((await readSkill(client.db, f.context, saved.skillId))?.files).toEqual(files);
+    await expect(
+      saveSkill(client.db, {
+        ...f.input,
+        skillId: saved.skillId,
+        operationId: crypto.randomUUID(),
+        expectedRevisionId: saved.revisionId,
+        description: `${description}x`,
+        files: [
+          {
+            path: "SKILL.md",
+            content: `---\nname: test-skill\ndescription: ${description}x\n---\nSkill body`,
+          },
+        ],
+      }),
+    ).rejects.toThrow();
+    expect((await readSkill(client.db, f.context, saved.skillId))?.revisionId).toBe(
+      saved.revisionId,
+    );
+  }, 30_000);
+
   test("legacy correction and activation cannot discard authored folders; explicit restore preserves history", async () => {
     if (!client) return;
     const f = await fixture("off");

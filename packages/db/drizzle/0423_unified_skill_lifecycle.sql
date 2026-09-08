@@ -18,6 +18,14 @@ END $drain$;
 ALTER TABLE preference_registry_revisions ADD COLUMN skill_files jsonb;
 ALTER TABLE preference_registry_revisions ADD COLUMN skill_activation_mode text
   CHECK (skill_activation_mode IN ('workspace_managed','session_selected'));
+-- Description is the full SKILL.md metadata projection, not a shortened summary.
+-- Revalidate the wider shape without rewriting immutable historical values.
+ALTER TABLE preference_registry_revisions DROP CONSTRAINT preference_registry_revisions_text_chk;
+ALTER TABLE preference_registry_revisions ADD CONSTRAINT preference_registry_revisions_text_chk CHECK (
+  length(btrim(title)) BETWEEN 1 AND 120
+  AND length(btrim(description)) BETWEEN 1 AND 1024
+  AND length(btrim(content)) > 0 AND length(content) <= 262144
+);
 ALTER TABLE preference_registry_revisions DROP CONSTRAINT preference_registry_revisions_provenance_chk;
 ALTER TABLE preference_registry_revisions ADD CONSTRAINT preference_registry_revisions_provenance_chk CHECK (
   provenance_source IN ('human','onboarding','knowledge_proposal','imported_document','slack','meeting_transcript','call_transcript','agent','portable_skill')
@@ -166,7 +174,7 @@ BEGIN
     SELECT * INTO binding FROM skill_source_bindings b WHERE b.workspace_id=p_workspace_id
       AND b.plugin_id=source.plugin_id AND b.facet_key=source.facet_key;
     skill_id := coalesce(binding.preference_id,gen_random_uuid());
-    files := source.files; title := left(source.name,120); description := left(source.description,240);
+    files := source.files; title := source.name; description := source.description;
     stable_key := 'installed-'||replace(skill_id::text,'-',''); source_id := source.facet_id::text;
     activation_mode := source.activation_mode;
   END IF;
@@ -293,7 +301,7 @@ BEGIN
       VALUES(skill_id,source.account_id,'installed-'||replace(skill_id::text,'-',''),'workspace',source.workspace_id,'service:skill-migration:0423');
     INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,
       conflict_strategy,provenance_source,provenance_source_id,trust,created_by_subject_id,skill_files,skill_activation_mode)
-      VALUES(revision_id,source.account_id,skill_id,left(source.name,120),left(source.description,240),main_content,
+      VALUES(revision_id,source.account_id,skill_id,source.name,source.description,main_content,
         encode(sha256(convert_to(main_content,'UTF8')),'hex'),'override','portable_skill',source.facet_id::text,
         'workspace_managed','service:skill-migration:0423',source.files,source.activation_mode);
     INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,new_scope,new_workspace_id,actor_subject_id,reason)
