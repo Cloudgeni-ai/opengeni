@@ -4461,8 +4461,19 @@ async function deliverSlackSessionEvents(
     } else if (event.type === "turn.completed") {
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
+      if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          `${requester.mention}OpenGeni reached a billing or usage limit. Ask your organization owner to check credits and usage limits, then reply in this thread to resume.`,
+          "billing-limit",
+        );
+        terminal = "failed";
+        continue;
+      }
       // A completed turn is not necessarily a completed task. Input waits and
-      // pacing/budget yields settle without a result. Keep the cursor moving
+      // pacing yields settle without a result. Keep the cursor moving
       // and delivery open for the eventual response; never promote commentary
       // or invent a success message for these boundaries.
       if (!hasPublishableOutput || safePayloadText(event.payload, "segmentLimit")) {

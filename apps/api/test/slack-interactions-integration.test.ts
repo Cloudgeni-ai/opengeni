@@ -7344,7 +7344,6 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       { output: "" },
       { output: "   " },
       { output: "", segmentLimit: "max_turns" },
-      { output: "", segmentLimit: "budget_exhausted" },
       { output: "Segment ended before the task result.", segmentLimit: "max_turns" },
     ]) {
       await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
@@ -7382,6 +7381,49 @@ describe("Slack-to-OpenGeni real PostgreSQL acceptance", () => {
       value.slack.posts.some((post) => post.text.includes("OpenGeni finished this task.")),
     ).toBe(false);
     expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+  });
+
+  test("budget exhaustion sends one actionable Slack notice instead of silently waiting", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await postEvent(value.app, {
+      teamId: value.teamId,
+      eventId: `E_CREDITS_${crypto.randomUUID()}`,
+      event: {
+        type: "message",
+        channel_type: "im",
+        user: value.ownerSlackUserId,
+        channel: "D_CREDITS",
+        ts: "1788876251.571220",
+        text: "Run a task",
+      },
+    });
+    await drainAll(value.deps);
+    const [route] = await interactions(value.owner.workspaceId);
+    const initialPosts = value.slack.posts.length;
+    await appendSessionEvents(client.db, value.owner.workspaceId, route!.session_id, [
+      {
+        type: "turn.completed",
+        payload: {
+          output: "",
+          segmentLimit: "budget_exhausted",
+          detail: "internal credit diagnostics must not be echoed",
+        },
+      },
+    ]);
+    await drainAll(value.deps);
+    const posts = value.slack.posts.slice(initialPosts);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.text).toContain("OpenGeni reached a billing or usage limit.");
+    expect(posts[0]!.text).toContain(
+      "Ask your organization owner to check credits and usage limits, then reply in this thread to resume.",
+    );
+    expect(posts[0]!.text).not.toContain("internal credit diagnostics");
+    expect((await interactions(value.owner.workspaceId))[0]!.terminal_delivery_state).toBe(
+      "failed",
+    );
+    expect(await drainSlackInteractionsOnce(value.deps)).toBe(false);
+    expect(value.slack.posts.length).toBe(initialPosts + 1);
   });
 
   test("caps durable progress globally across pages, response loss, retries, restarts, and replica claims", async () => {
