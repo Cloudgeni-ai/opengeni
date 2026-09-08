@@ -16,6 +16,7 @@ import {
   getCurrentPreferenceRegistryGovernanceMetadata,
   assertSkillReadAttempt,
   listSkillDescriptors,
+  replayPortableSkillInstall,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
@@ -146,6 +147,102 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
 }
 
 describe("unified Skill real PostgreSQL lifecycle", () => {
+  test("portable retries replay before distribution CAS or moving-source resolution", async () => {
+    if (!client) return;
+    const f = await fixture("automatic");
+    const key = crypto.randomUUID();
+    const content = "Original replay source";
+    const digest = createHash("sha256").update(content).digest("hex");
+    const requestIdentity = {
+      sourceUrl: "https://example.test/moving",
+      options: {},
+      expectedInstallationVersion: null,
+    };
+    const input: InstallPortableSkillInput = {
+      ...f.context,
+      subjectId: f.human.actor.subjectId,
+      skillActor: f.agent.actor,
+      skillOperationId: crypto.randomUUID(),
+      skillRequestIdentity: requestIdentity,
+      capabilityId: `skill:${key}`,
+      pluginKey: `skill/replay/${key}`,
+      source: "github",
+      sourceUrl: requestIdentity.sourceUrl,
+      repositoryUrl: "https://example.test/repo",
+      sourceCommit: "a".repeat(40),
+      sourcePath: key,
+      name: "replay-skill",
+      description: "Replay test",
+      contentSha256: digest,
+      totalBytes: Buffer.byteLength(content),
+      files: [
+        { path: "SKILL.md", content, byteSize: Buffer.byteLength(content), contentSha256: digest },
+      ],
+    };
+    const installed = await installPortableSkill(client.db, input);
+    const moved = await installPortableSkill(client.db, {
+      ...input,
+      skillOperationId: crypto.randomUUID(),
+      sourceCommit: "b".repeat(40),
+      expectedInstallationVersion: installed.installationVersion,
+      skillRequestIdentity: {
+        ...requestIdentity,
+        expectedInstallationVersion: installed.installationVersion,
+      },
+    });
+    expect(moved.installationVersion).toBe(installed.installationVersion + 1);
+    const expectedReplay = {
+      ...installed,
+      skillReceipt: { ...installed.skillReceipt, replayed: true },
+    };
+    const retries = await Promise.all([
+      installPortableSkill(client.db, input),
+      installPortableSkill(client.db, input),
+    ]);
+    expect(retries).toEqual([expectedReplay, expectedReplay]);
+    expect(
+      await replayPortableSkillInstall(client.db, {
+        ...f.agent,
+        operationId: input.skillOperationId!,
+        requestIdentity,
+      }),
+    ).toEqual(expectedReplay);
+    // Even if an adapter resolved the moving URL before retry, original request binding wins.
+    expect(
+      await installPortableSkill(client.db, { ...input, sourceCommit: "c".repeat(40) }),
+    ).toEqual(expectedReplay);
+    await expect(
+      replayPortableSkillInstall(client.db, {
+        ...f.agent,
+        operationId: input.skillOperationId!,
+        requestIdentity: { sourceUrl: "different" },
+      }),
+    ).rejects.toThrow("reused with different input");
+    await expect(
+      replayPortableSkillInstall(client.db, {
+        ...f.agent,
+        actor: { ...f.agent.actor, executionGeneration: 2 },
+        operationId: input.skillOperationId!,
+        requestIdentity,
+      }),
+    ).rejects.toThrow("exact live attempt");
+    await expect(
+      replayPortableSkillInstall(client.db, {
+        ...f.human,
+        operationId: input.skillOperationId!,
+        requestIdentity,
+      }),
+    ).rejects.toThrow();
+    const [current] = await shared!
+      .admin`select version,plugin_version_id from capability_plugin_installations where id=${installed.pluginInstallationId}`;
+    expect(current!.version).toBe(moved.installationVersion);
+    expect(current!.plugin_version_id).toBe(moved.pluginVersionId);
+    const [versions] = await shared!
+      .admin`select count(*)::integer as count from capability_plugin_versions where plugin_id=${installed.pluginId}`;
+    expect(versions!.count).toBe(2);
+    expect(installed.skillReceipt).not.toHaveProperty("portableInstall");
+  }, 30_000);
+
   test("no policy means Require approval; agent reads are fenced and descriptors omit bodies", async () => {
     if (!client) return;
     const f = await fixture(null);

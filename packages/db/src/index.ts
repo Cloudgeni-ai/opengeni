@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { applySkillLifecycle, listSkillRecords, skillFilesContentHash } from "./skills";
+import {
+  applySkillLifecycle,
+  assertSkillReadAttempt,
+  listSkillRecords,
+  skillFilesContentHash,
+} from "./skills";
 import { releaseOrphanedSkillHeads, type SkillSourceReleaseReceipt } from "./skill-source-release";
 import type { SkillActor, SkillWriteReceipt } from "@opengeni/contracts";
 import { isDeepStrictEqual } from "node:util";
@@ -5964,6 +5969,8 @@ export type InstallPortableSkillInput = {
   /** Required at runtime after 0423; omission fails before distribution writes. */
   skillActor?: SkillActor;
   skillOperationId?: string;
+  /** Host-canonical original request, including source/options/owner/explicit CAS, before resolution. */
+  skillRequestIdentity?: Record<string, unknown>;
   capabilityId: string;
   pluginKey: string;
   source: "library" | "github" | "skills_sh" | "pack";
@@ -8337,11 +8344,67 @@ function portableSkillManifestIdentity(manifest: Record<string, unknown>): strin
   return stableJson(identity);
 }
 
+/** Replay before remote resolution; callers must provide the same canonical original request used at install. */
+export async function replayPortableSkillInstall(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    actor: SkillActor;
+    operationId: string;
+    requestIdentity: Record<string, unknown>;
+  },
+): Promise<InstalledPortableSkill | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    if (input.actor.kind === "agent")
+      await assertSkillReadAttempt(tx, { ...input, actor: input.actor });
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`skill-operation:${input.workspaceId}:${input.operationId}`},0))`,
+    );
+    const [prior] = await tx
+      .select()
+      .from(schema.skillWriteReceipts)
+      .where(
+        and(
+          eq(schema.skillWriteReceipts.workspaceId, input.workspaceId),
+          eq(schema.skillWriteReceipts.operationId, input.operationId),
+        ),
+      )
+      .limit(1);
+    if (!prior) return null;
+    const envelope = (
+      prior.receipt as unknown as {
+        portableInstall?: {
+          requestHash: string;
+          result: Omit<InstalledPortableSkill, "skillReceipt">;
+        };
+      }
+    ).portableInstall;
+    if (
+      prior.accountId !== input.accountId ||
+      !envelope ||
+      envelope.requestHash !==
+        createHash("sha256").update(stableJson(input.requestIdentity)).digest("hex")
+    ) {
+      throw new Error(
+        "Skill operation key reused with different input or without a portable install receipt",
+      );
+    }
+    const skillReceipt = await applySkillLifecycle(tx, input, {
+      operation: "install",
+      operationId: input.operationId,
+      skillFacetId: envelope.result.facetId,
+      reason: "Install portable Skill through the unified registry head",
+      portableInstall: envelope,
+    });
+    return { ...envelope.result, skillReceipt };
+  });
+}
+
 /**
  * Install one immutable, already-validated Skill through the authoritative
- * Plugin/Skill-Facet ownership model. Repeating the same exact source is
- * idempotent; changing a commit's content fails instead of silently rewriting
- * immutable history.
+ * Plugin/Skill-Facet ownership model. Repeating an operation replays its original
+ * result; a new operation cannot rewrite an immutable commit's content.
  */
 export async function installPortableSkill(
   db: Database,
@@ -8351,6 +8414,13 @@ export async function installPortableSkill(
     throw new Error("Portable Skill installation requires a truthful unified Skill actor");
   const skillActor = input.skillActor;
   const skillOperationId = input.skillOperationId ?? randomUUID();
+  const {
+    skillActor: _actor,
+    skillOperationId: _operation,
+    skillRequestIdentity: originalIdentity,
+    ...resolvedIdentity
+  } = input;
+  const requestIdentity = originalIdentity ?? resolvedIdentity;
   return await withRlsContext(
     db,
     {
@@ -8359,6 +8429,14 @@ export async function installPortableSkill(
     },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const replay = await replayPortableSkillInstall(tx as unknown as Database, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          actor: skillActor,
+          operationId: skillOperationId,
+          requestIdentity,
+        });
+        if (replay) return replay;
         const now = new Date();
         const version = input.version ?? input.sourceCommit;
         await lockCapabilityComponentIdentity(
@@ -8670,22 +8748,7 @@ export async function installPortableSkill(
           })
           .onConflictDoNothing();
 
-        const skillReceipt = await applySkillLifecycle(
-          tx as unknown as Database,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            actor: skillActor,
-          },
-          {
-            operation: "install",
-            operationId: skillOperationId,
-            skillFacetId: facet.id,
-            reason: "Install portable Skill through the unified registry head",
-          },
-        );
-        return {
-          skillReceipt,
+        const result = {
           created: !existingOwner,
           capabilityId: input.capabilityId,
           pluginId: plugin.id,
@@ -8700,6 +8763,28 @@ export async function installPortableSkill(
           sourceCommit: input.sourceCommit,
           contentSha256: input.contentSha256,
           name: input.name,
+        };
+        const skillReceipt = await applySkillLifecycle(
+          tx as unknown as Database,
+          {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: skillActor,
+          },
+          {
+            operation: "install",
+            operationId: skillOperationId,
+            skillFacetId: facet.id,
+            reason: "Install portable Skill through the unified registry head",
+            portableInstall: {
+              requestHash: createHash("sha256").update(stableJson(requestIdentity)).digest("hex"),
+              result,
+            },
+          },
+        );
+        return {
+          skillReceipt,
+          ...result,
         };
       }),
   );

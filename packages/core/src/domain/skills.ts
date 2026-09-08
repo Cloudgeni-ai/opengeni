@@ -11,6 +11,7 @@ import {
   type Database,
   type SkillReadContext,
 } from "@opengeni/db";
+export { replayPortableSkillInstall } from "@opengeni/db";
 
 /** Canonical text-only folder; rejects invalid Unicode before PostgreSQL conversion. */
 export function validateSkillFiles(files: readonly SkillFile[]): SkillFile[] {

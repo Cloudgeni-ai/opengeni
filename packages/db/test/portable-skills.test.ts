@@ -151,7 +151,6 @@ describe("portable Skill persistence", () => {
     expect(installed.created).toBe(true);
     expect(replay).toEqual({
       ...installed,
-      created: false,
       skillReceipt: { ...installed.skillReceipt, replayed: true },
     });
     expect(await listInstalledPortableSkills(client.db, first.workspaceId)).toEqual([
@@ -226,11 +225,17 @@ describe("portable Skill persistence", () => {
 
     expect(await installPortableSkill(client.db, input)).toEqual({
       ...installed,
-      created: false,
       skillReceipt: { ...installed.skillReceipt, replayed: true },
     });
     await expect(
       installPortableSkill(client.db, { ...input, totalBytes: input.totalBytes + 1 }),
+    ).rejects.toThrow("reused with different input");
+    await expect(
+      installPortableSkill(client.db, {
+        ...input,
+        skillOperationId: crypto.randomUUID(),
+        totalBytes: input.totalBytes + 1,
+      }),
     ).rejects.toThrow("conflicts with immutable stored content");
     await deactivateInstalledSkill(installed);
     await uninstallPortableSkill(client.db, {
