@@ -135,20 +135,32 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      # Existing GHCR consumers keep their tag names, but package permissions
-      # must not gate the verified public ACR image. Never rebuild for a mirror.
+  # Isolate mirror failures and timeouts from the authoritative publication job.
+  # Existing GHCR consumers keep their tag names. Never rebuild for a mirror.
+  ghcr-mirror:
+    name: Mirror verified desktop image (best effort)
+    needs: desktop-image
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
       - name: Mirror desktop image to GHCR (best effort)
-        continue-on-error: true
+        timeout-minutes: 5
         env:
-          DIGEST: ${{ steps.desktop_image.outputs.digest }}
+          DIGEST: ${{ needs.desktop-image.outputs.digest }}
           SOURCE_SHA: ${{ github.sha }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          source="opengenipublicneuacr.azurecr.io/opengeni-desktop@$DIGEST"
+          docker pull "$source"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GHCR_USERNAME" --password-stdin
           trap 'docker logout ghcr.io' EXIT
-          source="opengenipublicneuacr.azurecr.io/opengeni-desktop@$DIGEST"
           for tag in "sha-$SOURCE_SHA" "canary-sha-$SOURCE_SHA"; do
             target="ghcr.io/cloudgeni-ai/opengeni-desktop:$tag"
             docker tag "$source" "$target"

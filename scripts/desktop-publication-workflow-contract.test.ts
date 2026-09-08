@@ -98,16 +98,19 @@ docker() {
 });
 
 test("legacy GHCR tags are only a non-gating mirror after ACR verification", () => {
-  const mirror = steps.find(
+  const mirrorJob = workflow.jobs["ghcr-mirror"];
+  expect(mirrorJob.needs).toBe("desktop-image");
+  expect(mirrorJob["continue-on-error"]).toBe(true);
+  expect(mirrorJob["timeout-minutes"]).toBe(10);
+  expect(mirrorJob.outputs).toBeUndefined();
+  expect(mirrorJob.if).toBeUndefined(); // default success(): never mirror failed proof
+  const mirror = mirrorJob.steps.find(
     (step: any) => step.name === "Mirror desktop image to GHCR (best effort)",
   );
-  expect(mirror["continue-on-error"]).toBe(true);
-  expect(mirror.if).toBeUndefined(); // default success(): never mirror failed proof
-  expect(steps.indexOf(mirror)).toBeGreaterThan(
-    steps.findIndex(
-      (step: any) => step.name === "Verify anonymous desktop publication and installed runtime",
-    ),
-  );
+  expect(mirror["timeout-minutes"]).toBe(5);
+  expect(mirror.env.DIGEST).toBe("${{ needs.desktop-image.outputs.digest }}");
+  expect(mirror.run).toContain('docker pull "$source"');
+  expect(steps.some((step: any) => step.name === mirror.name)).toBe(false);
   expect(mirror.run).toContain('"sha-$SOURCE_SHA" "canary-sha-$SOURCE_SHA"');
   expect(mirror.run).toContain("opengenipublicneuacr.azurecr.io/opengeni-desktop@$DIGEST");
   expect(mirror.run).not.toContain("docker build");

@@ -1541,7 +1541,8 @@ The publisher uses the existing `public-release` OIDC identity, verifies the tag
 immutable digest and source label after registry logout, pulls anonymously, and
 runs the installed artifact runtime doctor while rejecting `.unavailable`.
 The workflow retains publication evidence; its legacy GHCR `sha-<source-sha>` and
-`canary-sha-<source-sha>` tags are best-effort mirrors, not publication gates.
+`canary-sha-<source-sha>` tags are best-effort mirrors in a separate bounded,
+error-tolerant job, not publication gates.
 Dispatch builds the selected ref's exact SHA; dispatch merged main deliberately.
 Publication does not update deployment pins or rotate existing sandboxes. OpenGeni defaults to
 a public, digest-pinned desktop image in both runtime config and Helm. Override

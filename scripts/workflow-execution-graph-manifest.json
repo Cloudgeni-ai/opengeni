@@ -38,7 +38,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "1a660c6a4ee3ec8aecbdac742d392e3907e462b45726f1a643e59d254f928b65"
+      "sha256": "17902076236fd5cccd0d82163ecff8a126e18067e6c1784d5fae5a3e20b48764"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -800,12 +800,6 @@
       "job": "publish",
       "step": "Verify exact source",
       "sha256": "e10d2a67ae143c5223960cad1b2433bdeba7046fecd1a05ae1519a8a880e5022"
-    },
-    {
-      "workflow": ".github/workflows/publish-desktop-image.yml",
-      "job": "desktop-image",
-      "step": "Mirror desktop image to GHCR (best effort)",
-      "sha256": "9d002c330ca957ed9fa383e396f92bdcab7349e5ad248e7fed9dcd57241e975a"
     },
     {
       "workflow": ".github/workflows/publish-desktop-image.yml",
