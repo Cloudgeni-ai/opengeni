@@ -666,13 +666,39 @@ describe("workspace-capture — pre-service skip gates", () => {
   });
 
   test("flag off → returns without touching storage or db", async () => {
+    let opened = false;
     await expect(
       captureWorkspaceRevision({
         ...baseInput(),
         settings: testSettings({ workspaceCaptureEnabled: false }),
         objectStorage: forbiddenStorage(),
+        openReadSession: async () => {
+          opened = true;
+          return await new Promise<ChannelASession>(() => {});
+        },
       }),
     ).resolves.toBeUndefined();
+    expect(opened).toBe(false);
+  });
+
+  test("capture failure keeps its stage visible without exposing provider errors", async () => {
+    const warnings: string[] = [];
+    await captureWorkspaceRevision({
+      ...baseInput(),
+      settings: testSettings({ workspaceCaptureEnabled: true }),
+      objectStorage: forbiddenStorage(),
+      openReadSession: async () => {
+        throw new Error("provider unavailable: secret-token-and-private-path");
+      },
+      observability: {
+        warn: (message: string) => warnings.push(message),
+        incrementCounter: () => {},
+        incrementGauge: () => {},
+      } as unknown as typeof observability,
+    });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("stage=open_read_session reason=operation_failed");
+    expect(warnings[0]).not.toContain("secret-token");
   });
 
   test("storage null → returns without touching db", async () => {

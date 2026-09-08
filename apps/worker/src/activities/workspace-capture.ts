@@ -434,13 +434,25 @@ export async function captureWorkspaceRevision(
     }
     // The one and only place a capture failure surfaces — as a log line, never
     // an exception past this boundary (the turn already completed).
-    observability.warn("workspace capture failed — turn outcome unaffected", {
-      "opengeni.session_id": input.sessionId,
-      "opengeni.turn_id": input.turnId ?? "",
-      "error.message": error instanceof Error ? error.message : String(error),
-      "workspace_capture.duration_ms": Date.now() - startedAt,
-      "workspace_capture.stage": stage.value,
-    });
+    // Public telemetry intentionally strips arbitrary error text and unknown
+    // attributes. Keep the bounded stage/reason in the message so operators can
+    // distinguish a deadline from provider loss without logging file contents,
+    // credentials, paths, or upstream exception messages.
+    const reason = controller.signal.aborted
+      ? "deadline_exceeded"
+      : isBoxExitingError(error)
+        ? "sandbox_exited"
+        : "operation_failed";
+    observability.warn(
+      `workspace capture failed — stage=${stage.value} reason=${reason} durationMs=${Date.now() - startedAt}; review cache not updated`,
+      {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.turn_id": input.turnId ?? "",
+        "error.message": error instanceof Error ? error.message : String(error),
+        "workspace_capture.duration_ms": Date.now() - startedAt,
+        "workspace_capture.stage": stage.value,
+      },
+    );
     observability.incrementCounter({
       name: "opengeni_workspace_capture_total",
       labels: { result: "failed" },

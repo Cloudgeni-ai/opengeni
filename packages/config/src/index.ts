@@ -948,8 +948,10 @@ const SettingsSchema = z.object({
   // persists a capture revision (blobs in @opengeni/storage) so the workbench
   // paints cold/offline sessions with zero machine round-trips. Best-effort and
   // fully behind this flag: off ⇒ capture is skipped and reads fall back to the
-  // live/wake path (status-quo behavior). Default on; explicit per environment.
-  workspaceCaptureEnabled: EnvBoolean.default(true),
+  // live/wake path. Default off: this synchronous cache runs after logical turn
+  // completion and can hold the next turn behind its 120s deadline. Recovery
+  // snapshots and the idle shutdown timer are independent of this review cache.
+  workspaceCaptureEnabled: EnvBoolean.default(false),
   recordingFramerate: z.coerce.number().int().positive().default(15),
   recordingMaxSeconds: z.coerce.number().int().positive().default(600),
   recordingMaxBytes: z.coerce.number().int().positive().default(268_435_456), // 256 MB

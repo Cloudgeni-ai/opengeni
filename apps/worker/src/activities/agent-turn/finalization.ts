@@ -488,6 +488,7 @@ export async function finalizeTurnAttempt(deps: TurnFinalizationDeps): Promise<v
       deadlineRotationRequested: sandboxState.deadlineRotationRequested,
     });
     if (
+      settings.workspaceCaptureEnabled &&
       runTurnEndPersistence &&
       attempt.turnId &&
       sandboxState.resolvedSandbox &&
