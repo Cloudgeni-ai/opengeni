@@ -181,6 +181,7 @@ import {
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
+import { getToolSearchExecution, getToolSearchProviderCallId } from "@openai/agents-core/utils";
 import {
   Capabilities,
   Manifest,
@@ -309,6 +310,7 @@ import {
   composeCallModelInputFilters,
   contextRobustnessFilterForSettings,
   incrementalModelInputProjectionFilter,
+  stripProviderItemId,
 } from "./model-input";
 import {
   recordModelPreparationManifestInventory,
@@ -1010,8 +1012,9 @@ export async function summarizeForCompaction(
     input: input.map(detachCompactionResponseItemIdentity) as AgentInputItem[],
     modelSettings: {
       maxTokens,
-      // Historical tool records remain input, but a checkpoint must be text.
-      toolChoice: "none",
+      // Azure can select a historical tool despite empty schemas. Keep this
+      // verified policy off subscription/gateway transports with other contracts.
+      ...(provider.wireProfile === "azure-openai" ? { toolChoice: "none" as const } : {}),
       // Azure rejects store:false; the Codex subscription transport enforces
       // it independently. The OpenAI platform path remains explicitly storeless.
       ...(settings.openaiProvider === "azure" ? {} : { store: false }),
@@ -1055,14 +1058,13 @@ export async function summarizeForCompaction(
  */
 const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
   "message",
+  "reasoning",
   "function_call",
   "function_call_result",
-  "function_call_output",
   "shell_call",
   "shell_call_output",
   "computer_call",
   "computer_call_result",
-  "computer_call_output",
   "apply_patch_call",
   "apply_patch_call_output",
 ]);
@@ -1070,27 +1072,21 @@ const DETACHABLE_COMPACTION_ITEM_TYPES = new Set([
 function detachCompactionResponseItemIdentity(
   item: Record<string, unknown>,
 ): Record<string, unknown> {
-  const providerData = item.providerData;
-  const provider = providerData as Record<string, unknown> | undefined;
   const clientToolSearch =
     (item.type === "tool_search_call" || item.type === "tool_search_output") &&
-    provider?.execution === "client" &&
-    typeof (provider.call_id ?? provider.callId) === "string";
-  if (!DETACHABLE_COMPACTION_ITEM_TYPES.has(String(item.type)) && !clientToolSearch) return item;
-  const hasProviderId =
-    providerData !== null &&
-    typeof providerData === "object" &&
-    !Array.isArray(providerData) &&
-    Object.hasOwn(providerData, "id");
-  if (!Object.hasOwn(item, "id") && !hasProviderId) return item;
-  const projected = { ...item };
-  delete projected.id;
-  if (hasProviderId) {
-    const projectedProviderData = { ...(providerData as Record<string, unknown>) };
-    delete projectedProviderData.id;
-    projected.providerData = projectedProviderData;
-  }
-  return projected;
+    getToolSearchExecution(item) !== "server" &&
+    Boolean(getToolSearchProviderCallId(item));
+  const providerData = item.providerData as Record<string, unknown> | undefined;
+  const webSearch =
+    item.type === "hosted_tool_call" &&
+    (providerData?.type === "web_search_call" || providerData?.type === "web_search");
+  // Unlike web search, hosted file search requires its id on Azure input.
+  // Approval/program references also remain intact. A universal strip is unsafe.
+  if (!DETACHABLE_COMPACTION_ITEM_TYPES.has(String(item.type)) && !clientToolSearch && !webSearch)
+    return item;
+  // The SDK reserves providerData.id for these types; only the top-level id is
+  // emitted. Share the normal inference primitive without changing its policy.
+  return stripProviderItemId(item as AgentInputItem) as Record<string, unknown>;
 }
 
 /**

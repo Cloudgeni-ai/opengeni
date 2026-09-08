@@ -17,6 +17,8 @@ import { acquireSharedTestDatabase } from "@opengeni/testing";
 import { maybeCompactContext } from "../../apps/worker/src/activities/context-compaction";
 import type { Settings } from "@opengeni/config";
 
+import { CompactionVerificationError } from "./compaction-verification-errors";
+
 type Item = Record<string, unknown>;
 
 /** Exercise the real fenced checkpoint on disposable PostgreSQL, never customer data. */
@@ -26,7 +28,7 @@ export async function compactDurableFixture(
   summarize: (settings: Settings, input: Item[]) => Promise<string>,
 ) {
   const shared = await acquireSharedTestDatabase("portable-compaction-live");
-  if (!shared) throw new Error("Disposable PostgreSQL unavailable");
+  if (!shared) throw new CompactionVerificationError("Disposable PostgreSQL unavailable");
   const client = createDb(shared.appUrl);
   try {
     const suffix = crypto.randomUUID();
@@ -77,7 +79,8 @@ export async function compactDurableFixture(
       dispatchId: `dispatch-${crypto.randomUUID()}`,
       trigger: { kind: "next" },
     });
-    if (claim.action !== "claimed") throw new Error("Synthetic compaction claim failed");
+    if (claim.action !== "claimed")
+      throw new CompactionVerificationError("Synthetic compaction claim failed");
     const outcome = await maybeCompactContext(
       client.db,
       {
@@ -97,8 +100,22 @@ export async function compactDurableFixture(
       summarize,
       { force: true, trigger: "operator", clearRequestedCompaction: true },
     );
-    if (!outcome.compacted)
-      throw new Error("Durable synthetic compaction did not install a checkpoint");
+    if (!outcome.compacted) {
+      const knownReasons = [
+        "below_threshold",
+        "no_history",
+        "summarization_failed",
+        "empty_summary",
+        "replacement_not_smaller",
+        "stale_attempt",
+        "interrupted",
+        "no_replacement_history",
+      ];
+      const reason = knownReasons.includes(outcome.reason) ? outcome.reason : "unrecognized_reason";
+      throw new CompactionVerificationError(
+        `Durable synthetic compaction did not install a checkpoint (${reason}).`,
+      );
+    }
     const rows = await withWorkspaceRls(client.db, workspaceId, (db) =>
       db
         .select()
@@ -108,7 +125,7 @@ export async function compactDurableFixture(
     );
     const inactive = rows.filter((row) => !row.active).map((row) => row.item);
     if (!isDeepStrictEqual(inactive, history))
-      throw new Error("Archived canonical history changed");
+      throw new CompactionVerificationError("Archived canonical history changed");
     const replacement = (
       await getActiveSessionHistoryItems(client.db, workspaceId, session.id)
     ).map((row) => row.item as Item);
@@ -117,9 +134,9 @@ export async function compactDurableFixture(
       persisted?.lastInputTokens !== null ||
       (await isSessionCompactionRequested(client.db, workspaceId, session.id))
     )
-      throw new Error("Checkpoint token/request settlement failed");
+      throw new CompactionVerificationError("Checkpoint token/request settlement failed");
     if (!outcome.events.some((event) => event.type === "session.context.compacted"))
-      throw new Error("Durable checkpoint event missing");
+      throw new CompactionVerificationError("Durable checkpoint event missing");
     return {
       replacement,
       proof: {
@@ -136,7 +153,10 @@ export async function compactDurableFixture(
       },
     };
   } finally {
-    await client.close();
-    await shared.release();
+    try {
+      await client.close();
+    } finally {
+      await shared.release();
+    }
   }
 }

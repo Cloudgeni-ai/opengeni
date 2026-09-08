@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { getSettings } from "@opengeni/config";
-import { compactionHistoryFixture as longHistory } from "../../../scripts/fixtures/compaction-history";
+import { configuredProviders } from "@opengeni/config";
+import { testSettings } from "@opengeni/testing";
+import { compactionHistoryFixture as longHistory } from "../../../scripts/operator/compaction-history";
 import {
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
@@ -14,7 +15,7 @@ import {
 
 type Item = Record<string, unknown>;
 type Options = NonNullable<Parameters<typeof summarizeForCompaction>[2]>;
-const settings = { ...getSettings(), openaiProvider: "azure" as const, openaiModel: "gpt-5.6-sol" };
+const settings = testSettings({ openaiProvider: "azure", openaiModel: "gpt-5.6-sol" });
 const missingReasoning =
   "Item 'msg_fixture' of type 'message' was provided without its required 'reasoning' item: 'rs_fixture'.";
 
@@ -152,7 +153,83 @@ describe("portable compaction provider identity", () => {
       ),
     });
     expect(summary).toBe("Verified checkpoint.");
+    await expect(
+      summarizeForCompaction(settings, longHistory(), {
+        client: provider(async () => ({
+          output: [{ type: "function_call", call_id: "again", name: "inspect", arguments: "{}" }],
+        })),
+      }),
+    ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
   });
+
+  test.each([
+    { execution: "client", call_id: "search_fixture" },
+    { execution: "client", callId: "search_fixture" },
+    { providerData: { execution: "client", call_id: "search_fixture" } },
+    { providerData: { call_id: "search_fixture" } },
+    { providerData: { callId: "search_fixture" } },
+  ])("detaches every correlated client tool-search shape: %j", async (shape) => {
+    const raw: Item[] = [
+      { type: "tool_search_call", id: "tsc_fixture", arguments: { query: "inspect" }, ...shape },
+      { type: "tool_search_output", id: "tso_fixture", tools: [], ...shape },
+    ];
+    const before = structuredClone(raw);
+    await summarizeForCompaction(settings, raw, {
+      client: provider(async (request) => {
+        const input = request.input as Item[];
+        for (const item of input) {
+          expect(item.id).toBeUndefined();
+          expect(item.call_id).toBe("search_fixture");
+        }
+        return response("Verified search result.");
+      }),
+    });
+    expect(raw).toEqual(before);
+  });
+
+  test.each([
+    "codex-subscription",
+    "xai-subscription",
+    "vercel-gateway-managed",
+    "api-key",
+  ] as const)(
+    "does not add Azure tool selection policy to %s; tool-only summaries still fail closed",
+    async (kind) => {
+      const other = {
+        ...configuredProviders(settings)[0]!,
+        kind,
+        builtin: false,
+        wireProfile: "openai" as const,
+      };
+      await expect(
+        summarizeForCompaction(settings, [], {
+          provider: other,
+          client: provider(async (request) => {
+            expect(request.tool_choice).toBeUndefined();
+            const result = {
+              ...response(""),
+              status: "completed",
+              output: [
+                {
+                  type: "function_call",
+                  id: "fc_again",
+                  call_id: "again",
+                  name: "inspect",
+                  arguments: "{}",
+                  status: "completed",
+                },
+              ],
+            };
+            if (request.stream)
+              return (async function* () {
+                yield { type: "response.completed", response: result };
+              })();
+            return result;
+          }),
+        }),
+      ).rejects.toBeInstanceOf(EmptyCompactionSummaryError);
+    },
+  );
 
   test("detaches shell and computer identities without losing actions, results or safety checks", async () => {
     const safetyChecks = [{ id: "check_fixture", code: "fixture", message: "Synthetic check" }];
@@ -255,8 +332,19 @@ describe("portable compaction provider identity", () => {
     expect(raw).toEqual(before);
   });
 
-  test("preserves hosted required ids, approval links, program callers and plaintext reasoning", async () => {
+  test("detaches web-search and reasoning ids but preserves required hosted ids and semantic links", async () => {
     const raw: Item[] = [
+      {
+        type: "hosted_tool_call",
+        id: "ws_fixture",
+        name: "web_search_call",
+        status: "completed",
+        providerData: {
+          type: "web_search_call",
+          id: "ws_fixture",
+          action: { type: "search", query: "fixture" },
+        },
+      },
       {
         type: "reasoning",
         id: "rs_plain",
@@ -325,7 +413,20 @@ describe("portable compaction provider identity", () => {
         return response("Verified.");
       }),
     });
-    expect(wire).toContainEqual(expect.objectContaining({ type: "reasoning", id: "rs_plain" }));
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "reasoning",
+        id: undefined,
+        summary: [{ type: "summary_text", text: "Verified context." }],
+      }),
+    );
+    expect(wire).toContainEqual(
+      expect.objectContaining({
+        type: "web_search_call",
+        id: undefined,
+        action: { type: "search", query: "fixture" },
+      }),
+    );
     expect(wire).toContainEqual(
       expect.objectContaining({ type: "file_search_call", id: "fs_fixture" }),
     );

@@ -664,7 +664,12 @@ Temporal retry. When an OpenAI/Azure context overflow is classified,
 Codex-local plaintext for non-Codex and portable-locked Codex sessions, or
 Codex remote compaction v2 for `remote_v2` Codex sessions. On the portable path the summarizer
 receives a bounded, protocol-valid temporary copy of structured active history
-plus the checkpoint prompt. Aggregate tool outputs are replaced oldest-first in
+plus the checkpoint prompt. Portable Responses also detach optional stored item
+ids from that copy while preserving required hosted/approval/program identities
+and tool correlation. Only the Azure wire profile forces `tool_choice: "none"`;
+other transports retain their existing behavior, including rejection of tool-only
+summaries. See [context compaction](context-compaction.md#portable-responses-identity-regression).
+Aggregate tool outputs are replaced oldest-first in
 that copy; whole oldest user-delimited units are removed only if necessary. A
 provider overflow gets one smaller refit, so the path performs at most two
 provider calls rather than one failing request per history item. Other failures

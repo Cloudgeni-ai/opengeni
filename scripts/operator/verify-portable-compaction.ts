@@ -1,55 +1,79 @@
 /** Live synthetic Azure checkpoint canary; --durable uses disposable PostgreSQL. */
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { getSettings } from "@opengeni/config";
+import { getSettings, type Settings } from "@opengeni/config";
+import { buildOpenAIClientFromSettings } from "../../packages/runtime/src/model-provider-client";
+import {
+  CompactionVerificationError,
+  verificationFailureDiagnostics,
+} from "./compaction-verification-errors";
 import {
   buildCompactionReplacementHistory,
-  compactionProviderFailureDiagnostics,
   estimateTokens,
   prepareCompactionPromptInput,
   sanitizeHistoryItemsForModel,
   summarizeForCompaction,
-} from "../packages/runtime/src/index";
-import { compactionHistoryFixture } from "./fixtures/compaction-history";
+} from "../../packages/runtime/src/index";
+import { compactionHistoryFixture } from "./compaction-history";
 
 type Item = Record<string, unknown>;
-type ProviderResponse = { output: Item[]; usage?: Item; id?: string };
-
-async function main() {
-  if (!process.argv.includes("--live"))
-    throw new Error("Pass --live to run synthetic provider requests");
-  const settings = getSettings();
+type VerificationRequest = Omit<
+  Parameters<ReturnType<typeof buildOpenAIClientFromSettings>["responses"]["create"]>[0],
+  "model" | "stream"
+>;
+export function createVerificationClient(settings: Settings) {
   if (
     settings.openaiProvider !== "azure" ||
-    !settings.azureOpenaiBaseUrl ||
-    !settings.azureOpenaiApiKey
+    !(
+      settings.azureOpenaiBaseUrl ||
+      (settings.azureOpenaiEndpoint && settings.azureOpenaiDeployment)
+    ) ||
+    !(settings.azureOpenaiApiKey || settings.azureOpenaiAdToken)
+  )
+    throw new CompactionVerificationError(
+      "Configure Azure with a base URL or endpoint/deployment, an API key or AD token, and a model.",
+    );
+  return buildOpenAIClientFromSettings(settings);
+}
+
+export function assertOpaqueKickoff(output: Item[]): void {
+  if (
+    !output.some(
+      (item) =>
+        item.type === "reasoning" &&
+        typeof item.encrypted_content === "string" &&
+        item.encrypted_content.length > 0,
+    ) ||
+    !output.some((item) => item.type === "message")
   ) {
-    throw new Error(
-      "Set OPENGENI_OPENAI_PROVIDER=azure and the explicit Azure base URL, API key and model",
+    throw new CompactionVerificationError(
+      "Kickoff must contain opaque reasoning and a dependent assistant message.",
     );
   }
-  const base = settings.azureOpenaiBaseUrl.replace(/\/+$/, "");
-  const apiKey = settings.azureOpenaiApiKey;
+}
+
+export async function main(args: string[] = process.argv.slice(2)) {
+  if (!args.includes("--live"))
+    throw new CompactionVerificationError("Pass --live to run synthetic provider requests.");
+  const settings = getSettings();
+  const client = createVerificationClient(settings);
   const receipts: Item[] = [];
-  async function request(body: Item): Promise<ProviderResponse> {
-    const response = await fetch(`${base}/responses`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "api-key": apiKey },
-      body: JSON.stringify({
-        model: settings.openaiModel,
-        reasoning: { effort: "medium" },
-        ...body,
-      }),
-      signal: AbortSignal.timeout(180_000),
-    });
+  async function request(body: VerificationRequest) {
+    const { data, response } = await client.responses
+      .create(
+        {
+          model: settings.openaiModel,
+          reasoning: { effort: "medium" },
+          ...body,
+          stream: false,
+        },
+        { timeout: 180_000 },
+      )
+      .withResponse();
     receipts.push({ status: response.status, requestId: response.headers.get("x-request-id") });
-    if (!response.ok)
-      throw new Error(
-        `Synthetic provider request failed (HTTP ${response.status}); request id recorded`,
-      );
-    const result = (await response.json()) as ProviderResponse;
-    if (!Array.isArray(result.output)) throw new Error("Provider did not return structured output");
-    return result;
+    if (data.status !== "completed")
+      throw new CompactionVerificationError("Synthetic provider leg did not complete.");
+    return data;
   }
   const kickoff = await request({
     input:
@@ -57,6 +81,7 @@ async function main() {
     include: ["reasoning.encrypted_content"],
     max_output_tokens: 8192,
   });
+  assertOpaqueKickoff(kickoff.output as unknown as Item[]);
   const initialOutput: Item[] = kickoff.output.map((item) => {
     if (item.type === "reasoning") {
       const summary = item.summary as Array<{ text: string }>;
@@ -68,16 +93,8 @@ async function main() {
       };
     }
     if (item.type === "message") return { ...item, providerData: { id: item.id } };
-    throw new Error("Unexpected kickoff output type");
+    throw new CompactionVerificationError("Unexpected kickoff output type");
   });
-  if (
-    !initialOutput.some((item) => item.type === "reasoning") ||
-    !initialOutput.some((item) => item.type === "message")
-  ) {
-    throw new Error(
-      `Kickoff must produce reasoning/message dependency: ${JSON.stringify({ types: kickoff.output.map((item) => item.type), usage: kickoff.usage })}`,
-    );
-  }
   const history: Item[] = [
     {
       type: "message",
@@ -103,8 +120,8 @@ async function main() {
     });
   let durableProof: unknown;
   let replacement: Item[];
-  if (process.argv.includes("--durable")) {
-    const { compactDurableFixture } = await import("./fixtures/durable-compaction");
+  if (args.includes("--durable")) {
+    const { compactDurableFixture } = await import("./compaction-durable");
     const result = await compactDurableFixture(settings, history, summarize);
     replacement = result.replacement;
     durableProof = result.proof;
@@ -114,16 +131,19 @@ async function main() {
       await summarize(settings, prepared.input),
     );
   }
-  if (JSON.stringify(history) !== original) throw new Error("Canonical history mutated");
+  if (JSON.stringify(history) !== original)
+    throw new CompactionVerificationError("Canonical history mutated");
   const estimatedAfter = estimateTokens(replacement);
   if (estimatedBefore <= 244_800 || estimatedAfter >= estimatedBefore)
-    throw new Error("Long-history/shrink assertion failed");
+    throw new CompactionVerificationError("Long-history/shrink assertion failed");
   // Replacement consists of retained user messages and the summary message.
   // Internal summary markers are durable metadata, not Responses wire fields.
   const input = sanitizeHistoryItemsForModel(replacement).map((item) => {
-    if (item.type !== "message" || item.role !== "user")
-      throw new Error("Unexpected replacement shape; use the SDK converter for new types");
-    return { role: "user", content: item.content };
+    if (item.type !== "message" || item.role !== "user" || typeof item.content !== "string")
+      throw new CompactionVerificationError(
+        "Unexpected replacement shape; use the SDK converter for new types",
+      );
+    return { role: "user" as const, content: item.content };
   });
   const continued = await request({
     input: [
@@ -158,19 +178,27 @@ async function main() {
   const call = continued.output.find(
     (item) => item.type === "function_call" && item.name === "verify_checkpoint",
   );
-  if (!call || typeof call.arguments !== "string") throw new Error("No continuation tool call");
-  const args = JSON.parse(call.arguments) as Record<string, unknown>;
+  if (!call || call.type !== "function_call" || typeof call.arguments !== "string")
+    throw new CompactionVerificationError("No continuation tool call");
+  const facts = JSON.parse(call.arguments) as Record<string, unknown>;
   if (
-    args.checkpoint !== "amber-orchid-42" ||
-    args.release !== "blue" ||
-    args.patchStatus !== "completed"
+    facts.checkpoint !== "amber-orchid-42" ||
+    facts.release !== "blue" ||
+    facts.patchStatus !== "completed"
   )
-    throw new Error(`Synthetic compacted facts mismatch: ${JSON.stringify(args)}`);
+    throw new CompactionVerificationError(
+      "Synthetic compacted checkpoint, release or patch facts mismatch.",
+    );
   const receipt = "verified-amber-orchid-42";
+  const continuationOutput = continued.output.map((item) => {
+    if (item.type === "message" || item.type === "reasoning" || item.type === "function_call")
+      return item;
+    throw new CompactionVerificationError("Unexpected continuation output type.");
+  });
   const finished = await request({
     input: [
       ...input,
-      ...continued.output,
+      ...continuationOutput,
       { type: "function_call_output", call_id: call.call_id, output: receipt },
       { role: "user", content: "Reply with the exact verification receipt from the tool result." },
     ],
@@ -182,7 +210,7 @@ async function main() {
     .map((part) => part.text ?? "")
     .join("");
   if (!text.includes(receipt))
-    throw new Error("Continuation did not consume the paired tool result");
+    throw new CompactionVerificationError("Continuation did not consume the paired tool result");
   const manifest = {
     model: settings.openaiModel,
     historyItems: history.length,
@@ -214,9 +242,7 @@ if (import.meta.main) {
     await main();
   } catch (error) {
     // Never let the CLI print SDK causes containing raw provider messages.
-    console.error(
-      JSON.stringify({ verificationFailed: true, ...compactionProviderFailureDiagnostics(error) }),
-    );
+    console.error(JSON.stringify(verificationFailureDiagnostics(error)));
     process.exitCode = 1;
   }
 }

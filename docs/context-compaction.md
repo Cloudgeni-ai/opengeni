@@ -332,17 +332,25 @@ the request as described above.
 ### Portable Responses identity regression
 
 Portable Responses checkpoints detach optional provider response-item `id`
-fields from messages, function, shell, computer and patch calls/results, and
-client-executed tool search. Opaque reasoning is omitted during checkpoint
-preparation; retaining a dependent message's stored response id can otherwise
-make the provider require that omitted reasoning even with complete inline
-content. The temporary projection removes both the SDK item id and its
-`providerData.id` override. It preserves call/result correlation, payload ids,
-ordering, plaintext reasoning, and required hosted-tool/approval/program ids.
-Normal inference and remote-v2 compaction do not use this projection.
-Responses checkpoints also set `tool_choice: "none"`: empty tool schemas alone
-do not prevent a provider from returning a historical tool call instead of
-summary text. Such a response still fails the existing empty-summary guard.
+fields from messages, plaintext reasoning, function, shell, computer and patch
+calls/results, client-executed tool search, and hosted web search. Opaque
+reasoning is omitted during checkpoint preparation; retaining a dependent
+item's stored response id can otherwise make the provider require that omitted
+reasoning even with complete inline content. The request-local projection uses
+the normal inference strip primitive only for those types. The SDK reserves
+`providerData.id` on those shapes, so deleting it separately is unnecessary.
+Call/result correlation, payload ids, plaintext reasoning content and ordering
+remain intact. Tool search uses the SDK's correlation/execution readers for
+both top-level and `providerData` fields; an explicit server execution is kept.
+
+A universal strip is unsafe: Azure accepts inline web-search and plaintext
+reasoning without ids but rejects id-less file-search input with a missing-id
+validation error. Other hosted-tool ids and approval/program links remain
+intact. Normal inference and remote-v2 compaction retain their existing policies.
+Azure-profile checkpoints set `tool_choice: "none"`: empty tool schemas alone
+do not prevent that provider from returning a historical tool call instead of
+summary text. Other Responses transports keep their prior tool-choice behavior;
+tool-only responses still fail the existing empty-summary guard.
 
 The known missing-reasoning rejection is classified as
 `missing_required_reasoning_item` without retaining the provider message or its
@@ -353,14 +361,21 @@ does not prove that a summary preserves every fact; the synthetic continuation
 check verifies representative facts and tool semantics, not exhaustive semantic
 equivalence. Original history remains archived by the existing checkpoint flow.
 
-Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for
-SDK wire conversion and history-preservation regression coverage. For a live
-synthetic long-history check, configure the Azure provider settings and run
-`bun scripts/verify-portable-compaction.ts --live --durable`. The durable mode
-uses the disposable PostgreSQL test harness and the real fenced compaction
-activity, then verifies archival, the committed checkpoint event, and cleared
-token/request state. It checks compaction followed
-by a correlated tool call/result and remembered checkpoint facts; it never
-reads or modifies a customer session. Omit `--durable` for provider-only verification; the receipt distinguishes the
-two modes. Database settlement/fencing remains
-covered by `apps/worker/test/context-compaction-activity.test.ts`.
+Run `bun test packages/runtime/test/portable-compaction-identity.test.ts` for SDK
+wire coverage and `bun test scripts/operator/verify-portable-compaction.test.ts`
+for the operator/disposable PostgreSQL regression. The operator project is part
+of CI typechecking; its source fixtures are formatted TypeScript rather than
+byte-exact fixture exemptions. Database settlement/fencing also remains covered
+by `apps/worker/test/context-compaction-activity.test.ts`.
+
+For live verification, configure Azure's base URL or endpoint/deployment and
+API key or AD token, then run `bun run verify:portable-compaction --live --durable`.
+All provider legs use the runtime's Azure client, including its authentication
+and API-version query handling. The kickoff must contain opaque reasoning and
+a dependent assistant message. Durable mode uses disposable PostgreSQL and the
+real fenced compaction activity, verifies unchanged archival, the committed
+checkpoint event and cleared token/request state, then supplies the reloaded
+checkpoint to a correlated tool call/result continuation. It never reads or
+modifies a customer session. Omit `--durable` for provider-only verification;
+the receipt distinguishes the two modes. Locally authored assertion messages
+are visible; arbitrary provider errors and SDK causes remain content-free.
