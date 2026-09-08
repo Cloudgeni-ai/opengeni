@@ -441,9 +441,10 @@ const budgets = {
 const effectiveBudgets = {
   ...budgets,
   // Feedback forms and rating controls are lazy. The retained SDK methods and
-  // entry points measure 2,324,853 raw / 647,413 gzip bytes on macOS/arm64.
+  // entry points merged with 380bba5e6 measure 2,326,478 raw / 649,427 gzip
+  // bytes on macOS/arm64.
   // Keep the established whole-KiB headroom and gzip platform-skew allowance.
-  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_324_853)),
+  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_326_478)),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
