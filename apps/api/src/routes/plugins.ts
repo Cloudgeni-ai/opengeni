@@ -229,7 +229,7 @@ export function registerPluginRoutes(
         status: "installed",
       });
       const removalActor = skillRemovalActor(access);
-      const { skillReleases } = await finalizePluginPackageInstall(deps.db, {
+      const { skillReleases, skillPublications } = await finalizePluginPackageInstall(deps.db, {
         ...(removalActor ? { skillActor: removalActor } : {}),
         accountId: grant.accountId,
         workspaceId,
@@ -241,7 +241,11 @@ export function registerPluginRoutes(
         result,
       });
       return c.json(
-        { ...result, ...(skillReleases.length ? { skillReleases } : {}) },
+        {
+          ...result,
+          ...(skillReleases.length ? { skillReleases } : {}),
+          ...(skillPublications.length ? { skillPublications } : {}),
+        },
         resolved.preview.installed ? 200 : 201,
       );
     } catch (error) {
