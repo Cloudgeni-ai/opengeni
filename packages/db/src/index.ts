@@ -34902,6 +34902,7 @@ export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
   titleOriginalChars: number | null;
+  channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
@@ -34994,6 +34995,7 @@ type NormalizedSessionDiscoveryFilters = {
   activeOnly: boolean;
   recentHours: number | null;
   rootSessionId: string | null;
+  channelId: string | null | undefined;
   parentSessionId: string | null | undefined;
   subject: WorkClaimSubjectFilter | null;
 };
@@ -35002,6 +35004,7 @@ type SessionDiscoveryPageRow = {
   id: string | null;
   title: string | null;
   titleOriginalChars: number | string | null;
+  channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
   nestedAgentDepth: number | string | null;
@@ -35071,6 +35074,7 @@ function normalizeSessionDiscoveryFilters(options: {
   activeOnly?: boolean;
   recentHours?: number;
   rootSessionId?: string;
+  channelId?: string | null;
   parentSessionId?: string | null;
   subject?: WorkClaimSubjectFilter;
 }): NormalizedSessionDiscoveryFilters {
@@ -35106,6 +35110,7 @@ function normalizeSessionDiscoveryFilters(options: {
     activeOnly: options.activeOnly === true,
     recentHours,
     rootSessionId: options.rootSessionId ?? null,
+    channelId: options.channelId,
     parentSessionId: Object.prototype.hasOwnProperty.call(options, "parentSessionId")
       ? (options.parentSessionId ?? null)
       : undefined,
@@ -35124,6 +35129,7 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
         rootSessionId: filters.rootSessionId,
         parentSessionId:
           filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
+        ...(filters.channelId !== undefined ? { channelId: filters.channelId } : {}),
         subject: filters.subject,
       }),
     )
@@ -35190,6 +35196,13 @@ async function selectSessionDiscoveryPageRows(
     authorizationFilters.push(
       sql`${schema.sessions.updatedAt} >= ${options.snapshotAt}::text::timestamptz
         - (${options.filters.recentHours}::integer * interval '1 hour')`,
+    );
+  }
+  if (options.filters.channelId !== undefined) {
+    authorizationFilters.push(
+      options.filters.channelId === null
+        ? isNull(schema.sessions.channelId)
+        : eq(schema.sessions.channelId, options.filters.channelId),
     );
   }
   if (options.filters.rootSessionId) {
@@ -35496,6 +35509,7 @@ async function selectSessionDiscoveryPageRows(
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
+          ${schema.sessions.channelId} as channel_id,
           ${schema.sessions.parentSessionId} as parent_session_id,
           ${schema.sessions.rootSessionId} as root_session_id,
           ${schema.sessions.nestedAgentDepth} as nested_agent_depth,
@@ -35515,6 +35529,7 @@ async function selectSessionDiscoveryPageRows(
         page.id,
         page.title,
         page."titleOriginalChars",
+        page."channelId",
         page."parentSessionId",
         page."rootSessionId",
         page."nestedAgentDepth",
@@ -35535,6 +35550,7 @@ async function selectSessionDiscoveryPageRows(
           ranked_sessions.id,
           left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
           char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.channel_id as "channelId",
           ranked_sessions.parent_session_id as "parentSessionId",
           ranked_sessions.root_session_id as "rootSessionId",
           ranked_sessions.nested_agent_depth as "nestedAgentDepth",
@@ -35745,6 +35761,7 @@ export async function listSessionDiscoverySummaries(
     includeLastMessage?: boolean;
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
+    channelId?: string | null;
     parentSessionId?: string | null;
     rootSessionId?: string;
     query?: string;
@@ -35996,6 +36013,7 @@ export async function listSessionDiscoverySummaries(
         id: sessionId,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        channelId: row.channelId ?? null,
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
         nestedAgentDepth: Number(row.nestedAgentDepth),

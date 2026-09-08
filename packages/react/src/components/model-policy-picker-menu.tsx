@@ -58,14 +58,35 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
     <PickerNavRow
       key={row.id}
       label={row.label}
-      hint={`${props.messages?.billingHints?.[row.billingClass] ?? payerSummaryForModel(row.catalog)}${row.unavailableReason ? ` · ${row.unavailableReason}` : ""}`}
+      hint={
+        row.billingClass === "opengeni_credits"
+          ? (row.unavailableReason ?? undefined)
+          : [
+              props.messages?.billingHints?.[row.billingClass] ?? payerSummaryForModel(row.catalog),
+              row.unavailableReason,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+      }
       disabled={props.disabled || !row.selectable}
-      title={row.unavailableReason ?? undefined}
+      title={[row.label, payerSummaryForModel(row.catalog), row.unavailableReason]
+        .filter(Boolean)
+        .join(" · ")}
+      description={payerSummaryForModel(row.catalog)}
       active={row.id === props.model}
       showChevron={false}
       trailing={
-        row.id === props.model ? (
-          <CheckIcon className="size-3.5" aria-label={messages.selected} />
+        row.catalog.cost === "free" || row.id === props.model ? (
+          <span className="flex items-center gap-2">
+            {row.catalog.cost === "free" ? (
+              <span className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-control text-og-fg-muted">
+                {messages.free}
+              </span>
+            ) : null}
+            {row.id === props.model ? (
+              <CheckIcon className="size-3.5" aria-label={messages.selected} />
+            ) : null}
+          </span>
         ) : null
       }
       testId={`model-picker-choice-${row.id}`}
@@ -179,7 +200,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
   const supportsFast = runnableLatencyModesForModel(selected.catalog).includes("fast");
   return (
     <div
-      className="flex items-center gap-2 text-og-control text-og-fg-muted"
+      className="flex flex-wrap items-center gap-2 text-og-control text-og-fg-muted"
       data-testid="model-picker-reasoning"
     >
       <label className="flex min-h-9 items-center gap-2">
@@ -208,7 +229,7 @@ function ModelThinkingControls(props: ModelPolicyPickerProps) {
           onClick={() =>
             props.onLatencyModeChange(props.latencyMode === "fast" ? "standard" : "fast")
           }
-          className="ml-auto flex min-h-9 items-center gap-1.5 rounded-og-sm px-2 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
+          className="ml-auto flex min-h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-og-sm px-2 hover:bg-og-surface-2 focus-visible:ring-2 focus-visible:ring-og-accent/40 disabled:opacity-50"
         >
           <ZapIcon className={cn("size-3.5", props.latencyMode === "fast" && "fill-current")} />
           {messages.fast} <span className="text-og-fg-subtle">{messages.fastRateHint}</span>

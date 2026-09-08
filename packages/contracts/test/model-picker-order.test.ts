@@ -6,6 +6,28 @@ import {
 import { compareModelPickerOrder, modelPickerBillingClassFor } from "../src/model-picker-order";
 
 describe("model picker shared ordering", () => {
+  test("groups deployment models together independently of upstream settlement", () => {
+    for (const cost of ["free", "credits", undefined] as const) {
+      for (const metering of ["external", "opengeni_credits"] as const) {
+        expect(
+          modelPickerBillingClassFor({
+            cost,
+            billing: { upstreamPayer: "deployment", metering },
+            credentialSource: { kind: "deployment" },
+          }),
+        ).toBe("opengeni_credits");
+      }
+    }
+    expect(modelPickerBillingClassFor({ cost: "free" })).toBe("opengeni_credits");
+    expect(modelPickerBillingClassFor({ cost: "workspace" })).toBe("byok");
+    expect(modelPickerBillingClassFor({ cost: "organization" })).toBe("organization_byok");
+    expect(modelPickerBillingClassFor({ cost: "subscription", source: "codex" })).toBe(
+      "codex_subscription",
+    );
+    expect(modelPickerBillingClassFor({ cost: "subscription", source: "supergrok" })).toBe(
+      "supergrok_subscription",
+    );
+  });
   test("orders by billing rail, selectability, and label", () => {
     const rows = [
       { billingClass: "byok" as const, selectable: true, label: "Zulu" },
@@ -44,7 +66,7 @@ describe("model picker shared ordering", () => {
       modelPickerBillingClassFor({
         billing: { upstreamPayer: "deployment", metering: "external" },
       }),
-    ).toBe("external");
+    ).toBe("opengeni_credits");
     expect(
       modelPickerBillingClassFor({
         cost: "credits",

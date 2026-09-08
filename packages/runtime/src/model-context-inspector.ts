@@ -99,6 +99,7 @@ const LAYER_TITLES: Record<ModelContextInstructionLayerId, string> = {
   workspace_memory: "Workspace memory",
   codemode: "Codemode",
   git_bindings: "Git credential bindings",
+  builtin_skills: "Built-in skills",
   genesis_title: "Missing-title directive",
   sdk_capability_instructions: "SDK capability instructions",
   sandbox_preamble: "Sandbox runtime preamble",
