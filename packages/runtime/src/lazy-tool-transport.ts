@@ -33,6 +33,8 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // The SDK skills capability prints the skill index in the instructions and
   // mandates this call before any SKILL.md read.
   "load_skill",
+  // The server-backed reader needs neither sandbox setup nor tool search.
+  "skill_read",
   "request_human_input",
   "list_models",
 ]);

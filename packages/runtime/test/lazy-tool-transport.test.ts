@@ -752,6 +752,8 @@ describe("generic lazy tool dispatch", () => {
     const image = firstPartyTool("view_image", "Return an image from a sandbox path");
     const patch = firstPartyTool("apply_patch", "Apply a create, update, or delete file patch");
     const skill = firstPartyTool("load_skill", "Load a lazily configured skill into the sandbox");
+    const skillRead = firstPartyTool("skill_read", "Read Skill text without a sandbox");
+    const skillSave = firstPartyTool("skill_save", "Save workspace Skill file changes");
     const human = firstPartyTool(
       "request_human_input",
       "Pause this turn and request structured human input",
@@ -765,7 +767,7 @@ describe("generic lazy tool dispatch", () => {
       name: "lazy-test",
       instructions: "Use tools.",
       model: "scripted",
-      tools: [exec, stdin, image, patch, skill, human, models, browser],
+      tools: [exec, stdin, image, patch, skill, skillRead, skillSave, human, models, browser],
     });
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set());
     const visible = await agent.getAllTools(undefined as never);
@@ -780,6 +782,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "load_skill",
+      "skill_read",
       "request_human_input",
       "list_models",
       "tool_search",
@@ -791,6 +794,7 @@ describe("generic lazy tool dispatch", () => {
       "view_image",
       "apply_patch",
       "load_skill",
+      "skill_read",
       "request_human_input",
       "list_models",
     ]) {
@@ -801,6 +805,9 @@ describe("generic lazy tool dispatch", () => {
     expect(
       runtime.search({ query: "interact with browser" }).map((candidate) => candidate.name),
     ).toEqual(["interaction__browser_act"]);
+    expect(
+      runtime.search({ query: "Save workspace Skill file changes" }).map((tool) => tool.name),
+    ).toContain("skill_save");
   });
 
   test("searches, restores provider history, and executes the real tool pipeline", async () => {

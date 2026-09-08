@@ -4,6 +4,16 @@ import { dirname, isAbsolute, join, relative } from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
 
+export {
+  applySkillFileChanges,
+  assertSkillRelativePath,
+  readSkillFiles,
+  SkillFileError,
+  SKILL_READ_MAX_OUTPUT_BYTES,
+  SKILL_READ_MAX_PATHS,
+  type SkillTextFile,
+} from "./skill-files";
+
 /**
  * Metadata for a platform-curated skill. The metadata is deliberately
  * provider-neutral: it describes guidance provenance and compatibility, not
@@ -284,6 +294,25 @@ const skillLibraryRootCandidates = (): string[] => {
 
 function skillLibraryRoot(): string | null {
   return skillLibraryRootCandidates().find((candidate) => isRealDirectory(candidate)) ?? null;
+}
+
+/** Read packaged guidance on the server; never materialize it into a sandbox. */
+export function loadSkillManagementSkill(): SkillLibrarySkill {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const root = [
+    join(moduleDir, "assets", "runtime", "bundled_management_skills"),
+    join(moduleDir, "bundled_management_skills"),
+    join(moduleDir, "..", "src", "bundled_management_skills"),
+  ].find((candidate) => isRealDirectory(candidate));
+  if (!root) throw new Error("Built-in Skill management guidance is missing from this deployment.");
+  const artifact = readSkillLibraryArtifact(join(root, "opengeni-skills"));
+  const main = artifact.files.find((entry) => entry.path === "SKILL.md");
+  if (!main) throw new Error("Built-in Skill management guidance has no SKILL.md.");
+  const metadata = parsePortableSkillFrontmatter(main.content);
+  if (metadata.name !== "opengeni-skills" || !metadata.description) {
+    throw new Error("Built-in Skill management metadata is invalid.");
+  }
+  return { name: metadata.name, description: metadata.description, files: artifact.files };
 }
 
 function entryDirectory(entry: SkillLibraryEntry): string | null {

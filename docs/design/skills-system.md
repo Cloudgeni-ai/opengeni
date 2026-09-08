@@ -2,7 +2,8 @@
 
 Design dossier · updated September 8, 2026 · tracking: OPE-421.
 
-Code baseline: `origin/main` at `d33ce73b54fb4656213790dc4b035e9bcafc9a41`.
+Design-review baseline: `origin/main` at `d33ce73b54fb4656213790dc4b035e9bcafc9a41`.
+Implementation started from `cb97a3eb` on branch `feat/unified-skills`.
 This is a proposed implementation design, not a claim that the system is built.
 It replaces the previous draft and appended audit. Statements marked proposed
 are recommendations, not additional user agreements.
@@ -149,13 +150,16 @@ by making the model serialize an entire directory into a tool argument.
 Save and publish share validation, authorization, history, and activation.
 Both detect stale writes and make retries safe. Exact schemas remain open.
 
-## 4. Learning and permissions: simplify deliberately
+## 4. Learning and permissions: agreed simplification
 
 Do not distinguish agent-initiated from allegedly user-requested tool writes.
 Authenticated human editing has human authority; agent calls remain agent calls.
-Normal workspace access and editable ownership always apply.
+All agents in a workspace can discover and read shared workspace Skills and
+use management tools. No per-agent or per-Skill permission configuration is
+introduced for ordinary shared workspace Skills. Workspace boundaries and
+platform-owned built-in protection remain enforced by the backend.
 
-Proposed target behavior:
+Agreed target behavior:
 
 | Learning mode | Persistent agent change |
 | --- | --- |
@@ -171,11 +175,11 @@ Reuse the existing mode setting and useful approval/history mechanisms. Do not
 assume that every file edit should traverse Knowledge claims, evidence reviews,
 confidence scoring, and the entire existing derived-learning evaluator.
 
-**Unresolved implementation decision:** determine the smallest supported Skill
-write lifecycle while retaining actual authorization, configured policy and
-source restrictions, auditability, and interruption/concurrency safety. Removing
-an evaluator is a deliberate authority change, not a shortcut implementers may
-make implicitly. A complex review inbox can wait; correct Require-approval
+Ordinary Skill edits do not require Knowledge claims, evidence reviews or
+confidence evaluation. Implement the mode decision directly in the shared Skill
+write lifecycle, retaining tenancy, live-attempt checks, history and safe writes.
+Existing source-policy compatibility must be accounted for during migration,
+not silently discarded. A complex review inbox can wait; correct Require-approval
 backend behavior cannot be silently replaced with Autonomous or Off.
 
 ## 5. Prompt and built-in management Skill
@@ -267,7 +271,7 @@ this dossier; this document does not assert they have been updated.
    compatibility tests pass. Test migration and deployment with old callers,
    document supported recovery, and reconcile the architecture documentation.
 
-These are dependency slices, not authorization to implement yet. UI convergence
+Implementation is authorized by the subsequent user confirmation. UI convergence
 may land alongside writes; do not leave a second live editor until the end.
 
 ## 8. Remaining decisions, not hidden assumptions
@@ -276,7 +280,7 @@ Before implementation:
 
 - Exact shared identity/schema and registry migration, preserving current scope
   and ownership semantics without adding new personal/org agent-write scope.
-- Smallest correct Learning-controlled write path and approval behavior.
+- Map the agreed simple Learning behavior onto a safe shared write lifecycle.
 - Exact text validation, import failure policy, and bounded read/path discovery.
 - Final file-save/publish inputs and concurrency/retry conventions.
 - Concrete search provider and source resolution without a mandatory preview.
