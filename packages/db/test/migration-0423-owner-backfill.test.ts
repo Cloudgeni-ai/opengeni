@@ -77,6 +77,7 @@ describe("0423 owner-only Skill backfill", () => {
         installationId: string;
         ownerId: string;
       }> = [];
+      const description = "d".repeat(1024);
       const files = [
         { path: "SKILL.md", content: "Original installed Skill" },
         { path: "references/context.txt", content: "Keep supporting text" },
@@ -100,7 +101,7 @@ describe("0423 owner-only Skill backfill", () => {
         await admin`insert into capability_facets(id,plugin_version_id,facet_key,kind,activation_mode)
           values(${facetId},${versionId},'skill','skill','workspace_managed')`;
         await admin`insert into capability_skill_facets(facet_id,capability_id,name,description,source_url,source_commit,source_path,content_sha256,file_count,total_bytes)
-          values(${facetId},${ownerId},'same-name','Original description','https://example.test/upstream',${"a".repeat(40)},'skill',${digest(files[0]!.content)},2,${files.reduce((n, f) => n + Buffer.byteLength(f.content), 0)})`;
+          values(${facetId},${ownerId},'same-name',${description},'https://example.test/upstream',${"a".repeat(40)},'skill',${digest(files[0]!.content)},2,${files.reduce((n, f) => n + Buffer.byteLength(f.content), 0)})`;
         for (const file of files)
           await admin`insert into capability_skill_files(skill_facet_id,path,content,byte_size,content_sha256)
           values(${facetId},${file.path},${file.content},${Buffer.byteLength(file.content)},${digest(file.content)})`;
@@ -115,7 +116,7 @@ describe("0423 owner-only Skill backfill", () => {
       expect(await owner`select id from capability_plugin_installations`).toHaveLength(0);
       await migrate(ownerUrl);
       const heads =
-        await admin`select b.account_id,b.workspace_id,b.plugin_id,b.skill_facet_id,h.id,h.status,r.skill_files,r.content_hash
+        await admin`select b.account_id,b.workspace_id,b.plugin_id,b.skill_facet_id,h.id,h.status,r.skill_files,r.content_hash,r.description
         from skill_source_bindings b join preference_registry_preferences h on h.id=b.preference_id
         join preference_registry_revisions r on r.id=h.active_revision_id order by b.workspace_id`;
       expect(heads).toHaveLength(2);
@@ -127,6 +128,7 @@ describe("0423 owner-only Skill backfill", () => {
           skill_facet_id: fixture.facetId,
           status: "active",
           skill_files: files,
+          description,
           content_hash: digest(files[0]!.content),
         });
         expect([
