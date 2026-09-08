@@ -13361,3 +13361,53 @@ export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
 export * from "./interaction-schema";
+
+/** Immutable feedback, scoped to its submitting principal and optional session. */
+export const feedbackSubmissions = pgTable(
+  "feedback_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    principalKind: text("principal_kind"),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    sentiment: text("sentiment"),
+    comment: losslessText("comment"),
+    commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    turn: foreignKey({
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    request: uniqueIndex("feedback_submissions_request_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.idempotencyKey,
+    ),
+    author: index("feedback_submissions_author_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.createdAt,
+      table.id,
+    ),
+    sessionTime: index("feedback_submissions_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);

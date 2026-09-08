@@ -1,3 +1,4 @@
+import { registerFeedbackRoutes } from "./routes/feedback";
 import { codemodeSessionRequest } from "./codemode";
 import {
   canonicalizeConfiguredModelId,
@@ -1236,6 +1237,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerPluginRoutes(app, routeDeps);
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
+  registerFeedbackRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);

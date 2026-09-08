@@ -1,3 +1,4 @@
+import { FeedbackDialog, FeedbackIcon } from "@/components/feedback";
 // Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
 // (account/sign-out, depending on auth mode). Collapsed → just the avatar +
 // a collapse chevron, both with tooltips.
@@ -9,7 +10,7 @@ import {
   LogOutIcon,
   UserIcon,
 } from "lucide-react";
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
 
 import { AppearanceMenu } from "@/components/appearance-menu";
@@ -48,6 +49,7 @@ function userInitial(label: string): string {
 
 export function RailFooter() {
   const rail = useRail();
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const context = useAppContext();
   const managed = context.clientConfig.auth.mode === "managedSession";
   const browserAccounts = managed && context.clientConfig.managedAuthSessionSetMode !== "legacy";
@@ -73,6 +75,24 @@ export function RailFooter() {
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+      <FeedbackDialog
+        key={rail.workspaceId}
+        client={context.client}
+        workspaceId={rail.workspaceId}
+        open={feedbackOpen}
+        onOpenChange={setFeedbackOpen}
+        onSubmitted={() => toast.success("Thanks for your feedback")}
+      />
+      <Button
+        variant="ghost"
+        size="sm"
+        aria-label="Send feedback"
+        title="Send feedback"
+        onClick={() => setFeedbackOpen(true)}
+      >
+        <FeedbackIcon className="size-4" />
+        {rail.collapsed ? null : "Send feedback"}
+      </Button>
       <div
         className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
       >

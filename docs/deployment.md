@@ -3044,3 +3044,10 @@ Historical managed rows may derive it from their exact retained process, while
 unattributed Connected Machine rows remain service-owned. Deploy the new API and
 worker together to enable command and wait-timeout causal admission; this source
 change does not itself deploy or authorize pre-claim recovery.
+
+## Feedback storage activation
+
+Migration `0423_feedback_submissions.sql` extends the exact runtime table/privilege
+contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
+and start the feedback-aware binary. Do not restart an older binary afterward.
+See [Feedback](feedback.md) for API, privacy, and retention behavior.

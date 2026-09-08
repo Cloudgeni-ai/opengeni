@@ -1,3 +1,4 @@
+import { SessionFeedback } from "@/components/feedback";
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
@@ -1997,6 +1998,13 @@ function SessionChatPane(props: {
           </div>
         </>
       )}
+
+      <SessionFeedback
+        key={props.session.id}
+        client={context.client}
+        workspaceId={props.session.workspaceId}
+        sessionId={props.session.id}
+      />
 
       {/* Live decision strip: only while the session is actually paused on
           an approval — a replayed log or a stale stream must never render
