@@ -1021,6 +1021,9 @@ async function installCapabilityApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
@@ -1207,6 +1210,9 @@ async function installLargeCatalogApi(
     if (url.pathname === `/v1/workspaces/${workspaceId}/skills`) {
       return json({ skills: [] });
     }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/skills/content`) {
+      return json({ skills: [], nextCursor: null });
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/plugins`) {
       return json({ plugins: [] });
     }
@@ -1316,6 +1322,7 @@ async function installWorkspaceCatalogApi(
     if (resource === "integrations/definitions") return json({ definitions: [] });
     if (resource === "integrations") return json({ integrations: [] });
     if (resource === "skills") return json({ skills: [] });
+    if (resource === "skills/content") return json({ skills: [], nextCursor: null });
     if (resource === "plugins") return json({ plugins: [] });
     if (resource === "packs") return json({ packs: [], installations: [] });
     if (resource === "variable-sets" || resource === "rigs" || resource === "channels") {
