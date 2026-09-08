@@ -148,6 +148,55 @@ async function callRegisteredTool(
 }
 
 describe("first-party MCP tool visibility policy", () => {
+  test("project tools follow existing session permissions and exact selection", () => {
+    const human = (permissions: Permission[]): AccessGrant => ({
+      accountId,
+      workspaceId,
+      subjectId: "user:projects",
+      principalKind: "human_session",
+      permissions,
+    });
+    const projects = (permissions: Permission[]) =>
+      registeredToolNames(buildOpenGeniMcpServer(deps(), human(permissions))).filter(
+        (n) => n.startsWith("project_") || n === "session_set_project",
+      );
+    expect(projects([])).toEqual([]);
+    expect(projects(["sessions:read"])).toEqual(["project_get", "project_list"]);
+    expect(projects(["sessions:create"])).toEqual([
+      "project_create",
+      "project_delete",
+      "project_reorder",
+      "project_update",
+    ]);
+    expect(projects(["sessions:control"])).toEqual(["session_set_project"]);
+    expect(
+      registeredToolNames(
+        buildOpenGeniMcpServer(
+          deps(),
+          grant(["sessions:read", "sessions:create"], ["project_list"]),
+        ),
+      ),
+    ).toEqual(["project_list"]);
+    const server = buildOpenGeniMcpServer(
+      deps(),
+      human(["sessions:create", "sessions:read", "sessions:control"]),
+    );
+    expect(
+      registeredToolInputSchema(server, "project_create").safeParse({ name: "  " }).success,
+    ).toBe(false);
+    expect(
+      registeredToolInputSchema(server, "session_set_project").safeParse({
+        sessionId,
+        projectId: null,
+      }).success,
+    ).toBe(true);
+    expect(
+      registeredToolInputSchema(server, "session_create").safeParse({
+        initialMessage: "Work",
+        projectId: crypto.randomUUID(),
+      }).success,
+    ).toBe(true);
+  });
   test("workspace artifact listing is available to humans without an agent session", () => {
     const human: AccessGrant = {
       accountId,

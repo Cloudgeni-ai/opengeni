@@ -153,7 +153,7 @@ interpretation of YAML. Restore requires valid frontmatter; plain archived conte
 must be explicitly repaired through save. Files-bearing activation remains
 compatible with human governance.
 
-The exact 0423 runner stage executes inside an explicit migration transaction:
+The exact 0426 runner stage executes inside an explicit migration transaction:
 setup and owner window, TypeScript parsing into a temporary staging table, then
 SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
 fails closed. All existing active authored heads receive new canonical revisions;
@@ -172,7 +172,7 @@ foreign-key constraints are flushed before restoring FORCE RLS, all within the
 migration transaction. A seeded `NOSUPERUSER NOBYPASSRLS` owner test verifies
 cross-tenant identity preservation, folder content, and the restored posture.
 
-Migration `0423_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
+Migration `0426_unified_skill_lifecycle.sql` is a maintenance cutover. Drain all
 old API/control/turn workers, supply the exact application database role list,
 migrate, provision roles, and start only the unified-Skill-aware release. Never
 restart a pre-0423 binary: its installed reads bypass the registry content head.
@@ -184,7 +184,7 @@ lifecycle capability.
 
 ### Stored execution configuration maintenance
 
-The same atomic 0423 runner calls `packages/db/src/skill-config-migration.ts`
+The same atomic 0426 runner calls `packages/db/src/skill-config-migration.ts`
 after staging registry metadata. It converts headerless Skills in current
 `sessions.skills` and `workspace_packs.manifest` (including inline automation
 template Skills). It uses historical name/description, preserves the complete

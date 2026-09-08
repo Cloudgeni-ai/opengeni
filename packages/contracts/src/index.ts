@@ -4,6 +4,7 @@ import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
 import { isSafeSkillRelativePath, validateSkillTextFiles } from "./skill-files";
+export * from "./model-connection-access";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -809,6 +810,13 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "run_on",
   "sandbox_provision",
   "connected_machine_remove",
+  "project_list",
+  "project_get",
+  "project_create",
+  "project_update",
+  "project_reorder",
+  "project_delete",
+  "session_set_project",
   "rig_list",
   "rig_get",
   "rig_propose_change",
@@ -1952,14 +1960,24 @@ export const WorkspaceSessionToolDefaults = z
     mcpServerIds: z
       .array(z.string().trim().min(1).max(128))
       .max(128)
-      .transform((ids) => [...new Set(ids)]),
+      .transform((ids) => [...new Set(ids)])
+      .optional(),
     firstPartyMcpTools: z
       .array(FirstPartyMcpToolName)
       .max(512)
-      .transform((tools) => [...new Set(tools)]),
+      .transform((tools) => [...new Set(tools)])
+      .optional(),
   })
   .strict();
 export type WorkspaceSessionToolDefaults = z.infer<typeof WorkspaceSessionToolDefaults>;
+
+// Omitted keys preserve the stored selection; null removes only that override.
+export const WorkspaceSessionToolDefaultsPatch = z
+  .object({
+    mcpServerIds: WorkspaceSessionToolDefaults.shape.mcpServerIds.nullable(),
+    firstPartyMcpTools: WorkspaceSessionToolDefaults.shape.firstPartyMcpTools.nullable(),
+  })
+  .strict();
 
 /** Client-safe voice-input capability projection. Never includes provider secrets. */
 export const ClientVoiceInputConfig = z
@@ -2323,7 +2341,7 @@ export const UpdateWorkspaceSettingsRequest = z
     memoryEnabled: z.boolean().optional(),
     memoryPromptMode: WorkspaceMemoryPromptMode.optional(),
     sessionDefaults: WorkspaceSessionDefaults.optional(),
-    sessionToolDefaults: WorkspaceSessionToolDefaults.optional(),
+    sessionToolDefaults: WorkspaceSessionToolDefaultsPatch.optional(),
     voiceInput: WorkspaceVoiceInputSettings.optional(),
     /** @deprecated Prefer `voiceInput`. Kept for one compatibility release. */
     transcription: WorkspaceTranscriptionPolicy.optional(),
@@ -6632,6 +6650,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
   "session.delete",
@@ -12220,6 +12239,11 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     queueHeadPosition: z.number().int(),
     queueTailPosition: z.number().int(),
     effectiveControl: EffectiveSessionControl,
+    /** Current out-of-turn wait; elapsed deadline means a recheck is due. */
+    inputWait: z
+      .object({ deadlineAt: z.string().datetime({ offset: true }), reason: z.string() })
+      .nullable()
+      .optional(),
     lastSequence: z.number().int().nonnegative(),
     // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
     // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -12259,6 +12283,7 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
         totalDescendants: z.number().int().nonnegative(),
         runningDescendants: z.number().int().nonnegative(),
         queuedDescendants: z.number().int().nonnegative(),
+        waitingDescendants: z.number().int().nonnegative().optional(),
         attentionDescendants: z.number().int().nonnegative(),
         pausedDescendants: z.number().int().nonnegative(),
         /** Historical failed lifecycle states, including already-reviewed failures. */
@@ -12314,6 +12339,8 @@ export type SessionSummary = Session;
 export const SessionListResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
   z.object({
     pinned: z.array(Session),
+    filtersApplied: z.literal(true).optional(),
+    originSiteId: z.string().uuid().optional(),
     /** True when older matching pins were omitted from this bounded page. */
     pinnedTruncated: z.boolean().optional(),
     sessions: z.array(Session),
@@ -16771,3 +16798,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+
+export * from "./feedback";

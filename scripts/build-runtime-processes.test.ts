@@ -19,6 +19,7 @@ test("production process bundles retain every runtime skill asset directory", as
     expect(RUNTIME_SKILL_ASSET_DIRECTORY_NAMES).toEqual([
       "curated_skill_library",
       "bundled_artifact_skills",
+      "bundled_project_skills",
       "bundled_site_skills",
       "bundled_video_skills",
       "bundled_management_skills",
@@ -26,6 +27,7 @@ test("production process bundles retain every runtime skill asset directory", as
     for (const [directoryName, skillName] of [
       ["curated_skill_library", "azure-verified-modules"],
       ["bundled_artifact_skills", "opengeni-spreadsheets"],
+      ["bundled_project_skills", "opengeni-projects"],
       ["bundled_site_skills", "opengeni-sites"],
       ["bundled_video_skills", "opengeni-video-generation"],
       ["bundled_management_skills", "opengeni-skills"],

@@ -1823,7 +1823,7 @@ export const PERSONAL_CODEX_INHERITANCE_MAINTENANCE_CUTOVER =
   "0422_personal_workspace_organization_codex_inheritance";
 
 const MAINTENANCE_CUTOVERS = {
-  "0423_unified_skill_lifecycle": { migrationSummary: "migration 0423" },
+  "0426_unified_skill_lifecycle": { migrationSummary: "migration 0426" },
   [MODEL_CATALOG_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0389" },
   [SESSION_SELECTED_SKILL_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0394" },
   [SESSION_INPUT_WAIT_MAINTENANCE_CUTOVER]: { migrationSummary: "migration 0402" },

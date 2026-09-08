@@ -35,6 +35,7 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   "load_skill",
   // The server-backed reader needs neither sandbox setup nor tool search.
   "skill_read",
+  "load_builtin_skill",
   "request_human_input",
   "list_models",
 ]);

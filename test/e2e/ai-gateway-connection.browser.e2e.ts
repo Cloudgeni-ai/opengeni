@@ -189,7 +189,7 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
       await openFixture(mobilePage, baseUrl);
       const gatewayCard = providerCard(mobilePage, "vercel-ai-gateway");
       await gatewayCard.locator("summary").click();
-      await gatewayCard.getByText("Models from your Gateway", { exact: true }).waitFor();
+      await gatewayCard.getByText("Custom models", { exact: true }).waitFor();
 
       const slug = gatewayCard.getByLabel("Vercel AI Gateway model slug");
       const add = gatewayCard.getByRole("button", { name: "Add model" });
@@ -255,8 +255,10 @@ describe(`AI Gateway custom model settings in ${browserEngine}`, () => {
 async function openFixture(page: Page, baseUrl: string): Promise<void> {
   await page.goto(`${baseUrl}${fixturePath}`, { waitUntil: "networkidle" });
   await page.getByRole("heading", { name: "AI model connections", exact: true }).waitFor();
-  await page.getByText("Bring your own Vercel AI Gateway", { exact: true }).waitFor();
-  await page.getByText("Bring your own OpenRouter", { exact: true }).waitFor();
+  await providerCard(page, "vercel-ai-gateway")
+    .getByText("Vercel AI Gateway", { exact: true })
+    .waitFor();
+  await providerCard(page, "openrouter").getByText("OpenRouter", { exact: true }).waitFor();
 }
 
 function providerCard(page: Page, provider: "vercel-ai-gateway" | "openrouter"): Locator {

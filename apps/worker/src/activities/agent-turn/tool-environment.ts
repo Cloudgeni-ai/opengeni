@@ -1,3 +1,4 @@
+import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
   beginConnectorActionExecution,
   getWorkspaceVideoGenerationPolicy,
@@ -650,6 +651,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         const currentSettings = currentCatalog.settings;
         const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
         const [
+          connectionModelRestrictions,
           policy,
           codexSubscriptionActive,
           xaiSubscriptionActive,
@@ -662,6 +664,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           organizationOpenRouterConnectionActive,
           organizationOpenRouterCustomModels,
         ] = await Promise.all([
+          getWorkspaceConnectionModelRestrictions(
+            db,
+            input.workspaceId,
+            xaiReadinessAuthority?.subjectId ?? credentialSubjectId ?? "worker:model-access",
+            xaiReadinessAuthority?.authoritySnapshot,
+          ),
           getWorkspaceModelPolicy(db, input.workspaceId),
           workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
           xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
@@ -703,6 +711,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ]);
         return {
           selections: resolveWorkspaceModelSelection({
+            connectionModelRestrictions,
             settings: currentSettings,
             policy,
             codexSubscriptionActive,

@@ -81,6 +81,7 @@ export function compactSessionMcpPause(control: SessionMcpControlSource) {
 }
 
 export type SessionMcpListSource = {
+  channelId?: string | null;
   id: string;
   title: string | null;
   titleOriginalChars?: number | null;
@@ -126,6 +127,7 @@ export function compactSessionMcpListRow(
       : undefined;
   return {
     id: session.id,
+    ...(session.channelId ? { projectId: session.channelId } : {}),
     title: title.text,
     status: session.status,
     ...(title.truncated ? { titleTruncated: true } : {}),
@@ -200,6 +202,7 @@ export function compactSessionMcpDetail(
   const waitReason = monitoring.wait ? boundSessionMcpText(monitoring.wait.reason) : null;
   return {
     id: session.id,
+    ...(session.channelId ? { projectId: session.channelId } : {}),
     title: title.text,
     status: session.status,
     ...(title.truncated ? { titleTruncated: true } : {}),

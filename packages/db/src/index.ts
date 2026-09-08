@@ -1,3 +1,24 @@
+import {
+  latestStartedSessionTurnQuery,
+  withLatestStartedSessionPolicy,
+} from "./session-execution-policy";
+import {
+  assignedConnectionDefault,
+  updateModelConnectionAccess as updateModelConnectionAccessPolicy,
+  type ModelConnectionAccess,
+  type ModelConnectionTarget,
+} from "./model-connection-access";
+import { withOrganizationXaiCapacityMutation } from "./organization-xai-subscriptions";
+export {
+  assertModelConnectionAllowsTurn,
+  modelAllowedByConnections,
+  type ConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
+import {
+  assertModelConnectionAllowsTurn,
+  getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
+export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
 import { lockSkillPublication } from "./skill-publication";
 import {
@@ -513,6 +534,7 @@ export * from "./user-resource-authority";
 import { acceptTurnPersonalResourceAttachmentInTransaction } from "./user-resource-authority";
 export * from "./connection-authority";
 export * from "./xai-subscription";
+export * from "./organization-xai-subscriptions";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -636,7 +658,11 @@ import {
   resolveAcceptedConnectionUse,
   resolveConnectionUseAuthority,
 } from "./connection-authority";
-import { resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./xai-subscription";
+import {
+  resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction,
+  xaiCredentialWorkspacePredicate,
+  xaiRotationWorkspacePredicate,
+} from "./xai-subscription";
 
 function parsedPersonalConnectionDelegations(
   value: unknown,
@@ -5976,7 +6002,7 @@ export type InstallPortableSkillInput = {
   accountId: string;
   workspaceId: string;
   subjectId: string;
-  /** Required at runtime after 0423; omission fails before distribution writes. */
+  /** Required at runtime after 0426; omission fails before distribution writes. */
   skillActor?: SkillActor;
   skillOperationId?: string;
   /** Host-canonical original request, including source/options/owner/explicit CAS, before resolution. */
@@ -14259,6 +14285,7 @@ async function loadWorkspaceProviderApiKey(
   settings: Settings,
   workspaceId: string,
   providerKind: WorkspaceProviderApiKeyConnectionKind,
+  turnModelId?: string | null,
 ): Promise<string | null> {
   const spec = workspaceProviderApiKeyConnectionSpec(providerKind);
   const metadata = (await listConnectionsMetadata(db, workspaceId, null)).find(
@@ -14286,6 +14313,14 @@ async function loadWorkspaceProviderApiKey(
   ) {
     return null;
   }
+  if (turnModelId) {
+    await assertModelConnectionAllowsTurn(db, {
+      workspaceId,
+      subjectId: "worker:model-access",
+      modelId: turnModelId,
+      workspaceProviderConnectionId: connection.id,
+    });
+  }
   const apiKey = connection.credential.apiKey;
   return typeof apiKey === "string" && apiKey.trim().length > 0 ? apiKey : null;
 }
@@ -14295,8 +14330,15 @@ export async function loadWorkspaceVercelAiGatewayApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "vercel_gateway");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "vercel_gateway",
+    turnModelId?.startsWith("workspace-gateway/") ? turnModelId : null,
+  );
 }
 
 /** Resolve only the reviewed workspace-shared OpenRouter credential shape. */
@@ -14304,8 +14346,15 @@ export async function loadWorkspaceOpenRouterApiKey(
   db: Database,
   settings: Settings,
   workspaceId: string,
+  turnModelId?: string | null,
 ): Promise<string | null> {
-  return await loadWorkspaceProviderApiKey(db, settings, workspaceId, "openrouter");
+  return await loadWorkspaceProviderApiKey(
+    db,
+    settings,
+    workspaceId,
+    "openrouter",
+    turnModelId?.startsWith("workspace-openrouter/") ? turnModelId : null,
+  );
 }
 
 /**
@@ -22582,6 +22631,11 @@ export async function upsertOrganizationCodexSubscriptionCredential(
       .for("update")
       .limit(1);
     if (!settings) throw new Error("organization Codex rotation settings are unavailable");
+    // Local administration has no managed-human reset-credit owner.
+    // Keep the same attribution boundary as workspace Codex connections.
+    const connectedBySubjectId = input.actorSubjectId.startsWith("user:")
+      ? input.actorSubjectId
+      : null;
     const now = new Date();
     const [row] = await scopedDb
       .insert(schema.codexSubscriptionCredentials)
@@ -22599,7 +22653,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
         lastRefreshAt: input.lastRefreshAt,
         accountEmail: input.accountEmail ?? null,
         label: input.label ?? null,
-        connectedBySubjectId: input.actorSubjectId,
+        connectedBySubjectId,
         status: "active",
         lastError: null,
       })
@@ -22618,7 +22672,7 @@ export async function upsertOrganizationCodexSubscriptionCredential(
           lastRefreshAt: input.lastRefreshAt,
           accountEmail: input.accountEmail ?? null,
           label: sql`coalesce(${schema.codexSubscriptionCredentials.label}, ${input.label ?? null})`,
-          connectedBySubjectId: input.actorSubjectId,
+          connectedBySubjectId: sql`coalesce(${connectedBySubjectId}, ${schema.codexSubscriptionCredentials.connectedBySubjectId})`,
           status: "active",
           lastError: null,
           version: sql`${schema.codexSubscriptionCredentials.version} + 1`,
@@ -22678,6 +22732,7 @@ export async function listOrganizationCodexAccountStatuses(
       .select({
         id: schema.codexSubscriptionCredentials.id,
         chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
@@ -23599,21 +23654,29 @@ async function getCodexCredentialStatusScoped(
     [row] = await scopedDb
       .select(cols)
       .from(schema.codexSubscriptionCredentials)
-      .where(pool.condition)
-      .orderBy(desc(schema.codexSubscriptionCredentials.createdAt))
+      .where(
+        organizationSource
+          ? and(
+              pool.condition,
+              eq(schema.codexSubscriptionCredentials.status, "active"),
+              eq(schema.codexSubscriptionCredentials.allocatorEnabled, true),
+            )
+          : pool.condition,
+      )
+      .orderBy(
+        organizationSource
+          ? asc(schema.codexSubscriptionCredentials.createdAt)
+          : desc(schema.codexSubscriptionCredentials.createdAt),
+        asc(schema.codexSubscriptionCredentials.id),
+      )
       .limit(1);
-    if (row && settingsRow && settingsRow.activeCredentialId !== row.id) {
-      if (organizationSource) {
-        await scopedDb
-          .update(schema.organizationCodexRotationSettings)
-          .set({ activeCredentialId: row.id, updatedAt: new Date() })
-          .where(eq(schema.organizationCodexRotationSettings.accountId, pool.source.accountId));
-      } else {
-        await scopedDb
-          .update(schema.codexRotationSettings)
-          .set({ activeCredentialId: row.id, updatedAt: new Date() })
-          .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
-      }
+    // An organization default can be deliberately unassigned here. A local
+    // readiness read must never rewrite that organization's default.
+    if (row && settingsRow && !organizationSource && settingsRow.activeCredentialId !== row.id) {
+      await scopedDb
+        .update(schema.codexRotationSettings)
+        .set({ activeCredentialId: row.id, updatedAt: new Date() })
+        .where(eq(schema.codexRotationSettings.workspaceId, workspaceId));
     }
   }
   if (!row) {
@@ -23742,6 +23805,7 @@ export async function isCodexBilledTurn(input: {
 // ---------------------------------------------------------------------------
 
 export type CodexAccountStatus = {
+  allowedModelIds?: string[] | null;
   id: string;
   source: Exclude<EffectiveCodexSubscriptionSource, "disabled">;
   chatgptAccountId: string | null;
@@ -23962,6 +24026,7 @@ function codexCredentialFailoverLimitForLease(
 export const CODEX_CREDENTIAL_LEASE_TTL_MS = 5 * 60_000;
 
 type CodexLeaseCandidateRow = {
+  allowed_model_ids: string[] | null;
   id: string;
   chatgpt_account_id: string | null;
   label: string | null;
@@ -23996,6 +24061,7 @@ function mapCodexLeaseCandidate(
   return {
     id: row.id,
     chatgptAccountId: row.chatgpt_account_id,
+    allowedModelIds: row.allowed_model_ids,
     label: row.label,
     accountEmail: row.account_email,
     planType: row.plan_type,
@@ -24064,6 +24130,7 @@ async function listCodexLeaseCandidatesInTransaction(
     select
       c.id,
       c.chatgpt_account_id,
+      c.allowed_model_ids,
       c.label,
       c.account_email,
       c.plan_type,
@@ -24362,7 +24429,7 @@ export async function acquireCodexCredentialLease<
         );
       }
       const policyScope = input.resolvePolicyScope?.(turn.metadata ?? {}) ?? null;
-      const activeCredentialId = codexPolicySnapshot
+      let activeCredentialId = codexPolicySnapshot
         ? codexPolicySnapshot.activeCredentialId
         : settingsRow.active_credential_id;
       const rotationEnabled = codexPolicySnapshot
@@ -24400,6 +24467,10 @@ export async function acquireCodexCredentialLease<
             source: acceptedOrganizationSource ? "organization" : "workspace",
             excludeTurnId: input.turnId,
           });
+      if (organizationSource) {
+        activeCredentialId = assignedConnectionDefault(activeCredentialId, allAccounts);
+        for (const account of allAccounts) account.isActive = account.id === activeCredentialId;
+      }
       const sameTurnCredentialId = existingCredentialId;
       const selectionContext = (
         accounts: CodexLeaseAccountStatus[],
@@ -25891,7 +25962,7 @@ export type XaiCapacityWait = {
   blockedTurnId: string;
   blockedTurnGeneration: number;
   workflowId: string;
-  authorityScope: "workspace" | "user";
+  authorityScope: "workspace" | "user" | "organization";
   ownerOrganizationMembershipId: string | null;
   status: CodexCapacityWaitStatus;
   generation: number;
@@ -25934,7 +26005,7 @@ function mapXaiCapacityWaiter(row: typeof schema.xaiCapacityWaiters.$inferSelect
     blockedTurnId: row.blockedTurnId,
     blockedTurnGeneration: row.blockedTurnGeneration,
     workflowId: row.workflowId,
-    authorityScope: row.authorityScope as "workspace" | "user",
+    authorityScope: row.authorityScope as "workspace" | "user" | "organization",
     ownerOrganizationMembershipId: row.ownerOrganizationMembershipId,
     status: row.status as CodexCapacityWaitStatus,
     generation: row.generation,
@@ -26088,7 +26159,7 @@ async function resolveXaiPoolMembershipInTransaction(
     authoritySnapshot: XaiProviderAccountAuthoritySnapshotV1;
   },
 ): Promise<string | null> {
-  if (input.authoritySnapshot.scope === "workspace") return null;
+  if (input.authoritySnapshot.scope !== "user") return null;
   const rows = await rawRows<{ membership_id: string }>(
     tx,
     sql`select organization_membership_id as membership_id
@@ -26113,7 +26184,7 @@ function xaiSnapshotMatchesTurn(
   return (
     current.success &&
     stableJson(current.data) === stableJson(snapshot) &&
-    (snapshot.scope === "workspace" || turn.initiatingHumanSubjectId === subjectId)
+    (snapshot.scope !== "user" || turn.initiatingHumanSubjectId === subjectId)
   );
 }
 
@@ -26178,21 +26249,22 @@ export async function armXaiCapacityWait(
         if (snapshot.scope === "user" && !ownerOrganizationMembershipId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        await tx
-          .insert(schema.xaiRotationSettings)
-          .values({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            authorityScope: snapshot.scope,
-            ownerOrganizationMembershipId,
-          })
-          .onConflictDoNothing();
+        if (snapshot.scope !== "organization")
+          await tx
+            .insert(schema.xaiRotationSettings)
+            .values({
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              authorityScope: snapshot.scope,
+              ownerOrganizationMembershipId,
+            })
+            .onConflictDoNothing();
         const [rotation] = await tx
           .select()
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -26345,7 +26417,7 @@ export async function armXaiCapacityWait(
             .where(
               and(
                 eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-                eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+                xaiCredentialWorkspacePredicate(input.workspaceId),
                 eq(schema.xaiSubscriptionCredentials.id, lease.credentialId),
               ),
             )
@@ -26710,7 +26782,7 @@ export async function reconcileXaiCapacityWait(
           .from(schema.xaiRotationSettings)
           .where(
             and(
-              eq(schema.xaiRotationSettings.workspaceId, input.workspaceId),
+              xaiRotationWorkspacePredicate(input.workspaceId),
               eq(schema.xaiRotationSettings.authorityScope, authority.snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiRotationSettings.ownerOrganizationMembershipId)
@@ -26868,7 +26940,7 @@ export async function reconcileXaiCapacityWait(
           .where(
             and(
               eq(schema.xaiSubscriptionCredentials.accountId, input.accountId),
-              eq(schema.xaiSubscriptionCredentials.workspaceId, input.workspaceId),
+              xaiCredentialWorkspacePredicate(input.workspaceId),
               eq(schema.xaiSubscriptionCredentials.authorityScope, authority.snapshot.scope),
               ownerOrganizationMembershipId === null
                 ? isNull(schema.xaiSubscriptionCredentials.ownerOrganizationMembershipId)
@@ -27394,6 +27466,65 @@ export async function quarantineCodexCredentialForLease(
   );
 }
 
+/** Commit organization subscription policy and its durable capacity wake atomically. */
+export async function updateModelConnectionAccess(
+  db: Database,
+  target: ModelConnectionTarget,
+  policy: ModelConnectionAccess,
+): Promise<ModelConnectionAccess | null> {
+  if (target.workspaceId !== null || (target.kind !== "codex" && target.kind !== "supergrok")) {
+    return await updateModelConnectionAccessPolicy(db, target, policy);
+  }
+  const actor = { organizationId: target.accountId, actorSubjectId: target.subjectId };
+  return await withOrganizationCodexAdministrator(db, actor, async (tx) => {
+    if (target.kind === "supergrok") {
+      return await withOrganizationXaiCapacityMutation(tx, actor, (scopedDb) =>
+        updateModelConnectionAccessPolicy(scopedDb, target, policy),
+      );
+    }
+    // Match ordinary organization mutations: workspace source locks, then pool,
+    // then credential and waiter rows. Keep Personal inventory internal.
+    await lockOrganizationCodexSubscriptionSources(tx, target.accountId);
+    await tx
+      .select({ accountId: schema.organizationCodexRotationSettings.accountId })
+      .from(schema.organizationCodexRotationSettings)
+      .where(eq(schema.organizationCodexRotationSettings.accountId, target.accountId))
+      .for("update");
+    const updated = await updateModelConnectionAccessPolicy(tx, target, policy);
+    if (updated) {
+      await wakeOrganizationCodexCapacityWaitersInTransaction(tx, {
+        accountId: target.accountId,
+        reason: "organization_codex_connection_access_changed",
+        restoreWorkspaceId: null,
+      });
+    }
+    return updated;
+  });
+}
+
+/** Compose existing pool metadata without a leaf-to-root database import cycle. */
+export async function getWorkspaceConnectionModelRestrictions(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
+) {
+  const [accounts, rotation] = await Promise.all([
+    listCodexAccountStatuses(db, workspaceId),
+    getCodexRotationSettings(db, workspaceId),
+  ]);
+  const selectableAccounts = rotation?.rotationEnabled
+    ? accounts
+    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
+  return await resolveWorkspaceConnectionModelRestrictions(
+    db,
+    workspaceId,
+    subjectId,
+    selectableAccounts,
+    authoritySnapshot,
+  );
+}
+
 /**
  * Metadata-only list of every connected Codex account in the workspace, for the
  * accounts UI + the worker's selection resolver. NEVER decrypts. `isActive` marks
@@ -27423,11 +27554,12 @@ export async function listCodexAccountStatuses(
             .from(schema.codexRotationSettings)
             .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
             .limit(1);
-    const activeId = settingsRow?.activeCredentialId ?? null;
+    let activeId = settingsRow?.activeCredentialId ?? null;
     const rows = await scopedDb
       .select({
         id: schema.codexSubscriptionCredentials.id,
         chatgptAccountId: schema.codexSubscriptionCredentials.chatgptAccountId,
+        allowedModelIds: schema.codexSubscriptionCredentials.allowedModelIds,
         label: schema.codexSubscriptionCredentials.label,
         accountEmail: schema.codexSubscriptionCredentials.accountEmail,
         planType: schema.codexSubscriptionCredentials.planType,
@@ -27458,6 +27590,7 @@ export async function listCodexAccountStatuses(
         asc(schema.codexSubscriptionCredentials.createdAt),
         asc(schema.codexSubscriptionCredentials.id),
       );
+    if (accountSource === "organization") activeId = assignedConnectionDefault(activeId, rows);
     return rows.map((row) => ({
       ...row,
       source: accountSource,
@@ -28600,6 +28733,13 @@ export async function getCodexRotationSettings(
             .from(schema.codexRotationSettings)
             .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
             .limit(1);
+    if (row && source.effectiveSource === "organization") {
+      const accounts = await listCodexAccountStatuses(scopedDb, workspaceId);
+      return {
+        ...row,
+        activeCredentialId: assignedConnectionDefault(row.activeCredentialId, accounts),
+      };
+    }
     return row ?? null;
   });
 }
@@ -32672,6 +32812,8 @@ export type SessionListKeysetCursor = {
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type SessionListFilterOptions = {
+  /** Sessions created through this published Site, independent of project. */
+  originSiteId?: string;
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
   /** Exact frozen creator identity. */
@@ -32874,7 +33016,63 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
-type SessionRow = typeof schema.sessions.$inferSelect;
+type SessionRow = typeof schema.sessions.$inferSelect & { currentInputWait?: Session["inputWait"] };
+
+/** One bounded query in the caller's RLS scope; never infer waits from history text. */
+async function withCurrentSessionInputWait(
+  db: Database,
+  workspaceId: string,
+  rows: readonly SessionRow[],
+): Promise<SessionRow[]> {
+  const candidates = rows.filter(
+    (row) =>
+      row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
+  );
+  if (!candidates.length) return rows.map((row) => ({ ...row, currentInputWait: null }));
+  const latest = db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        isNotNull(schema.sessionTurns.finishedAt),
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
+    .limit(1)
+    .as("latest_wait_turn");
+  const matches = await db
+    .select({ id: schema.sessions.id, turnId: latest.id })
+    .from(schema.sessions)
+    .leftJoinLateral(latest, sql`true`)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(
+          schema.sessions.id,
+          candidates.map((row) => row.id),
+        ),
+      ),
+    );
+  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
+  return rows.map((row) => ({
+    ...row,
+    currentInputWait:
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      row.inputWaitUntil &&
+      row.inputWaitReason &&
+      row.inputWaitTurnId &&
+      byId.get(row.id) === row.inputWaitTurnId
+        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
+        : null,
+  }));
+}
 
 /**
  * Public sequence and unread projections are cursor-authoritative after the
@@ -32903,20 +33101,24 @@ async function canonicalSessionRowsFromEventCursors(
       ),
     );
   const cursorBySessionId = new Map(cursors.map((cursor) => [cursor.sessionId, cursor]));
-  return rows.map((row) => {
-    const cursor = cursorBySessionId.get(row.id);
-    if (
-      !cursor ||
-      cursor.accountId !== row.accountId ||
-      cursor.workspaceId !== row.workspaceId ||
-      cursor.lastSequence < row.lastSequence
-    ) {
-      throw new Error(`Session event cursor invariant failed for session ${row.id}`);
-    }
-    return cursor.lastSequence === row.lastSequence
-      ? row
-      : { ...row, lastSequence: cursor.lastSequence };
-  });
+  return withLatestStartedSessionPolicy(
+    db,
+    workspaceId,
+    (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
+      const cursor = cursorBySessionId.get(row.id);
+      if (
+        !cursor ||
+        cursor.accountId !== row.accountId ||
+        cursor.workspaceId !== row.workspaceId ||
+        cursor.lastSequence < row.lastSequence
+      ) {
+        throw new Error(`Session event cursor invariant failed for session ${row.id}`);
+      }
+      return cursor.lastSequence === row.lastSequence
+        ? row
+        : { ...row, lastSequence: cursor.lastSequence };
+    }),
+  );
 }
 
 function mapSessionAttention(
@@ -32959,6 +33161,7 @@ type SessionTreeStatsRow = {
   totalDescendants: number | string;
   runningDescendants: number | string;
   queuedDescendants: number | string;
+  waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
@@ -32979,6 +33182,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   totalDescendants: 0,
   runningDescendants: 0,
   queuedDescendants: 0,
+  waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
   failedDescendants: 0,
@@ -33109,6 +33313,7 @@ export async function sessionTreeStatsForSessions(
         stats."totalDescendants",
         stats."runningDescendants",
         stats."queuedDescendants",
+        stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
         stats."failedDescendants",
@@ -33232,6 +33437,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "queuedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'idle' and effective_pause_revision is null
+              and exists (
+                select 1 from ${schema.sessions} waiting_session
+                where waiting_session.workspace_id = ${workspaceId} and waiting_session.id = numbered.id
+                  and waiting_session.active_turn_id is null
+                  and waiting_session.input_wait_until is not null
+                  and waiting_session.input_wait_turn_id = (
+                    select finished.id from ${schema.sessionTurns} finished
+                    where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
+                      and finished.finished_at is not null
+                    order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+                  )
+              )
+          )::int as "waitingDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
               and depth > 0 and status = 'requires_action'
           )::int as "attentionDescendants",
           count(*) filter (
@@ -33331,6 +33552,7 @@ export async function sessionTreeStatsForSessions(
         totalDescendants: Number(row.totalDescendants),
         runningDescendants: Number(row.runningDescendants),
         queuedDescendants: Number(row.queuedDescendants),
+        waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
@@ -33394,6 +33616,7 @@ function sessionFilters(
     | "subjectId"
     | "archivedOnly"
     | "channelId"
+    | "originSiteId"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -33411,6 +33634,11 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.originSiteId) {
+    filters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
+    );
+  }
   const archivedRoot = sql`exists (
     select 1
     from ${schema.sessionPins} archive_state
@@ -33579,6 +33807,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   const hasChannel = options.channelId !== undefined;
   if (
     !hasChannel &&
+    !options.originSiteId &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33588,6 +33817,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
@@ -34788,6 +35018,8 @@ export async function getLatestSessionModelForSubject(
 
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt" | "relevance";
 export type SessionDiscoveryCursor = {
+  /** Site provenance is bound for chronological as well as relevance lists. */
+  originSiteId?: string;
   orderBy: SessionDiscoveryOrderBy;
   /** Stable rank class for relevance order; null for chronological order. */
   sortRank: number | null;
@@ -34811,6 +35043,7 @@ export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
   titleOriginalChars: number | null;
+  channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string;
   nestedAgentDepth: number;
@@ -34898,11 +35131,13 @@ async function readWorkspaceSessionActivityRevision(
 const SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
 
 type NormalizedSessionDiscoveryFilters = {
+  originSiteId: string | null;
   query: string | null;
   statuses: SessionStatus[];
   activeOnly: boolean;
   recentHours: number | null;
   rootSessionId: string | null;
+  channelId: string | null | undefined;
   parentSessionId: string | null | undefined;
   subject: WorkClaimSubjectFilter | null;
 };
@@ -34911,6 +35146,7 @@ type SessionDiscoveryPageRow = {
   id: string | null;
   title: string | null;
   titleOriginalChars: number | string | null;
+  channelId?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
   nestedAgentDepth: number | string | null;
@@ -34974,12 +35210,14 @@ function normalizeSessionDiscoverySubject(
 }
 
 function normalizeSessionDiscoveryFilters(options: {
+  originSiteId?: string;
   query?: string;
   search?: string;
   statuses?: SessionStatus[];
   activeOnly?: boolean;
   recentHours?: number;
   rootSessionId?: string;
+  channelId?: string | null;
   parentSessionId?: string | null;
   subject?: WorkClaimSubjectFilter;
 }): NormalizedSessionDiscoveryFilters {
@@ -35011,10 +35249,12 @@ function normalizeSessionDiscoveryFilters(options: {
   }
   return {
     query,
+    originSiteId: options.originSiteId ?? null,
     statuses,
     activeOnly: options.activeOnly === true,
     recentHours,
     rootSessionId: options.rootSessionId ?? null,
+    channelId: options.channelId,
     parentSessionId: Object.prototype.hasOwnProperty.call(options, "parentSessionId")
       ? (options.parentSessionId ?? null)
       : undefined,
@@ -35027,12 +35267,14 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
     .update(
       JSON.stringify({
         query: filters.query,
+        ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
         statuses: filters.statuses,
         activeOnly: filters.activeOnly,
         recentHours: filters.recentHours,
         rootSessionId: filters.rootSessionId,
         parentSessionId:
           filters.parentSessionId === undefined ? { any: true } : filters.parentSessionId,
+        ...(filters.channelId !== undefined ? { channelId: filters.channelId } : {}),
         subject: filters.subject,
       }),
     )
@@ -35092,6 +35334,11 @@ async function selectSessionDiscoveryPageRows(
   if (options.filters.statuses.length > 0) {
     authorizationFilters.push(inArray(schema.sessions.status, options.filters.statuses));
   }
+  if (options.filters.originSiteId) {
+    authorizationFilters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.filters.originSiteId}`,
+    );
+  }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
   }
@@ -35099,6 +35346,13 @@ async function selectSessionDiscoveryPageRows(
     authorizationFilters.push(
       sql`${schema.sessions.updatedAt} >= ${options.snapshotAt}::text::timestamptz
         - (${options.filters.recentHours}::integer * interval '1 hour')`,
+    );
+  }
+  if (options.filters.channelId !== undefined) {
+    authorizationFilters.push(
+      options.filters.channelId === null
+        ? isNull(schema.sessions.channelId)
+        : eq(schema.sessions.channelId, options.filters.channelId),
     );
   }
   if (options.filters.rootSessionId) {
@@ -35405,6 +35659,7 @@ async function selectSessionDiscoveryPageRows(
         select
           ${schema.sessions.id} as id,
           ${schema.sessions.title} as title,
+          ${schema.sessions.channelId} as channel_id,
           ${schema.sessions.parentSessionId} as parent_session_id,
           ${schema.sessions.rootSessionId} as root_session_id,
           ${schema.sessions.nestedAgentDepth} as nested_agent_depth,
@@ -35424,6 +35679,7 @@ async function selectSessionDiscoveryPageRows(
         page.id,
         page.title,
         page."titleOriginalChars",
+        page."channelId",
         page."parentSessionId",
         page."rootSessionId",
         page."nestedAgentDepth",
@@ -35444,6 +35700,7 @@ async function selectSessionDiscoveryPageRows(
           ranked_sessions.id,
           left(ranked_sessions.title, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS}) as title,
           char_length(ranked_sessions.title)::integer as "titleOriginalChars",
+          ranked_sessions.channel_id as "channelId",
           ranked_sessions.parent_session_id as "parentSessionId",
           ranked_sessions.root_session_id as "rootSessionId",
           ranked_sessions.nested_agent_depth as "nestedAgentDepth",
@@ -35649,11 +35906,13 @@ export async function listSessionDiscoverySummaries(
   db: Database,
   workspaceId: string,
   options: {
+    originSiteId?: string;
     limit: number;
     cursor?: SessionDiscoveryCursor;
     includeLastMessage?: boolean;
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
+    channelId?: string | null;
     parentSessionId?: string | null;
     rootSessionId?: string;
     query?: string;
@@ -35682,6 +35941,7 @@ export async function listSessionDiscoverySummaries(
   updatedAfter: string | null;
   /** Internal relevance cursor binding; omitted from row projections. */
   filterHash: string | null;
+  originSiteId?: string;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   const claimLimit = Math.max(
@@ -35703,6 +35963,9 @@ export async function listSessionDiscoverySummaries(
   }
   const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
   const readPage = async (scopedDb: Database) => {
+    if (options.cursor && (options.cursor.originSiteId ?? null) !== filters.originSiteId) {
+      throw new Error("sessions_list cursor Site filter does not match the request");
+    }
     const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
     const updatedAfter =
       requestedUpdatedAfter === null
@@ -35905,6 +36168,7 @@ export async function listSessionDiscoverySummaries(
         id: sessionId,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
+        channelId: row.channelId ?? null,
         parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         rootSessionId: relatedAccess === "root" ? row.rootSessionId! : sessionId,
         nestedAgentDepth: Number(row.nestedAgentDepth),
@@ -35965,6 +36229,7 @@ export async function listSessionDiscoverySummaries(
               snapshotRevision,
               updatedAfter,
               filterHash,
+              ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
             }
           : null,
       total: selected.total,
@@ -35974,6 +36239,7 @@ export async function listSessionDiscoverySummaries(
       updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
       filterHash,
+      ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
     };
   };
   const transactionConfig: PgTransactionConfig =
@@ -36344,6 +36610,26 @@ export async function countActiveSessionsForWorkspace(
         ),
       );
     return Number(count);
+  });
+}
+
+/** Immutable creation evidence for scheduled-session binding checks, never continuation defaults. */
+export async function getSessionCreationExecutionPolicy(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+) {
+  return withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        model: schema.sessions.model,
+        reasoningEffort: schema.sessions.reasoningEffort,
+        latencyMode: schema.sessions.latencyMode,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    return row ?? null;
   });
 }
 
@@ -61920,7 +62206,7 @@ function frozenXaiExecutionAuthority(
   const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(
     update.xaiProviderAccountAuthoritySnapshot,
   );
-  if (snapshot.scope === "workspace") return { snapshot, subjectId: null };
+  if (snapshot.scope !== "user") return { snapshot, subjectId: null };
   const subjectId = update.lineage.xaiAuthoritySubjectId;
   if (typeof subjectId !== "string" || subjectId.trim().length === 0) {
     throw new Error(`User-scoped xAI system update has no causal subject: ${update.id}`);
@@ -63866,29 +64152,11 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessionTurns.sessionId, sessionId),
                 ),
               );
-            const [latestStarted] = await tx
-              .select({
-                model: schema.sessionTurns.model,
-                reasoningEffort: schema.sessionTurns.reasoningEffort,
-                latencyMode: schema.sessionTurns.latencyMode,
-                sandboxBackend: schema.sessionTurns.sandboxBackend,
-                sandboxOs: schema.sessionTurns.sandboxOs,
-                initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-                initiatorKind: schema.sessionTurns.initiatorKind,
-                initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-                xaiProviderAccountAuthoritySnapshot:
-                  schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
-              })
-              .from(schema.sessionTurns)
-              .where(
-                and(
-                  eq(schema.sessionTurns.workspaceId, workspaceId),
-                  eq(schema.sessionTurns.sessionId, sessionId),
-                  sql`${schema.sessionTurns.startedAt} is not null`,
-                ),
-              )
-              .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
-              .limit(1);
+            const latestStarted = await latestStartedSessionTurnRow(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+            );
             await tx.execute(sql`set local opengeni.session_inference_claim = '1'`);
             const [compactionTurn] = await tx
               .insert(schema.sessionTurns)
@@ -64192,28 +64460,11 @@ export async function claimSessionWorkForAttempt(
           let frozenTurnExecutionPolicy = goalPolicy?.turnExecutionPolicy
             ? TurnExecutionPolicyV1.parse(goalPolicy.turnExecutionPolicy)
             : null;
-          const [latestStarted] = await tx
-            .select({
-              model: schema.sessionTurns.model,
-              reasoningEffort: schema.sessionTurns.reasoningEffort,
-              latencyMode: schema.sessionTurns.latencyMode,
-              tools: schema.sessionTurns.tools,
-              sandboxBackend: schema.sessionTurns.sandboxBackend,
-              sandboxOs: schema.sessionTurns.sandboxOs,
-              initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
-              initiatorKind: schema.sessionTurns.initiatorKind,
-              initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-            })
-            .from(schema.sessionTurns)
-            .where(
-              and(
-                eq(schema.sessionTurns.workspaceId, workspaceId),
-                eq(schema.sessionTurns.sessionId, sessionId),
-                sql`${schema.sessionTurns.startedAt} is not null`,
-              ),
-            )
-            .orderBy(desc(schema.sessionTurns.startedAt), desc(schema.sessionTurns.createdAt))
-            .limit(1);
+          const latestStarted = await latestStartedSessionTurnRow(
+            tx as unknown as Database,
+            workspaceId,
+            sessionId,
+          );
           let model =
             typeof goalPolicy?.model === "string"
               ? goalPolicy.model
@@ -72327,8 +72578,8 @@ export async function claimPendingSessionWorkflowWakes(
  * accepted direction or an interrupted attempt awaiting writer-set proof.
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
- * Agent Steer, a current wake still owns an accepted queued human/API turn, or
- * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * Agent Steer, a current wake owns a queued human/API turn, eligible machine
+ * input, or a due idle input-wait obligation, or an attempt awaits quiescence, retain the revision so the bounded outbox
  * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
  * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
@@ -72344,7 +72595,12 @@ export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
   | {
       action: "pending_admission";
-      blocker: "pending_agent_steer" | "pending_prompt_turn" | "pending_quiescence";
+      blocker:
+        | "pending_agent_steer"
+        | "pending_prompt_turn"
+        | "pending_quiescence"
+        | "pending_machine_input"
+        | "pending_input_wait";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -72410,6 +72666,64 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (currentWake?.wakeRevision === input.wakeRevision) {
+            // A transport ACK is not consumption. The workflow may have already
+            // taken its closing snapshot when a timeout or child result arrives.
+            // Keep the current revision retryable until claim consumes the input.
+            if (
+              session.activeTurnId === null &&
+              session.status !== "failed" &&
+              session.status !== "cancelled" &&
+              session.status !== "requires_action" &&
+              !(await sessionRealtimeIsActiveInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+              ))
+            ) {
+              const wait = await sessionInputWaitStateTx(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+                session,
+              );
+              const pending = await tx
+                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .from(schema.sessionSystemUpdates)
+                .where(
+                  and(
+                    eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                    eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                    eq(schema.sessionSystemUpdates.state, "pending"),
+                  ),
+                );
+              const [goal] = await tx
+                .select({ status: schema.sessionGoals.status })
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .limit(1);
+              if (
+                pending.some(
+                  ({ kind }) =>
+                    SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
+                      "immediate" &&
+                    (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+                      goal?.status === "active" ||
+                      wait.disposition === "held" ||
+                      session.status === "queued"),
+                )
+              )
+                return { action: "pending_admission", blocker: "pending_machine_input" } as const;
+              // A future hold is explicitly re-armed by settlement. Retaining its
+              // early transport revision would coalesce every rearm back to now.
+              if (wait.disposition === "timeout") {
+                return { action: "pending_admission", blocker: "pending_input_wait" } as const;
+              }
+            }
             const [pendingPromptTurn] = await tx
               .select({ id: schema.sessionTurns.id })
               .from(schema.sessionTurns)
@@ -75329,7 +75643,12 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  return mapSession(row, control, mcpServers, pin, attention, archive, tenancyViewer);
+  const [effective] = await withLatestStartedSessionPolicy(
+    db,
+    row.workspaceId,
+    await withCurrentSessionInputWait(db, row.workspaceId, [row]),
+  );
+  return mapSession(effective!, control, mcpServers, pin, attention, archive, tenancyViewer);
 }
 
 function mapSessionTenancy(
@@ -75362,7 +75681,7 @@ function mapSessionTenancy(
 }
 
 function mapSession(
-  row: typeof schema.sessions.$inferSelect,
+  row: SessionRow,
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
@@ -75441,6 +75760,7 @@ function mapSession(
     queueHeadPosition: Number(row.queueHeadPosition),
     queueTailPosition: Number(row.queueTailPosition),
     effectiveControl,
+    inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
     codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
     codexLastCredentialId: row.codexLastCredentialId ?? null,
@@ -75571,29 +75891,13 @@ async function latestStartedSessionTurnRow(
   workspaceId: string,
   sessionId: string,
 ): Promise<typeof schema.sessionTurns.$inferSelect | null> {
+  const latest = latestStartedSessionTurnQuery(db, workspaceId, sessionId).as(
+    "latest_started_turn",
+  );
   const [row] = await db
     .select({ turn: schema.sessionTurns })
-    .from(schema.sessionEvents)
-    .innerJoin(
-      schema.sessionTurns,
-      and(
-        eq(schema.sessionEvents.workspaceId, schema.sessionTurns.workspaceId),
-        eq(schema.sessionEvents.sessionId, schema.sessionTurns.sessionId),
-        eq(schema.sessionEvents.turnId, schema.sessionTurns.id),
-      ),
-    )
-    .where(
-      and(
-        eq(schema.sessionEvents.workspaceId, workspaceId),
-        eq(schema.sessionEvents.sessionId, sessionId),
-        eq(schema.sessionEvents.type, "turn.started"),
-      ),
-    )
-    // session_events_workspace_session_sequence_idx supports this backward
-    // scan; the PK join then fetches exactly one turn row even for very long
-    // sessions with thousands of timeline deltas per turn.
-    .orderBy(desc(schema.sessionEvents.sequence))
-    .limit(1);
+    .from(latest)
+    .innerJoin(schema.sessionTurns, eq(schema.sessionTurns.id, latest.id));
   return row?.turn ?? null;
 }
 
@@ -76666,3 +76970,5 @@ export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
     sql`select * from opengeni_private.list_due_workspace_pause_timers(${limit})`,
   );
 }
+
+export * from "./feedback";

@@ -10,6 +10,24 @@ function uuid(index: number): string {
 }
 
 describe("sessions_list legacy bounded detail=full discovery projection", () => {
+  test("Site-bound chronological cursors preserve origin in their versioned wire format", () => {
+    const cursor = {
+      orderBy: "createdAt" as const,
+      sortRank: null,
+      sortRevision: "0",
+      sortAt: "2026-09-08T12:00:00.123456Z",
+      id: uuid(1),
+      snapshotAt: "2026-09-08T13:00:00.123456Z",
+      snapshotRevision: "0",
+      updatedAfter: null,
+      filterHash: null,
+      originSiteId: uuid(2),
+    };
+    const encoded = encodeSessionDiscoveryCursor(cursor);
+    expect(JSON.parse(Buffer.from(encoded, "base64url").toString()).v).toBe(4);
+    expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+  });
+
   test("stays deterministic and within the exact envelope at 1, 20, and 100 rows", () => {
     let previousBytes = 0;
     for (const count of [1, 20, 100]) {

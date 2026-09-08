@@ -170,7 +170,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   if (!canRead || (loadError && !snapshot)) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
         <p className="text-sm text-fg-muted">{loadError ?? "Unavailable."}</p>
       </ContentPage>
     );
@@ -179,7 +179,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
   if ((!snapshot && loading) || !snap || !totals || !deltas || !view) {
     return (
       <ContentPage width="wide" data-insights className="gap-4">
-        <h1 className="text-lg font-semibold text-fg">Workspace insights</h1>
+        <h1 className="text-xl font-semibold tracking-tight text-fg">Workspace insights</h1>
         <p className="text-sm text-fg-muted">Loading rollups…</p>
       </ContentPage>
     );
@@ -198,7 +198,7 @@ export function InsightsRoute({ workspaceId }: { workspaceId: string }) {
             <p className="text-2xs font-medium uppercase tracking-[0.14em] text-fg-subtle">
               {workspace?.name ?? "Workspace"}
             </p>
-            <h1 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-fg">Insights</h1>
+            <h1 className="mt-1 text-xl font-semibold tracking-tight text-fg">Insights</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <MeasureControl value={measure} onChange={setMeasure} />

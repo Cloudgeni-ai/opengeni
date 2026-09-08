@@ -558,15 +558,15 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 320],
+            [FORCE_RLS_TABLES, 322],
             [NON_RLS_RUNTIME_TABLES, 19],
             [RUNTIME_FULL_DML_TABLES, 164],
             [RUNTIME_READ_ONLY_TABLES, 24],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
+            [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 71],
-            [RUNTIME_DML_TABLES, 268],
+            [RUNTIME_DML_TABLES, 269],
           ] as const)
         : ([
             [FORCE_RLS_TABLES, 206],
@@ -593,7 +593,7 @@ describe("runtime database posture evaluator", () => {
       }
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
-      const tableCount = hasCurrentMainActivityLedger ? 339 : 218;
+      const tableCount = hasCurrentMainActivityLedger ? 341 : 218;
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
           personalResourceProtectedTableCount +
@@ -606,6 +606,7 @@ describe("runtime database posture evaluator", () => {
           managedAuthSessionSetProtectedTableCount +
           organizationRecoveryProtectedTableCount,
       );
+      expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
         "SELECT",
         "INSERT",

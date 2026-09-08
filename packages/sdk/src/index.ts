@@ -1,3 +1,4 @@
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export { OpenGeniClient } from "./artifact-client";
 export {
   OpenGeniToolCallError,
@@ -1219,3 +1220,10 @@ export type {
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,
 } from "./types";
+
+export type {
+  FeedbackSentiment,
+  CreateFeedbackRequest,
+  Feedback,
+  FeedbackSubmissionResponse,
+} from "./feedback";

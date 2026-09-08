@@ -500,6 +500,7 @@ export {
   labelLatencyMode,
   labelReasoningEffort,
   payerSummaryForModel,
+  modelUsesCredits,
   projectClientModelRows,
   projectPickerRows,
   runnableLatencyModesForModel,

@@ -303,26 +303,21 @@ export function protectedResourceMetadataCandidates(
 }
 
 export function authorizationServerMetadataCandidates(authorizationServer: string): string[] {
+  const url = new URL(authorizationServer);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
+  // MCP specifies OAuth path insertion, then OpenID insertion/appending.
+  // Guessed OAuth suffixes and issuer-root fallbacks can hit protected routes
+  // before valid OpenID metadata, or discover a different tenant's metadata.
   return uniqueStrings([
-    ...oauthWellKnownCandidates(authorizationServer, "oauth-authorization-server"),
-    ...oauthWellKnownCandidates(authorizationServer, "openid-configuration"),
-    authorizationServer,
+    `${url.origin}/.well-known/oauth-authorization-server${path ? `/${path}` : ""}`,
+    `${url.origin}/.well-known/openid-configuration${path ? `/${path}` : ""}`,
+    `${url.origin}${path ? `/${path}` : ""}/.well-known/openid-configuration`,
   ]);
 }
 
 export function legacyAuthorizationServerMetadataCandidates(resourceUrl: string): string[] {
   const origin = new URL(resourceUrl).origin;
   return [`${origin}/.well-known/oauth-authorization-server`];
-}
-
-function oauthWellKnownCandidates(rawUrl: string, name: string): string[] {
-  const url = new URL(rawUrl);
-  const path = url.pathname.replace(/^\/+|\/+$/g, "");
-  return uniqueStrings([
-    `${url.origin}/.well-known/${name}${path ? `/${path}` : ""}`,
-    `${url.origin}${path ? `/${path}` : ""}/.well-known/${name}`,
-    `${url.origin}/.well-known/${name}`,
-  ]);
 }
 
 function parseProtectedResourceMetadata(

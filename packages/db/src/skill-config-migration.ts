@@ -84,14 +84,14 @@ async function assertSkillConfigurationMaintenanceWindow(
   const rows = await tx`SELECT c.oid FROM pg_class c
     WHERE c.oid='sessions'::regclass AND pg_get_userbyid(c.relowner)=current_user
       AND c.relrowsecurity AND NOT c.relforcerowsecurity
-      AND to_regclass('pg_temp.skill_metadata_0423') IS NOT NULL`;
+      AND to_regclass('pg_temp.skill_metadata_0426') IS NOT NULL`;
   if (rows.length !== 1)
     throw new Error(
       "Skill configuration conversion requires the parser-backed maintenance owner window",
     );
 }
 
-/** Maintenance-only: caller holds the 0423 owner window and drained runtime fence. */
+/** Maintenance-only: caller holds the 0426 owner window and drained runtime fence. */
 export async function migrateLegacySkillConfigurations(tx: postgres.TransactionSql): Promise<void> {
   await assertSkillConfigurationMaintenanceWindow(tx);
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('session-tenancy:'||workspace_id::text,0))
@@ -162,7 +162,7 @@ export async function migrateLegacySkillConfigurations(tx: postgres.TransactionS
   }
   if (blockers.length)
     throw new Error(
-      `0423 Skill configuration preflight: ${blockers.length} repair-required sources; drain or explicitly replace pinned sources before retry: ${blockers.slice(0, 30).join(", ")}`,
+      `0426 Skill configuration preflight: ${blockers.length} repair-required sources; drain or explicitly replace pinned sources before retry: ${blockers.slice(0, 30).join(", ")}`,
     );
   for (const { source, converted } of changes) {
     const original = tx.json(source.original as never);
@@ -175,6 +175,6 @@ export async function migrateLegacySkillConfigurations(tx: postgres.TransactionS
         ? await tx`UPDATE sessions SET skills=${replacement} WHERE id=${source.id} AND account_id=${source.account_id} AND workspace_id=${source.workspace_id} AND skills=${original} RETURNING id`
         : await tx`UPDATE workspace_packs SET manifest=${replacement} WHERE id=${source.id} AND account_id=${source.account_id} AND workspace_id=${source.workspace_id} AND manifest=${original} RETURNING id`;
     if (updated.length !== 1)
-      throw new Error(`0423 Skill configuration CAS conflict: ${source.kind}:${source.id}`);
+      throw new Error(`0426 Skill configuration CAS conflict: ${source.kind}:${source.id}`);
   }
 }

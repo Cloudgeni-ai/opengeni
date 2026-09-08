@@ -174,10 +174,10 @@ async function executeMigrationFile(
   sqlText: string,
 ): Promise<void> {
   if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
-    if (file !== "0423_unified_skill_lifecycle.sql")
-      throw new Error("Skill metadata stage is restricted to migration 0423");
+    if (file !== "0426_unified_skill_lifecycle.sql")
+      throw new Error("Skill metadata stage is restricted to migration 0426");
     const parts = sqlText.split(SKILL_METADATA_MIGRATION_MARKER);
-    if (parts.length !== 2) throw new Error("0423 requires exactly one Skill metadata stage");
+    if (parts.length !== 2) throw new Error("0426 requires exactly one Skill metadata stage");
     await sql.begin(async (transaction) => {
       await createSkillMetadataMigrationStage(transaction);
       await transaction`SELECT

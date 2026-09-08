@@ -1340,6 +1340,12 @@ export const workspaceVariableSetVariables = pgTable(
 export const codexSubscriptionCredentials = pgTable(
   "codex_subscription_credentials",
   {
+    allowedModelIds: text("allowed_model_ids").array(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    accessPolicyVersion: integer("access_policy_version").notNull().default(1),
+    accessPolicyUpdatedBy: text("access_policy_updated_by"),
+    accessPolicyUpdatedAt: timestamp("access_policy_updated_at", { withTimezone: true }),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -1627,6 +1633,12 @@ export const codexResetRedemptionAttempts = pgTable(
 export const connections = pgTable(
   "connections",
   {
+    allowedModelIds: text("allowed_model_ids").array(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    accessPolicyVersion: integer("access_policy_version").notNull().default(1),
+    accessPolicyUpdatedBy: text("access_policy_updated_by"),
+    accessPolicyUpdatedAt: timestamp("access_policy_updated_at", { withTimezone: true }),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -3875,13 +3887,17 @@ export const codexCredentialLeases = pgTable(
 export const xaiSubscriptionCredentials = pgTable(
   "xai_subscription_credentials",
   {
+    allowedModelIds: text("allowed_model_ids").array(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    accessPolicyVersion: integer("access_policy_version").notNull().default(1),
+    accessPolicyUpdatedBy: text("access_policy_updated_by"),
+    accessPolicyUpdatedAt: timestamp("access_policy_updated_at", { withTimezone: true }),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
     credentialEncrypted: text("credential_encrypted").notNull(),
     providerAccountId: text("provider_account_id"),
     label: text("label"),
@@ -3918,6 +3934,14 @@ export const xaiSubscriptionCredentials = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    accountIdentity: uniqueIndex("xai_subscription_credentials_account_identity_uq").on(
+      table.accountId,
+      table.id,
+    ),
+    scopeWorkspaceShape: check(
+      "xai_credential_scope_workspace_shape",
+      sql`(${table.authorityScope} = 'organization') = (${table.workspaceId} is null)`,
+    ),
     workspaceIdentity: uniqueIndex("xai_subscription_credentials_workspace_id_uq").on(
       table.workspaceId,
       table.id,
@@ -3927,6 +3951,7 @@ export const xaiSubscriptionCredentials = pgTable(
     ).on(table.workspaceId, table.accountId, table.id),
     providerIdentity: uniqueIndex("xai_subscription_credentials_provider_identity_uq")
       .on(
+        table.accountId,
         table.workspaceId,
         table.authorityScope,
         table.ownerOrganizationMembershipId,
@@ -3940,12 +3965,12 @@ export const xaiSubscriptionCredentials = pgTable(
     ),
     scopeValid: check(
       "xai_subscription_credentials_authority_scope_chk",
-      sql`${table.authorityScope} in ('workspace', 'user')`,
+      sql`${table.authorityScope} in ('workspace', 'user', 'organization')`,
     ),
     authorityShapeValid: check(
       "xai_subscription_credentials_authority_shape_chk",
       sql`(
-          ${table.authorityScope} = 'workspace'
+          ${table.authorityScope} in ('workspace', 'organization')
           and ${table.ownerOrganizationMembershipId} is null
           and ${table.organizationUserResourceAuthorityId} is null
           and ${table.organizationUserResourceKind} is null
@@ -3973,7 +3998,7 @@ export const xaiSubscriptionCredentials = pgTable(
   }),
 );
 
-// One fair-allocation serialization row per workspace or exact user pool.
+// One allocation serialization row per organization, workspace, or exact user pool.
 export const xaiRotationSettings = pgTable(
   "xai_rotation_settings",
   {
@@ -3981,9 +4006,7 @@ export const xaiRotationSettings = pgTable(
     accountId: uuid("account_id")
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
-    workspaceId: uuid("workspace_id")
-      .notNull()
-      .references(() => workspaces.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id").references(() => workspaces.id, { onDelete: "cascade" }),
     authorityScope: text("authority_scope").notNull().default("workspace"),
     ownerOrganizationMembershipId: uuid("owner_organization_membership_id"),
     activeCredentialId: uuid("active_credential_id"),
@@ -3994,14 +4017,19 @@ export const xaiRotationSettings = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    scopeWorkspaceShape: check(
+      "xai_rotation_scope_workspace_shape",
+      sql`(${table.authorityScope} = 'organization') = (${table.workspaceId} is null)`,
+    ),
     workspacePool: uniqueIndex("xai_rotation_settings_workspace_pool_uq").on(
+      table.accountId,
       table.workspaceId,
       table.authorityScope,
       table.ownerOrganizationMembershipId,
     ),
     scopeValid: check(
       "xai_rotation_settings_authority_scope_chk",
-      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+      sql`(${table.authorityScope} in ('workspace', 'organization') and ${table.ownerOrganizationMembershipId} is null)
         or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
     ),
     countersValid: check(
@@ -4046,7 +4074,7 @@ export const xaiCredentialLeases = pgTable(
     expiry: index("xai_credential_leases_expiry_idx").on(table.leasedUntil),
     scopeValid: check(
       "xai_credential_leases_authority_scope_chk",
-      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+      sql`(${table.authorityScope} in ('workspace', 'organization') and ${table.ownerOrganizationMembershipId} is null)
         or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
     ),
     generationValid: check("xai_credential_leases_generation_chk", sql`${table.generation} > 0`),
@@ -8211,7 +8239,7 @@ export const xaiSessionAccountPins = pgTable(
     ),
     scopeValid: check(
       "xai_session_account_pins_authority_scope_chk",
-      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+      sql`(${table.authorityScope} in ('workspace', 'organization') and ${table.ownerOrganizationMembershipId} is null)
         or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
     ),
     pinValid: check(
@@ -8274,7 +8302,7 @@ export const xaiCapacityWaiters = pgTable(
     ),
     scopeValid: check(
       "xai_capacity_waiters_authority_scope_chk",
-      sql`(${table.authorityScope} = 'workspace' and ${table.ownerOrganizationMembershipId} is null)
+      sql`(${table.authorityScope} in ('workspace', 'organization') and ${table.ownerOrganizationMembershipId} is null)
         or (${table.authorityScope} = 'user' and ${table.ownerOrganizationMembershipId} is not null)`,
     ),
     statusValid: check(
@@ -13193,6 +13221,12 @@ export const workspaceGatewayCustomModels = pgTable(
 export const organizationModelProviderConnections = pgTable(
   "organization_model_provider_connections",
   {
+    allowedModelIds: text("allowed_model_ids").array(),
+    allowedWorkspaceIds: uuid("allowed_workspace_ids").array(),
+    allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
+    accessPolicyVersion: integer("access_policy_version").notNull().default(1),
+    accessPolicyUpdatedBy: text("access_policy_updated_by"),
+    accessPolicyUpdatedAt: timestamp("access_policy_updated_at", { withTimezone: true }),
     id: uuid("id").primaryKey().defaultRandom(),
     accountId: uuid("account_id")
       .notNull()
@@ -13362,3 +13396,53 @@ export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
 export * from "./interaction-schema";
+
+/** Immutable feedback, scoped to its submitting principal and optional session. */
+export const feedbackSubmissions = pgTable(
+  "feedback_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    principalKind: text("principal_kind"),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    sentiment: text("sentiment"),
+    comment: losslessText("comment"),
+    commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspace: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    session: foreignKey({
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    turn: foreignKey({
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("cascade"),
+    request: uniqueIndex("feedback_submissions_request_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.idempotencyKey,
+    ),
+    author: index("feedback_submissions_author_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.createdAt,
+      table.id,
+    ),
+    sessionTime: index("feedback_submissions_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.createdAt,
+      table.id,
+    ),
+  }),
+);

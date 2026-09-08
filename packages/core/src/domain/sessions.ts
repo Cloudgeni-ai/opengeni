@@ -1,4 +1,5 @@
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
+import { sessionCreationMetadata } from "../site-session-origin";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -1586,7 +1587,10 @@ export async function postUserMessageTurn(
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
-  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  // Acceptance already froze this policy before resource/credential validation.
+  // A different turn starting meanwhile must not change the model we gate here.
+  const effectiveModelForGate =
+    input.turnExecutionPolicy?.productModelId ?? requestedModel ?? sessionForModelGate.model;
   const freshWorkspaceCustomModel =
     requestedModel !== null &&
     isWorkspaceCustomModelId(settings, requestedModel) &&
@@ -1836,6 +1840,7 @@ export async function createSessionForRequestWithOutcome(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  payload.metadata = sessionCreationMetadata(payload.metadata);
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
     throw new HTTPException(422, {
       message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
@@ -2450,7 +2455,7 @@ export async function createSessionForRequestWithOutcome(
       message: `first-party MCP tool is disabled by deployment policy: ${disallowedFirstPartyMcpTool}`,
     });
   }
-  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools.filter(
+  const workspaceFirstPartyDefaults = workspaceSessionToolDefaults?.firstPartyMcpTools?.filter(
     (tool) => deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
   );
   const firstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
@@ -3602,7 +3607,7 @@ export async function updateSessionToolPolicy(
     runtimeSettings,
   );
   const workspaceDefaultFirstPartyTools = [
-    ...(workspaceSessionToolDefaults?.firstPartyMcpTools.filter((tool) =>
+    ...(workspaceSessionToolDefaults?.firstPartyMcpTools?.filter((tool) =>
       deploymentFirstPartyMcpToolPolicy.allowed.includes(tool),
     ) ?? deploymentFirstPartyMcpToolPolicy.default),
   ];

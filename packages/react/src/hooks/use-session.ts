@@ -39,7 +39,13 @@ export function isTitleEvent(event: Pick<SessionEvent, "type">): boolean {
 }
 
 function isSessionDetailEvent(event: Pick<SessionEvent, "type">): boolean {
-  return isTitleEvent(event) || event.type.startsWith("session.command.");
+  return (
+    isTitleEvent(event) ||
+    event.type.startsWith("session.command.") ||
+    event.type.startsWith("session.wait.") ||
+    event.type === "session.status.changed" ||
+    event.type === "system.update.pending"
+  );
 }
 
 /** Fetch one session (with optional polling), live-patching its title on `session.title_set`. */
@@ -115,12 +121,13 @@ export function useSession(
         sharedEvents?.some(
           (item) =>
             item.sessionId === sessionId &&
-            item.type.startsWith("session.command.") &&
+            !isTitleEvent(item) &&
+            isSessionDetailEvent(item) &&
             item.sequence > (base?.lastSequence ?? -1),
         )
       ) {
         void refresh();
-      } else if (event.type.startsWith("session.command.")) {
+      } else if (!isTitleEvent(event)) {
         if (!base || event.sequence > base.lastSequence) void refresh();
         return;
       }

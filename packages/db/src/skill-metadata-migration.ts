@@ -1,7 +1,7 @@
 import { readSkillMetadata, type SkillFile } from "@opengeni/contracts";
 import type postgres from "postgres";
 
-/** Exact runner seam for 0423, not a general callback or runtime capability. */
+/** Exact runner seam for 0426, not a general callback or runtime capability. */
 export const SKILL_METADATA_MIGRATION_MARKER = "-- opengeni:skill-metadata-stage-v1";
 
 export function prepareLegacySkillFolder(
@@ -32,7 +32,7 @@ export function prepareLegacySkillFolder(
 export async function createSkillMetadataMigrationStage(
   tx: postgres.TransactionSql,
 ): Promise<void> {
-  await tx`CREATE TEMP TABLE skill_metadata_0423 (
+  await tx`CREATE TEMP TABLE skill_metadata_0426 (
     source_kind text NOT NULL, source_id uuid NOT NULL, account_id uuid NOT NULL,
     workspace_id uuid, files jsonb NOT NULL, name text NOT NULL, description text NOT NULL
   ) ON COMMIT DROP`;
@@ -75,7 +75,7 @@ export async function stageSkillMetadataMigration(tx: postgres.TransactionSql): 
       });
     } catch (cause) {
       throw new Error(
-        `Skill ${source.source_kind}:${source.source_id} needs explicit frontmatter repair before 0423`,
+        `Skill ${source.source_kind}:${source.source_id} needs explicit frontmatter repair before 0426`,
         { cause },
       );
     }
@@ -84,7 +84,7 @@ export async function stageSkillMetadataMigration(tx: postgres.TransactionSql): 
       throw new Error(
         `Skill ${source.source_id} exceeds the valid folder limits after metadata migration`,
       );
-    await tx`INSERT INTO pg_temp.skill_metadata_0423(source_kind,source_id,account_id,workspace_id,files,name,description)
+    await tx`INSERT INTO pg_temp.skill_metadata_0426(source_kind,source_id,account_id,workspace_id,files,name,description)
       VALUES(${source.source_kind},${source.source_id},${source.account_id},${source.workspace_id},${tx.json(folder.files)},${folder.name},${folder.description})`;
   }
 }

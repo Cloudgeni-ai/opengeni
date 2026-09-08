@@ -16,6 +16,7 @@ export const ModelContextInstructionLayerId = z.enum([
   "workspace_memory",
   "codemode",
   "git_bindings",
+  "builtin_skills",
   "genesis_title",
   "sdk_capability_instructions",
   "sandbox_preamble",
@@ -86,6 +87,25 @@ export const ModelContextSnapshot = z
     source: z.literal("model_request"),
     requestIndex: z.number().int().nonnegative(),
     instructions: z.string(),
+    // Absent on historical SDK-prefix captures. Never infer a wire payload.
+    providerRequest: z
+      .object({
+        provider: z.string(),
+        body: z.string().nullable(),
+        unavailableReason: z.string().optional(),
+        parts: z.array(
+          z
+            .object({
+              key: z.string(),
+              estimatedTokens: z.number().int().nonnegative().nullable(),
+              utf8Bytes: z.number().int().nonnegative(),
+              itemEstimatedTokens: z.array(z.number().int().nonnegative().nullable()).optional(),
+            })
+            .strict(),
+        ),
+      })
+      .strict()
+      .optional(),
     layers: z.array(ModelContextInstructionLayer).max(MODEL_CONTEXT_LAYER_MAX_COUNT),
     tools: z.array(ModelContextTool).max(MODEL_CONTEXT_TOOL_MAX_COUNT),
     skills: z.array(ModelContextSkill).max(MODEL_CONTEXT_SKILL_MAX_COUNT),

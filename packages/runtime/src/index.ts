@@ -277,6 +277,9 @@ import {
 import { workspaceSkills, type WorkspaceSkillSearchPath } from "./workspace-skills";
 import {
   composeRuntimeSkills,
+  builtinSkillIndex,
+  builtinSkillLoader,
+  BUILTIN_PROJECT_SKILL_SELECTION,
   type EffectiveSkillSelection,
   type RuntimeSkillActivation,
   type RuntimeSkillComposition,
@@ -298,6 +301,7 @@ export {
 import {
   joinPersistentAgentInstructionLayers,
   buildModelContextSnapshotFromRequest,
+  buildProviderRequestSnapshot,
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
@@ -305,6 +309,8 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   withModelRequestCapture,
+  type ModelRequestCapture,
+  nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
@@ -2058,6 +2064,7 @@ export function inspectPersistentAgentInstructions(
       content: OPENGENI_OPERATIONAL_INSTRUCTIONS,
     },
     { id: "persona_and_core", title: "Persona and CORE", content: personaAndCore },
+    { id: "builtin_skills", title: "Built-in skills", content: builtinSkillIndex() },
   ];
   const push = (
     id: PersistentAgentInstructionLayerDraft["id"],
@@ -2108,10 +2115,7 @@ export function inspectPersistentAgentInstructions(
     }
     push("workspace_memory", "Workspace memory", options.workspaceMemory);
   }
-  return {
-    layers,
-    composed: joinPersistentAgentInstructionLayers(layers),
-  };
+  return { layers, composed: joinPersistentAgentInstructionLayers(layers) };
 }
 
 /**
@@ -2435,6 +2439,7 @@ export function buildOpenGeniAgent(
           },
         });
   const agentTools = [
+    builtinSkillLoader(),
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
     ...(videoGenerationCapabilityTool ? [videoGenerationCapabilityTool] : []),
@@ -2502,6 +2507,7 @@ export function buildOpenGeniAgent(
 
   if (settings.sandboxBackend === "none") {
     const agent = new Agent(baseConfig);
+    agentSkillSelections.set(agent, [BUILTIN_PROJECT_SKILL_SELECTION]);
     if (options.inputWaitYield) agentInputWaitYields.set(agent, options.inputWaitYield);
     agentInstructionInspection.set(agent, instructionInspection);
     if (options.missingSessionTitleHint ?? options.genesisTitleHint) {
@@ -7093,11 +7099,10 @@ function measuredModelInputFilter(
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
-): ((request: import("@openai/agents").ModelRequest) => Promise<void>) | undefined {
+): ModelRequestCapture | undefined {
   if (!onCapture) return undefined;
-  let requestIndex = 0;
-  return async (request) => {
-    requestIndex += 1;
+  const capture: ModelRequestCapture = async (request) => {
+    const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
       buildModelContextSnapshotFromRequest({
         request,
@@ -7109,6 +7114,18 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  capture.nextProviderRequestIndex = () => nextModelContextCaptureIndex(agent);
+  capture.onProviderRequest = async (provider, body, unavailableReason, index) => {
+    await onCapture(
+      buildProviderRequestSnapshot({
+        provider,
+        body,
+        ...(unavailableReason ? { unavailableReason } : {}),
+        requestIndex: index ?? nextModelContextCaptureIndex(agent),
+      }),
+    );
+  };
+  return capture;
 }
 
 function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {

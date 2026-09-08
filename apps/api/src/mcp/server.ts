@@ -1,3 +1,12 @@
+import {
+  createChannel,
+  listChannels,
+  getChannel,
+  updateChannel,
+  reorderChannels,
+  deleteChannel,
+  setSessionChannel,
+} from "@opengeni/db";
 import { createHash, randomUUID } from "node:crypto";
 import {
   prepareWorkspaceArtifactUpload,
@@ -517,6 +526,13 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   run_on: { sessionRequired: true, allOf: ["sessions:control"] },
   sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
   connected_machine_remove: { allOf: ["enrollments:manage"] },
+  project_list: { allOf: ["sessions:read"] },
+  project_get: { allOf: ["sessions:read"] },
+  project_create: { allOf: ["sessions:create"] },
+  project_update: { allOf: ["sessions:create"] },
+  project_reorder: { allOf: ["sessions:create"] },
+  project_delete: { allOf: ["sessions:create"] },
+  session_set_project: { allOf: ["sessions:control"] },
   rig_list: { allOf: ["rigs:use"] },
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
@@ -974,6 +990,7 @@ export function buildOpenGeniMcpServer(
     sessionCreateVisible,
     json,
   );
+  registerProjectTools(server, deps, grant, can, json);
   registerVariableSetTools(server, deps, grant, can, sessionId, json);
   if (sessionId !== null && can("workspace:read")) {
     registerCapabilityDiscoveryTools(server, deps, grant, sessionId, json);
@@ -4706,7 +4723,22 @@ function registerWorkspaceOrchestrationTools(
             .max(8)
             .optional(),
           activeOnly: z4.boolean().optional(),
+          originSiteId: z4
+            .string()
+            .uuid()
+            .optional()
+            .describe(
+              "Conversations created through this Site, regardless of their project. Keep unchanged when paging.",
+            ),
           recentHours: z4.number().int().positive().max(WORK_DISCOVERY_RECENT_HOURS_MAX).optional(),
+          projectId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe(
+              "Filter by workspace project; null selects unfiled sessions. Keep unchanged when paging.",
+            ),
           rootSessionId: z4.string().uuid().optional(),
           parentSessionId: z4.string().uuid().nullable().optional(),
           subject: z4
@@ -4731,8 +4763,10 @@ function registerWorkspaceOrchestrationTools(
         query,
         statuses,
         activeOnly,
+        originSiteId,
         recentHours,
         rootSessionId,
+        projectId,
         parentSessionId,
         subject,
         claimLimit,
@@ -4795,8 +4829,10 @@ function registerWorkspaceOrchestrationTools(
             ...(query?.trim() ? { query } : {}),
             ...(statuses ? { statuses: statuses as SessionStatus[] } : {}),
             activeOnly: activeOnly === true,
+            ...(originSiteId ? { originSiteId } : {}),
             ...(recentHours !== undefined ? { recentHours } : {}),
             ...(rootSessionId ? { rootSessionId } : {}),
+            ...(projectId !== undefined ? { channelId: projectId } : {}),
             ...(parentSessionId !== undefined ? { parentSessionId } : {}),
             ...(subject ? { subject: subject as WorkClaimSubjectFilter } : {}),
             ...(claimLimit !== undefined ? { claimLimit } : {}),
@@ -5260,6 +5296,14 @@ function registerWorkspaceOrchestrationTools(
     const sessionCreateInput = z4
       .object({
         initialMessage: z4.string().min(1),
+        projectId: z4
+          .string()
+          .uuid()
+          .nullable()
+          .optional()
+          .describe(
+            "Workspace project to file the new session into. Omit for existing default behavior; does not change runtime or visibility.",
+          ),
         title: z4
           .string()
           .min(1)
@@ -5368,13 +5412,14 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const { machineTarget, title, ...request } = args;
+          const { machineTarget, title, projectId, ...request } = args;
           const result = await createSessionForRequestWithOutcome(
             deps,
             grant,
             grant.workspaceId,
             {
               ...request,
+              ...(projectId !== undefined ? { channelId: projectId } : {}),
               ...(machineTarget
                 ? {
                     targetSandboxId: machineTarget.targetSandboxId,
@@ -5778,6 +5823,130 @@ function registerWorkspaceOrchestrationTools(
           updated: result.updated,
           title: result.title ?? title,
         });
+      },
+    );
+  }
+}
+
+function registerProjectTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  can: (permission: Permission) => boolean,
+  json: JsonResult,
+): void {
+  const projectIdSchema = z4.string().uuid();
+  const nameSchema = z4.string().trim().min(1).max(80);
+  const descriptionSchema = z4.string().max(2000);
+  if (can("sessions:read")) {
+    server.registerTool(
+      "project_list",
+      {
+        description:
+          "List workspace-shared projects in sidebar order (pinned first). Projects group sessions in the user's sidebar; they do not change execution or access. Use before creating a project to reuse an existing group.",
+        inputSchema: {},
+      },
+      async () => json({ projects: await listChannels(deps.db, grant.workspaceId) }),
+    );
+    server.registerTool(
+      "project_get",
+      {
+        description:
+          "Read one workspace project: name, description, pin state and order. Use sessions_list with projectId to find its visible sessions.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        const project = await getChannel(deps.db, grant.workspaceId, projectId);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+  }
+  if (can("sessions:create")) {
+    server.registerTool(
+      "project_create",
+      {
+        description:
+          "Create a workspace-shared sidebar group for related sessions. A project is organizational metadata, not a repository, working directory, or inherited agent configuration.",
+        inputSchema: { name: nameSchema, description: descriptionSchema.optional() },
+      },
+      async ({ name, description }) =>
+        json({
+          project: await createChannel(deps.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            name,
+            description: description ?? null,
+            createdBy: grant.subjectId,
+          }),
+        }),
+    );
+    server.registerTool(
+      "project_update",
+      {
+        description:
+          "Rename, describe or pin/unpin a workspace project. Pin state is shared by everyone in the workspace. Omitted fields stay unchanged; null clears the description.",
+        inputSchema: {
+          projectId: projectIdSchema,
+          name: nameSchema.optional(),
+          description: descriptionSchema.nullable().optional(),
+          pinned: z4.boolean().optional(),
+        },
+      },
+      async ({ projectId, ...update }) => {
+        const project = await updateChannel(deps.db, grant.workspaceId, projectId, update);
+        if (!project) throw new Error("Project not found");
+        return json({ project });
+      },
+    );
+    server.registerTool(
+      "project_reorder",
+      {
+        description:
+          "Replace the shared sidebar project order. Pass every current project ID exactly once, from project_list. Pinned projects still appear first. If projects changed, list again before retrying.",
+        inputSchema: { projectIds: z4.array(projectIdSchema).min(1).max(200) },
+      },
+      async ({ projectIds }) => {
+        const projects = await reorderChannels(deps.db, grant.workspaceId, projectIds);
+        if (!projects)
+          throw new Error("Projects changed or order is invalid; call project_list and retry");
+        return json({ projects });
+      },
+    );
+    server.registerTool(
+      "project_delete",
+      {
+        description:
+          "Delete a workspace-shared project. Its sessions are preserved and become unfiled; no running work is stopped.",
+        inputSchema: { projectId: projectIdSchema },
+      },
+      async ({ projectId }) => {
+        if (!(await deleteChannel(deps.db, grant.workspaceId, projectId)))
+          throw new Error("Project not found");
+        return json({ ok: true, projectId });
+      },
+    );
+  }
+  if (can("sessions:control")) {
+    server.registerTool(
+      "session_set_project",
+      {
+        description:
+          "File a session into a workspace project, or pass projectId=null to unfile it. Projects group root sessions in the user's sidebar. Filing changes organization only, not visibility, instructions, runtime, or history.",
+        inputSchema: { sessionId: z4.string().uuid(), projectId: projectIdSchema.nullable() },
+      },
+      async ({ sessionId, projectId }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.control");
+        await requireSession(deps.db, grant.workspaceId, sessionId);
+        if (
+          !(await setSessionChannel(deps.db, {
+            workspaceId: grant.workspaceId,
+            sessionId,
+            channelId: projectId,
+          }))
+        )
+          throw new Error("Session not found");
+        return json({ ok: true, sessionId, projectId });
       },
     );
   }
@@ -6460,7 +6629,8 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
   const relevance = cursor.orderBy === "relevance";
   return Buffer.from(
     JSON.stringify({
-      v: relevance ? 3 : 2,
+      v: cursor.originSiteId ? 4 : relevance ? 3 : 2,
+      ...(cursor.originSiteId ? { originSiteId: cursor.originSiteId } : {}),
       orderBy: cursor.orderBy,
       ...(relevance ? { sortRank: cursor.sortRank, filterHash: cursor.filterHash } : {}),
       sortRevision: cursor.sortRevision,
@@ -6514,6 +6684,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       updatedAfter?: unknown;
       sortRank?: unknown;
       filterHash?: unknown;
+      originSiteId?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -6563,8 +6734,14 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     }
     const isV2 = parsed.v === 2;
     const isV3 = parsed.v === 3;
+    const isV4 = parsed.v === 4;
+    const relevance = parsed.orderBy === "relevance";
     if (
-      (!isV2 && !isV3) ||
+      (!isV2 && !isV3 && !isV4) ||
+      (isV4 &&
+        (typeof parsed.originSiteId !== "string" ||
+          !SESSION_DISCOVERY_UUID.test(parsed.originSiteId) ||
+          !["createdAt", "updatedAt", "relevance"].includes(parsed.orderBy as string))) ||
       (isV2 && parsed.orderBy !== "createdAt" && parsed.orderBy !== "updatedAt") ||
       (isV3 && parsed.orderBy !== "relevance") ||
       typeof parsed.sortRevision !== "string" ||
@@ -6578,7 +6755,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       throw new Error("invalid cursor fields");
     }
     if (
-      isV3 &&
+      relevance &&
       (!Number.isSafeInteger(parsed.sortRank) ||
         (parsed.sortRank as number) < 0 ||
         typeof parsed.filterHash !== "string" ||
@@ -6586,7 +6763,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     ) {
       throw new Error("invalid relevance cursor fields");
     }
-    if (isV2 && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
+    if (!relevance && (parsed.sortRank !== undefined || parsed.filterHash !== undefined)) {
       throw new Error("chronological cursor cannot carry relevance fields");
     }
     const sortAt = normalizeSessionDiscoveryTimestamp(parsed.sortAt, "cursor sortAt");
@@ -6609,19 +6786,20 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
     if (parsed.orderBy === "createdAt" && (sortRevision !== "0" || snapshotRevision !== "0")) {
       throw new Error("creation cursor cannot carry activity revisions");
     }
-    const orderBy: SessionDiscoveryOrderBy = isV3
+    const orderBy: SessionDiscoveryOrderBy = relevance
       ? "relevance"
       : (parsed.orderBy as "createdAt" | "updatedAt");
     return {
       orderBy,
-      sortRank: isV3 ? (parsed.sortRank as number) : null,
+      sortRank: relevance ? (parsed.sortRank as number) : null,
       sortRevision,
       sortAt,
       id: parsed.id,
       snapshotAt,
       snapshotRevision,
       updatedAfter: normalizedUpdatedAfter,
-      filterHash: isV3 ? (parsed.filterHash as string) : null,
+      filterHash: relevance ? (parsed.filterHash as string) : null,
+      ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
@@ -6688,6 +6866,7 @@ export function capSessionDiscoveryCompactPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           }
         : page.nextCursor;
     return {
@@ -6740,6 +6919,7 @@ export function capSessionDiscoveryPage(
       : null;
     return {
       id: session.id,
+      ...(session.channelId ? { projectId: session.channelId } : {}),
       title: title.text,
       titleTruncated: title.truncated,
       parentSessionId: session.parentSessionId,
@@ -6852,6 +7032,7 @@ export function capSessionDiscoveryPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           })
         : null
       : page.nextCursor

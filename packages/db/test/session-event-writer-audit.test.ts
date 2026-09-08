@@ -939,7 +939,7 @@ describe("session_events writer inventory", () => {
           expect(guards[0], key).toBeLessThan(nodeStart(node));
           expect(source).toContain("pg_get_userbyid(c.relowner)=current_user");
           expect(source).toContain("c.relrowsecurity AND NOT c.relforcerowsecurity");
-          expect(source).toContain("to_regclass('pg_temp.skill_metadata_0423') IS NOT NULL");
+          expect(source).toContain("to_regclass('pg_temp.skill_metadata_0426') IS NOT NULL");
           expect(source).toContain("IN SHARE ROW EXCLUSIVE MODE");
           const callers = productionTypeScriptFiles()
             .filter(

@@ -1407,6 +1407,8 @@ export type Session = {
   queueHeadPosition: number;
   queueTailPosition: number;
   effectiveControl: EffectiveSessionControl;
+  /** Current durable input wait; an elapsed deadline does not prove a new turn started. */
+  inputWait?: { deadlineAt: string; reason: string } | null | undefined;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -1441,6 +1443,7 @@ export type Session = {
         totalDescendants: number;
         runningDescendants: number;
         queuedDescendants: number;
+        waitingDescendants?: number | undefined;
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
@@ -1479,6 +1482,8 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -3001,6 +3006,13 @@ export type FirstPartyMcpToolName =
   | "run_on"
   | "sandbox_provision"
   | "connected_machine_remove"
+  | "project_list"
+  | "project_get"
+  | "project_create"
+  | "project_update"
+  | "project_reorder"
+  | "project_delete"
+  | "session_set_project"
   | "rig_list"
   | "rig_get"
   | "rig_propose_change"
@@ -3601,11 +3613,12 @@ export type CodexConnectPoll =
     };
 
 /** Explicit authority of one connected SuperGrok/xAI subscription account. */
-export type SuperGrokAccountScope = "workspace" | "user";
+export type SuperGrokAccountScope = "workspace" | "user" | "organization";
 
 /** Metadata-only connected SuperGrok account. Secret OAuth material never crosses the API. */
 export type SuperGrokAccount = {
   id: string;
+  plan?: string | null;
   scope: SuperGrokAccountScope;
   subject: string;
   email?: string | null;
@@ -3636,6 +3649,8 @@ export type SuperGrokRotationSettings = {
 
 /** GET /supergrok/accounts — visible accounts plus the workspace active pointer. */
 export type SuperGrokAccountsResponse = {
+  source?: "workspace" | "user" | "organization";
+  organizationId?: string;
   accounts: SuperGrokAccount[];
   activeAccountId: string | null;
   settings: SuperGrokRotationSettings;
@@ -4391,8 +4406,8 @@ export type WorkspaceSessionDefaults = {
 };
 
 export type WorkspaceSessionToolDefaults = {
-  mcpServerIds: string[];
-  firstPartyMcpTools: FirstPartyMcpToolName[];
+  mcpServerIds?: string[];
+  firstPartyMcpTools?: FirstPartyMcpToolName[];
 };
 
 export type WorkspaceSlackReactionSummonSettings = {
@@ -4449,7 +4464,9 @@ export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   memoryPromptMode?: "legacy_standing" | "retrieval_only" | undefined;
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
-  sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  sessionToolDefaults?:
+    | { mcpServerIds?: string[] | null; firstPartyMcpTools?: FirstPartyMcpToolName[] | null }
+    | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -8173,4 +8190,17 @@ export type EnrollTokenExchangeRequest = {
 /** POST /v1/enrollments/token/exchange response (wraps the credential shape). */
 export type EnrollTokenExchangeResponse = {
   credentials: EnrollmentCredentials;
+};
+
+export type ModelConnectionAccessPolicy = {
+  allowedModels: string[] | null;
+  allowedWorkspaces: string[] | null;
+  allowPersonalWorkspaces: boolean;
+  version: number;
+};
+export type ModelConnectionAccessResponse = {
+  policy: ModelConnectionAccessPolicy;
+  models: Array<{ id: string; label: string }>;
+  workspaces: Array<{ id: string; name: string }>;
+  personalWorkspacesSupported: boolean;
 };
