@@ -5,6 +5,8 @@ import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
+  createChannel,
+  getSession,
   createSession,
   type DbClient,
 } from "@opengeni/db";
@@ -224,6 +226,30 @@ describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
     expect((await durableCounts(grant.workspaceId, sessionId)).workspaceSessions).toBe(1);
   }, 60_000);
 
+  test("MCP project selection files a new session and survives keyed replay", async () => {
+    if (!available) return;
+    const grant = await freshGrant();
+    const project = await createChannel(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: "New project",
+    });
+    const server = buildServer(grant, new FakeWorkflowClient());
+    const args = {
+      initialMessage: "Work in this project",
+      projectId: project.id,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
+    expect(created.committed).toBe(true);
+    const session = await getSession(client.db, grant.workspaceId, created.resource.id);
+    expect(session!.channelId).toBe(project.id);
+    const replay = await callMcpTool<McpMutationReceiptType>(server, "session_create", args);
+    expect(replay.resource.id).toBe(created.resource.id);
+    expect((await getSession(client.db, grant.workspaceId, replay.resource.id))!.channelId).toBe(
+      project.id,
+    );
+  });
   test("runs through a non-superuser, non-BYPASSRLS app role on forced tables", async () => {
     if (!available) return;
     const [role] = await shared!.admin<Array<{ superuser: boolean; bypassRls: boolean }>>`
