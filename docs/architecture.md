@@ -1163,7 +1163,10 @@ conversation rows, or authorization into vector ranking.
 
 ### 7.4 Capabilities, connections, and MCP
 
-Projects: always-indexed, worker-loaded `opengeni-projects` skill.
+Projects guidance is a default bundled Skill (`builtin:opengeni-projects`) in
+the shared Skill catalog. Host bundle selection can exclude it; `skill_read`
+reads its packaged files without starting a sandbox. It has no separate eager
+loader or unconditional instruction index.
 
 Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
