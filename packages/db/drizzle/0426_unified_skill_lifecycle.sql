@@ -679,3 +679,27 @@ BEGIN
   EXECUTE format('ALTER FUNCTION skill_revision_activation_authority(uuid,timestamptz) SET search_path = pg_catalog, %I, pg_temp',current_schema());
   REVOKE ALL ON FUNCTION preference_registry_activation_authority(uuid,uuid[]) FROM PUBLIC;
 END $snapshot_authority$;
+
+-- Preserve the legacy signature/receipts for historical readers, but retire its
+-- write capability before it creates Knowledge or registry destination state.
+-- Skills use skill_apply_lifecycle, never the Knowledge evidence evaluator.
+CREATE OR REPLACE FUNCTION preference_registry_create_knowledge_proposal_for_attempt(
+  p_account_id uuid, p_workspace_id uuid, p_session_id uuid, p_turn_id uuid,
+  p_attempt_id uuid, p_execution_generation integer, p_operation_id uuid,
+  p_input_hash text, p_knowledge_proposal_id uuid, p_stable_key text,
+  p_title text, p_description text, p_content text, p_precedence_rank integer,
+  p_conflict_strategy text, p_conflicts_with jsonb, p_expires_at timestamptz,
+  p_reason text
+) RETURNS TABLE(preference_id uuid, revision_id uuid)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
+BEGIN
+  RAISE EXCEPTION 'Knowledge-backed Skill proposals are retired; use the unified Skill lifecycle (skill_save)'
+    USING ERRCODE='55000';
+END $$;
+REVOKE ALL ON FUNCTION preference_registry_create_knowledge_proposal_for_attempt(
+  uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text
+) FROM PUBLIC;
+DO $retired_preference_search_path$
+BEGIN
+  EXECUTE format('ALTER FUNCTION preference_registry_create_knowledge_proposal_for_attempt(uuid,uuid,uuid,uuid,uuid,integer,uuid,text,uuid,text,text,text,text,integer,text,jsonb,timestamptz,text) SET search_path = pg_catalog, %I, pg_temp',current_schema());
+END $retired_preference_search_path$;
