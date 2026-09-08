@@ -22,7 +22,11 @@ import {
   type SkillIndexEntry,
 } from "@openai/agents/sandbox";
 
-import { skillArtifactContentSha256 } from "./skill-library";
+import {
+  buildPortableSkillArtifact,
+  readSkillLibraryArtifact,
+  skillArtifactContentSha256,
+} from "./skill-library";
 
 export type RuntimeSkillArtifactFile = Readonly<{
   path: string;
@@ -110,6 +114,37 @@ const emptyNativeToolSkillSet: NativeToolSkillSet = Object.freeze({
   sites: false,
   videoGeneration: false,
 });
+
+/**
+ * Packaged guidance is server-readable content, not a sandbox installation.
+ * The caller supplies the effective capability selection; compute backend is
+ * deliberately absent. Reading never stages files into cwd or a user's box.
+ */
+export function loadNativeToolSkillArtifacts(
+  nativeTools: NativeToolSkillSet,
+): readonly RuntimeSkillArtifact[] {
+  const directories: string[] = [];
+  if (nativeTools.editableArtifacts) directories.push("bundled_artifact_skills");
+  if (nativeTools.sites) directories.push("bundled_site_skills");
+  if (nativeTools.videoGeneration) directories.push("bundled_video_skills");
+  return directories.flatMap((directory) => {
+    const root = packagedSkillDirectory(directory);
+    return skillDirNames(root).map((name) => {
+      const artifact = readSkillLibraryArtifact(join(root, name));
+      const files = [...artifact.files];
+      if (name === "opengeni-sites") {
+        const generatedPath = "package-versions.json";
+        const existing = files.findIndex((entry) => entry.path === generatedPath);
+        if (existing !== -1) files.splice(existing, 1);
+        files.push({
+          path: generatedPath,
+          content: JSON.stringify(sitePackageVersions(), null, 2),
+        });
+      }
+      return buildPortableSkillArtifact(files);
+    });
+  });
+}
 
 let stagedBundledArtifactSkillsDir: string | null = null;
 let stagedBundledVideoSkillsDir: string | null = null;

@@ -283,6 +283,7 @@ import {
 } from "./runtime-skills";
 export {
   composeRuntimeSkills,
+  loadNativeToolSkillArtifacts,
   type EffectiveSkillSelection,
   type InstalledSkillActivation,
   type NativeToolSkillSet,

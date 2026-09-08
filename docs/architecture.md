@@ -872,6 +872,11 @@ a sandbox. File selection and partial-edit primitives live in runtime
 filesystem service only for optional checkout/publish. These foundations do not
 themselves migrate stored Skills or activate the new tools in a live worker;
 the unified-system rollout is tracked in [the Skill design](design/skills-system.md).
+`runtime-skills.ts` also exposes `loadNativeToolSkillArtifacts` to read packaged
+native guidance without staging files or selecting a compute backend, including
+the generated Sites package-version file. The legacy composition still owns live
+bundled selection until the reader rollout is wired; the new loader alone does
+not introduce embedding-product selection controls.
 
 Before every follow-up provider request, the worker reconciles the SDK's
 complete prior history into durable call/result truth; the first request has no

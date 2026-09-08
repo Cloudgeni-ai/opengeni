@@ -255,6 +255,14 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
+For unified Skills work, start with `docs/design/skills-system.md`. Server-side
+file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
+`skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
+`apps/worker/src/activities/agent-turn/skill-*.ts`. Distinguish a tested adapter
+from its live registration and persisted lifecycle. Native packaged guidance can
+be read without sandbox staging via `loadNativeToolSkillArtifacts`; do not infer
+embedding selection controls or Connected Machine visibility from that helper.
+
 For tools and MCP work, distinguish:
 
 - MCP tool providers selected by session/turn/scheduled-task config.

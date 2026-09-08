@@ -206,6 +206,28 @@ prefer one reader where bytes are available without a sandbox, but do not promis
 remote reads of repository files that only exist on a machine. Define any
 temporary filesystem-loader exception explicitly before retiring `load_skill`.
 
+### Bundled guidance and embedded products: open integration detail
+
+The September 8 implementation review identified inconsistent bundled selection:
+artifact guidance follows the tool catalog, Sites is selected by compute backend,
+and Connected Machines omit video guidance because the old loader cannot deliver
+the files. These are existing delivery constraints, not a product rule that
+Connected Machines should receive different instructions.
+
+The new server-readable native artifact loader has no compute-backend input and
+does not stage files. Live selection remains to be wired. Preserve generated
+Sites package-version metadata when reading or checking out its folder.
+
+Proposed, not yet approved: make bundled guidance follow enabled capabilities
+by default, with an optional embedding-product allowlist to restrict that set
+(omitted = defaults; empty = no bundled guidance). Resolve selection once for
+prompt descriptors, search and read; hiding a descriptor alone is insufficient.
+This also needs to cover the built-in management Skill, which the current
+foundation adds unconditionally. Do not confuse this platform-bundle selection
+with per-agent permissions for ordinary shared workspace Skills. The exact
+public configuration placement and how host restrictions propagate to child
+sessions remain open; do not ship a runtime-only flag as an embedding contract.
+
 ## 6. Current implementation: verified baseline
 
 Paths below refer to the main commit recorded at the top, not necessarily this
