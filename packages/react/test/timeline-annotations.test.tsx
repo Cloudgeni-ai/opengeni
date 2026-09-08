@@ -559,6 +559,63 @@ describe("timeline annotations", () => {
     await rendered.unmount();
   });
 
+  test("pins badges to this timeline when another timeline shares the same source id", async () => {
+    stubRangeGeometry();
+    const previousElementRect = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "getBoundingClientRect",
+    );
+    Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({
+        left: 0,
+        right: 1024,
+        top: 0,
+        bottom: 768,
+        width: 1024,
+        height: 768,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      }),
+    });
+    try {
+      const decoy = userItem(SOURCE_EVENT_ID, "zzzz zzzz zzzz", 3);
+      const match = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+      const first = annotation("");
+      const rendered = await renderComponent(
+        <div>
+          <MessageTimeline items={[decoy]} onAnnotate={() => undefined} />
+          <MessageTimeline
+            items={[match]}
+            onAnnotate={() => undefined}
+            draftAnnotations={[first]}
+            onDraftAnnotationSelect={() => undefined}
+          />
+        </div>,
+      );
+      await flush();
+      const sources = [
+        ...document.body.querySelectorAll<HTMLElement>("[data-og-annotation-source-key]"),
+      ];
+      expect(sources.map((source) => source.textContent)).toEqual([
+        expect.stringContaining("zzzz zzzz zzzz"),
+        expect.stringContaining("alpha beta omega"),
+      ]);
+      const badges = [
+        ...document.body.querySelectorAll<HTMLButtonElement>("[data-og-annotation-badge]"),
+      ];
+      expect(badges.map((button) => button.getAttribute("aria-label"))).toEqual(["Annotation 1"]);
+      await rendered.unmount();
+    } finally {
+      if (previousElementRect) {
+        Object.defineProperty(HTMLElement.prototype, "getBoundingClientRect", previousElementRect);
+      } else {
+        Reflect.deleteProperty(HTMLElement.prototype, "getBoundingClientRect");
+      }
+    }
+  });
+
   test("keeps a dense long-annotation review list inside one scrollable panel", async () => {
     await import("../src/components/timeline-annotations-dialog");
     const items: DraftTimelineAnnotation[] = Array.from({ length: 12 }, (_, index) => ({

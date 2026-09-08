@@ -1,5 +1,5 @@
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
-import { useLayoutEffect, useState } from "react";
+import { useLayoutEffect, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/cn";
 import {
@@ -58,32 +58,41 @@ function occurrenceForAnnotation(
   return best;
 }
 
-function currentAnnotationViewport(): AnnotationBox {
-  const scroller = document.querySelector("[data-og-timeline-scroller]");
-  const scrollerBox =
-    scroller instanceof HTMLElement
-      ? (() => {
-          const rect = scroller.getBoundingClientRect();
-          return {
-            left: rect.left,
-            right: rect.right,
-            top: rect.top,
-            bottom: rect.bottom,
-          } satisfies AnnotationBox;
-        })()
-      : null;
+function timelineScroller(root: HTMLElement): HTMLElement {
+  if (root.matches("[data-og-timeline-scroller]")) return root;
+  const nested = root.querySelector("[data-og-timeline-scroller]");
+  return nested instanceof HTMLElement ? nested : root;
+}
+
+function currentAnnotationViewport(root: HTMLElement): AnnotationBox {
+  const scroller = timelineScroller(root);
+  const rect = scroller.getBoundingClientRect();
+  const scrollerBox = {
+    left: rect.left,
+    right: rect.right,
+    top: rect.top,
+    bottom: rect.bottom,
+  } satisfies AnnotationBox;
   return annotationViewportBox(window.innerWidth || 1024, window.innerHeight || 768, scrollerBox);
 }
 
-function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): AnnotationBadgeAnchor[] {
-  if (typeof document === "undefined") return [];
-  const viewport = currentAnnotationViewport();
+function sourceInTimeline(root: HTMLElement, eventId: string): HTMLElement | null {
+  const source = root.querySelector(
+    `[data-og-annotation-source-key="${cssEscapeAttribute(eventId)}"]`,
+  );
+  return source instanceof HTMLElement ? source : null;
+}
+
+function collectMarkers(
+  root: HTMLElement | null,
+  annotations: readonly DraftTimelineAnnotation[],
+): AnnotationBadgeAnchor[] {
+  if (!root) return [];
+  const viewport = currentAnnotationViewport(root);
   const next: AnnotationBadgeAnchor[] = [];
   for (const [index, annotation] of annotations.entries()) {
-    const source = document.querySelector(
-      `[data-og-annotation-source-key="${cssEscapeAttribute(annotation.source.eventId)}"]`,
-    );
-    if (!(source instanceof HTMLElement)) continue;
+    const source = sourceInTimeline(root, annotation.source.eventId);
+    if (!source) continue;
     const quote =
       matchingQuoteInSource(annotatableText(source).text, annotation.quote) ?? annotation.quote;
     const range = buildQuoteRange(source, quote, occurrenceForAnnotation(source, annotation));
@@ -112,34 +121,36 @@ function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): Annota
 export function TimelineAnnotationMarkers({
   annotations,
   onSelect,
+  rootRef,
 }: {
   annotations: readonly DraftTimelineAnnotation[];
   onSelect?: ((id: string) => void) | undefined;
+  rootRef: RefObject<HTMLElement | null>;
 }) {
   const [markers, setMarkers] = useState<AnnotationBadgeAnchor[]>([]);
 
   useLayoutEffect(() => {
-    if (annotations.length === 0) {
+    const root = rootRef.current;
+    if (!root || annotations.length === 0) {
       setMarkers([]);
       return;
     }
-    const update = () => setMarkers(collectMarkers(annotations));
+    const update = () => setMarkers(collectMarkers(root, annotations));
     update();
     window.addEventListener("resize", update);
     window.addEventListener("scroll", update, true);
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(update) : null;
+    observer?.observe(root);
     for (const annotation of annotations) {
-      const source = document.querySelector(
-        `[data-og-annotation-source-key="${cssEscapeAttribute(annotation.source.eventId)}"]`,
-      );
-      if (source instanceof HTMLElement) observer?.observe(source);
+      const source = sourceInTimeline(root, annotation.source.eventId);
+      if (source) observer?.observe(source);
     }
     return () => {
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
       observer?.disconnect();
     };
-  }, [annotations]);
+  }, [annotations, rootRef]);
 
   if (markers.length === 0 || typeof document === "undefined") return null;
   return createPortal(

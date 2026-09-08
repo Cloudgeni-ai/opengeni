@@ -1802,14 +1802,6 @@ export function MessageTimeline({
                       />
                     </Suspense>
                   ) : null}
-                  {draftAnnotations && draftAnnotations.length > 0 ? (
-                    <Suspense fallback={null}>
-                      <TimelineAnnotationMarkers
-                        annotations={draftAnnotations}
-                        onSelect={onDraftAnnotationSelect}
-                      />
-                    </Suspense>
-                  ) : null}
                   {/* Pinned: anchoring off so the tip-follow camera owns the motion.
           Unpinned: native scroll anchoring holds the reader's place. */}
                   <div
@@ -2015,6 +2007,15 @@ export function MessageTimeline({
                       </div>
                     </TimelineBeforeLayout>
                   </div>
+                  {draftAnnotations && draftAnnotations.length > 0 ? (
+                    <Suspense fallback={null}>
+                      <TimelineAnnotationMarkers
+                        rootRef={scrollRef}
+                        annotations={draftAnnotations}
+                        onSelect={onDraftAnnotationSelect}
+                      />
+                    </Suspense>
+                  ) : null}
 
                   <AnimatePresence>
                     {loadingNewer ? (
