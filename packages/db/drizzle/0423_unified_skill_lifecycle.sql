@@ -140,7 +140,7 @@ BEGIN
   IF FOUND THEN
     IF prior.fingerprint <> fingerprint OR prior.account_id <> p_account_id THEN
       RAISE EXCEPTION 'Skill operation key reused with different input' USING ERRCODE='23505'; END IF;
-    RETURN prior.receipt || jsonb_build_object('replayed',true);
+    RETURN (prior.receipt - 'portableInstall') || jsonb_build_object('replayed',true);
   END IF;
   IF p_actor->>'kind' = 'agent' THEN
     SELECT r.workspace_mode INTO mode FROM workspace_learning_policy_heads h
@@ -250,7 +250,10 @@ BEGIN
   END IF;
   result := jsonb_build_object('operationId',operation_id,'skillId',skill_id,'revisionId',revision_id,'outcome',outcome,'replayed',false);
   INSERT INTO skill_write_receipts(account_id,workspace_id,operation_id,fingerprint,actor,receipt,activation_event_id)
-    VALUES(p_account_id,p_workspace_id,operation_id,fingerprint,p_actor,result,activation_event_id);
+    VALUES(p_account_id,p_workspace_id,operation_id,fingerprint,p_actor,
+      CASE WHEN operation='install' AND p_request ? 'portableInstall'
+        THEN result || jsonb_build_object('portableInstall',p_request->'portableInstall') ELSE result END,
+      activation_event_id);
   RETURN result;
 END $body$;
 

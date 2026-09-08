@@ -67,6 +67,21 @@ actor; a stale attempt cannot use replay to regain access.
 same transaction. Callers omitting actor context fail before any write. Its
 return includes `skillReceipt`, so pending installation must not be reported as
 activated. `installSkill` alone requires an already-installed portable facet.
+Portable install retries acquire the existing Skill operation lock and replay
+before distribution writes or installation-version CAS. The same immutable
+Skill receipt retains a private original-request hash and original installation
+result (including the original `created` value); this is a historical operation
+result, not a fresh claim about current installation state. Public lifecycle
+receipts do not expose this envelope. Replay rechecks
+the actual actor and exact live agent attempt through the existing lifecycle.
+`replayPortableSkillInstall` (DB and core export) can run before remote source
+resolution. Its `requestIdentity` must match the install's `skillRequestIdentity`:
+host-canonical original source/URL, options, owner and explicit installation CAS,
+not a freshly resolved commit or folder. Adapters must construct this identity,
+not accept a caller-provided hash. Without an explicit identity, install binds
+the full resolved input; callers cannot safely replay a moving URL before
+resolution. Receipts predating the envelope fail closed, not reconstruct a
+possibly changed installation. A missing operation ID means a new operation.
 Last-owner direct, Pack, and plugin removal resolves the canonical head atomically
 with distribution cleanup through `skill-source-release.ts`. Source-managed
 workspace heads deactivate through the existing human registry lifecycle;
