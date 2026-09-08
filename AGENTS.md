@@ -306,7 +306,7 @@ If a change alters architecture, terminology, the run lifecycle, the memory mode
 
 ## Keeping docs true
 
-Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename files or packages, run `bun run check:docs-refs` and fix every current-tier reference it reports. A new package needs a package README plus the [`docs/architecture.md`](docs/architecture.md) package table. A new embed surface or port belongs in [`docs/embedding.md`](docs/embedding.md). A new process or command belongs in its canonical home from the docs map; link to that home instead of restating volatile details.
+Use [`docs/README.md`](docs/README.md) as the docs map. When you move or rename files or packages, run `bun run check:docs-refs` and fix every current-tier reference it reports. A new package needs a package README plus the [`docs/architecture.md`](docs/architecture.md) package table. A new embed surface or port belongs in [`docs/embedding.md`](docs/embedding.md). A new process or command belongs in its canonical home from the docs map; link to that home instead of restating volatile details. The public product docs at docs.opengeni.ai are built by Mintlify from `docs-site/` on `main`; when a change alters user-facing behavior described there (quickstart, concepts, guides), update the matching page in the same change and preview it with `bunx mint dev` from that directory.
 
 ## Sandbox Notes
 

@@ -1,0 +1,44 @@
+---
+title: "Memory and knowledge"
+description: "What agents remember, what they can look up, and what tells them how to behave."
+icon: "brain"
+---
+
+OpenGeni keeps three kinds of durable context apart, because they carry different authority and follow different lifecycles.
+
+## Workspace Memory
+
+Specific facts, decisions, incidents, fixes, and confirmed outcomes. When Memory is enabled for a workspace, live agents save these autonomously during a run with `memory_save`, correct them with `memory_correct`, and find them later with `memory_search`. Saved text is stored exactly as written and is visible in the workspace's Memory view.
+
+Memory is retrieval context, never conversation history: the model sees relevant memories, not a transcript of how they were created.
+
+## Documents and Knowledge
+
+Upload documents or sync them from connected sources such as Google Drive. OpenGeni indexes them for hybrid vector and keyword search, and agents retrieve permission-filtered passages with citations. A separate curated Knowledge lane holds human-reviewed claims for facts that should not change without review.
+
+## Behavior: instructions and Skills
+
+- **Workspace instructions** are unconditional rules every agent must follow. They are composed into the prompt of every session, so keep them short.
+- **Skills** are reusable, conditional how-to guidance the agent loads when relevant.
+- **Organization profile** holds the organization's identity and mission and is composed ahead of workspace rules.
+
+The same material should not be copied across these. A workspace instruction can say "search Memory for related incidents"; the incident itself stays in Memory and the investigation method stays in a Skill.
+
+<Note>
+  Skills, Packs, and the capability catalog are evolving quickly. The current contracts live in the
+  repository under
+  [docs/capabilities.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/capabilities.md)
+  and [docs/packs.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/packs.md).
+</Note>
+
+## Learning mode
+
+A workspace learning policy governs whether agents may derive behavior changes from what they observe:
+
+| Mode         | Effect                                                                                 |
+| ------------ | -------------------------------------------------------------------------------------- |
+| Off          | No derived proposals                                                                   |
+| Review first | Agents leave auditable, inactive proposals for a human to activate                     |
+| Autonomous   | Eligible Skills and instruction policies activate through their own undoable lifecycle |
+
+Learning mode does not gate Memory. Agents save and correct facts whenever Memory is enabled.
