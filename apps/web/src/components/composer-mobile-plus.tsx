@@ -27,7 +27,7 @@ import type { McpServerOption } from "@/lib/session-tools";
 type Panel = "root" | "tools" | "repos" | "voice";
 
 /**
- * Mobile-only “+” overflow. Attach, tools, repositories, and voice model live
+ * Narrow-composer “+” overflow. Attach, tools, repositories, and voice model live
  * here so the bar stays one compact row.
  */
 export function ComposerMobilePlus(props: {
@@ -95,7 +95,7 @@ export function ComposerMobilePlus(props: {
           size="icon-xs"
           disabled={props.disabled}
           aria-label="More composer actions"
-          className="size-11 shrink-0 rounded-full border border-border text-fg-muted hover:text-fg sm:hidden"
+          className="console-composer-compact-control size-11 shrink-0 rounded-full border border-border text-fg-muted hover:text-fg sm:hidden"
         >
           <PlusIcon className="size-4" />
         </Button>
