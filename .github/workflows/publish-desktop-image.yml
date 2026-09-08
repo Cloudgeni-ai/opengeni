@@ -113,7 +113,10 @@ jobs:
           docker pull "$image@$DIGEST" 2>&1 | tee .release/desktop-publication/anonymous-pull.txt
           revision="$(docker image inspect "$image@$DIGEST" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
           [ "$revision" = "$SOURCE_SHA" ]
-          docker run --rm --entrypoint /bin/bash "$image@$DIGEST" -euo pipefail -c '
+          docker run --rm --entrypoint /bin/bash \
+            --env OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json \
+            --env OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs \
+            "$image@$DIGEST" -euo pipefail -c '
             test ! -e /opt/opengeni/artifact-runtime/.unavailable
             opengeni-artifact-runtime doctor --json
           ' | tee .release/desktop-publication/runtime-doctor.json

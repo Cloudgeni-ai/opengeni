@@ -38,7 +38,7 @@
     },
     {
       "path": ".github/workflows/publish-desktop-image.yml",
-      "sha256": "fce0912a781c9a532b49a811c170e832c754144b2a2acb00e52466662192e9bd"
+      "sha256": "1a660c6a4ee3ec8aecbdac742d392e3907e462b45726f1a643e59d254f928b65"
     },
     {
       "path": ".github/workflows/publish-packages.yml",
@@ -811,7 +811,7 @@
       "workflow": ".github/workflows/publish-desktop-image.yml",
       "job": "desktop-image",
       "step": "Verify anonymous desktop publication and installed runtime",
-      "sha256": "02d9bcea4bcb34b192261073b1724ce5e9bb37861886cf18cdb202a08777f158"
+      "sha256": "68f876fe64acfa9424639c2a7d477eef28e1a52f580d9e2054ac5aa0ce9f256c"
     },
     {
       "workflow": ".github/workflows/publish-packages.yml",

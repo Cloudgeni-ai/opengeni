@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 const source = readFileSync(
   new URL("../.github/workflows/publish-desktop-image.yml", import.meta.url),
@@ -44,7 +45,9 @@ test("anonymous digest and installed runtime proof gates success and retains evi
     '[ "$resolved" = "$DIGEST" ]',
     'docker pull "$image@$DIGEST"',
     '[ "$revision" = "$SOURCE_SHA" ]',
-    'docker run --rm --entrypoint /bin/bash "$image@$DIGEST"',
+    "docker run --rm --entrypoint /bin/bash",
+    "--env OPENGENI_ARTIFACT_RUNTIME_MANIFEST=/opt/opengeni/artifact-runtime/installation.json",
+    "--env OPENGENI_ARTIFACT_TOOL_ENTRY=/opt/opengeni/artifact-runtime/skill-facade-entry.mjs",
     "test ! -e /opt/opengeni/artifact-runtime/.unavailable",
     "opengeni-artifact-runtime doctor --json",
   ])
@@ -53,6 +56,45 @@ test("anonymous digest and installed runtime proof gates success and retains evi
   const evidence = steps.find((step: any) => step.name === "Retain desktop publication evidence");
   expect(evidence.if).toBe("always()");
   expect(evidence.with.path).toBe(".release/desktop-publication");
+});
+
+test("published doctor receives both required installation paths in its container", () => {
+  const proof = steps.find(
+    (step: any) => step.name === "Verify anonymous desktop publication and installed runtime",
+  );
+  const command = proof.run.slice(
+    proof.run.indexOf("docker run --rm"),
+    proof.run.indexOf(" | tee .release/desktop-publication/runtime-doctor.json"),
+  );
+  const harness = `
+set -euo pipefail
+image=fixture
+DIGEST=sha256:fixture
+docker() {
+  local -a container_env=()
+  while (( $# )); do
+    case "$1" in
+      --env) container_env+=("$2"); shift 2 ;;
+      --entrypoint) shift 2 ;;
+      fixture@*) break ;;
+      *) shift ;;
+    esac
+  done
+  env -i "\${container_env[@]}" /bin/bash -euo pipefail -c '
+    test "$OPENGENI_ARTIFACT_RUNTIME_MANIFEST" = /opt/opengeni/artifact-runtime/installation.json
+    test "$OPENGENI_ARTIFACT_TOOL_ENTRY" = /opt/opengeni/artifact-runtime/skill-facade-entry.mjs
+  '
+}
+`;
+  const run = (body: string) => spawnSync("bash", ["-c", harness + body], { encoding: "utf8" });
+  const valid = run(command);
+  expect(valid.status).toBe(0);
+  expect(valid.stderr).toBe("");
+  for (const name of ["OPENGENI_ARTIFACT_RUNTIME_MANIFEST", "OPENGENI_ARTIFACT_TOOL_ENTRY"]) {
+    const broken = run(command.replace(new RegExp(`--env ${name}=\\S+`), ""));
+    expect(broken.status).not.toBe(0);
+    expect(broken.stderr).toContain(name);
+  }
 });
 
 test("legacy GHCR tags are only a non-gating mirror after ACR verification", () => {
