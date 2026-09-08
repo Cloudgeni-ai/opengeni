@@ -806,7 +806,11 @@ jobs:
       - name: Session pin browser acceptance
         if: ${{ matrix.lane == 'knowledge' }}
         id: session_pin_browser
-        timeout-minutes: 4
+        # Includes a production web build, real PostgreSQL setup, and 23 serial
+        # browser cases. Baseline fa2b99a6 took 229s; run 34257100987 passed 22
+        # cases in 247s before the old 4m cap stopped the last case. Keep the
+        # individual test deadlines strict while allowing suite-level headroom.
+        timeout-minutes: 6
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
