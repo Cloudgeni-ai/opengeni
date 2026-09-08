@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   McpOAuthDiscoveryError,
   parseMcpOAuthChallenge,
+  protectedResourceMetadataCandidates,
   resolveMcpOAuthDiscovery,
   type McpOAuthMetadataFetchResult,
 } from "../src/mcp-oauth-discovery";
@@ -43,6 +44,68 @@ const modernAs = {
 };
 
 describe("MCP OAuth discovery", () => {
+  test("does not downgrade an authorization failure at advertised or standard metadata", async () => {
+    for (const advertised of [undefined, `${resourceUrl}/.well-known/oauth-protected-resource`]) {
+      const requested: string[] = [];
+      await expect(
+        resolveMcpOAuthDiscovery({
+          resourceUrl,
+          challenge: {
+            scheme: "bearer",
+            scope: [],
+            ...(advertised ? { resourceMetadata: advertised } : {}),
+          },
+          fetchMetadata: async ({ url }) => {
+            requested.push(url);
+            throw new Error("HTTP 401 metadata denied");
+          },
+          validateEndpoint,
+          canonicalizeResource,
+        }),
+      ).rejects.toThrow("HTTP 401 metadata denied");
+      expect(requested).toEqual([advertised ?? modernPrmUrl]);
+    }
+  });
+  test("uses prefix and root PRM locations, preserving explicit advertised URLs", () => {
+    expect(protectedResourceMetadataCandidates(resourceUrl)).toEqual([
+      modernPrmUrl,
+      "https://mcp.example.test/.well-known/oauth-protected-resource",
+    ]);
+    expect(protectedResourceMetadataCandidates("https://mcp.example.test/")).toEqual([
+      "https://mcp.example.test/.well-known/oauth-protected-resource",
+    ]);
+    const advertised = `${resourceUrl}/.well-known/oauth-protected-resource`;
+    expect(protectedResourceMetadataCandidates(resourceUrl, advertised)[0]).toBe(advertised);
+  });
+
+  test("legacy discovery does not probe a protected resource catch-all as metadata", async () => {
+    const requested: string[] = [];
+    const legacyMetadataUrl = "https://mcp.example.test/.well-known/oauth-authorization-server";
+    const fetchMetadata = metadataFetcher({
+      [legacyMetadataUrl]: {
+        ...modernAs,
+        issuer: "https://mcp.example.test",
+      },
+    });
+    const result = await resolveMcpOAuthDiscovery({
+      resourceUrl,
+      challenge: parseMcpOAuthChallenge('Bearer error="invalid_token"'),
+      fetchMetadata: async ({ url }) => {
+        requested.push(url);
+        if (url.startsWith(`${resourceUrl}/`)) throw new Error("HTTP 401 protected API route");
+        return fetchMetadata({ url });
+      },
+      validateEndpoint,
+      canonicalizeResource,
+    });
+    expect(result.mode).toBe("legacy_2025_03_26_metadata");
+    expect(requested).toEqual([
+      modernPrmUrl,
+      "https://mcp.example.test/.well-known/oauth-protected-resource",
+      legacyMetadataUrl,
+    ]);
+  });
+
   test("parses parameterless challenges and stops before the next auth scheme", () => {
     expect(parseMcpOAuthChallenge('Bearer, Basic scope="must-not-leak"')).toEqual({
       scheme: "bearer",

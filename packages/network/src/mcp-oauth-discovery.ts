@@ -290,9 +290,15 @@ export function protectedResourceMetadataCandidates(
   resourceUrl: string,
   advertisedUrl?: string,
 ): string[] {
+  const url = new URL(resourceUrl);
+  const path = url.pathname.replace(/^\/+|\/+$/g, "");
   return uniqueStrings([
     ...(advertisedUrl !== undefined ? [advertisedUrl] : []),
-    ...oauthWellKnownCandidates(resourceUrl, "oauth-protected-resource"),
+    // RFC 9728 inserts the well-known prefix before the resource path.
+    // Appending it instead can hit a protected API catch-all and fail with
+    // 401 before genuine metadata absence permits legacy discovery.
+    `${url.origin}/.well-known/oauth-protected-resource${path ? `/${path}` : ""}`,
+    `${url.origin}/.well-known/oauth-protected-resource`,
   ]);
 }
 
