@@ -24,6 +24,7 @@ import {
   getWorkspaceConnectionModelRestrictions,
   modelAllowedByConnections,
   upsertOrganizationCodexSubscriptionCredential,
+  updateOrganizationCodexRotationSettings,
   listCodexAccountStatuses,
   upsertOrganizationModelProviderConnection,
   organizationModelProviderConnectionActiveForWorkspace,
@@ -295,6 +296,53 @@ realTest(
     );
   },
 );
+
+realTest("catalog uses the active subscription unless rotation enables the pool", async () => {
+  for (const kind of ["codex", "supergrok"] as const) {
+    const setup = await fixture();
+    for (const name of ["first", "second"]) {
+      const id =
+        kind === "supergrok"
+          ? (await connect(setup, name)).account.id
+          : (
+              await upsertOrganizationCodexSubscriptionCredential(client.db, {
+                ...setup,
+                credentialEncrypted: "test-envelope",
+                chatgptAccountId: name,
+                scopes: null,
+                planType: "team",
+                isFedramp: false,
+                expiresAt: null,
+                lastRefreshAt: null,
+              })
+            ).id;
+      const target = {
+        accountId: setup.organizationId,
+        workspaceId: null,
+        subjectId: setup.actorSubjectId,
+        kind,
+        connectionId: id,
+      };
+      const policy = await getModelConnectionAccess(client.db, target);
+      await updateModelConnectionAccess(client.db, target, {
+        ...policy!,
+        allowedModels: [`${kind}/${name}`],
+      });
+    }
+    const read = () =>
+      getWorkspaceConnectionModelRestrictions(client.db, setup.workspaceId, setup.actorSubjectId);
+    const prefix = `${kind}/`;
+    expect((await read())[prefix]).toEqual([`${kind}/first`]);
+    await (
+      kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
+    )(client.db, { ...setup, rotationEnabled: true });
+    expect((await read())[prefix]?.sort()).toEqual([`${kind}/first`, `${kind}/second`]);
+    await (
+      kind === "codex" ? updateOrganizationCodexRotationSettings : updateOrganizationXaiRotation
+    )(client.db, { ...setup, rotationEnabled: false });
+    expect((await read())[prefix]).toEqual([`${kind}/first`]);
+  }
+});
 
 realTest(
   "workspace gateways keep access policy on the actual connection without changing key revision",

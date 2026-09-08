@@ -28,7 +28,11 @@ Organization administration requires the existing verified browser administrator
 private SuperGrok policy management requires its owning managed browser human.
 
 The workspace catalog intersects connection model permissions with the workspace
-policy. Codex and SuperGrok allocation filter accounts by the requested model.
+policy. Rotation-off catalogs use the effective active subscription; rotating
+pools combine permissions from eligible subscriptions. An assigned paused or
+unhealthy default remains selected when rotation is off, so disabling rotation
+never silently changes the billed account. Codex and SuperGrok allocation filter
+accounts by the requested model.
 The worker checks the exact selected connection again before model execution,
 including pins and recovered leases. Restrictions apply at turn startup; they do
 not cancel an already-running model call. Media, transcription, and realtime

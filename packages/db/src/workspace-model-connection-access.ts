@@ -1,9 +1,9 @@
 import type { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, withWorkspaceSubjectRls, type Database } from "./database";
-import { listCodexAccountStatuses } from "./index";
 import {
   listXaiSubscriptionAccountsMetadata,
+  getXaiRotationSettings,
   resolveXaiProviderAccountAuthoritySnapshotForAcceptance,
 } from "./xai-subscription";
 import { connectionModelAllowed } from "./model-connection-access";
@@ -15,14 +15,23 @@ export async function getWorkspaceConnectionModelRestrictions(
   db: Database,
   workspaceId: string,
   subjectId: string,
+  codex: ReadonlyArray<{
+    status: string;
+    allocatorEnabled: boolean;
+    allowedModelIds?: string[] | null;
+  }>,
   authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
 ): Promise<ConnectionModelRestrictions> {
-  const [codex, xai, xaiAuthority] = await Promise.all([
-    listCodexAccountStatuses(db, workspaceId),
+  const [xai, xaiAuthority] = await Promise.all([
     listXaiSubscriptionAccountsMetadata(db, { workspaceId, subjectId }),
     authoritySnapshot ??
       resolveXaiProviderAccountAuthoritySnapshotForAcceptance(db, { workspaceId, subjectId }),
   ]);
+  const xaiRotation = await getXaiRotationSettings(db, {
+    workspaceId,
+    subjectId,
+    authoritySnapshot: xaiAuthority,
+  });
   const union = (rows: Array<{ allowedModelIds?: string[] | null }>) =>
     rows.some((row) => row.allowedModelIds == null)
       ? null
@@ -32,7 +41,10 @@ export async function getWorkspaceConnectionModelRestrictions(
     "supergrok/": union(
       xai.filter(
         (row) =>
-          row.scope === xaiAuthority.scope && row.status === "active" && row.allocatorEnabled,
+          row.scope === xaiAuthority.scope &&
+          row.status === "active" &&
+          row.allocatorEnabled &&
+          (xaiRotation?.rotationEnabled || row.id === xaiRotation?.activeCredentialId),
       ),
     ),
     "workspace-gateway/": [],

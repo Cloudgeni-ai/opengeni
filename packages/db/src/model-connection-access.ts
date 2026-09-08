@@ -29,7 +29,11 @@ export function connectionModelAllowed(
   return allowedModels == null || allowedModels.includes(modelId);
 }
 
-/** An organization default outside this workspace's assigned pool is not usable here. */
+/**
+ * Replace a default only when it is outside the assigned pool. An assigned
+ * paused/unhealthy default remains explicit intent: rotation-off must wait,
+ * not silently change the billed subscription. Allocation checks health later.
+ */
 export function assignedConnectionDefault(
   preferred: string | null,
   accounts: readonly { id: string; status: string; allocatorEnabled: boolean }[],

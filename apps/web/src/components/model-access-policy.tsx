@@ -495,8 +495,8 @@ export function ModelAccessPolicySection({
       </div>
       <ConfirmDialog
         open={pendingReplacementMode !== null}
-        onOpenChange={(open) => {
-          if (!open) setPendingReplacementMode(null);
+        onOpenChange={(isOpen) => {
+          if (!isOpen) setPendingReplacementMode(null);
         }}
         title="Replace the provider-level model policy?"
         description={

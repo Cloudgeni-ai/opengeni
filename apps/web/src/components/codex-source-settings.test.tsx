@@ -1,3 +1,9 @@
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { WorkspaceCodexSubscriptionSource } from "@opengeni/sdk";
@@ -117,6 +123,61 @@ for (const provider of ["Codex", "SuperGrok"] as const) {
       expect(container.querySelector("summary")?.textContent).toContain("Not connected");
       expect(container.querySelector('[role="alert"]')).toBeNull();
       expect(container.textContent).toContain("Connect account");
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  });
+}
+
+for (const includeSource of [true, false]) {
+  test(`inherited Codex accounts do not request workspace access settings (source metadata: ${includeSource})`, async () => {
+    const requestJson = mock(async () => {
+      throw new Error("Inherited policy must not use a workspace endpoint");
+    });
+    const client = {
+      listCodexAccounts: async () => ({
+        accounts: [
+          {
+            id: "subscription",
+            source: "organization",
+            label: "Team plan",
+            status: "active",
+            active: true,
+            allocatorEnabled: true,
+          },
+        ],
+        activeAccountId: "subscription",
+        ...(includeSource ? { source } : {}),
+        settings: { rotationEnabled: false },
+      }),
+      getCodexOverview: async () => ({ accounts: {} }),
+      requestJson,
+    } as unknown as OpenGeniBrowserClient;
+    const route = createRootRoute({
+      component: () => (
+        <CodexSubscriptionsCardWithClient client={client} workspaceId="workspace-a" canManage />
+      ),
+    });
+    const router = createRouter({
+      routeTree: route,
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => {
+        await router.load();
+        root.render(<RouterProvider router={router} />);
+      });
+      const details = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+        (button) => button.textContent === "Team plan",
+      );
+      expect(details).toBeDefined();
+      await act(async () => details!.click());
+      expect(container.textContent).not.toContain("Choose what this connection can be used for");
+      expect(requestJson).not.toHaveBeenCalled();
     } finally {
       await act(async () => root.unmount());
       container.remove();

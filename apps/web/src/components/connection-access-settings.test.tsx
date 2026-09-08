@@ -50,7 +50,7 @@ for (const kind of ["codex", "supergrok", "vercel_gateway", "openrouter"] as con
     const clickLabel = async (text: string) =>
       act(async () => {
         const label = [...container.querySelectorAll("label")].find(
-          (label) => label.textContent === text,
+          (candidate) => candidate.textContent === text,
         );
         expect(label).toBeDefined();
         label!.querySelector<HTMLInputElement>("input")!.click();

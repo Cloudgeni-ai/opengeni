@@ -38,7 +38,6 @@ import { ChatGptMark } from "@/components/chatgpt-mark";
 import { Button } from "@/components/ui/button";
 import { SubscriptionAccountRow } from "@/components/subscription-account-row";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
-import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { useAppContext } from "@/context";
 import {
@@ -1237,6 +1236,7 @@ export function CodexSubscriptionsCardWithClient({
 
   return (
     <ModelConnectionSection
+      testId="codex-connection-card"
       title="Codex"
       description={
         source?.effectiveSource === "organization"
@@ -1522,7 +1522,7 @@ export function CodexSubscriptionsCardWithClient({
                     ) : null}
                   </div>
                 ) : null}
-                {workspaceManaged ? (
+                {workspaceManaged && account.source !== "organization" ? (
                   <ConnectionAccessSettings
                     client={client}
                     workspaceId={workspaceId}

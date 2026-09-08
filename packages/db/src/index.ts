@@ -1,5 +1,10 @@
 import { assignedConnectionDefault } from "./model-connection-access";
-export * from "./workspace-model-connection-access";
+export {
+  assertModelConnectionAllowsTurn,
+  modelAllowedByConnections,
+  type ConnectionModelRestrictions,
+} from "./workspace-model-connection-access";
+import { getWorkspaceConnectionModelRestrictions as resolveWorkspaceConnectionModelRestrictions } from "./workspace-model-connection-access";
 export * from "./model-connection-access";
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -27256,6 +27261,29 @@ export async function quarantineCodexCredentialForLease(
         }
         return { action: "recorded", failoverCount, maxFailovers, exhausted } as const;
       }),
+  );
+}
+
+/** Compose existing pool metadata without a leaf-to-root database import cycle. */
+export async function getWorkspaceConnectionModelRestrictions(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+  authoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1,
+) {
+  const [accounts, rotation] = await Promise.all([
+    listCodexAccountStatuses(db, workspaceId),
+    getCodexRotationSettings(db, workspaceId),
+  ]);
+  const selectableAccounts = rotation?.rotationEnabled
+    ? accounts
+    : accounts.filter((account) => account.id === rotation?.activeCredentialId);
+  return await resolveWorkspaceConnectionModelRestrictions(
+    db,
+    workspaceId,
+    subjectId,
+    selectableAccounts,
+    authoritySnapshot,
   );
 }
 
