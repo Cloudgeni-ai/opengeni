@@ -722,6 +722,16 @@ capability document so every surface degrades to a reason instead of crashing.
 These surfaces pull in [optional peer dependencies](#optional-peer-dependencies)
 — install only the ones for surfaces you actually mount.
 
+`SandboxWorkspace` keeps capture-backed file browsing passive, but an explicit
+live-file open acquires a viewer. Failed opens show the connection error and a
+retry that renegotiates the viewer instead of leaving a waking spinner running.
+When composing `SandboxFiles` directly, pass `workspaceError` alongside
+`liveWorkspaceReady` and supply an `onWakeWorkspace` callback that can retry a
+failed negotiation. Complete PNG, JPEG, GIF, and WebP reads render as read-only
+image previews; truncated reads and other binary formats remain non-editable
+notices. Image previews use the existing bounded file-read path and do not
+publish or retain additional files.
+
 ## Connected Machines (`@opengeni/react/machines`)
 
 Bring-your-own-compute UI: the Machines dashboard, per-machine metrics, the
