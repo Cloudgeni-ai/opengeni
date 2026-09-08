@@ -39,3 +39,25 @@ export const skillWriteReceipts = pgTable(
   },
   (table) => [primaryKey({ columns: [table.workspaceId, table.operationId] })],
 );
+
+/** Immutable maintenance evidence; never an execution configuration head. */
+export const skillConfigConversionReceipts = pgTable(
+  "skill_config_conversion_receipts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceKind: text("source_kind").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    conversionVersion: text("conversion_version").notNull().default("0423-v1"),
+    actor: text("actor").notNull().default("service:skill-migration:0423"),
+    originalConfiguration: jsonb("original_configuration").notNull(),
+    originalHash: text("original_hash").notNull(),
+    replacementHash: text("replacement_hash").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.workspaceId, table.sourceKind, table.sourceId, table.conversionVersion],
+    }),
+  ],
+);

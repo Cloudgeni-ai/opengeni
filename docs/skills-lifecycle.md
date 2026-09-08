@@ -133,6 +133,64 @@ migrate, provision roles, and start only the unified-Skill-aware release. Never
 restart a pre-0423 binary: its installed reads bypass the registry content head.
 The migration preserves existing source ownership, backfills installed Skills
 by portable identity, and rejects invalid existing folders for repair rather
-than silently truncating them. New binding/receipt tables are FORCE-RLS and
+than silently truncating them. New binding/write-receipt tables are FORCE-RLS and
 read-only for the runtime role; mutation requires the exact SECURITY DEFINER
 lifecycle capability.
+
+### Stored execution configuration maintenance
+
+The same atomic 0423 runner calls `packages/db/src/skill-config-migration.ts`
+after staging registry metadata. It converts headerless Skills in current
+`sessions.skills` and `workspace_packs.manifest` (including inline automation
+template Skills). It uses historical name/description, preserves the complete
+body and supporting UTF-8 file bytes, and applies the shared parser and folder
+limits. Valid YAML, its cached descriptor fields, unrelated manifest fields,
+and source timestamps remain unchanged; the stored read projections derive
+canonical metadata without rewriting those bytes. Names that cannot be slugged
+use a stable source/array-position hash, never content-based identity or merging.
+Canonical name collisions, malformed/apparent YAML headers, missing historical
+metadata and overflow are repair-required, not silently normalized or dropped.
+
+Before replacing any current configuration, the migration inserts its original
+JSON, PostgreSQL JSONB-text SHA-256, replacement hash, tenant/source identity,
+conversion version and truthful migration actor into
+`skill_config_conversion_receipts` in the same transaction. This is immutable
+maintenance evidence, not another Skill head. The table has FORCE RLS and **no
+runtime table privileges**, including SELECT: an archived private Session's
+configuration must not become workspace-readable audit content. Authorized
+database maintenance uses explicit account/workspace context to inspect it.
+Workspace tenancy advisory locks, table locks and old-value CAS protect writes;
+the migration ledger makes committed retries no-ops. A failure rolls back all
+configuration changes, receipts, registry conversion and schema changes.
+
+The owner-only RLS window also covers current configurations and the exact
+Session/automation/Pack tables read by preflight; FORCE is restored before commit.
+Preflight reports source kinds/IDs and blocker counts without content. It refuses
+conversion when plain inline Session Skills have a nonterminal accepted turn or
+an active-turn pointer. It also refuses plain or invalid Skills in non-disabled
+Pack installation snapshots, active/paused current automation revisions, queued
+or dispatching accepted runs, and accepted event matches not yet assigned a run.
+Already assigned events do not independently block after their run is terminal.
+
+Operator repair requirements:
+
+- Before stopping old runtimes, complete or explicitly cancel affected accepted
+  work. Stopping database clients alone does not retire accepted execution pins.
+- Replace active plain automation templates with a newly validated revision, or
+  explicitly disable the trigger. Pausing alone is not archival. Preserve every
+  old revision and accepted execution payload.
+- Explicitly disable or replace active plain Pack sources through an appropriate
+  audited lifecycle. Migration never rewrites `pack_installations.manifest_snapshot`
+  or its digest, published plugin versions/facets/files, or accepted event matches.
+  Ordinary Pack re-admission overwrites the current installation snapshot: archive
+  that original separately before using re-admission as an operator repair.
+- Repair malformed mutable source configuration explicitly, then retry the whole
+  migration. The failure inventory reports up to 30 IDs and the total blocker
+  count; repeat preflight after repairs if further IDs remain.
+
+Disabled Pack snapshots, noncurrent/disabled automation revisions, terminal runs
+and immutable audit history remain unchanged. Re-enabling a plain historical
+artifact still requires explicit valid replacement; no read-time synthesis or
+silent rebinding is supported. Deployment/host configuration outside these DB
+sources needs its own validation. This maintenance inventory materializes source
+JSON in memory and has not been load-tested on a large production dataset.

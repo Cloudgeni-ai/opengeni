@@ -19,6 +19,16 @@ const windowTables = [
   "preference_registry_revisions",
   "preference_registry_events",
   "skill_source_bindings",
+  "skill_config_conversion_receipts",
+  "sessions",
+  "workspace_packs",
+  "session_turns",
+  "automation_triggers",
+  "automation_trigger_revisions",
+  "automation_runs",
+  "automation_trigger_events",
+  "automation_run_event_links",
+  "pack_installations",
 ];
 let owned: OwnerMigratedTestDatabase | null = null;
 
@@ -193,7 +203,164 @@ describe("0423 owner-only Skill backfill", () => {
         await tx`INSERT INTO preference_registry_events(account_id,preference_id,type,version,old_revision_id,actor_subject_id,reason)
           VALUES(${fixtures[0]!.accountId},${invalid.id},'deactivated',3,${invalid.revisionId},'user:original','Explicitly archive invalid fixture after cutover rejection')`;
       });
+      const configFixtures = [];
+      for (const fixture of fixtures) {
+        const sessionId = crypto.randomUUID();
+        await admin`INSERT INTO workspace_inference_controls(workspace_id,account_id) VALUES(${fixture.workspaceId},${fixture.accountId})`;
+        const packId = crypto.randomUUID();
+        const skills = [
+          { name: "Original Name", description: "Original description", files },
+          {
+            name: "Stale cached name",
+            description: "Stale cached description",
+            files: [{ path: "SKILL.md", content: yaml }],
+          },
+        ];
+        const manifest = {
+          id: `legacy-${packId}`,
+          name: "Legacy Pack",
+          description: "Legacy registration",
+          role: "agent",
+          category: "test",
+          version: "1",
+          skills,
+        };
+        await admin.begin(async (tx) => {
+          await tx`SELECT set_config('opengeni.account_id',${fixture.accountId},true),set_config('opengeni.workspace_id',${fixture.workspaceId},true)`;
+          await tx`SELECT set_config('opengeni.session_activity_gate_state','open',true),set_config('opengeni.session_activity_gate_workspace_id',${fixture.workspaceId},true),set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+          await tx`INSERT INTO sessions(id,account_id,workspace_id,sandbox_group_id,status,initial_message,model,sandbox_backend,skills,tool_policy,reasoning_effort,latency_mode)
+            VALUES(${sessionId},${fixture.accountId},${fixture.workspaceId},${sessionId},'idle','fixture','test','none',${tx.json(skills)},'{"mode":"workspace_default","inheritedFromSessionId":null}', 'medium','standard')`;
+          await tx`SELECT set_config('opengeni.session_activity_gate_state','preparing',true)`;
+          await tx`SET CONSTRAINTS ALL IMMEDIATE`;
+          await tx`SET CONSTRAINTS sessions_activity_insert_commit_guard,sessions_activity_update_commit_guard DEFERRED`;
+          await tx`SELECT set_config('opengeni.session_activity_gate_state','finalizing',true)`;
+          await tx`WITH advanced AS (UPDATE workspace_session_activity_revisions SET revision=revision+1 WHERE workspace_id=${fixture.workspaceId} RETURNING revision)
+            UPDATE sessions SET activity_revision=advanced.revision,activity_revision_pending_xid=NULL FROM advanced WHERE id=${sessionId}`;
+          await tx`SELECT set_config('opengeni.session_activity_gate_state','finalized',true)`;
+        });
+        await admin`INSERT INTO workspace_packs(id,account_id,workspace_id,pack_id,manifest)
+          VALUES(${packId},${fixture.accountId},${fixture.workspaceId},${manifest.id},${admin.json(manifest)})`;
+        configFixtures.push({ ...fixture, sessionId, packId, skills, manifest });
+      }
+      // An active immutable snapshot blocks the whole maintenance transaction.
+      const pinnedId = crypto.randomUUID();
+      const config = configFixtures[0]!;
+      await admin`INSERT INTO pack_installations(id,account_id,workspace_id,pack_id,manifest_snapshot,manifest_digest)
+        VALUES(${pinnedId},${config.accountId},${config.workspaceId},${config.manifest.id},${admin.json(config.manifest)},${digest(JSON.stringify(config.manifest))})`;
+      await expect(migrate(ownerUrl)).rejects.toThrow("pack-installation:");
+      expect(await admin`SELECT name FROM schema_migrations WHERE name=${cutover}`).toHaveLength(0);
+      expect([...(await admin`SELECT skills FROM sessions WHERE id=${config.sessionId}`)]).toEqual([
+        { skills: config.skills },
+      ]);
+      expect([
+        ...(await admin`SELECT to_regclass('skill_config_conversion_receipts') AS name`),
+      ]).toEqual([{ name: null }]);
+      await admin`UPDATE pack_installations SET status='disabled' WHERE id=${pinnedId}`;
+      // Malformed current folders and canonical collisions abort before archive
+      // creation, leaving every other tenant's current configuration untouched.
+      for (const skills of [
+        [
+          {
+            ...config.skills[0]!,
+            files: [{ path: "SKILL.md", content: "---\nname: [\n---\ninvalid" }],
+          },
+        ],
+        [config.skills[0]!, { ...config.skills[0]!, name: "original-name" }],
+      ]) {
+        await admin`UPDATE workspace_packs SET manifest=${admin.json({ ...config.manifest, skills })} WHERE id=${config.packId}`;
+        await expect(migrate(ownerUrl)).rejects.toThrow("invalid content or canonical collision");
+        expect([
+          ...(await admin`SELECT skills FROM sessions WHERE id=${config.sessionId}`),
+        ]).toEqual([{ skills: config.skills }]);
+        expect([
+          ...(await admin`SELECT to_regclass('skill_config_conversion_receipts') AS name`),
+        ]).toEqual([{ name: null }]);
+      }
+      await admin`UPDATE workspace_packs SET manifest=${admin.json(config.manifest)} WHERE id=${config.packId}`;
+      const queuedTurnId = crypto.randomUUID();
+      await admin.begin(async (tx) => {
+        await tx`SELECT set_config('opengeni.account_id',${config.accountId},true),set_config('opengeni.workspace_id',${config.workspaceId},true),set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+        await tx`INSERT INTO session_turns(id,account_id,workspace_id,session_id,trigger_event_id,temporal_workflow_id,status,position,prompt,model,reasoning_effort,sandbox_backend)
+          VALUES(${queuedTurnId},${config.accountId},${config.workspaceId},${config.sessionId},${crypto.randomUUID()},'legacy-config-fixture','queued',1,'fixture','test','medium','none')`;
+      });
+      await expect(migrate(ownerUrl)).rejects.toThrow("runnable accepted turn");
+      await admin`UPDATE session_turns SET status='cancelled' WHERE id=${queuedTurnId}`;
+      const sourceId = crypto.randomUUID();
+      const triggerId = crypto.randomUUID();
+      const eventId = crypto.randomUUID();
+      const runId = crypto.randomUUID();
+      const template = { skills: config.skills };
+      await admin`INSERT INTO automation_sources(id,account_id,workspace_id,name,adapter_id,webhook_secret_encrypted,created_by_subject_id)
+        VALUES(${sourceId},${config.accountId},${config.workspaceId},'Legacy source','test','fixture-not-a-secret','user:original')`;
+      await admin`INSERT INTO automation_triggers(id,account_id,workspace_id,source_id,name,created_by_subject_id)
+        VALUES(${triggerId},${config.accountId},${config.workspaceId},${sourceId},'Legacy trigger','user:original')`;
+      await admin`INSERT INTO automation_trigger_revisions(trigger_id,revision,account_id,workspace_id,adapter_id,event_types,session_template,created_by_subject_id)
+        VALUES(${triggerId},1,${config.accountId},${config.workspaceId},'test','["test"]',${admin.json(template)},'user:original')`;
+      await expect(migrate(ownerUrl)).rejects.toThrow("automation-current:");
+      await admin`UPDATE automation_triggers SET status='disabled' WHERE id=${triggerId}`;
+      await admin`INSERT INTO automation_trigger_events(id,account_id,workspace_id,source_id,source_version,source_configuration,matched_trigger_revisions,delivery_key,request_digest,adapter_id,event_type,occurrence_key,normalized_event)
+        VALUES(${eventId},${config.accountId},${config.workspaceId},${sourceId},1,'{}',${admin.json([{ triggerId, revision: 1 }])},'fixture',${digest("fixture")},'test','test','fixture','{}')`;
+      await expect(migrate(ownerUrl)).rejects.toThrow("automation-event:");
+      await admin`INSERT INTO automation_runs(id,account_id,workspace_id,source_id,trigger_id,trigger_revision,event_id,occurrence_key,accepted_execution)
+        VALUES(${runId},${config.accountId},${config.workspaceId},${sourceId},${triggerId},1,${eventId},'fixture',${admin.json({ sessionTemplate: template })})`;
+      await expect(migrate(ownerUrl)).rejects.toThrow("automation-run:");
+      await admin`UPDATE automation_runs SET status='skipped' WHERE id=${runId}`;
       await migrate(ownerUrl);
+      expect(
+        (
+          await admin`SELECT session_template FROM automation_trigger_revisions WHERE trigger_id=${triggerId}`
+        )[0]!.session_template,
+      ).toEqual(template);
+      expect(
+        (await admin`SELECT accepted_execution FROM automation_runs WHERE id=${runId}`)[0]!
+          .accepted_execution,
+      ).toEqual({ sessionTemplate: template });
+      expect(
+        (
+          await admin`SELECT matched_trigger_revisions FROM automation_trigger_events WHERE id=${eventId}`
+        )[0]!.matched_trigger_revisions,
+      ).toEqual([{ triggerId, revision: 1 }]);
+      for (const convertedFixture of configFixtures) {
+        const [session] =
+          await admin`SELECT skills FROM sessions WHERE id=${convertedFixture.sessionId}`;
+        expect(session!.skills[0].files[0].content).toBe(
+          `---\nname: "original-name"\ndescription: "Original description"\n---\n${files[0]!.content}`,
+        );
+        expect(session!.skills[0].files[1]).toEqual(files[1]);
+        expect(session!.skills[1]).toEqual(convertedFixture.skills[1]);
+        const receipts =
+          await admin`SELECT source_kind,original_configuration,actor FROM skill_config_conversion_receipts WHERE workspace_id=${convertedFixture.workspaceId} ORDER BY source_kind`;
+        expect([...receipts]).toEqual([
+          {
+            source_kind: "session",
+            original_configuration: convertedFixture.skills,
+            actor: "service:skill-migration:0423",
+          },
+          {
+            source_kind: "workspace-pack",
+            original_configuration: convertedFixture.manifest,
+            actor: "service:skill-migration:0423",
+          },
+        ]);
+      }
+      expect([
+        ...(await admin`SELECT manifest_snapshot,manifest_digest FROM pack_installations WHERE id=${pinnedId}`),
+      ]).toEqual([
+        {
+          manifest_snapshot: config.manifest,
+          manifest_digest: digest(JSON.stringify(config.manifest)),
+        },
+      ]);
+      await expect(
+        admin`UPDATE skill_config_conversion_receipts SET actor=actor`.execute(),
+      ).rejects.toThrow();
+      expect(await owner`SELECT source_id FROM skill_config_conversion_receipts`).toHaveLength(0);
+      await owner.begin(async (tx) => {
+        await tx`SELECT set_config('opengeni.account_id',${config.accountId},true),set_config('opengeni.workspace_id',${config.workspaceId},true)`;
+        expect(await tx`SELECT source_id FROM skill_config_conversion_receipts`).toHaveLength(2);
+      });
+      await migrate(ownerUrl);
+      expect(await admin`SELECT source_id FROM skill_config_conversion_receipts`).toHaveLength(4);
       const migratedFiles = [
         {
           path: "SKILL.md",

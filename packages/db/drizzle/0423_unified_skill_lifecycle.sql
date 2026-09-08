@@ -87,16 +87,46 @@ CREATE TABLE skill_write_receipts (
 CREATE TRIGGER skill_write_receipts_immutable BEFORE UPDATE OR DELETE ON skill_write_receipts
 FOR EACH ROW EXECUTE FUNCTION preference_registry_reject_history_mutation();
 
+-- Maintenance audit only: never a current Skill/content authority. No runtime
+-- writes or deletes; original JSON and hashes survive source replacement.
+CREATE TABLE skill_config_conversion_receipts (
+  account_id uuid NOT NULL,
+  workspace_id uuid NOT NULL,
+  source_kind text NOT NULL CHECK (source_kind IN ('session','workspace-pack')),
+  source_id uuid NOT NULL,
+  conversion_version text NOT NULL DEFAULT '0423-v1' CHECK (conversion_version='0423-v1'),
+  actor text NOT NULL DEFAULT 'service:skill-migration:0423' CHECK (actor='service:skill-migration:0423'),
+  original_configuration jsonb NOT NULL,
+  original_hash text NOT NULL CHECK (original_hash=encode(sha256(convert_to(original_configuration::text,'UTF8')),'hex')),
+  replacement_hash text NOT NULL CHECK (replacement_hash ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id,source_kind,source_id,conversion_version),
+  FOREIGN KEY (workspace_id,account_id) REFERENCES workspaces(id,account_id) ON DELETE RESTRICT
+);
+CREATE TRIGGER skill_config_conversion_receipts_immutable BEFORE UPDATE OR DELETE ON skill_config_conversion_receipts
+FOR EACH ROW EXECUTE FUNCTION preference_registry_reject_history_mutation();
+
 DO $rls$
 DECLARE t text;
 BEGIN
-  FOREACH t IN ARRAY ARRAY['skill_source_bindings','skill_write_receipts'] LOOP
+  FOREACH t IN ARRAY ARRAY['skill_source_bindings','skill_write_receipts','skill_config_conversion_receipts'] LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY', t);
     EXECUTE format('CREATE POLICY skill_workspace_scope ON %I USING (account_id = nullif(current_setting(''opengeni.account_id'', true), '''')::uuid AND workspace_id = nullif(current_setting(''opengeni.workspace_id'', true), '''')::uuid)', t);
     EXECUTE format('REVOKE ALL ON %I FROM PUBLIC', t);
   END LOOP;
 END $rls$;
+
+-- Override any deployment default grants: archived Session JSON can be private.
+DO $config_receipt_grants$
+DECLARE runtime_role text;
+BEGIN
+  FOR runtime_role IN SELECT jsonb_array_elements_text(current_setting('opengeni.migration_application_roles')::jsonb) LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname=runtime_role) THEN
+      EXECUTE format('REVOKE ALL ON skill_config_conversion_receipts FROM %I',runtime_role);
+    END IF;
+  END LOOP;
+END $config_receipt_grants$;
 
 -- This is a separate truthful agent lifecycle, not a human-session impersonation.
 -- The caller supplies trusted HTTP human identity or host-bound exact attempt claims.
@@ -286,6 +316,16 @@ ALTER TABLE preference_registry_preferences NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_revisions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_source_bindings NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE skill_config_conversion_receipts NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_packs NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_triggers NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_revisions NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_runs NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_events NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_run_event_links NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE pack_installations NO FORCE ROW LEVEL SECURITY;
 -- The runner invokes the shared contracts parser here, inside this transaction.
 -- Raw SQL execution fails closed below without its owner-local staging table.
 -- opengeni:skill-metadata-stage-v1
@@ -365,6 +405,16 @@ ALTER TABLE preference_registry_preferences FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_revisions FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_source_bindings FORCE ROW LEVEL SECURITY;
+ALTER TABLE skill_config_conversion_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE sessions FORCE ROW LEVEL SECURITY;
+ALTER TABLE workspace_packs FORCE ROW LEVEL SECURITY;
+ALTER TABLE session_turns FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_triggers FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_revisions FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_runs FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_trigger_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE automation_run_event_links FORCE ROW LEVEL SECURITY;
+ALTER TABLE pack_installations FORCE ROW LEVEL SECURITY;
 
 -- All new writes use files after cutover, including formerly legacy CREATE.
 -- Keep historical rows/hashes unchanged; explicit restore creates a new folder revision.
