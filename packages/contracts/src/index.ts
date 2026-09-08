@@ -6634,6 +6634,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.secret.read",
   "session.codemode.call",
   "session.pin.write",
+  "session.feedback.write",
   "session.attention.write",
   "session.archive.write",
   "session.delete",
@@ -16691,3 +16692,5 @@ export * from "./organization-recovery";
 export * from "./organization-membership-lifecycle";
 export * from "./remember";
 export * from "./agent-authored-durable-text";
+
+export * from "./feedback";

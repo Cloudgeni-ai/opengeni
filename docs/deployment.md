@@ -3058,3 +3058,10 @@ workers do not enforce per-connection model restrictions and must not be used as
 rollback images once restrictions are configured. Existing connections retain
 unrestricted models and their prior workspace reach. See
 [model connection access](model-connection-access.md).
+
+## Feedback storage activation
+
+Migration `0425_feedback_submissions.sql` extends the exact runtime table/privilege
+contract. Stop old API and both worker types, migrate, run `db:provision-roles`,
+and start the feedback-aware binary. Do not restart an older binary afterward.
+See [Feedback](feedback.md) for API, privacy, and retention behavior.
