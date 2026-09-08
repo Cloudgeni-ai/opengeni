@@ -19,12 +19,12 @@ Agents have a built-in `request_human_input` tool for questions that need an ans
 
 The outcome is delivered to the agent as ordinary tool output:
 
-| Outcome | When |
-| --- | --- |
-| `answered` | The person submitted validated answers |
-| `skipped` | The person skipped and the request allowed it |
-| `expired` | The deadline passed first |
-| `cancelled` | The owning turn was replaced or terminated |
+| Outcome     | When                                          |
+| ----------- | --------------------------------------------- |
+| `answered`  | The person submitted validated answers        |
+| `skipped`   | The person skipped and the request allowed it |
+| `expired`   | The deadline passed first                     |
+| `cancelled` | The owning turn was replaced or terminated    |
 
 No outcome creates a synthetic user message or starts a new turn. Workspace admins can disable the tool with the `agentHumanInputEnabled` workspace setting.
 

@@ -25,17 +25,20 @@ Upload documents or sync them from connected sources such as Google Drive. OpenG
 The same material should not be copied across these. A workspace instruction can say "search Memory for related incidents"; the incident itself stays in Memory and the investigation method stays in a Skill.
 
 <Note>
-Skills, Packs, and the capability catalog are evolving quickly. The current contracts live in the repository under [docs/capabilities.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/capabilities.md) and [docs/packs.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/packs.md).
+  Skills, Packs, and the capability catalog are evolving quickly. The current contracts live in the
+  repository under
+  [docs/capabilities.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/capabilities.md)
+  and [docs/packs.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/packs.md).
 </Note>
 
 ## Learning mode
 
 A workspace learning policy governs whether agents may derive behavior changes from what they observe:
 
-| Mode | Effect |
-| --- | --- |
-| Off | No derived proposals |
-| Review first | Agents leave auditable, inactive proposals for a human to activate |
-| Autonomous | Eligible Skills and instruction policies activate through their own undoable lifecycle |
+| Mode         | Effect                                                                                 |
+| ------------ | -------------------------------------------------------------------------------------- |
+| Off          | No derived proposals                                                                   |
+| Review first | Agents leave auditable, inactive proposals for a human to activate                     |
+| Autonomous   | Eligible Skills and instruction policies activate through their own undoable lifecycle |
 
 Learning mode does not gate Memory. Agents save and correct facts whenever Memory is enabled.

@@ -8,11 +8,11 @@ A **session** is one durable conversation and workstream: its history, policy, v
 
 ## Three identities
 
-| Identity | Meaning | Lifetime |
-| --- | --- | --- |
-| Session | Durable conversation, workstream, policy, visibility, and compute context | Until archived or deleted |
-| Turn | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, a schedule, an approval, or a recovery | Until logically settled |
-| Attempt | One physical worker execution of a turn | Until completion, interruption, loss, or replacement |
+| Identity | Meaning                                                                                                                         | Lifetime                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Session  | Durable conversation, workstream, policy, visibility, and compute context                                                       | Until archived or deleted                            |
+| Turn     | One accepted unit of input: a human or API prompt, a machine input, a goal continuation, a schedule, an approval, or a recovery | Until logically settled                              |
+| Attempt  | One physical worker execution of a turn                                                                                         | Until completion, interruption, loss, or replacement |
 
 A new attempt does not imply a new prompt. A new prompt does imply a new turn. This is what lets OpenGeni recover the same logical turn after a worker dies without duplicating external effects.
 

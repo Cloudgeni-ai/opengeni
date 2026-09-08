@@ -32,19 +32,11 @@
       },
       {
         "group": "Guides",
-        "pages": [
-          "guides/self-host",
-          "guides/connect-a-machine",
-          "guides/integrate-your-product"
-        ]
+        "pages": ["guides/self-host", "guides/connect-a-machine", "guides/integrate-your-product"]
       },
       {
         "group": "Reference",
-        "pages": [
-          "reference/sdk",
-          "reference/authentication",
-          "reference/further-reading"
-        ]
+        "pages": ["reference/sdk", "reference/authentication", "reference/further-reading"]
       }
     ],
     "global": {

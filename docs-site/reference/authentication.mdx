@@ -8,23 +8,23 @@ The API is workspace-scoped: protected routes carry the workspace id in the URL,
 
 ## Choosing a credential
 
-| You are | Use |
-| --- | --- |
-| A product backend integrating OpenGeni | An **organization API key** |
-| A backend or automation constrained to one workspace | A **workspace API key** |
-| A host acting on behalf of its own signed-in users | A **delegated access token** signed with the deployment's delegation secret |
-| A person in the web console | A managed web session (email and password) |
-| A machine you enrolled | The enrollment credential the installer obtained; you never handle it |
+| You are                                              | Use                                                                         |
+| ---------------------------------------------------- | --------------------------------------------------------------------------- |
+| A product backend integrating OpenGeni               | An **organization API key**                                                 |
+| A backend or automation constrained to one workspace | A **workspace API key**                                                     |
+| A host acting on behalf of its own signed-in users   | A **delegated access token** signed with the deployment's delegation secret |
+| A person in the web console                          | A managed web session (email and password)                                  |
+| A machine you enrolled                               | The enrollment credential the installer obtained; you never handle it       |
 
 ## Credentials
 
-| Credential | Transport | Lifetime | Notes |
-| --- | --- | --- | --- |
-| Organization API key | `Authorization: Bearer ogk_...` | Until revoked or expired | Created through organization settings or the organization API-key routes. Shown once, stored hashed. Fixed scope: read the organization, create and administer workspaces, manage keys. Usable only with organization workspaces, never from a browser |
-| Workspace API key | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant |
-| Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions |
-| Deployment access key | `x-opengeni-access-key` header | Static | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity |
-| Managed web session | Cookie | Session | Email and password sign-in in `managed` mode |
+| Credential             | Transport                       | Lifetime                 | Notes                                                                                                                                                                                                                                                  |
+| ---------------------- | ------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Organization API key   | `Authorization: Bearer ogk_...` | Until revoked or expired | Created through organization settings or the organization API-key routes. Shown once, stored hashed. Fixed scope: read the organization, create and administer workspaces, manage keys. Usable only with organization workspaces, never from a browser |
+| Workspace API key      | `Authorization: Bearer ogk_...` | Until revoked or expired | Issued by an authorized caller for one workspace; cannot exceed that workspace's grant                                                                                                                                                                 |
+| Delegated access token | `Authorization: Bearer ogd_...` | Short, embedded expiry   | HMAC-signed by your host with `OPENGENI_DELEGATION_SECRET`; embeds workspace, account, and permissions                                                                                                                                                 |
+| Deployment access key  | `x-opengeni-access-key` header  | Static                   | Optional coarse perimeter enabled by `OPENGENI_AUTH_REQUIRED=true`. Not an identity                                                                                                                                                                    |
+| Managed web session    | Cookie                          | Session                  | Email and password sign-in in `managed` mode                                                                                                                                                                                                           |
 
 ## Rules that hold everywhere
 
@@ -35,10 +35,10 @@ The API is workspace-scoped: protected routes carry the workspace id in the URL,
 
 ## Deployment access modes
 
-| `OPENGENI_PRODUCT_ACCESS_MODE` | Who can call |
-| --- | --- |
-| `local` | The bootstrap `dev` user with broad permissions. Development only |
-| `configured` | Delegated bearer tokens from your product, or the deployment shared key |
-| `managed` | Managed sign-up, organizations, API keys, prepaid credits, and limits |
+| `OPENGENI_PRODUCT_ACCESS_MODE` | Who can call                                                            |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `local`                        | The bootstrap `dev` user with broad permissions. Development only       |
+| `configured`                   | Delegated bearer tokens from your product, or the deployment shared key |
+| `managed`                      | Managed sign-up, organizations, API keys, prepaid credits, and limits   |
 
 The full credential taxonomy, including stream tokens, enrollment tokens, sandbox bearers, and signed storage URLs, is in the repository's [credentials document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/credentials.md).

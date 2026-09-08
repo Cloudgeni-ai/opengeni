@@ -7,20 +7,30 @@ icon: "laptop"
 A Connected Machine is your own always-on computer, enrolled once and then usable as a session target. The agent runs there directly, with no cloud box in between. See [Compute targets](/concepts/compute-targets) for how it differs from a managed sandbox.
 
 <Note>
-On a self-hosted deployment, Connected Machines are off until an operator sets `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` and configures the control plane and relay. Managed OpenGeni has them enabled.
+  On a self-hosted deployment, Connected Machines are off until an operator enables them. Setting
+  `OPENGENI_SANDBOX_SELFHOSTED_ENABLED=true` alone is not enough: the deployment also needs the
+  stream relay, NATS with auth-callout, public WebSocket ingress for both, and their secrets. The
+  [Connected Machines section of the deployment
+  guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/deployment.md#connected-machines)
+  enumerates them. Managed OpenGeni has them enabled.
 </Note>
 
 ## Enroll interactively
 
 <Steps>
   <Step title="Run the installer">
-    Open the Machines page in your workspace and copy the one-line installer. Run it on the machine. It installs or updates the `opengeni-agent` binary, registers it as a background service, and starts a device flow.
+    Open the Machines page in your workspace and copy the one-line installer. Run it on the machine.
+    It installs or updates the `opengeni-agent` binary, registers it as a background service, and
+    starts a device flow.
   </Step>
   <Step title="Approve the device">
-    The agent prints a short code and a verification URL. Open the URL, confirm the code, and choose who may use the machine: only you (the default), the workspace, or the whole organization. Screen control is a separate consent.
+    The agent prints a short code and a verification URL. Open the URL, confirm the code, and choose
+    who may use the machine: only you (the default), the workspace, or the whole organization.
+    Screen control is a separate consent.
   </Step>
   <Step title="Done">
-    The machine appears in the Machines list with its status and metrics and is immediately available as a session target.
+    The machine appears in the Machines list with its status and metrics and is immediately
+    available as a session target.
   </Step>
 </Steps>
 

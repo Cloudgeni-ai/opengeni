@@ -5,7 +5,8 @@ icon: "code"
 ---
 
 <Note>
-The SDK surface is changing quickly. This page describes the shape; the package READMEs in the repository are the authority for exact method signatures and the current version.
+  The SDK surface is changing quickly. This page describes the shape; the package READMEs in the
+  repository are the authority for exact method signatures and the current version.
 </Note>
 
 ## @opengeni/sdk
@@ -38,16 +39,16 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 
 What it covers:
 
-| Area | Highlights |
-| --- | --- |
-| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, workspace settings |
-| Sessions | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel |
-| Input and control | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers |
-| Events | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression |
-| Files | Upload, attach, and download workspace files |
-| Goals | Read, pause, resume, and clear a session goal |
-| Connected Machines | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap |
-| Proxy helpers | Re-emit a session stream from your own server with an identical wire format |
+| Area                         | Highlights                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, workspace settings                                                           |
+| Sessions                     | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel                             |
+| Input and control            | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers                                          |
+| Events                       | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression |
+| Files                        | Upload, attach, and download workspace files                                                                                      |
+| Goals                        | Read, pause, resume, and clear a session goal                                                                                     |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                        |
+| Proxy helpers                | Re-emit a session stream from your own server with an identical wire format                                                       |
 
 Full reference: [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
 
@@ -57,12 +58,12 @@ Hooks and styled components built on the SDK: live session streaming, a composer
 
 Subpaths keep the root import lean:
 
-| Import | Contents |
-| --- | --- |
-| `@opengeni/react` | Timeline, composer, hooks, and the sandbox workbench |
-| `@opengeni/react/composer` | Advanced composer composition |
-| `@opengeni/react/machines` | Connected Machines dashboard and enrollment flow |
-| `@opengeni/react/realtime` | Voice controls, lazily loadable |
+| Import                     | Contents                                             |
+| -------------------------- | ---------------------------------------------------- |
+| `@opengeni/react`          | Timeline, composer, hooks, and the sandbox workbench |
+| `@opengeni/react/composer` | Advanced composer composition                        |
+| `@opengeni/react/machines` | Connected Machines dashboard and enrollment flow     |
+| `@opengeni/react/realtime` | Voice controls, lazily loadable                      |
 
 Full reference: [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
 

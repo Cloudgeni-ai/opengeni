@@ -6,13 +6,13 @@ icon: "microchip"
 
 Every session picks where its commands, files, and tools run. Two kinds of target are co-equal and first-class.
 
-|              | Managed sandbox | Connected Machine |
-| ------------ | --- | --- |
-| Ownership    | Platform-owned, ephemeral | User-owned, persistent |
-| Provisioning | OpenGeni creates and tears it down | OpenGeni attaches to what is already there |
-| Repositories | Cloned into `/workspace` | Not cloned; the machine uses its own git credentials |
-| Working directory | `/workspace` | A per-session folder under the agent's launch root |
-| Network | Provisioned inside the deployment | The machine dials out; nothing is exposed inbound |
+|                   | Managed sandbox                    | Connected Machine                                    |
+| ----------------- | ---------------------------------- | ---------------------------------------------------- |
+| Ownership         | Platform-owned, ephemeral          | User-owned, persistent                               |
+| Provisioning      | OpenGeni creates and tears it down | OpenGeni attaches to what is already there           |
+| Repositories      | Cloned into `/workspace`           | Not cloned; the machine uses its own git credentials |
+| Working directory | `/workspace`                       | A per-session folder under the agent's launch root   |
+| Network           | Provisioned inside the deployment  | The machine dials out; nothing is exposed inbound    |
 
 ## Managed sandboxes
 
