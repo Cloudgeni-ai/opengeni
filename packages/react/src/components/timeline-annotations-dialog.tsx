@@ -6,10 +6,15 @@ import { usePortalTokenStyle } from "../lib/use-portal-token-style";
 import {
   AnnotationAccentRow,
   AnnotationNoteField,
+  AnnotationNotePreview,
   AnnotationQuoteSourceButton,
   type TimelineAnnotationLike,
 } from "./timeline-annotation-chrome";
-import { annotationDisplayOrdinal } from "./timeline-annotation-shared";
+import {
+  ANNOTATION_REVIEW_DIALOG_WIDTH_PX,
+  clampAnnotationDialogPlacement,
+} from "./timeline-annotation-layout";
+import { annotationDisplayOrdinal, cssEscapeAttribute } from "./timeline-annotation-shared";
 
 function focusableElements(root: HTMLElement): HTMLElement[] {
   return [
@@ -43,8 +48,10 @@ export function TimelineAnnotationsDialog({
   onDismiss: (restoreFocus: boolean) => void;
 }) {
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
-  const [position, setPosition] = useState({ left: 12, top: 12, above: false });
+  const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 280 });
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
   const noteRefs = useRef(new Map<string, HTMLTextAreaElement>());
   const portalStyle = usePortalTokenStyle(triggerRef.current);
   const commitNotes = () => {
@@ -56,30 +63,22 @@ export function TimelineAnnotationsDialog({
   };
 
   useLayoutEffect(() => {
-    if (!focusAnnotationId) return;
-    const note = noteRefs.current.get(focusAnnotationId);
-    note?.focus();
-    if (note && document.activeElement === note) onFocusConsumed?.();
-  }, [focusAnnotationId, onFocusConsumed]);
-
-  useLayoutEffect(() => {
     const updatePosition = () => {
       const rect = triggerRef.current?.getBoundingClientRect();
-      const panel = panelRef.current;
       if (!rect) return;
-      const panelWidth = Math.min(400, window.innerWidth - 24);
-      const panelHeight = panel?.offsetHeight ?? 280;
-      const left = Math.min(
-        Math.max(12, rect.left),
-        Math.max(12, window.innerWidth - panelWidth - 12),
+      const contentHeight =
+        (headerRef.current?.offsetHeight ?? 44) + (listRef.current?.scrollHeight ?? 200);
+      setPosition(
+        clampAnnotationDialogPlacement({
+          triggerLeft: rect.left,
+          triggerTop: rect.top,
+          triggerBottom: rect.bottom,
+          contentHeight,
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight,
+          panelWidth: ANNOTATION_REVIEW_DIALOG_WIDTH_PX,
+        }),
       );
-      const spaceBelow = window.innerHeight - rect.bottom - 12;
-      const spaceAbove = rect.top - 12;
-      const above = spaceBelow < Math.min(panelHeight, 280) && spaceAbove > spaceBelow;
-      const top = above
-        ? Math.max(12 + panelHeight, rect.top - 8)
-        : Math.min(rect.bottom + 8, window.innerHeight - 12);
-      setPosition({ left, top, above });
     };
     updatePosition();
     window.addEventListener("resize", updatePosition);
@@ -89,6 +88,17 @@ export function TimelineAnnotationsDialog({
       window.removeEventListener("scroll", updatePosition, true);
     };
   }, [annotations, triggerRef]);
+
+  useLayoutEffect(() => {
+    if (!focusAnnotationId) return;
+    const row = listRef.current?.querySelector<HTMLElement>(
+      `[data-og-annotation-id="${cssEscapeAttribute(focusAnnotationId)}"]`,
+    );
+    row?.scrollIntoView({ block: "nearest" });
+    const note = noteRefs.current.get(focusAnnotationId);
+    note?.focus();
+    if (note && document.activeElement === note) onFocusConsumed?.();
+  }, [focusAnnotationId, onFocusConsumed, annotations.length]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -136,16 +146,21 @@ export function TimelineAnnotationsDialog({
       ref={panelRef}
       role="dialog"
       tabIndex={-1}
+      data-og-annotation-review=""
       style={{
         left: position.left,
         top: position.top,
-        transform: position.above ? "translateY(-100%)" : undefined,
+        maxHeight: position.maxHeight,
         ...portalStyle,
       }}
-      className="og-root fixed z-[75] box-border max-h-[min(32rem,70vh)] w-[min(25rem,calc(100vw-1.5rem))] overflow-y-auto rounded-og-lg border border-og-border bg-og-surface-1 p-3 text-og-fg shadow-xl outline-hidden"
+      className="og-root fixed z-[75] box-border flex w-[min(25rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1 text-og-fg shadow-xl outline-hidden"
       aria-label={editable ? "Edit quoted notes" : "Quoted notes"}
     >
-      <div className="mb-3 flex items-start justify-between gap-3">
+      <div
+        ref={headerRef}
+        data-og-annotation-review-header=""
+        className="flex shrink-0 items-start justify-between gap-3 px-3 pt-3 pb-2"
+      >
         <p className="min-w-0 pt-0.5 text-og-sm font-medium text-og-fg-muted">{countLabel}</p>
         <button
           type="button"
@@ -156,11 +171,19 @@ export function TimelineAnnotationsDialog({
           <XIcon className="size-3.5" aria-hidden="true" />
         </button>
       </div>
-      <div className="grid gap-3">
+      <div
+        ref={listRef}
+        data-og-annotation-review-list=""
+        className="grid min-h-0 flex-1 gap-2.5 overflow-y-auto overscroll-contain px-3 pb-3"
+      >
         {annotations.map((annotation, index) => {
           const ordinal = annotationDisplayOrdinal(annotation, index);
           return (
-            <section key={annotation.id} aria-label={`Annotation ${ordinal}`}>
+            <section
+              key={annotation.id}
+              data-og-annotation-id={annotation.id}
+              aria-label={`Annotation ${ordinal}`}
+            >
               <AnnotationAccentRow>
                 <div className="flex items-start gap-1">
                   <div className="min-w-0 flex-1">
@@ -200,11 +223,13 @@ export function TimelineAnnotationsDialog({
                     onUpdate={onUpdate}
                     onCommit={commitNotes}
                   />
-                ) : annotation.note ? (
-                  <p className="mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
-                    {annotation.note}
-                  </p>
-                ) : null}
+                ) : (
+                  <AnnotationNotePreview
+                    note={annotation.note}
+                    annotationId={annotation.id}
+                    ordinal={ordinal}
+                  />
+                )}
               </AnnotationAccentRow>
             </section>
           );

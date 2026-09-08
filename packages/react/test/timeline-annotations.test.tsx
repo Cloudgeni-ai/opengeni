@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { DraftTimelineAnnotation } from "@opengeni/sdk";
 import { act, useState } from "react";
 import { MessageTimeline } from "../src";
-import { TimelineAnnotationsChip } from "../src/components/timeline-annotations";
+import { TimelineAnnotationsChip, TimelineAnnotationCards } from "../src/components/timeline-annotations";
 import type { AgentMessageItem, UserMessageItem } from "../src/timeline";
 import { flush, registerDom, renderComponent } from "./render-hook";
 
@@ -547,6 +547,81 @@ describe("timeline annotations", () => {
     ]);
     await act(async () => badges[1]?.click());
     expect(selected).toEqual(["00000000-0000-4000-8000-000000000522"]);
+    expect(new Set(badges.map((button) => button.style.left)).size).toBe(2);
+    await rendered.unmount();
+  });
+
+  test("keeps a dense long-annotation review list inside one scrollable panel", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const items: DraftTimelineAnnotation[] = Array.from({ length: 12 }, (_, index) => ({
+      ...annotation(index === 11 ? `${"Keep this exact constraint. ".repeat(24).trim()}` : "Keep this."),
+      id: `00000000-0000-4000-8000-${String(0x502 + index).padStart(12, "0")}`,
+      quote:
+        index === 0
+          ? "OpenGeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
+          : `quote-${index + 1}`,
+    }));
+    const focusId = items[11]!.id;
+    const scrolled: string[] = [];
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function scrollIntoView() {
+      if (this instanceof HTMLElement) {
+        scrolled.push(this.getAttribute("data-og-annotation-id") ?? "");
+      }
+    };
+    const rendered = await renderComponent(
+      <TimelineAnnotationsChip
+        annotations={items}
+        editable
+        focusAnnotationId={focusId}
+        onUpdate={() => undefined}
+        onRemove={() => undefined}
+      />,
+    );
+    try {
+      expect(rendered.container.textContent).toContain("12 annotations");
+      expect(
+        rendered.container.querySelector('button[aria-label="Review 12 annotations"]'),
+      ).not.toBeNull();
+      const dialog = document.body.querySelector<HTMLElement>("[data-og-annotation-review]");
+      const list = document.body.querySelector<HTMLElement>("[data-og-annotation-review-list]");
+      const header = document.body.querySelector<HTMLElement>("[data-og-annotation-review-header]");
+      expect(dialog).not.toBeNull();
+      expect(header).not.toBeNull();
+      expect(list?.className).toContain("overflow-y-auto");
+      expect(document.body.querySelectorAll("textarea")).toHaveLength(12);
+      expect(document.body.querySelectorAll("textarea")[0]?.className).toContain("max-h-40");
+      expect(scrolled).toContain(focusId);
+      const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
+        button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+      );
+      expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+      await rendered.unmount();
+    }
+  });
+
+  test("clamps long sent annotation notes and scrolls a dense card stack", async () => {
+    const longNote = "Keep this exact constraint. ".repeat(24).trim();
+    const items: DraftTimelineAnnotation[] = Array.from({ length: 6 }, (_, index) => ({
+      ...annotation(longNote),
+      id: `00000000-0000-4000-8000-${String(0x602 + index).padStart(12, "0")}`,
+      quote: `quoted passage ${index + 1} that can also run long enough to wrap`,
+    }));
+    const rendered = await renderComponent(<TimelineAnnotationCards annotations={items} />);
+    const cards = rendered.container.querySelector<HTMLElement>("[data-og-annotation-cards]");
+    expect(cards?.className).toContain("overflow-y-auto");
+    const notes = rendered.container.querySelectorAll<HTMLElement>("[data-og-annotation-note]");
+    expect(notes).toHaveLength(6);
+    expect(notes[0]?.className).toContain("line-clamp-4");
+    const more = rendered.container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Show more annotation 1"]',
+    );
+    expect(more?.textContent).toBe("Show more");
+    await act(async () => more?.click());
+    expect(notes[0]?.getAttribute("data-og-annotation-note-expanded")).toBe("true");
+    expect(more?.textContent).toBe("Show less");
     await rendered.unmount();
   });
 });

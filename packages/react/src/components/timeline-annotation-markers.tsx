@@ -3,6 +3,13 @@ import { useLayoutEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../lib/cn";
 import {
+  annotationBoxIntersects,
+  annotationViewportBox,
+  layoutAnnotationBadges,
+  type AnnotationBadgeAnchor,
+  type AnnotationBox,
+} from "./timeline-annotation-layout";
+import {
   annotationDisplayOrdinal,
   annotationHasNote,
   annotatableText,
@@ -11,14 +18,6 @@ import {
   matchingQuoteInSource,
   occurrenceOffsets,
 } from "./timeline-annotation-shared";
-
-type Marker = {
-  id: string;
-  ordinal: number;
-  left: number;
-  top: number;
-  incomplete: boolean;
-};
 
 function lastVisibleRect(range: Range): DOMRect | null {
   try {
@@ -56,9 +55,27 @@ function occurrenceForAnnotation(sourceEl: HTMLElement, annotation: DraftTimelin
   return best;
 }
 
-function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): Marker[] {
+function currentAnnotationViewport(): AnnotationBox {
+  const scroller = document.querySelector("[data-og-timeline-scroller]");
+  const scrollerBox =
+    scroller instanceof HTMLElement
+      ? (() => {
+          const rect = scroller.getBoundingClientRect();
+          return {
+            left: rect.left,
+            right: rect.right,
+            top: rect.top,
+            bottom: rect.bottom,
+          } satisfies AnnotationBox;
+        })()
+      : null;
+  return annotationViewportBox(window.innerWidth || 1024, window.innerHeight || 768, scrollerBox);
+}
+
+function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): AnnotationBadgeAnchor[] {
   if (typeof document === "undefined") return [];
-  const next: Marker[] = [];
+  const viewport = currentAnnotationViewport();
+  const next: AnnotationBadgeAnchor[] = [];
   for (const [index, annotation] of annotations.entries()) {
     const source = document.querySelector(
       `[data-og-annotation-source-key="${cssEscapeAttribute(annotation.source.eventId)}"]`,
@@ -70,6 +87,14 @@ function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): Marker
     if (!range) continue;
     const rect = lastVisibleRect(range);
     if (!rect) continue;
+    if (
+      !annotationBoxIntersects(
+        { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom },
+        viewport,
+      )
+    ) {
+      continue;
+    }
     next.push({
       id: annotation.id,
       ordinal: annotationDisplayOrdinal(annotation, index),
@@ -78,7 +103,7 @@ function collectMarkers(annotations: readonly DraftTimelineAnnotation[]): Marker
       incomplete: !annotationHasNote(annotation.note),
     });
   }
-  return next;
+  return layoutAnnotationBadges(next, viewport);
 }
 
 export function TimelineAnnotationMarkers({
@@ -88,7 +113,7 @@ export function TimelineAnnotationMarkers({
   annotations: readonly DraftTimelineAnnotation[];
   onSelect?: ((id: string) => void) | undefined;
 }) {
-  const [markers, setMarkers] = useState<Marker[]>([]);
+  const [markers, setMarkers] = useState<AnnotationBadgeAnchor[]>([]);
 
   useLayoutEffect(() => {
     if (annotations.length === 0) {
@@ -121,9 +146,10 @@ export function TimelineAnnotationMarkers({
           key={marker.id}
           type="button"
           data-og-annotation-badge=""
-          style={{ left: marker.left, top: marker.top }}
+          data-og-annotation-badge-ordinal={marker.ordinal}
+          style={{ left: marker.left, top: marker.top, zIndex: marker.ordinal }}
           className={cn(
-            "pointer-events-auto absolute flex size-4 -translate-x-1/2 -translate-y-[110%] items-center justify-center rounded-full bg-og-accent text-[10px] font-semibold tabular-nums text-white shadow-sm outline-hidden select-none focus-visible:ring-2 focus-visible:ring-og-accent",
+            "pointer-events-auto absolute flex size-4 -translate-x-1/2 -translate-y-[110%] items-center justify-center rounded-full bg-og-accent text-[10px] font-semibold tabular-nums text-white shadow-sm outline-hidden select-none after:absolute after:-inset-2 after:content-[''] focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:after:-inset-2.5",
             marker.incomplete && "ring-1 ring-og-accent-fg/35",
           )}
           aria-label={`Annotation ${marker.ordinal}`}

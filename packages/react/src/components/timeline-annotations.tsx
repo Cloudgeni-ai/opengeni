@@ -4,9 +4,11 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { cn } from "../lib/cn";
 import {
   AnnotationAccentRow,
+  AnnotationNotePreview,
   AnnotationQuoteSourceButton,
   type TimelineAnnotationLike,
 } from "./timeline-annotation-chrome";
+import { ANNOTATION_CARD_STACK_SCROLL_AT } from "./timeline-annotation-layout";
 import {
   annotationDisplayOrdinal,
   annotationHasNote,
@@ -28,7 +30,15 @@ export function TimelineAnnotationCards({
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
   if (annotations.length === 0) return null;
   return (
-    <div className={cn("grid gap-2", className)}>
+    <div
+      data-og-annotation-cards=""
+      className={cn(
+        "grid gap-2",
+        annotations.length >= ANNOTATION_CARD_STACK_SCROLL_AT &&
+          "max-h-[min(28rem,55vh)] overflow-y-auto overscroll-contain pr-1",
+        className,
+      )}
+    >
       {annotations.map((annotation, index) => {
         const ordinal = annotationDisplayOrdinal(annotation, index);
         return (
@@ -48,11 +58,11 @@ export function TimelineAnnotationCards({
                   Source is outside the loaded timeline window.
                 </p>
               ) : null}
-              {annotation.note ? (
-                <p className="mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg">
-                  {annotation.note}
-                </p>
-              ) : null}
+              <AnnotationNotePreview
+                note={annotation.note}
+                annotationId={annotation.id}
+                ordinal={ordinal}
+              />
             </AnnotationAccentRow>
           </section>
         );

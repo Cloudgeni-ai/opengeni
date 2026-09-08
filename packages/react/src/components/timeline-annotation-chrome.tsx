@@ -3,8 +3,9 @@ import type {
   TimelineAnnotation,
   TimelineAnnotationSource,
 } from "@opengeni/sdk";
-import { useLayoutEffect, useRef, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { annotationNoteNeedsDisclosure } from "./timeline-annotation-layout";
 import {
   annotationSourceLabel,
   revealLoadedAnnotationSource,
@@ -80,6 +81,50 @@ export function AnnotationAccentRow({
     <div className={cn("flex gap-2.5", className)}>
       <div aria-hidden="true" className="w-0.5 shrink-0 rounded-full bg-og-accent/55" />
       <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+export function AnnotationNotePreview({
+  note,
+  annotationId,
+  ordinal,
+  className,
+}: {
+  note: string;
+  annotationId: string;
+  ordinal: number;
+  className?: string | undefined;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (!note) return null;
+  const collapsible = annotationNoteNeedsDisclosure(note);
+  const contentId = `og-annotation-note-${annotationId}`;
+  return (
+    <div className={className}>
+      <p
+        id={contentId}
+        data-og-annotation-note=""
+        data-og-annotation-note-expanded={expanded ? "true" : "false"}
+        className={cn(
+          "mt-0.5 whitespace-pre-wrap text-og-sm leading-5 text-og-fg",
+          !expanded && "line-clamp-4",
+        )}
+      >
+        {note}
+      </p>
+      {collapsible ? (
+        <button
+          type="button"
+          className="mt-0.5 inline-flex min-h-7 items-center rounded-og-sm px-1 text-og-xs font-medium text-og-fg-muted outline-hidden hover:text-og-fg focus-visible:ring-2 focus-visible:ring-og-accent pointer-coarse:min-h-11"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          aria-label={expanded ? `Show less annotation ${ordinal}` : `Show more annotation ${ordinal}`}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
     </div>
   );
 }
