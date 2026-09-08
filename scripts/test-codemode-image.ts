@@ -38,13 +38,17 @@ let mode = "completed";
 let lastId = "";
 let denyRead = false;
 let losePostAcknowledgement = false;
+let activeClient = "";
 const requests: string[] = [];
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   async fetch(req) {
     assert.equal(req.headers.get("authorization"), "Bearer owned-fixture");
-    assert.equal(req.headers.get("x-opengeni-api-contract"), OPENGENI_API_CONTRACT_REVISION);
+    // The native client supports older deployments whose Codemode routes were
+    // contract-guarded. Current JS/CLI clients use the attempt protocol directly.
+    if (activeClient === "native")
+      assert.equal(req.headers.get("x-opengeni-api-contract"), OPENGENI_API_CONTRACT_REVISION);
     requests.push(req.method + " " + new URL(req.url).pathname);
     if (denyRead)
       return Response.json({ error: { message: "fixture access denied" } }, { status: 403 });
@@ -57,7 +61,10 @@ const server = Bun.serve({
       if (losePostAcknowledgement) {
         losePostAcknowledgement = false;
         // Simulate a committed operation whose acknowledgement is unavailable.
-        return Response.json({ error: { message: "lost acknowledgement" } }, { status: 503 });
+        return Response.json(
+          { error: { message: "lost acknowledgement", outcomeUnknown: true } },
+          { status: 503 },
+        );
       }
     }
     const operation = {
@@ -86,6 +93,7 @@ const dir = await mkdtemp(join(tmpdir(), "codemode-owned-fixture-"));
 await chmod(dir, 0o700);
 await writeFile(join(dir, "token"), "owned-fixture", { mode: 0o600 });
 async function run(client: string, auth: string, args?: string[]) {
+  activeClient = client;
   const cmd = [
     "docker",
     "run",

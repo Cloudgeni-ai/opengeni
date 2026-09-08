@@ -54,11 +54,13 @@ approvals, and invocation continue through the existing runtime. Listing
 joins deferred preparation but adds no preparation barrier to the first model
 request, no shell dependency, and no change to eager/search policy defaults.
 
-The native Connected Machine Codemode client and the TypeScript client both
-send their compiled API contract acknowledgement. A server contract mismatch
-must fail explicitly; clients must not blindly echo a newly advertised version
-to bypass the mutation fence. The native mirror is pinned to the shared
-contracts by `packages/codemode/test/native-api-contract.test.ts`.
+The native Connected Machine Codemode client sends its compiled API contract
+acknowledgement for compatibility with older deployments whose Codemode routes
+were protected by the product mutation fence. Current deployments scope
+Codemode through the attempt protocol independently, and the TypeScript client
+does not send this header. A server contract mismatch must fail explicitly;
+clients must not blindly echo a newly advertised version. The native mirror is
+pinned to the shared contracts by `packages/codemode/test/native-api-contract.test.ts`.
 
 Native Codemode failures emit a JSON receipt on stderr with the operation ID,
 observed state, error code, and message once an operation ID has been allocated.
