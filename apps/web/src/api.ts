@@ -749,7 +749,7 @@ function authHeaders(): Record<string, string> {
   return authHeadersForAccessKey(getStoredAccessKey());
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
   const response = await managedActorFetch(`${apiBaseUrl}${path}`, {
     ...init,
     credentials: "include",
@@ -760,6 +760,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
+  handleApiContractResponse(response);
+  return response;
+}
+
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await requestResponse(path, init);
   if (!response.ok) {
     handleApiContractResponse(response);
     const text = await response.text();

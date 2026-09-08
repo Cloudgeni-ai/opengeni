@@ -180,7 +180,7 @@ describe("principal transition contract", () => {
 
   test("mutation callers do not toast, refresh, or announce stale results", () => {
     expect(workspaceSettingsSource).toContain(
-      "const updated = await context.setWorkspaceInferenceControl(workspaceId, action)",
+      "await context.setWorkspaceInferenceControl(workspaceId, action)",
     );
     expect(transcriptionSettingsSource).toContain(
       "const updated = await context.updateWorkspaceSettings(workspaceId",

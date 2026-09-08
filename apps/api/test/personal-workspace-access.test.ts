@@ -131,6 +131,8 @@ function createTestApp(overrides: Partial<Settings> = {}): Hono {
       ...overrides,
     }),
     managedAuth,
+    // This fixture checks durable authorization; post-commit delivery has its own suite.
+    schedulePromptPostCommit: () => undefined,
   } as ApiRouteDeps;
   registerApiKeyRoutes(registered, deps);
   registerWorkspaceRoutes(registered, deps);
@@ -235,6 +237,22 @@ describe("managed personal workspace access", () => {
     });
     expect(video.status).toBe(200);
     expect(await video.json()).toMatchObject({ revision: 1, enabledModelIds: [] });
+    const current = await app.request(base, { headers });
+    const workspace = (await current.json()) as Workspace;
+    const timer = await app.request(`${base}/pause-timer`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        action: "set",
+        pauseInSeconds: 3600,
+        pauseForSeconds: 600,
+        expectedRevision: workspace.inferenceControl.revision,
+        clientEventId: crypto.randomUUID(),
+      }),
+    });
+    expect(timer.status).toBe(200);
+    const timed = await app.request(base, { headers });
+    expect(((await timed.json()) as Workspace).inferenceControl.pauseAt).not.toBeNull();
     const revisionResponse = await app.request(`${base}/learning/revisions`, {
       method: "POST",
       headers,
@@ -292,6 +310,7 @@ describe("managed personal workspace access", () => {
         ["POST", "/gateway-custom-models", {}],
         ["POST", "/openrouter-custom-models", {}],
         ["POST", "/inference-control", {}],
+        ["POST", "/pause-timer", {}],
       ] as const) {
         const response = await app.request(`${base}${path}`, {
           method,

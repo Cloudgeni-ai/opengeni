@@ -1386,7 +1386,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
     for (;;) {
-      if (canAdoptInBackground && performance.now() - startedAt >= waitMs) break;
+      if (performance.now() - startedAt >= waitMs) break;
       if (this.cancelled) throw cancellationError(this.reason);
       if (
         !state.writeInvoke &&
@@ -1397,9 +1397,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           "The retained command cannot be observed for its requested foreground wait",
         );
       }
-      const remainingMs = canAdoptInBackground
-        ? waitMs - (performance.now() - startedAt)
-        : TURN_PROVIDER_YIELD_SLICE_MS;
+      const remainingMs = waitMs - (performance.now() - startedAt);
       if (remainingMs <= 0) break;
       const yieldTimeMs = Math.min(TURN_PROVIDER_YIELD_SLICE_MS, Math.ceil(remainingMs));
       // A failed read is neither terminal proof nor permission to shorten the
@@ -1448,9 +1446,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
     }
     if (!canAdoptInBackground) {
-      throw new Error(
-        `Process-local sandbox session ${state.sessionId} became unobservable before reaching a terminal result`,
-      );
+      // Docker/local handles belong to this exact worker session. Keep the
+      // shell registered with the turn fence: finalization must stop and settle
+      // it. Returning control is not durable background-command adoption.
+      return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
       await state.processSession.adoptRetainedProcessAsBackgroundCommand(state.sessionId);

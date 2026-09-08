@@ -70,6 +70,7 @@ try {
 }
 
 function scriptedModelForScenario(scenario: string): Model {
+  if (scenario === "child-wait-boundary") return new ChildWaitBoundaryModel();
   if (scenario === "sandbox") {
     return new SandboxScriptedModel();
   }
@@ -313,4 +314,49 @@ function sandboxDoneStep(): ScriptedModelStep {
     chunks: ["sandbox ", "ok"],
     outputText: "sandbox ok",
   };
+}
+
+class ChildWaitBoundaryModel implements Model {
+  private step(request: ModelRequest): ScriptedModelStep {
+    const body = JSON.stringify(request.input);
+    const isRoot = body.includes("CHILD_WAIT_PARENT_FIXTURE");
+    const name = (suffix: string) =>
+      request.tools.find((tool) => tool.name?.endsWith(suffix))?.name ?? `opengeni__${suffix}`;
+    if (isRoot) {
+      if (!body.includes("opengeni__session_create"))
+        return {
+          output: [
+            functionCall(name("session_create"), {
+              initialMessage: "CHILD_WAIT_CHILD_FIXTURE",
+              sandboxBackend: "none",
+              goal: {
+                text: "Wait for the controlled deadline, then finish",
+                successCriteria: "Deadline elapsed",
+              },
+            }),
+          ],
+        };
+      return { outputText: "Parent is awaiting its child." };
+    }
+    if (!body.includes("opengeni__wait_for_input"))
+      return {
+        output: [
+          functionCall(name("wait_for_input"), {
+            reason: "Controlled child wait, work is not finished",
+            timeoutSeconds: 40,
+          }),
+        ],
+      };
+    if (body.includes("session_wait_timeout") && !body.includes("opengeni__goal_complete"))
+      return {
+        output: [functionCall(name("goal_complete"), { evidence: "Controlled deadline elapsed" })],
+      };
+    return { outputText: "Child completed after its deadline." };
+  }
+  async getResponse(request: ModelRequest): Promise<ModelResponse> {
+    return new ScriptedModel([this.step(request)]).getResponse(request);
+  }
+  async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    yield* new ScriptedModel([this.step(request)]).getStreamedResponse(request);
+  }
 }

@@ -432,6 +432,12 @@ The same database-owned transition covers a lost claim commit response: if the
 activity reports retryable pre-claim failure but the control lane finds its
 exact active attempt, that durable attempt wins and is recovered.
 
+A permanent admission failure with no claimed turn records the supplied failure
+message and, when available, its classified admission cause on the durable
+`session.status.changed` event. The absence of a `turn.failed` event must not
+discard those diagnostics. Older events remain unchanged; missing historical
+details cannot be reconstructed from the failure code alone.
+
 SuperGrok/xAI connected-subscription work separately freezes an identifier-free
 `workspace | user` provider-account authority snapshot. Workspace is the
 default shared pool. User scope is explicit/private and remains bound to the
@@ -1041,6 +1047,11 @@ prefix (the parent session row is locked with the child) and the worker delivers
 the row right after the producing commit; the reaper covers crashes. See
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
+A workflow run closing during a current input wait or an active goal is parked,
+not completed work. Idle settlement preserves that projection and durable wake
+without creating a child terminal result. Goal completion, explicit goal pause,
+failed settlement, and finished goalless work retain their existing callbacks.
+
 Every child terminal result remains a durable pending machine input even when it
 arrives late. It may autonomously wake an idle parent only while the parent has
 an active goal, which is the durable obligation to keep working. A goal paused
@@ -1367,8 +1378,14 @@ Only providers whose process locator is controllable from another worker may
 end that wait with a second, exact-attempt-fenced adoption transaction that
 inserts its session-owned command row immediately before the model receives the
 live locator. The SDK Local and Docker locators index an in-memory table on one
-worker session object, so those providers remain turn-owned until terminal or
-turn cancellation instead of publishing a false background locator. A yielded
+worker session object. After the bounded foreground wait, those providers return
+an explicitly turn-scoped handle so the agent can test a running server. The
+shell remains registered with the exact turn cancellation fence: ordinary
+completion, Pause, Steer, and cancellation stop it and settle its process holder
+before workspace capture. It is not registered as a session background command,
+does not create terminal background notifications, and cannot be reused by a
+successor attempt. Never wait for an indefinitely running server to exit before
+returning control to its owning agent. A yielded
 Connected Machine exec likewise creates its session-owned background-command
 row before returning; that row freezes the physical control workspace,
 enrollment, connection instance, and op ID. The exact parent admission,
@@ -1460,6 +1477,23 @@ Waits also recheck durable state once a second if a hint is missed. Sending
 stdin is a separate capability, explicitly unsupported when the provider has no
 interactive transport. A longer wait uses session-level `wait_for_input`,
 whose timeout never cancels the command.
+
+Migration 0419 records the exact launch turn, attempt, and execution generation
+when either provider adopts a background command under the existing attempt
+fence. Terminal results resolve that immutable receipt, copy only eligible
+same-session successor delegations, and retain the causal human for normal
+personal-resource admission. Legacy managed commands can prove the same tuple
+through their retained process; legacy Connected Machine commands with no receipt
+remain unattributed. A timeout similarly inherits its exact waiting turn.
+Different causal turns claim separately. No path substitutes the newest human,
+extends a once grant, or bypasses live revocation.
+
+The existing exact-set pre-claim recovery can restore unconsumed root command
+results and wait timeouts only after verifying their retained launch or timeout
+receipt, completed causal human turn, failure frontier, and unchanged failed
+update set. It repairs typed authority, preserves message/event content, and is
+idempotent; it does not replay a previously accepted turn or recover a nested
+session with parent-facing terminal truth.
 
 Both command readers accept `commandId`, an optional opaque `cursor`,
 `waitSeconds` (0–50; defaults 0 for read and 45 for wait), and `maxOutputBytes`

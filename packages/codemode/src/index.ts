@@ -411,7 +411,15 @@ export class CodemodeClient {
     return CodemodeOperation.parse(await response.json());
   }
 
-  private async request(path: string, init: RequestInit): Promise<Response> {
+  /** Server-side Site preview forwarding. The attempt bearer never enters the page. */
+  async sessionRequest(path: string, init: RequestInit): Promise<Response> {
+    if (!path.startsWith("/v1/")) {
+      throw new Error("Unsupported Site session API path");
+    }
+    return this.request(`/sdk${path}`, init, false);
+  }
+
+  private async request(path: string, init: RequestInit, throwOnError = true): Promise<Response> {
     const token =
       typeof this.options.token === "function" ? await this.options.token() : this.options.token;
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
@@ -421,7 +429,7 @@ export class CodemodeClient {
         authorization: `Bearer ${token}`,
       },
     });
-    if (!response.ok) {
+    if (!response.ok && throwOnError) {
       let message = `Codemode request failed with HTTP ${response.status}`;
       let errorOptions: {
         code?: string;

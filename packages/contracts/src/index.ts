@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
+export { siteSessionPath } from "./site-session-http";
 import {
   boundSessionEventPayload,
   measureSessionEventJson,
@@ -901,6 +902,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "atlassian_get",
   "artifacts_list",
   "artifacts_get_source",
+  "artifacts_prepare_upload",
   "artifacts_create",
   "artifacts_publish",
   "artifacts_rollback",
@@ -1558,6 +1560,30 @@ export const ManagedAccount = z.object({
 });
 export type ManagedAccount = z.infer<typeof ManagedAccount>;
 
+export const WorkspacePauseTimer = z.object({
+  id: z.string().uuid(),
+  action: z.enum(["pause", "resume"]),
+  dueAt: z.string().datetime(),
+  pauseForSeconds: z.number().int().min(60).max(2592000).nullable(),
+});
+export type WorkspacePauseTimer = z.infer<typeof WorkspacePauseTimer>;
+export const WorkspacePauseTimerRequest = z
+  .object({
+    action: z.enum(["set", "cancel"]),
+    pauseInSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(2592000)
+      .refine((v) => v === 0 || v >= 60)
+      .optional(),
+    pauseForSeconds: z.number().int().min(60).max(2592000).nullable().optional(),
+    clientEventId: z.string().min(1).max(200),
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+export type WorkspacePauseTimerRequest = z.infer<typeof WorkspacePauseTimerRequest>;
+
 export const Workspace = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -1577,6 +1603,8 @@ export const Workspace = z.object({
   // PATCH merges so newer settings survive an older server.
   settings: z.record(z.string(), z.unknown()),
   inferenceControl: z.object({
+    timer: WorkspacePauseTimer.nullable().optional(),
+    serverTime: z.string().optional(),
     state: z.enum(["active", "paused"]),
     revision: z.number().int().nonnegative(),
     reason: z.string().nullable(),
@@ -7367,7 +7395,7 @@ export const WorkspaceControlEvent = z.object({
   type: z.literal("workspace.control.changed"),
   scope: z.enum(["workspace", "session"]),
   rootSessionId: z.string().uuid().nullable(),
-  action: z.enum(["pause", "resume"]),
+  action: z.enum(["pause", "resume", "timer_set", "timer_cancelled"]),
   automatic: z.boolean(),
   reason: z.string().nullable(),
   actor: z.string().min(1),
@@ -14543,7 +14571,8 @@ export const CreateSessionRequest = withVariableSetIdAlias(
     // compatibility fallback by omitting this field.
     policyRole: WorkspaceInstructionPolicyRoleKeyInput.optional(),
     // For an agent-created child, omission inherits the trusted immediate
-    // parent's repository/file context. An explicit array, including [], is
+    // parent's repositories only; files require explicit selection. An explicit
+    // array, including [], is
     // authoritative. Top-level omission remains []. Presence is resolved from
     // the raw request because this Zod default erases absent-vs-empty.
     resources: z.array(ResourceRef).default([]),
@@ -16507,6 +16536,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
     productAccessMode: ProductAccessMode,
+    billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 import {
   publishableWorkspacePackages,
@@ -57,6 +57,23 @@ export function main(): void {
   for (const pkg of packages) {
     run("npm", ["publish", "--tag", "canary", "--access", "public"], pkg.dir);
   }
+  mkdirSync(".release", { recursive: true });
+  writeFileSync(
+    ".release/site-package-versions.json",
+    JSON.stringify(
+      Object.fromEntries(
+        packages
+          .filter((pkg) =>
+            ["@opengeni/sdk", "@opengeni/react", "@opengeni/codemode", "@opengeni/ogtool"].includes(
+              pkg.name,
+            ),
+          )
+          .map((pkg) => [pkg.name, JSON.parse(readFileSync(pkg.packagePath, "utf8")).version]),
+      ),
+      null,
+      2,
+    ),
+  );
 }
 
 if (import.meta.main) main();

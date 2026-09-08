@@ -64,6 +64,29 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
 }
 
 describe("workload image system package contract", () => {
+  test("builds web assets natively and assembles either runtime architecture without execution", async () => {
+    const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
+    const builder = stage(dockerfile, "web-build");
+    const runtime = stage(dockerfile, "web");
+    expect(builder).toStartWith("FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}");
+    expect(builder).toContain("COPY --from=workspace-manifests / /app/");
+    expect(builder).toContain("bun run --cwd apps/web build");
+    expect(builder).toContain("bun build apps/web/src/server.ts --target=bun");
+    expect(runtime).toStartWith("FROM oven/bun:${BUN_VERSION} AS web");
+    expect(runtime).not.toMatch(/^RUN\s/mu);
+    expect(runtime).not.toContain("node_modules");
+    expect(runtime).toContain("/app/apps/web/dist ./apps/web/dist");
+    expect(runtime).toContain("/app/web-server/server.ts ./apps/web/src/server.ts");
+    expect(runtime).toContain("USER bun");
+    const ci = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const webJob = ci.slice(
+      ci.indexOf("  web-image:"),
+      ci.indexOf("  artifact-materializer-image:"),
+    );
+    expect(webJob).toContain("platforms: linux/amd64,linux/arm64");
+    expect(webJob).not.toContain("setup-qemu-action");
+  });
+
   test("coalesces specialized workload packages without weakening their runtime base", async () => {
     const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
 

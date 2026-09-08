@@ -74,6 +74,49 @@ beforeAll(async () => {
   });
   otherGrant = other.workspaceGrants[0]!;
   objectStorage = {
+    maxSinglePutSizeBytes: 5_000_000_000,
+    createPutUrl: async ({ key, contentType }: { key: string; contentType: string }) => ({
+      url: `https://storage.example.test/${key}`,
+      expiresAt: new Date(Date.now() + 60000),
+      requiredHeaders: { "Content-Type": contentType },
+    }),
+    headObject: async (key: string) => {
+      const object = objects.get(key);
+      return object ? { ContentLength: object.bytes.length, VersionToken: "test-version" } : null;
+    },
+    getObjectRange: async ({
+      key,
+      start,
+      endInclusive,
+    }: {
+      key: string;
+      start: number;
+      endInclusive: number;
+    }) => {
+      const object = objects.get(key);
+      return object
+        ? { bytes: object.bytes.slice(start, endInclusive + 1), versionToken: "test-version" }
+        : null;
+    },
+    putObjectStreamIfAbsent: async ({
+      key,
+      chunks,
+      contentType,
+    }: {
+      key: string;
+      chunks: AsyncIterable<Uint8Array>;
+      contentType: string;
+    }) => {
+      if (objects.has(key)) return false;
+      const parts = [];
+      for await (const part of chunks) parts.push(part);
+      objects.set(key, { bytes: Buffer.concat(parts), contentType });
+      return true;
+    },
+    createGetUrl: async ({ key }: { key: string }) => ({
+      url: `https://storage.example.test/${key}`,
+      expiresAt: new Date(Date.now() + 60000),
+    }),
     putObject: async ({
       key,
       body,
@@ -130,6 +173,79 @@ async function request(
   if (init.body) headers.set("content-type", "application/json");
   return await app.request(`http://x${path}`, { ...init, headers });
 }
+
+test("direct uploads publish large HTML with optional downloadable source and immutable retries", async () => {
+  const base = `/v1/workspaces/${grant.workspaceId}/published-artifacts`;
+  for (const withSource of [false, true]) {
+    const prepared = await requestAsCanonicalLocalHuman(`${base}/uploads`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(prepared.status).toBe(200);
+    const upload = await prepared.json();
+    const html = "<!doctype html><h1>Large upload</h1><!--" + "x".repeat(5_000_000) + "-->";
+    const htmlKey = new URL(upload.html.putUrl).pathname.slice(1);
+    objects.set(htmlKey, { bytes: new TextEncoder().encode(html), contentType: "text/html" });
+    const source = {
+      entrypoint: "index.tsx",
+      files: [{ path: "index.tsx", content: "export default () => <h1>Large upload</h1>" }],
+    };
+    if (withSource)
+      objects.set(new URL(upload.source.putUrl).pathname.slice(1), {
+        bytes: new TextEncoder().encode(JSON.stringify(source)),
+        contentType: "application/json",
+      });
+    const body = {
+      title: "Upload test",
+      uploadId: upload.uploadId,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const response = await requestAsCanonicalLocalHuman(base, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(201);
+    const result = WorkspaceArtifactMutationResponse.parse(await response.json());
+    expect(result.version.sizeBytes).toBe(html.length);
+    expect(result.version.contentSha256).toBeNull();
+    const downloads = await (
+      await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/downloads`)
+    ).json();
+    expect(downloads.source === null).toBe(!withSource);
+    if (withSource)
+      expect(
+        JSON.parse(
+          new TextDecoder().decode(
+            objects.get(new URL(downloads.source.url).pathname.slice(1))!.bytes,
+          ),
+        ),
+      ).toEqual(source);
+    objects.set(htmlKey, {
+      bytes: new TextEncoder().encode("changed staging"),
+      contentType: "text/html",
+    });
+    const replay = await (
+      await requestAsCanonicalLocalHuman(base, { method: "POST", body: JSON.stringify(body) })
+    ).json();
+    expect(replay.replayed).toBe(true);
+    expect(replay.version.id).toBe(result.version.id);
+    const mismatchedReplay = await requestAsCanonicalLocalHuman(base, {
+      method: "POST",
+      body: JSON.stringify({ ...body, title: "A different publication" }),
+    });
+    expect(mismatchedReplay.status).toBe(409);
+    const runtime = await requestAsCanonicalLocalHuman(`${base}/${result.artifact.id}/html`);
+    expect(await runtime.text()).toBe(html);
+    for (const endpoint of ["html", "downloads", "content"]) {
+      for (const versionId of ["not-a-uuid", ""]) {
+        const invalid = await requestAsCanonicalLocalHuman(
+          `${base}/${result.artifact.id}/${endpoint}?versionId=${versionId}`,
+        );
+        expect(invalid.status).toBe(422);
+      }
+    }
+  }
+});
 
 async function requestAsCanonicalLocalHuman(
   path: string,
@@ -282,7 +398,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
     expect(created.artifact).not.toHaveProperty("kind");
     expect(created.artifact.currentVersion?.revision).toBe(1);
     expect(created.version.requestedTools).toEqual(createBody.requestedTools);
-    expect(created.version.sourceSha256).toHaveLength(64);
+    expect(created.version.sourceSha256).toBeNull();
     const putsAfterCreate = objectPutCount;
 
     const replayResponse = await requestAsCanonicalLocalHuman(base, {
@@ -586,6 +702,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           attemptId: attempt.attemptId,
           executionGeneration: attempt.executionGeneration,
           firstPartyMcpTools: [
+            "artifacts_prepare_upload",
             "artifacts_create",
             "artifacts_get_source",
             "artifacts_publish",
@@ -605,15 +722,28 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         "artifacts_archive",
         "artifacts_create",
         "artifacts_get_source",
+        "artifacts_prepare_upload",
         "artifacts_publish",
         "artifacts_restore",
         "artifacts_rollback",
       ]);
+      const preparedResult = await mcp.callTool({
+        name: "artifacts_prepare_upload",
+        arguments: {},
+      });
+      expect(preparedResult.isError).not.toBe(true);
+      const preparedText = preparedResult.content.find((item) => item.type === "text");
+      if (!preparedText || preparedText.type !== "text") throw new Error("Missing upload result");
+      const upload = JSON.parse(preparedText.text);
+      objects.set(new URL(upload.html.putUrl).pathname.slice(1), {
+        bytes: new TextEncoder().encode("<!doctype html><main>Created through MCP</main>"),
+        contentType: "text/html",
+      });
       const createdResult = await mcp.callTool({
         name: "artifacts_create",
         arguments: {
           title: "Agent-created map",
-          html: "<!doctype html><main>Created through MCP</main>",
+          uploadId: upload.uploadId,
           idempotencyKey: "agent-create-map",
         },
       });
@@ -631,7 +761,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
         name: "artifacts_create",
         arguments: {
           title: "Agent-created map",
-          html: "<!doctype html><main>Created through MCP</main>",
+          uploadId: upload.uploadId,
           idempotencyKey: "agent-create-map",
         },
       });
@@ -648,11 +778,11 @@ describe("workspace artifact API and PostgreSQL authority", () => {
       });
       const sourceText = sourceResult.content.find((item) => item.type === "text");
       if (!sourceText || sourceText.type !== "text") throw new Error("missing MCP source result");
-      expect(JSON.parse(sourceText.text).html).toContain("Created through MCP");
-      expect(JSON.parse(sourceText.text).source).toEqual({
-        entrypoint: "index.html",
-        files: [{ path: "index.html", content: "<!doctype html><main>Created through MCP</main>" }],
-      });
+      expect(JSON.parse(sourceText.text).downloads.html.url).toStartWith(
+        "https://storage.example.test/",
+      );
+      expect(JSON.parse(sourceText.text).downloads.source).toBeNull();
+      expect(JSON.parse(sourceText.text)).not.toHaveProperty("html");
 
       const publishedResult = await mcp.callTool({
         name: "artifacts_publish",
@@ -764,7 +894,7 @@ describe("workspace artifact API and PostgreSQL authority", () => {
           name: "artifacts_create",
           arguments: {
             title: "Agent-created map",
-            html: "<!doctype html><main>Created through MCP</main>",
+            uploadId: upload.uploadId,
             idempotencyKey: "agent-create-map",
           },
         });

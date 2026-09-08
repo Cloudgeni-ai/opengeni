@@ -1215,6 +1215,11 @@ content-hashed `/assets/*` responses are served with immutable one-year caching,
 while the HTML shell revalidates. The API compresses JSON responses and leaves
 SSE and other streaming transports uncompressed.
 
+Web assets, the React demo, and the server bundle compile once on BuildKit's
+native build platform. The amd64 and arm64 web images copy those portable
+outputs into their respective Bun runtime images without executing target
+architecture build steps. Web image publication therefore does not need QEMU.
+
 Build local OpenGeni workload images:
 
 ```bash
@@ -1230,6 +1235,16 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 ## Verified public release
 
 `main` is the daily integration branch and remains GitHub's default branch.
+
+Site authoring installs exact registry versions. Stable builds use their source
+SDK/React/Codemode/ogtool manifest versions. Before a canary rollout, publish packages
+from the same source using `publish-canary.yml`, then set
+`OPENGENI_SITE_PACKAGE_VERSIONS` on the turn workers to the JSON from that run's
+`site-package-versions-<sha>` artifact. The runtime includes these pins beside
+the Sites skill. Never use a mutable dist-tag as the deployment pin. Production
+sandbox images do not include Site package archives; the local development
+image helper alone enables `OPENGENI_LOCAL_SITE_PACKAGES=true` for unreleased work.
+
 `production` is the official source pointer in this repository; it is not a
 live-cluster deploy. Staging is a manual pin of already-baked
 `canary-sha-<commit>` images from any `main` SHA
@@ -2035,6 +2050,14 @@ The runtime secret must provide values such as:
 Do not commit real secret values.
 
 ### MCP OAuth and tool-gateway posture cutover (0404-0405)
+
+The same drained rollout procedure below applies to
+`0418_site_direct_uploads.sql`: it adds the exact upload-table/RLS/grant inventory,
+allows hash-free HTML versions and optional source, and widens stored byte counts.
+Stop old API and both worker roles, supply the complete runtime login list,
+migrate, provision the target roles, then start the matching binary. After this
+cutover, do not restart a pre-0417 binary. Existing Site versions and source remain
+readable; local development data does not need resetting.
 
 Migrations `0404_mcp_oauth_authorization_server.sql` and
 `0405_tool_gateway_approval_capabilities.sql` change the exact application-role
@@ -3000,3 +3023,15 @@ A deployment is not acceptable until it proves:
 Use `bun run deployment:stack`, `bun run deployment:preflight`, provider
 Terraform validation, Helm rendering, and this conformance suite as the merge
 and release gate for deployment changes.
+
+
+### Background-command launch authority (0419)
+
+Migration `0419_background_command_launch_authority.sql` is rolling: nullable
+launch turn/attempt/generation columns and an immutable identity fence let older
+adoption writers remain compatible. New writers stamp the existing accepted
+attempt; terminal commands use that receipt without creating a personal grant.
+Historical managed rows may derive it from their exact retained process, while
+unattributed Connected Machine rows remain service-owned. Deploy the new API and
+worker together to enable command and wait-timeout causal admission; this source
+change does not itself deploy or authorize pre-claim recovery.

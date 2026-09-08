@@ -1,3 +1,5 @@
+import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
+import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -96,6 +98,7 @@ import {
   assertWorkspaceMemberRemovable,
   assertWorkspaceMemberUpdateAllowed,
   controlHumanWorkspace,
+  controlHumanWorkspaceTimer,
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { ApiHttpError } from "../http/api-error";
@@ -823,6 +826,39 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       allowedModels: canonicalWorkspacePolicyModelIds(catalog.settings, payload.allowedModels),
     });
     return c.json(policy);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/pause-timer", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
+    const parsed = WorkspacePauseTimerRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "Invalid pause timer" });
+    try {
+      await controlHumanWorkspaceTimer(
+        {
+          db: deps.db,
+          bus: deps.bus,
+          workflowClient: deps.workflowClient,
+          ...(deps.schedulePromptPostCommit
+            ? { schedulePromptPostCommit: deps.schedulePromptPostCommit }
+            : {}),
+        },
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        parsed.data,
+      );
+    } catch (error) {
+      if (error instanceof SessionControlConflictError)
+        throw new HTTPException(409, {
+          message: "Workspace changed. Reopen the timer and try again.",
+        });
+      if (error instanceof WorkspacePauseTimerInputError)
+        throw new HTTPException(400, { message: error.message });
+      throw error;
+    }
+    return c.json({ ok: true });
   });
 
   app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {

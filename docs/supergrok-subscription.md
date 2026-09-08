@@ -150,6 +150,14 @@ alternate account moves the same logical turn to `recovering`; otherwise the
 provider-tagged waiter persists until a quota reset, account reconnect,
 allocator/rotation/pin mutation, or bounded timer wakes it.
 
+Cached quota exhaustion is rechecked against provider billing before allocation
+and during capacity reconciliation (at most once per account per 30 seconds).
+Waiters recheck within the normal bounded refresh interval even when the stored
+reset is hours away, so an external usage reset can resume the same turn. A
+successful refresh below 100% clears exhaustion; unavailable or unknown billing
+preserves it. Updates compare the previously observed quota timestamp and
+exhaustion deadline so a stale refresh cannot overwrite a newer refusal.
+
 Ambiguous network failures, provider 5xx, malformed/partial streams, invalid
 content, and unrelated 4xx errors do not quarantine or rotate credentials. They
 remain on the existing same-provider recovery or terminal path because upstream

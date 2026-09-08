@@ -1,3 +1,4 @@
+import { codemodeSessionRequest } from "./codemode";
 import {
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -895,6 +896,7 @@ export function createAppComposition(deps: AppDependencies): {
             : {}),
         },
         productAccessMode: deps.settings.productAccessMode,
+        billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
         analytics: clientAnalyticsConfig(deps.settings),
@@ -1125,6 +1127,20 @@ export function createAppComposition(deps: AppDependencies): {
     } finally {
       await prepared.close();
     }
+  });
+
+  app.all("/v1/workspaces/:workspaceId/codemode/sdk/*", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, routeDeps, workspaceId);
+    const url = new URL(c.req.url);
+    const prefix = `/v1/workspaces/${workspaceId}/codemode/sdk`;
+    const forwarded = await codemodeSessionRequest(
+      routeDeps,
+      grant,
+      c.req.raw,
+      url.pathname.slice(prefix.length) + url.search,
+    );
+    return app.fetch(forwarded);
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1957,6 +1973,10 @@ const routeLabelPatterns: Array<{
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/inference-control$/,
     label: "/v1/workspaces/:workspaceId/inference-control",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/pause-timer$/,
+    label: "/v1/workspaces/:workspaceId/pause-timer",
   },
   {
     pattern:
