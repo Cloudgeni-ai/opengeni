@@ -419,6 +419,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 2,
       runningDescendants: 1,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -442,6 +443,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 1,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 1,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -586,6 +588,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 1,
+      waitingDescendants: 0,
       pausedDescendants: 2,
     });
 
@@ -600,6 +603,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       pausedDescendants: 3,
     });
 
@@ -618,6 +622,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 3,
       runningDescendants: 0,
       queuedDescendants: 1,
+      waitingDescendants: 0,
       pausedDescendants: 2,
     });
   });
@@ -698,6 +703,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 32,
       runningDescendants: 32,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -712,6 +718,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 32,
       runningDescendants: 32,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -726,6 +733,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 1_000,
       runningDescendants: 0,
       queuedDescendants: 0,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -824,6 +832,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       totalDescendants: 2,
       runningDescendants: 0,
       queuedDescendants: 2,
+      waitingDescendants: 0,
       attentionDescendants: 0,
       pausedDescendants: 0,
       failedDescendants: 0,
@@ -1588,6 +1597,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         totalDescendants: 0,
         runningDescendants: 0,
         queuedDescendants: 0,
+        waitingDescendants: 0,
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,

@@ -32839,7 +32839,63 @@ function mapSessionPin(
     : { pinned: false, pinnedAt: null, pinVersion: 0 };
 }
 
-type SessionRow = typeof schema.sessions.$inferSelect;
+type SessionRow = typeof schema.sessions.$inferSelect & { currentInputWait?: Session["inputWait"] };
+
+/** One bounded query in the caller's RLS scope; never infer waits from history text. */
+async function withCurrentSessionInputWait(
+  db: Database,
+  workspaceId: string,
+  rows: readonly SessionRow[],
+): Promise<SessionRow[]> {
+  const candidates = rows.filter(
+    (row) =>
+      row.status === "idle" && !row.activeTurnId && row.inputWaitTurnId && row.inputWaitUntil,
+  );
+  if (!candidates.length) return rows.map((row) => ({ ...row, currentInputWait: null }));
+  const latest = db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, schema.sessions.id),
+        isNotNull(schema.sessionTurns.finishedAt),
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionTurns.finishedAt),
+      desc(schema.sessionTurns.position),
+      desc(schema.sessionTurns.createdAt),
+    )
+    .limit(1)
+    .as("latest_wait_turn");
+  const matches = await db
+    .select({ id: schema.sessions.id, turnId: latest.id })
+    .from(schema.sessions)
+    .leftJoinLateral(latest, sql`true`)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(
+          schema.sessions.id,
+          candidates.map((row) => row.id),
+        ),
+      ),
+    );
+  const byId = new Map(matches.map((row) => [row.id, row.turnId]));
+  return rows.map((row) => ({
+    ...row,
+    currentInputWait:
+      row.status === "idle" &&
+      !row.activeTurnId &&
+      row.inputWaitUntil &&
+      row.inputWaitReason &&
+      row.inputWaitTurnId &&
+      byId.get(row.id) === row.inputWaitTurnId
+        ? { deadlineAt: row.inputWaitUntil.toISOString(), reason: row.inputWaitReason }
+        : null,
+  }));
+}
 
 /**
  * Public sequence and unread projections are cursor-authoritative after the
@@ -32871,7 +32927,7 @@ async function canonicalSessionRowsFromEventCursors(
   return withLatestStartedSessionPolicy(
     db,
     workspaceId,
-    rows.map((row) => {
+    (await withCurrentSessionInputWait(db, workspaceId, rows)).map((row) => {
       const cursor = cursorBySessionId.get(row.id);
       if (
         !cursor ||
@@ -32928,6 +32984,7 @@ type SessionTreeStatsRow = {
   totalDescendants: number | string;
   runningDescendants: number | string;
   queuedDescendants: number | string;
+  waitingDescendants: number | string;
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
@@ -32948,6 +33005,7 @@ const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
   totalDescendants: 0,
   runningDescendants: 0,
   queuedDescendants: 0,
+  waitingDescendants: 0,
   attentionDescendants: 0,
   pausedDescendants: 0,
   failedDescendants: 0,
@@ -33078,6 +33136,7 @@ export async function sessionTreeStatsForSessions(
         stats."totalDescendants",
         stats."runningDescendants",
         stats."queuedDescendants",
+        stats."waitingDescendants",
         stats."attentionDescendants",
         stats."pausedDescendants",
         stats."failedDescendants",
@@ -33201,6 +33260,22 @@ export async function sessionTreeStatsForSessions(
           )::int as "queuedDescendants",
           count(*) filter (
             where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'idle' and effective_pause_revision is null
+              and exists (
+                select 1 from ${schema.sessions} waiting_session
+                where waiting_session.workspace_id = ${workspaceId} and waiting_session.id = numbered.id
+                  and waiting_session.active_turn_id is null
+                  and waiting_session.input_wait_until is not null
+                  and waiting_session.input_wait_turn_id = (
+                    select finished.id from ${schema.sessionTurns} finished
+                    where finished.workspace_id = ${workspaceId} and finished.session_id = numbered.id
+                      and finished.finished_at is not null
+                    order by finished.finished_at desc, finished.position desc, finished.created_at desc limit 1
+                  )
+              )
+          )::int as "waitingDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
               and depth > 0 and status = 'requires_action'
           )::int as "attentionDescendants",
           count(*) filter (
@@ -33300,6 +33375,7 @@ export async function sessionTreeStatsForSessions(
         totalDescendants: Number(row.totalDescendants),
         runningDescendants: Number(row.runningDescendants),
         queuedDescendants: Number(row.queuedDescendants),
+        waitingDescendants: Number(row.waitingDescendants),
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
@@ -72325,8 +72401,8 @@ export async function claimPendingSessionWorkflowWakes(
  * accepted direction or an interrupted attempt awaiting writer-set proof.
  * Temporal accepting a signal is transport evidence, not proof that a closing
  * workflow observed Postgres. While active control still has an actionable
- * Agent Steer, a current wake still owns an accepted queued human/API turn, or
- * an attempt awaits quiescence, retain the revision so the bounded outbox
+ * Agent Steer, a current wake owns a queued human/API turn, eligible machine
+ * input, or a due idle input-wait obligation, or an attempt awaits quiescence, retain the revision so the bounded outbox
  * dispatcher retries signalWithStart. The attempt-fenced claim consumes each
  * direction once; a real Pause is the typed blocker and may acknowledge this
  * revision because Resume commits a new one.
@@ -72342,7 +72418,12 @@ export type SessionWorkflowWakeDeliveryResult =
   | { action: "acknowledged" }
   | {
       action: "pending_admission";
-      blocker: "pending_agent_steer" | "pending_prompt_turn" | "pending_quiescence";
+      blocker:
+        | "pending_agent_steer"
+        | "pending_prompt_turn"
+        | "pending_quiescence"
+        | "pending_machine_input"
+        | "pending_input_wait";
     };
 
 export async function markSessionWorkflowWakeDelivered(
@@ -72408,6 +72489,64 @@ export async function markSessionWorkflowWakeDelivered(
             )
             .limit(1);
           if (currentWake?.wakeRevision === input.wakeRevision) {
+            // A transport ACK is not consumption. The workflow may have already
+            // taken its closing snapshot when a timeout or child result arrives.
+            // Keep the current revision retryable until claim consumes the input.
+            if (
+              session.activeTurnId === null &&
+              session.status !== "failed" &&
+              session.status !== "cancelled" &&
+              session.status !== "requires_action" &&
+              !(await sessionRealtimeIsActiveInTransaction(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+              ))
+            ) {
+              const wait = await sessionInputWaitStateTx(
+                tx as unknown as Database,
+                input.workspaceId,
+                input.sessionId,
+                session,
+              );
+              const pending = await tx
+                .selectDistinct({ kind: schema.sessionSystemUpdates.kind })
+                .from(schema.sessionSystemUpdates)
+                .where(
+                  and(
+                    eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                    eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                    eq(schema.sessionSystemUpdates.state, "pending"),
+                  ),
+                );
+              const [goal] = await tx
+                .select({ status: schema.sessionGoals.status })
+                .from(schema.sessionGoals)
+                .where(
+                  and(
+                    eq(schema.sessionGoals.workspaceId, input.workspaceId),
+                    eq(schema.sessionGoals.sessionId, input.sessionId),
+                  ),
+                )
+                .limit(1);
+              if (
+                pending.some(
+                  ({ kind }) =>
+                    SESSION_SYSTEM_UPDATE_WAKE_CLASS[kind as SessionSystemUpdateKind] ===
+                      "immediate" &&
+                    (!isChildLifecycleSystemUpdateKind(kind as SessionSystemUpdateKind) ||
+                      goal?.status === "active" ||
+                      wait.disposition === "held" ||
+                      session.status === "queued"),
+                )
+              )
+                return { action: "pending_admission", blocker: "pending_machine_input" } as const;
+              // A future hold is explicitly re-armed by settlement. Retaining its
+              // early transport revision would coalesce every rearm back to now.
+              if (wait.disposition === "timeout") {
+                return { action: "pending_admission", blocker: "pending_input_wait" } as const;
+              }
+            }
             const [pendingPromptTurn] = await tx
               .select({ id: schema.sessionTurns.id })
               .from(schema.sessionTurns)
@@ -75327,7 +75466,11 @@ async function mapSessionWithControl(
   const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
-  const [effective] = await withLatestStartedSessionPolicy(db, row.workspaceId, [row]);
+  const [effective] = await withLatestStartedSessionPolicy(
+    db,
+    row.workspaceId,
+    await withCurrentSessionInputWait(db, row.workspaceId, [row]),
+  );
   return mapSession(effective!, control, mcpServers, pin, attention, archive, tenancyViewer);
 }
 
@@ -75361,7 +75504,7 @@ function mapSessionTenancy(
 }
 
 function mapSession(
-  row: typeof schema.sessions.$inferSelect,
+  row: SessionRow,
   effectiveControl: Session["effectiveControl"],
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
@@ -75437,6 +75580,7 @@ function mapSession(
     queueHeadPosition: Number(row.queueHeadPosition),
     queueTailPosition: Number(row.queueTailPosition),
     effectiveControl,
+    inputWait: effectiveControl.state === "active" ? (row.currentInputWait ?? null) : null,
     lastSequence: row.lastSequence,
     codexPinnedCredentialId: row.codexPinnedCredentialId ?? null,
     codexLastCredentialId: row.codexLastCredentialId ?? null,

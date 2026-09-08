@@ -47,6 +47,29 @@ describe("Session rail row metadata in Chromium", () => {
     await Promise.allSettled([browser?.close(), web?.stop()]);
   }, 30_000);
 
+  test("shows scheduled work and overdue rechecks, then clears waiting on completion", async () => {
+    const preview = page.getByTestId("wait-preview");
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 850 });
+      await page.reload({ waitUntil: "networkidle" });
+      expect(await preview.innerText()).toContain("Continues automatically");
+      expect(await page.getByTestId("waiting-row").innerText()).toContain("Waiting · ");
+      expect(await preview.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+      await page.screenshot({ path: `/tmp/opengeni-wait-status-${width}.png`, fullPage: true });
+      await page.getByRole("button", { name: "Recheck due", exact: true }).click();
+      await page.waitForFunction(() =>
+        document
+          .querySelector('[data-testid="wait-preview"]')
+          ?.textContent?.includes("The scheduled recheck is due"),
+      );
+      expect(await page.getByTestId("waiting-row").innerText()).toContain("Recheck due");
+      await page.getByRole("button", { name: "Complete work", exact: true }).click();
+      expect(await preview.innerText()).not.toContain("Waiting ·");
+      expect(await preview.innerText()).not.toContain("Continues automatically");
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+  });
+
   test("contains every production-width row and keeps titles clear of real metadata", async () => {
     const rail = page.getByTestId("production-session-rail");
     expect((await rail.boundingBox())?.width).toBe(244);

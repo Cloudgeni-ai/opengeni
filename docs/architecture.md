@@ -164,11 +164,10 @@ Docker/local SDK processes expose turn-scoped handles after a bounded wait.
 They remain on the turn cancellation fence and stop before finalization, allowing
 an agent to test a preview server without waiting for it to exit.
 
-Long external waits are session state, not workflow memory or goals.
-`wait_for_input` records the declaring turn and absolute PostgreSQL deadline,
-then ends the turn and workflow. Durable input or the deadline outbox restarts
-it; timeout becomes typed input. `session_wait` and `command_wait` are short
-in-turn reads.
+`wait_for_input` persists a turn and deadline; input or timeout resumes execution.
+Acknowledgment cannot strand eligible input or due waits. `Session.inputWait`
+drives working/recheck UI separately from unread. `session_wait`/`command_wait`
+are in-turn reads. See [durable-agent-inputs.md](durable-agent-inputs.md).
 
 Canonical: `apps/worker/src/activities/agent-turn/`,
 `apps/worker/src/activities/session-state.ts`, and

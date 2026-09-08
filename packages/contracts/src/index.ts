@@ -12164,6 +12164,15 @@ export const Session = z.object({
   queueHeadPosition: z.number().int(),
   queueTailPosition: z.number().int(),
   effectiveControl: EffectiveSessionControl,
+  /** Current out-of-turn wait, independent of goals. Omitted by older servers.
+   * An elapsed deadline means the recheck is due, not proof it has started. */
+  inputWait: z
+    .object({
+      deadlineAt: z.string().datetime({ offset: true }),
+      reason: z.string(),
+    })
+    .nullable()
+    .optional(),
   lastSequence: z.number().int().nonnegative(),
   // Multi-account Codex (P1). codexPinnedCredentialId: the account this session is
   // manually PINNED to (null ⇒ follow the workspace active pointer).
@@ -12203,6 +12212,7 @@ export const Session = z.object({
       totalDescendants: z.number().int().nonnegative(),
       runningDescendants: z.number().int().nonnegative(),
       queuedDescendants: z.number().int().nonnegative(),
+      waitingDescendants: z.number().int().nonnegative().optional(),
       attentionDescendants: z.number().int().nonnegative(),
       pausedDescendants: z.number().int().nonnegative(),
       /** Historical failed lifecycle states, including already-reviewed failures. */
