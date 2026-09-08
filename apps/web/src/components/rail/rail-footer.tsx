@@ -1,4 +1,3 @@
-import { FeedbackDialog, FeedbackIcon } from "@/components/feedback";
 // Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
 // (account/sign-out, depending on auth mode). Collapsed → just the avatar +
 // a collapse chevron, both with tooltips.
@@ -9,6 +8,7 @@ import {
   LockIcon,
   LogOutIcon,
   UserIcon,
+  MessageSquareIcon as FeedbackIcon,
 } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
@@ -36,6 +36,10 @@ import {
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
+
+const FeedbackDialog = lazy(() =>
+  import("@/components/feedback").then((module) => ({ default: module.FeedbackDialog })),
+);
 
 const BrowserAccountMenu = lazy(() =>
   import("@/components/browser-account-menu").then((module) => ({
@@ -75,14 +79,16 @@ export function RailFooter() {
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      <FeedbackDialog
-        key={rail.workspaceId}
-        client={context.client}
-        workspaceId={rail.workspaceId}
-        open={feedbackOpen}
-        onOpenChange={setFeedbackOpen}
-        onSubmitted={() => toast.success("Thanks for your feedback")}
-      />
+      <Suspense fallback={null}>
+        <FeedbackDialog
+          key={rail.workspaceId}
+          client={context.client}
+          workspaceId={rail.workspaceId}
+          open={feedbackOpen}
+          onOpenChange={setFeedbackOpen}
+          onSubmitted={() => toast.success("Thanks for your feedback")}
+        />
+      </Suspense>
       <Button
         variant="ghost"
         size="sm"

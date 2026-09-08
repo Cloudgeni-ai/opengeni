@@ -440,6 +440,10 @@ const budgets = {
 // per-file, lazy, and CSS cap unchanged.
 const effectiveBudgets = {
   ...budgets,
+  // Feedback forms and rating controls are lazy. The retained SDK methods and
+  // entry points measure 2,324,853 raw / 647,413 gzip bytes on macOS/arm64.
+  // Keep the established whole-KiB headroom and gzip platform-skew allowance.
+  directSessionRaw: Math.max(budgets.directSessionRaw, wholeKibEnvelope(2_324_853)),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
     PR_REVIEW_EXECUTION_CURRENT_MAIN_BROWSER_GZIP_BUDGET,
@@ -451,6 +455,7 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
+    wholeKibEnvelope(647_413, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
