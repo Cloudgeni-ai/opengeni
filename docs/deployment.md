@@ -1,22 +1,22 @@
 # Deployment
 
-### Host MCP, native-link and Connect authority migrations (0419–0432)
+### Host MCP, native-link and Connect authority migrations (0429–0442)
 
 `0429_host_mcp_binding_registry.sql`, `0430_host_mcp_delegations.sql`, and
 `0431_host_mcp_turn_authorities.sql` introduce the registry and direct-turn contract.
-Migrations 0422–0424 extend it with exact causal continuation, immutable task
+Migrations 0432–0434 extend it with exact causal continuation, immutable task
 revision selections, and guarded child inheritance.
-Migrations 0425–0428 add optional native consent, immutable linked-work provenance,
-bounded consent identity previews and scheduled-origin checks. Migration 0429
+Migrations 0435–0438 add optional native consent, immutable linked-work provenance,
+bounded consent identity previews and scheduled-origin checks. Migration 0439
 allows separately owned native host bindings through organization membership;
 it never transfers an external binding or changes existing resource owners.
-Migration 0430 preserves immutable external Connect origin authority separately
+Migration 0440 preserves immutable external Connect origin authority separately
 from the effective owner. All setup mutations and callback receipts recheck that
 origin as well as current request authority; changing API keys cannot bypass
-revocation. Do not restart a pre-0430 Connect writer that omits this restriction.
-Migration 0431 adds bounded, participant-only identity labels for link inventory;
+revocation. Do not restart a pre-0440 Connect writer that omits this restriction.
+Migration 0441 adds bounded, participant-only identity labels for link inventory;
 it does not grant application roles direct access to external identity mappings.
-Migration 0432 versions social connections on every update, including refresh and
+Migration 0442 versions social connections on every update, including refresh and
 disconnect. Reconnect commits must match the observed version and upstream account;
 a concurrent change produces a conflict rather than overwriting another account.
 Stop old API and worker database sessions and provide the complete runtime login
@@ -32,7 +32,7 @@ API and SDK; direct human starts explicitly select grants for atomic
 initial-turn capture. Worker runtime
 validation requires an exact captured authority snapshot and denies missing records.
 Existing inline credentials remain unchanged; durable renewal is still opt-in.
-Migration 0421 adds direct-turn snapshot storage with a canonical insert guard
+Migration 0431 adds direct-turn snapshot storage with a canonical insert guard
 and SELECT/INSERT-only application privileges. Its binding/delegation foreign
 keys prevent deleting referenced metadata while accepted work remains. Internal
 capture is reached through verified direct-create admission, gated by the host

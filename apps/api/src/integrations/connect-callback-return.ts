@@ -28,7 +28,7 @@ const locator = z.object({
   iat: z.number().int().nonnegative(),
 });
 
-/** Navigation-only recovery. Expired signed state can identify the host's saved
+/** Navigation-only recovery. Recently expired signed state can identify the host's saved
  * destination, but cannot authorize exchange, persistence, or credential use.
  * Normal callbacks independently enforce current time and live authority. */
 export function registerConnectCallbackReturns(app: Hono, deps: ApiRouteDeps) {
@@ -50,7 +50,15 @@ export function registerConnectCallbackReturns(app: Hono, deps: ApiRouteDeps) {
         : deps.settings.integrationsStateSecret?.trim();
     // Verify at the signed timestamp ONLY for a read of the immutable return
     // destination. Never pass this timestamp to the actual provider callback.
-    const verified = secret ? locator.safeParse(readSignedState(raw, secret, candidate.iat)) : null;
+    // Keep recovery useful after a normal provider timeout, without making a
+    // signed callback an indefinitely reusable redirect. This does not change
+    // the trusted backend's exact destination or provider exchange expiry.
+    const now = Math.floor(Date.now() / 1000);
+    const recoveryWindow = candidate.iat <= now + 60 && candidate.iat >= now - 24 * 60 * 60;
+    const verified =
+      secret && recoveryWindow
+        ? locator.safeParse(readSignedState(raw, secret, candidate.iat))
+        : null;
     let destination: string | undefined;
     if (verified?.success) {
       try {

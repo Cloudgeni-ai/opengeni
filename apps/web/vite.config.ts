@@ -34,6 +34,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Account setup is interaction-driven. Do not let shared icons
+              // co-locate these forms/controllers with the eager session graph.
+              name: "connect-setup",
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:connect(?:-accounts|-chooser|-panel|-setup)?|device-authorization|identity-link-accounts|identity-link-consent)\.tsx?$|packages[\\/]connect[\\/]src[\\/](?:index|device|authorization|poll|browser-navigation)\.ts$|apps[\\/]web[\\/]src[\\/]components[\\/]capabilities[\\/]native-connect-setup\.tsx$)/,
+              includeDependenciesRecursively: false,
+              priority: 21,
+            },
+            {
               // Workspace forms, provider marks, and administration links are
               // shared route primitives. They must not pull the settings
               // implementation into the workspace shell or direct sessions.
@@ -72,7 +80,7 @@ export default defineConfig({
               // The Personal badge and scope trigger are shared rail UI, not
               // settings-only code; keep them out of the management chunk.
               name: "app-shell",
-              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/]routes\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
+              test: /(?:apps[\\/]web[\\/]src[\\/](?:lib[\\/](?:routes|identity-link-continuation)\.ts|components[\\/]personal-workspace-badge\.tsx|components[\\/]ui[\\/](?:empty-state|meta-chip|status-dot|scope-switcher-trigger)\.tsx)|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:arrow-left|bar-chart-3|bot|box|boxes|chart-column|chevron-down|chevron-left|circle-alert|database|key-round|laptop|plug|settings-2|shield-alert|shield-check|sparkles|users|x)\.mjs)$/,
               includeDependenciesRecursively: true,
               priority: 4,
             },

@@ -9,6 +9,18 @@ import {
 import { rewriteEntryPointsToDist } from "./rewrite-entry-points";
 import { rewriteWorkspaceDependenciesToConcrete } from "./rewrite-workspace-deps";
 
+test("Docker dependency stages and Codemode runtimes retain the Connect SDK dependency", () => {
+  const root = join(import.meta.dir, "..");
+  for (const file of ["opengeni", "sandbox", "desktop"]) {
+    const source = readFileSync(join(root, "docker", `${file}.Dockerfile`), "utf8");
+    expect(source).toContain("COPY packages/connect/package.json packages/connect/package.json");
+    if (file !== "opengeni")
+      expect(source).toContain(
+        'cp -a packages/connect/src "$runtime/node_modules/@opengeni/connect/src"',
+      );
+  }
+});
+
 test("Connect is published before its SDK and React consumers without a React/server dependency", () => {
   const packages = topologicallySortedPackages(publishableWorkspacePackages());
   const names = packages.map((pkg) => pkg.name);

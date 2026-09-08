@@ -139,11 +139,7 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
-import {
-  hasPermission,
-  requirePermission,
-  type AccessGrantAuthorization,
-} from "../access";
+import { hasPermission, requirePermission, type AccessGrantAuthorization } from "../access";
 import { externalCreationMetadata } from "./external-creation-attribution";
 import { prepareExternalLinkTurnAdmission } from "../application/external-link-work-admission";
 import { externalContinuationCommitAuthorizer } from "../application/external-continuation";

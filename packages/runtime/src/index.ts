@@ -2556,7 +2556,9 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilitiesFromComposition(settings, skillComposition, {
-      ...(options.authorizeAttemptExecution ? { authorizeAttemptExecution: options.authorizeAttemptExecution } : {}),
+      ...(options.authorizeAttemptExecution
+        ? { authorizeAttemptExecution: options.authorizeAttemptExecution }
+        : {}),
       ...(editableArtifactToolsAvailable ? { editableArtifactToolsAvailable: true } : {}),
       ...(options.videoGeneration ? { videoGenerationAvailable: true } : {}),
       ...repositoryWorkspaceSkillPathsOption(resources),
@@ -3403,13 +3405,16 @@ function buildAgentCapabilitiesFromComposition(
       const target = capability as unknown as { tools(): Tool<unknown>[] };
       const original = target.tools;
       target.tools = function () {
-        return original.call(this).map(tool => {
+        return original.call(this).map((tool) => {
           if (tool.type !== "function") return tool;
           const invoke = tool.invoke;
-          return { ...tool, invoke: async (context, input, details) => {
-            await options.authorizeAttemptExecution!();
-            return invoke(context, input, details);
-          } };
+          return {
+            ...tool,
+            invoke: async (context, input, details) => {
+              await options.authorizeAttemptExecution!();
+              return invoke(context, input, details);
+            },
+          };
         });
       };
     }
@@ -4396,20 +4401,22 @@ async function prepareAttemptToolEnvironment(
   const subjectId = options.subjectId ?? "worker:mcp-model";
   const guardedDefinitions = options.authorizeAttemptExecution
     ? definitions.map((definition) => ({
-      ...definition,
-      lifecycle: {
-        prepare: async (input: Parameters<NonNullable<AttemptToolDefinition["lifecycle"]>["prepare"]>[0]) => {
-          const prior = await definition.lifecycle?.prepare(input);
-          return {
-            begin: async () => {
-              await options.authorizeAttemptExecution!();
-              await prior?.begin?.();
-            },
-            ...(prior?.complete ? { complete: prior.complete } : {}),
-          };
+        ...definition,
+        lifecycle: {
+          prepare: async (
+            input: Parameters<NonNullable<AttemptToolDefinition["lifecycle"]>["prepare"]>[0],
+          ) => {
+            const prior = await definition.lifecycle?.prepare(input);
+            return {
+              begin: async () => {
+                await options.authorizeAttemptExecution!();
+                await prior?.begin?.();
+              },
+              ...(prior?.complete ? { complete: prior.complete } : {}),
+            };
+          },
         },
-      },
-    }))
+      }))
     : definitions;
   const environment = createAttemptToolEnvironment({
     scope,

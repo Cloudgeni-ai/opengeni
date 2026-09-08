@@ -61,18 +61,27 @@ const canonicalManagedCookieContexts = new WeakSet<AccessContext>();
 const canonicalLocalHumanContexts = new WeakSet<AccessContext>();
 const externalActorContexts = new WeakMap<
   AccessContext,
-  { identity: ExternalIdentity; keyId: string; permissions: Permission[];
-    linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>> }
+  {
+    identity: ExternalIdentity;
+    keyId: string;
+    permissions: Permission[];
+    linked?: NonNullable<Awaited<ReturnType<typeof resolveExternalIdentityLink>>>;
+  }
 >();
 function attributionForExternalContext(context: AccessContext): ExternalActorAttribution {
   const external = externalActorContexts.get(context);
   if (!external) throw new Error("Verified external context required");
   return ExternalActorAttribution.parse({
-    accountId: external.identity.accountId, authenticatingApiKeyId: external.keyId,
-    externalIdentityId: external.identity.id, externalSubjectId: external.identity.subjectId,
+    accountId: external.identity.accountId,
+    authenticatingApiKeyId: external.keyId,
+    externalIdentityId: external.identity.id,
+    externalSubjectId: external.identity.subjectId,
     externalAuthorizationRevision: external.identity.authorizationRevision,
-    effectiveSubjectId: context.subjectId, actingMode: external.linked ? "linked_native" : "external",
-    ...(external.linked ? { linkId: external.linked.link.id, linkRevision: external.linked.link.revision } : {}),
+    effectiveSubjectId: context.subjectId,
+    actingMode: external.linked ? "linked_native" : "external",
+    ...(external.linked
+      ? { linkId: external.linked.link.id, linkRevision: external.linked.link.revision }
+      : {}),
   });
 }
 const resolvedAccessGrantAuthorizations = new WeakSet<object>();
@@ -115,9 +124,18 @@ export function externalActorContinuationForAuthorization(
 
 /** Dedicated owning-user proof. External admission never sets the native
  * cookie stamp. The resource/session layer still checks the exact owner. */
-export function hasVerifiedOwningUserAuthorization(authorization: AccessGrantAuthorization): boolean {
-  if (!authorization.contextIntegrity || authorization.authenticatedSubjectId !== authorization.grant.subjectId) return false;
-  return authorization.canonicalManagedHumanSession || externalAttributionForAuthorization(authorization, authorization.grant) !== null;
+export function hasVerifiedOwningUserAuthorization(
+  authorization: AccessGrantAuthorization,
+): boolean {
+  if (
+    !authorization.contextIntegrity ||
+    authorization.authenticatedSubjectId !== authorization.grant.subjectId
+  )
+    return false;
+  return (
+    authorization.canonicalManagedHumanSession ||
+    externalAttributionForAuthorization(authorization, authorization.grant) !== null
+  );
 }
 const accountScopedApiKeyContexts = new WeakMap<
   AccessContext,
@@ -215,14 +233,20 @@ export async function listExternalActorWorkspaces(
 ): Promise<Workspace[] | null> {
   const actor = externalActorContexts.get(context);
   if (!actor) return null;
-  if (!hasPermission(actor.permissions, "workspace:read") ||
-    (actor.linked && !hasPermission(actor.linked.link.permissions, "workspace:read"))) return [];
+  if (
+    !hasPermission(actor.permissions, "workspace:read") ||
+    (actor.linked && !hasPermission(actor.linked.link.permissions, "workspace:read"))
+  )
+    return [];
   const candidates = await withAccountRls(deps.db, actor.identity.accountId, (tx) =>
     listWorkspacesForSubject(tx, context.subjectId),
   );
   const authorized: Workspace[] = [];
-  const personal = await withAccountRls(deps.db, actor.identity.accountId, (tx) => requireWorkspace(tx, actor.linked?.personalWorkspaceId ?? actor.identity.personalWorkspaceId));
-  if (personal.accountId === actor.identity.accountId && personal.kind === "personal") authorized.push(personal);
+  const personal = await withAccountRls(deps.db, actor.identity.accountId, (tx) =>
+    requireWorkspace(tx, actor.linked?.personalWorkspaceId ?? actor.identity.personalWorkspaceId),
+  );
+  if (personal.accountId === actor.identity.accountId && personal.kind === "personal")
+    authorized.push(personal);
   for (const workspace of candidates) {
     if (workspace.accountId !== actor.identity.accountId || workspace.kind !== "shared") continue;
     const grant = await withWorkspaceSubjectRls(deps.db, workspace.id, context.subjectId, (tx) =>
@@ -480,15 +504,21 @@ async function accessGrantAuthorization(
 ): Promise<AccessGrantAuthorization> {
   const external = externalActorContexts.get(context);
   if (external) {
-    const grant: AccessGrant | null = workspaceId === (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId) ? {
-      accountId: external.identity.accountId,
-      workspaceId,
-      subjectId: context.subjectId,
-      principalKind: "human_session",
-      permissions: [...managedPersonalWorkspacePermissions],
-    } : await withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
-      getWorkspaceGrant(tx, context.subjectId, workspaceId, { principalKind: "human_session" }),
-    );
+    const grant: AccessGrant | null =
+      workspaceId ===
+      (external.linked?.personalWorkspaceId ?? external.identity.personalWorkspaceId)
+        ? {
+            accountId: external.identity.accountId,
+            workspaceId,
+            subjectId: context.subjectId,
+            principalKind: "human_session",
+            permissions: [...managedPersonalWorkspacePermissions],
+          }
+        : await withWorkspaceSubjectRls(deps.db, workspaceId, context.subjectId, (tx) =>
+            getWorkspaceGrant(tx, context.subjectId, workspaceId, {
+              principalKind: "human_session",
+            }),
+          );
     if (!grant || grant.accountId !== external.identity.accountId) {
       throw new HTTPException(403, { message: "external workspace access denied" });
     }
@@ -497,7 +527,8 @@ async function accessGrantAuthorization(
     // unless both sides hold it, and never infer literal secrets:read.
     grant.permissions = Permission.options.filter(
       (value) =>
-        hasPermission(grant.permissions, value) && hasPermission(external.permissions, value) &&
+        hasPermission(grant.permissions, value) &&
+        hasPermission(external.permissions, value) &&
         (!external.linked || hasPermission(external.linked.link.permissions, value)),
     );
     grant.metadata = {
@@ -786,8 +817,14 @@ async function apiKeyAccessContext(
       }
       throw new HTTPException(503, { message: "external identity authority is unavailable" });
     }
-    const linked = selection.mode === "linked_native"
-      ? await resolveExternalIdentityLink(deps.db, { identity, linkId: selection.linkId, expectedRevision: selection.expectedLinkRevision }) : null;
+    const linked =
+      selection.mode === "linked_native"
+        ? await resolveExternalIdentityLink(deps.db, {
+            identity,
+            linkId: selection.linkId,
+            expectedRevision: selection.expectedLinkRevision,
+          })
+        : null;
     if (selection.mode === "linked_native" && !linked)
       throw new HTTPException(403, { message: "Native identity link is unavailable or changed" });
     const effectiveSubjectId = linked?.link.nativeSubjectId ?? identity.subjectId;

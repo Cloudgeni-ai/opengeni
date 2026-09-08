@@ -256,7 +256,10 @@ export async function createValidatedScheduledTask(input: {
           ...scheduledConnectionSurfaceEligibility(runtimeSettings, target),
         });
   const creationInitiator = creationInitiatorForGrant(input.grant);
-  const captureLinkAuthority = prepareExternalLinkTaskAdmission(input.authorization, creationInitiator.actor);
+  const captureLinkAuthority = prepareExternalLinkTaskAdmission(
+    input.authorization,
+    creationInitiator.actor,
+  );
   const xaiProviderAccountAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 =
     creationInitiator.actor
       ? await getSessionTurnXaiProviderAccountAuthoritySnapshot(
@@ -972,7 +975,10 @@ export async function validatedScheduledTaskUpdate(input: {
     update.targetSessionId = nextTargetSessionId;
   }
   Object.assign(update, scheduledTaskAuthorityUpdateForGrant(input.grant));
-  const linkCapture = prepareExternalLinkTaskAdmission(input.authorization, creationInitiatorForGrant(input.grant).actor);
+  const linkCapture = prepareExternalLinkTaskAdmission(
+    input.authorization,
+    creationInitiatorForGrant(input.grant).actor,
+  );
   if (linkCapture) update.captureLinkAuthority = linkCapture;
   if (input.payload.selectedHostMcpDelegations !== undefined) {
     const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(

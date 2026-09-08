@@ -19,6 +19,7 @@ COPY packages/capabilities/package.json packages/capabilities/package.json
 COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/connect/package.json packages/connect/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json

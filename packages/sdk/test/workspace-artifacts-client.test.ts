@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { OpenGeniClient } from "../src/artifact-client";
+import { OpenGeniClient } from "../src/index";
 
 test("Site display fetches version-pinned HTML without downloading retained source", async () => {
   let called: URL | undefined;

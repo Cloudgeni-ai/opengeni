@@ -334,11 +334,19 @@ export async function assertAgentCommandAuthorityInTransaction(
       "The calling agent attempt is being interrupted",
     );
   }
-  const linked = await getExternalLinkTurnAuthorization(db, {
-    accountId: callerSession.accountId, workspaceId: input.workspaceId,
-  }, input.actor.turnId);
+  const linked = await getExternalLinkTurnAuthorization(
+    db,
+    {
+      accountId: callerSession.accountId,
+      workspaceId: input.workspaceId,
+    },
+    input.actor.turnId,
+  );
   if (linked && !linked.authorized)
-    throw new AgentCommandAuthorityError("CALLER_STALE", "The calling agent's native identity link is no longer active");
+    throw new AgentCommandAuthorityError(
+      "CALLER_STALE",
+      "The calling agent's native identity link is no longer active",
+    );
   if (input.action === "steer" && input.targetSessionId === input.actor.sessionId) {
     throw new AgentCommandAuthorityError("SELF_STEER", "An agent cannot steer its own session");
   }

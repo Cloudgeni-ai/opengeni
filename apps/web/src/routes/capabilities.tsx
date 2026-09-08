@@ -793,11 +793,14 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   async function enableMcpThroughConnect(capabilityId: string) {
     const attempt = await client.beginConnect(workspaceId, {
-      providerId: "mcp-install", ownership: "workspace", returnUrl: window.location.href,
+      providerId: "mcp-install",
+      ownership: "workspace",
+      returnUrl: window.location.href,
       idempotencyKey: crypto.randomUUID(),
     });
     const completed = await client.connectTransport().advance(workspaceId, attempt.id, {
-      expectedRevision: attempt.revision, idempotencyKey: crypto.randomUUID(),
+      expectedRevision: attempt.revision,
+      idempotencyKey: crypto.randomUUID(),
       action: { type: "credentials", values: { capabilityId } },
     });
     if (completed.state !== "complete" || !completed.integrationInstalled)

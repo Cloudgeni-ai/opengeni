@@ -72,8 +72,14 @@ import {
   requireLegacyOAuthActor,
 } from "../connection-ownership";
 import { listPersonalGitHubConnections } from "../integrations/personal-github";
-import { isConsistentGitHubBindingCandidates, isConsistentGitHubBindingProof } from "../integrations/github-installation-proof";
-import { completeGitHubAppConnect, isGitHubAppConnectState } from "../integrations/github-app-connect";
+import {
+  isConsistentGitHubBindingCandidates,
+  isConsistentGitHubBindingProof,
+} from "../integrations/github-installation-proof";
+import {
+  completeGitHubAppConnect,
+  isGitHubAppConnectState,
+} from "../integrations/github-app-connect";
 
 const githubStateCookie = "opengeni_github_state";
 const githubBindingStateMaxAgeSeconds = 10 * 60;
@@ -475,10 +481,14 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   const handleGitHubInstallCallback = async (c: Context) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state"))) return completeGitHubAppConnect(deps, {
-      state: c.req.query("state"), installationId: c.req.query("installation_id"), setupAction: c.req.query("setup_action"),
-      error: c.req.query("error"), requestUrl: c.req.url,
-    });
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        state: c.req.query("state"),
+        installationId: c.req.query("installation_id"),
+        setupAction: c.req.query("setup_action"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const state =
       c.req.query("state") ??
       allCookieValues(c, githubStateCookie).find((candidate) => {
@@ -556,9 +566,13 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/github/install/callback", handleGitHubInstallCallback);
 
   app.get("/v1/github/oauth/callback", async (c) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state"))) return completeGitHubAppConnect(deps, {
-      state: c.req.query("state"), code: c.req.query("code"), error: c.req.query("error"), requestUrl: c.req.url,
-    });
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        state: c.req.query("state"),
+        code: c.req.query("code"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code) {

@@ -1,4 +1,3 @@
-import { AppearanceMenu } from "@/components/appearance-menu";
 // Pinned rail footer: the collapse-toggle chevron and the signed-in user menu
 // (account/sign-out, depending on auth mode). Collapsed → just the avatar +
 // a collapse chevron, both with tooltips.
@@ -13,7 +12,11 @@ import {
 import { lazy, Suspense } from "react";
 import { toast } from "sonner";
 
+import { AppearanceMenu } from "@/components/appearance-menu";
 import {
+  accountMenuAriaLabel,
+  OrganizationInvitationCountBadge,
+  OrganizationInvitationRailNotice,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
   useOrganizationInvitations,
@@ -71,96 +74,114 @@ export function RailFooter() {
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
       <div
-        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-center gap-1.5"}
+        className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
       >
         {browserAccounts ? (
-          <Suspense
-            fallback={
-              <AccountTrigger
-                collapsed={rail.collapsed}
-                displayName={displayName}
-                secondary={secondary}
-                image={image}
-              />
-            }
-          >
-            <BrowserAccountMenu />
-          </Suspense>
-        ) : (
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Account menu"
-                className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring min-h-11"
-              >
-                <Avatar size="sm">
-                  {image ? <AvatarImage src={image} alt="" /> : null}
-                  <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                    {userInitial(displayName)}
-                  </AvatarFallback>
-                </Avatar>
-                {!rail.collapsed ? (
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-medium text-fg">
-                      {displayName}
-                    </span>
-                    {secondary && secondary !== displayName ? (
-                      <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
-                    ) : null}
-                  </span>
-                ) : null}
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              side={rail.collapsed ? "right" : "top"}
-              className="w-[min(18rem,calc(100vw-1rem))]"
+          <div className={rail.collapsed ? undefined : "min-w-0 flex-1"}>
+            <Suspense
+              fallback={
+                <AccountTrigger
+                  collapsed={rail.collapsed}
+                  displayName={displayName}
+                  secondary={secondary}
+                  image={image}
+                />
+              }
             >
-              <DropdownMenuLabel className="grid gap-0.5">
-                <span className="truncate text-sm">{displayName}</span>
-                {secondary && secondary !== displayName ? (
-                  <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
-                ) : null}
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              {managed ? (
-                <OrganizationInvitationsMenuItem controller={organizationInvitations} />
-              ) : null}
-              <AppearanceMenu />
-              {showAnalyticsPreferences ? (
-                <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
-                  <ChartColumnIcon className="size-4" />
-                  Analytics preferences
-                </DropdownMenuItem>
-              ) : null}
-              {managed ? (
-                <DropdownMenuItem
-                  variant="destructive"
-                  onSelect={() => {
-                    void context
-                      .handleManagedSignOut()
-                      .catch((error) =>
-                        toast.error("Sign out failed", { description: String(error) }),
-                      );
-                  }}
+              <BrowserAccountMenu />
+            </Suspense>
+          </div>
+        ) : (
+          <div className={rail.collapsed ? undefined : "min-w-0 flex-1"}>
+            {!rail.collapsed ? (
+              <OrganizationInvitationRailNotice controller={organizationInvitations} />
+            ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label={accountMenuAriaLabel({
+                    displayName,
+                    pendingCount: organizationInvitations.pendingCount,
+                  })}
+                  className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:py-2"
                 >
-                  <LogOutIcon className="size-4" />
-                  Sign out
-                </DropdownMenuItem>
-              ) : context.keyAuthRequired ? (
-                <DropdownMenuItem variant="destructive" onSelect={() => context.forgetAccessKey()}>
-                  <LockIcon className="size-4" />
-                  Clear access key
-                </DropdownMenuItem>
-              ) : (
-                <DropdownMenuItem disabled>
-                  <UserIcon className="size-4" />
-                  {context.accessContext.mode} access
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                  <span className="relative shrink-0">
+                    <Avatar size="sm">
+                      {image ? <AvatarImage src={image} alt="" /> : null}
+                      <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
+                        {userInitial(displayName)}
+                      </AvatarFallback>
+                    </Avatar>
+                    <OrganizationInvitationCountBadge
+                      pendingCount={organizationInvitations.pendingCount}
+                    />
+                  </span>
+                  {!rail.collapsed ? (
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-medium text-fg">
+                        {displayName}
+                      </span>
+                      {secondary && secondary !== displayName ? (
+                        <span className="block truncate text-2xs text-fg-subtle">{secondary}</span>
+                      ) : null}
+                    </span>
+                  ) : null}
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                side={rail.collapsed ? "right" : "top"}
+                className="w-[min(18rem,calc(100vw-1rem))]"
+              >
+                <DropdownMenuLabel className="grid gap-0.5">
+                  <span className="truncate text-sm">{displayName}</span>
+                  {secondary && secondary !== displayName ? (
+                    <span className="truncate text-xs font-normal text-fg-subtle">{secondary}</span>
+                  ) : null}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                {managed ? (
+                  <OrganizationInvitationsMenuItem controller={organizationInvitations} />
+                ) : null}
+                <AppearanceMenu />
+                {showAnalyticsPreferences ? (
+                  <DropdownMenuItem onSelect={() => openAnalyticsPreferences()}>
+                    <ChartColumnIcon className="size-4" />
+                    Analytics preferences
+                  </DropdownMenuItem>
+                ) : null}
+                {managed ? (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => {
+                      void context
+                        .handleManagedSignOut()
+                        .catch((error) =>
+                          toast.error("Sign out failed", { description: String(error) }),
+                        );
+                    }}
+                  >
+                    <LogOutIcon className="size-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                ) : context.keyAuthRequired ? (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    onSelect={() => context.forgetAccessKey()}
+                  >
+                    <LockIcon className="size-4" />
+                    Clear access key
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem disabled>
+                    <UserIcon className="size-4" />
+                    {context.accessContext.mode} access
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         )}
 
         {!rail.isMobile ? (

@@ -22,7 +22,8 @@ export function hostMcpBindingMatchesRequest(
     binding.workspaceId !== request.workspaceId ||
     // The registry currently describes an MCP endpoint, not a REST API grant.
     request.credentialTarget !== "mcp"
-  ) return false;
+  )
+    return false;
   const candidate = HostMcpBindingDefinition.safeParse({
     serverId: request.serverId,
     destinationUrl: request.destinationUrl,

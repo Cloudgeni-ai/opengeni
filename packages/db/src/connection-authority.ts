@@ -220,8 +220,12 @@ export async function resolveAcceptedConnectionUse(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
       const linked = await getExternalLinkTurnAuthorization(scopedDb, input, input.turnId);
-      if (linked && (!linked.authorized ||
-        (!linked.permissions.includes("connections:read") && !linked.permissions.includes("workspace:admin"))))
+      if (
+        linked &&
+        (!linked.authorized ||
+          (!linked.permissions.includes("connections:read") &&
+            !linked.permissions.includes("workspace:admin")))
+      )
         return { status: "denied", reason: "grant_status_inactive" };
       const [row] = await rawRows<{
         authorizationStatus: "authorized" | "denied";

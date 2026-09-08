@@ -11,7 +11,10 @@ export function pollSuperGrokDeviceLogin(options: {
   wait?: (delayMs: number, signal: AbortSignal) => Promise<boolean>;
   maxRetryDelaySeconds?: number;
 }): Promise<SuperGrokConnectPoll | null> {
-  return pollDeviceAuthorization({ ...options, expired: { status: "expired" } as SuperGrokConnectPoll,
-    retryable: error => error instanceof TypeError || (error instanceof OpenGeniApiError && error.retryable),
+  return pollDeviceAuthorization({
+    ...options,
+    expired: { status: "expired" } as SuperGrokConnectPoll,
+    retryable: (error) =>
+      error instanceof TypeError || (error instanceof OpenGeniApiError && error.retryable),
   });
 }

@@ -6,8 +6,11 @@ import {
   createDb,
   deleteWorkspace,
   ensureManagedAccessForUser,
-  ensureExternalIdentity, createOrganizationApiKey, revokeOrganizationApiKey,
-  grantWorkspaceAccess, withWorkspaceSubjectRls,
+  ensureExternalIdentity,
+  createOrganizationApiKey,
+  revokeOrganizationApiKey,
+  grantWorkspaceAccess,
+  withWorkspaceSubjectRls,
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
@@ -473,26 +476,50 @@ describe("SuperGrok subscription routes", () => {
 
   test("external owners connect private SuperGrok without cookies and cannot replace a revoked device origin", async () => {
     if (!client || !managedApp) throw new Error("Real database fixture required");
-    const identity = await ensureExternalIdentity(client.db, { accountId: managedAccountId, externalId: `supergrok-${randomUUID()}` });
-    await withWorkspaceSubjectRls(client.db, managedWorkspaceId, managedSubjectId, tx => grantWorkspaceAccess(tx, {
-      accountId: managedAccountId, workspaceId: managedWorkspaceId, subjectId: identity.subjectId,
-      permissions: ["workspace:read", "connections:write"],
-    }));
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: managedAccountId,
+      externalId: `supergrok-${randomUUID()}`,
+    });
+    await withWorkspaceSubjectRls(client.db, managedWorkspaceId, managedSubjectId, (tx) =>
+      grantWorkspaceAccess(tx, {
+        accountId: managedAccountId,
+        workspaceId: managedWorkspaceId,
+        subjectId: identity.subjectId,
+        permissions: ["workspace:read", "connections:write"],
+      }),
+    );
     const tokens = [randomUUID(), randomUUID()];
-    const keys = await Promise.all(tokens.map(token => createOrganizationApiKey(client!.db, {
-      accountId: managedAccountId, name: "External device fixture", prefix: "test",
-      keyHash: createHash("sha256").update(token).digest("hex"), permissions: ["workspace:read", "connections:write"],
-    })));
-    const deviceRequest = (path: string, body: unknown, index = 0) => managedApp!.request(
-      `/v1/workspaces/${managedWorkspaceId}/supergrok${path}`, { method: "POST", headers: {
-        authorization: `Bearer ${tokens[index]}`, "content-type": "application/json",
-        "x-opengeni-external-actor": encodeURIComponent(JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } })),
-      }, body: JSON.stringify(body) });
+    const keys = await Promise.all(
+      tokens.map((token) =>
+        createOrganizationApiKey(client!.db, {
+          accountId: managedAccountId,
+          name: "External device fixture",
+          prefix: "test",
+          keyHash: createHash("sha256").update(token).digest("hex"),
+          permissions: ["workspace:read", "connections:write"],
+        }),
+      ),
+    );
+    const deviceRequest = (path: string, body: unknown, index = 0) =>
+      managedApp!.request(`/v1/workspaces/${managedWorkspaceId}/supergrok${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${tokens[index]}`,
+          "content-type": "application/json",
+          "x-opengeni-external-actor": encodeURIComponent(
+            JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+          ),
+        },
+        body: JSON.stringify(body),
+      });
     const start = await deviceRequest("/connect/start", { scope: "user" });
     expect(start.status).toBe(200);
     const started = await start.json();
     const connected = await deviceRequest("/connect/poll", { state: started.state });
-    expect({ status: connected.status, ...(connected.status !== 200 ? { body: await connected.clone().text() } : {}) }).toEqual({ status: 200 });
+    expect({
+      status: connected.status,
+      ...(connected.status !== 200 ? { body: await connected.clone().text() } : {}),
+    }).toEqual({ status: 200 });
     expect(await connected.json()).toMatchObject({ status: "connected", scope: "user" });
     const waiting = await deviceRequest("/connect/start", { scope: "user" });
     expect(waiting.status).toBe(200);

@@ -72,6 +72,8 @@ export function NativeConnectSetup({
     setPreparing(true);
     setPending([]);
     const abort = new AbortController();
+    navigation.current?.abort();
+    navigation.current = new AbortController();
     navigation.current = abort;
     let live = true;
     void transport
@@ -96,6 +98,7 @@ export function NativeConnectSetup({
     return () => {
       live = false;
       abort.abort();
+      navigation.current?.abort();
       next.dispose();
     };
   }, [transport, workspaceId, request, retry]);

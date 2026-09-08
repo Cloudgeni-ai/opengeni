@@ -244,7 +244,10 @@ export const McpServerConnectionRefSchema = z
       })
       .optional(),
     authoritySource: z.literal("host").optional(),
-    hostBinding: z.object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() }).strict().optional(),
+    hostBinding: z
+      .object({ bindingId: z.string().uuid(), generation: z.number().int().positive().safe() })
+      .strict()
+      .optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
   .strict()
@@ -257,7 +260,11 @@ export const McpServerConnectionRefSchema = z
       });
     }
     if (reference.hostBinding && reference.authoritySource !== "host")
-      context.addIssue({ code: "custom", path: ["hostBinding"], message: "Durable binding requires host authority" });
+      context.addIssue({
+        code: "custom",
+        path: ["hostBinding"],
+        message: "Durable binding requires host authority",
+      });
     if (!reference.selectedResources) return;
     if (!reference.connectionId) {
       context.addIssue({

@@ -169,10 +169,22 @@ export async function listExternalIdentityLinks(
     );
     const links = rows.slice(0, 50).map(project);
     await setSubjectRlsContext(tx, input.subjectId);
-    const [labels] = links.length ? await rawRows<{ references: Record<string, unknown> }>(tx,
-      sql`select get_external_identity_link_inventory_references(${input.accountId}::uuid, ARRAY[${sql.join(links.map(link => sql`${link.id}::uuid`), sql`, `)}]) as references`) : [];
+    const [labels] = links.length
+      ? await rawRows<{ references: Record<string, unknown> }>(
+          tx,
+          sql`select get_external_identity_link_inventory_references(${input.accountId}::uuid, ARRAY[${sql.join(
+            links.map((link) => sql`${link.id}::uuid`),
+            sql`, `,
+          )}]) as references`,
+        )
+      : [];
     return ExternalIdentityLinkPage.parse({
-      links: links.map(link => ({ ...link, ...(labels?.references[link.id] ? { externalIdentity: ExternalIdentityReference.parse(labels.references[link.id]) } : {}) })),
+      links: links.map((link) => ({
+        ...link,
+        ...(labels?.references[link.id]
+          ? { externalIdentity: ExternalIdentityReference.parse(labels.references[link.id]) }
+          : {}),
+      })),
       nextCursor: rows.length > 50 ? links.at(-1)!.id : null,
     });
   });

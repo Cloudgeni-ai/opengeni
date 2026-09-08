@@ -26,5 +26,14 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // September 6, Bun 1.4 macOS/arm64: main 52ff56a94 measures 2,309,542
   // raw bytes; history anchoring and input handling measure 2,312,535.
   // September 7: idle queue-offer chrome lifts the graph to 2,315,348.
-  wholeKibEnvelope(2_315_348),
+  // Pending organization-invitation chrome on the always-loaded rail footer
+  // added 2,032 bytes on that 2,312,535 baseline (2,314,567 on Linux/x64).
+  // Combined estimate after merging current main: 2,315,348 + 2,032 = 2,317,380.
+  wholeKibEnvelope(2_317_380),
+  // September 8, Bun 1.4 Linux/x64, embedding + main 45405585: 2,333,201
+  // bytes. Connect setup/identity consent stay lazy; organization embedding
+  // administration stays outside the browser client. This includes the native
+  // actor-aware transport and main's identified product-journey capture.
+  // Keep the measured envelope rather than relaxing startup/chunk/file limits.
+  wholeKibEnvelope(2_333_201),
 );

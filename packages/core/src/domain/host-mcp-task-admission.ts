@@ -11,10 +11,7 @@ import {
   inheritHostMcpTaskAuthoritiesFromAttempt,
   type Database,
 } from "@opengeni/db";
-import {
-  hasPermission,
-  type AccessGrantAuthorization,
-} from "../access";
+import { hasPermission, type AccessGrantAuthorization } from "../access";
 import { prepareHostMcpOwnerAuthorization } from "../application/host-mcp-owner";
 import { assertHostMcpAuthoritySourceAdmissionEnabled } from "./host-mcp-authority-source-admission";
 
@@ -39,9 +36,15 @@ export function prepareHostMcpTaskAdmission(input: {
     throw new HTTPException(403, {
       message: "Host task selection requires a verified owner",
     });
-  const reauthorize = prepareHostMcpOwnerAuthorization(input.authorization, input.grant.workspaceId, "connections:read");
+  const reauthorize = prepareHostMcpOwnerAuthorization(
+    input.authorization,
+    input.grant.workspaceId,
+    "connections:read",
+  );
   const prepared = selections.map((selection) => {
-    const server = input.settings.mcpServers.find((candidate) => candidate.id === selection.serverId);
+    const server = input.settings.mcpServers.find(
+      (candidate) => candidate.id === selection.serverId,
+    );
     if (
       !server?.url ||
       server.connectionRef?.authoritySource !== "host" ||
@@ -68,13 +71,7 @@ export function prepareHostMcpTaskAdmission(input: {
   return async (tx, task) => {
     const owner = await reauthorize(tx);
     try {
-      if (prepared.length)
-        await captureHostMcpTaskAuthorities(
-          tx,
-          owner,
-          task,
-          prepared,
-        );
+      if (prepared.length) await captureHostMcpTaskAuthorities(tx, owner, task, prepared);
     } catch (error) {
       if (error instanceof HostMcpDelegationAuthorityError)
         throw new HTTPException(403, { message: error.message });

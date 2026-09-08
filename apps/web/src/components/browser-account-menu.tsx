@@ -36,6 +36,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useRail } from "@/components/rail/rail-context";
 import {
+  accountMenuAriaLabel,
+  OrganizationInvitationCountBadge,
+  OrganizationInvitationRailNotice,
   OrganizationInvitationsDialog,
   OrganizationInvitationsMenuItem,
   useOrganizationInvitations,
@@ -185,12 +188,18 @@ export function BrowserAccountMenu() {
       <span className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </span>
+      {!rail.collapsed ? (
+        <OrganizationInvitationRailNotice controller={organizationInvitations} />
+      ) : null}
       <DropdownMenu modal={false} open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
           <button
             ref={triggerRef}
             type="button"
-            aria-label={`Account menu. ${displayName} is active.`}
+            aria-label={accountMenuAriaLabel({
+              displayName,
+              pendingCount: organizationInvitations.pendingCount,
+            })}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
               // Own the Enter transition so native button activation cannot
@@ -198,14 +207,19 @@ export function BrowserAccountMenu() {
               event.preventDefault();
               setMenuOpen(true);
             }}
-            className="flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
+            className="flex min-h-11 min-w-0 w-full items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-surface-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none forced-colors:border forced-colors:border-transparent forced-colors:focus:border-[Highlight]"
           >
-            <Avatar size="sm">
-              {image ? <AvatarImage src={image} alt="" /> : null}
-              <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
-                {userInitial(displayName)}
-              </AvatarFallback>
-            </Avatar>
+            <span className="relative shrink-0">
+              <Avatar size="sm">
+                {image ? <AvatarImage src={image} alt="" /> : null}
+                <AvatarFallback className="bg-surface-3 text-2xs text-fg-muted">
+                  {userInitial(displayName)}
+                </AvatarFallback>
+              </Avatar>
+              <OrganizationInvitationCountBadge
+                pendingCount={organizationInvitations.pendingCount}
+              />
+            </span>
             {!rail.collapsed ? (
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-xs font-medium text-fg">{displayName}</span>

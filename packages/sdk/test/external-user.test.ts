@@ -36,7 +36,7 @@ test("identity link SDK retains server actor and passes explicit confirmation wi
   expect(calls.every((call) => call.actor === calls[0]!.actor && call.actor !== null)).toBe(true);
   expect(calls[4]!.body).toEqual({ expectedRevision: 2 });
 });
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/index";
 
 test("linked actor selection is explicit and isolated from service and external clients", async () => {
   const actors: unknown[] = [];

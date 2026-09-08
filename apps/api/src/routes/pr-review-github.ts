@@ -53,7 +53,10 @@ import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { githubBrowserBaseUrl } from "../github-browser-flow";
 import { acceptAutomationEvent, readAutomationWebhookBody } from "./automations";
-import { completeGitHubAppConnect, isGitHubAppConnectState } from "../integrations/github-app-connect";
+import {
+  completeGitHubAppConnect,
+  isGitHubAppConnectState,
+} from "../integrations/github-app-connect";
 
 const stateCookie = "opengeni_pr_review_github_state";
 const bindingStateMaxAgeSeconds = 10 * 60;
@@ -257,10 +260,15 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   );
 
   const handleInstallCallback = async (c: Context) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state"))) return completeGitHubAppConnect(deps, {
-      expectedProvider: "github-lens", state: c.req.query("state"), installationId: c.req.query("installation_id"),
-      setupAction: c.req.query("setup_action"), error: c.req.query("error"), requestUrl: c.req.url,
-    });
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        installationId: c.req.query("installation_id"),
+        setupAction: c.req.query("setup_action"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const state =
       c.req.query("state") ??
       allCookieValues(c, stateCookie).find((candidate) => {
@@ -312,9 +320,14 @@ export function registerPrReviewGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
   app.get("/v1/pr-review/github/install/callback", handleInstallCallback);
 
   app.get("/v1/pr-review/github/oauth/callback", async (c) => {
-    if (isGitHubAppConnectState(deps, c.req.query("state"))) return completeGitHubAppConnect(deps, {
-      expectedProvider: "github-lens", state: c.req.query("state"), code: c.req.query("code"), error: c.req.query("error"), requestUrl: c.req.url,
-    });
+    if (isGitHubAppConnectState(deps, c.req.query("state")))
+      return completeGitHubAppConnect(deps, {
+        expectedProvider: "github-lens",
+        state: c.req.query("state"),
+        code: c.req.query("code"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      });
     const code = c.req.query("code");
     const state = c.req.query("state");
     if (!code || !state) {

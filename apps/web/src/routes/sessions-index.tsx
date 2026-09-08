@@ -1,7 +1,9 @@
+import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
 import { PersonalResourceScopeChoice } from "@/components/personal-resource-scope-choice";
 import { usePersonalResourceScopeChoice } from "@/lib/use-personal-resource-scope-choice";
 import type { PersonalAttachmentMode } from "@/lib/personal-resource-attachments";
 import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { captureAnalyticsEvent } from "@/lib/analytics-observer";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
@@ -867,6 +869,40 @@ function SessionsIndexRouteContent({
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  const startBlocker =
+    modelCatalog.loading || newSessionDraft.loading
+      ? null
+      : modelCatalog.error
+        ? "model_catalog_unavailable"
+        : !newSessionPolicyValid
+          ? !modelCatalog.rows.some((row) => row.selectable)
+            ? "no_model_connected"
+            : selectedPolicyRow &&
+                selectedPolicyRow.billingClass !== "opengeni_credits" &&
+                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
+              ? "selected_model_not_connected"
+              : "model_policy_unavailable"
+          : privateCreateUnavailable
+            ? "private_session_unavailable"
+            : newSessionDraft.conflict
+              ? "draft_conflict"
+              : attachments.hasUnresolved
+                ? "attachments_pending"
+                : !computeReady
+                  ? "compute_unavailable"
+                  : null;
+  useEffect(() => {
+    const record = () => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocker_viewed", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
+    };
+    record();
+    window.addEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+    return () => window.removeEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+  }, [startBlocker, workspaceId]);
   // Shared with the bar start control and the mobile “+ → Voice model” panel.
   const voiceSelection = useRealtimeModelSelection({
     client: context.client,
@@ -886,6 +922,11 @@ function SessionsIndexRouteContent({
       realtimeModel: SessionRealtimeModel | null,
       policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
     ): Promise<boolean> => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocked", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
       const hasTypedText = message.trim().length > 0;
       const text = hasTypedText
         ? message

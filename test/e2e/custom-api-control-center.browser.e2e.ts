@@ -19,6 +19,7 @@ const salesConnectionId = "00000000-0000-4000-8000-000000000620";
 const outlookConnectionId = "00000000-0000-4000-8000-000000000621";
 const apiContractRevision = OPENGENI_API_CONTRACT_REVISION;
 let webBaseUrl = "";
+const consentUrl = "https://provider.fixture.invalid/consent";
 
 type UiState = {
   canManage: boolean;
@@ -29,6 +30,17 @@ type UiState = {
   unhealthyAccount?: boolean;
   mailInboxBinding: ReturnType<typeof mailInboxBinding> | null;
   oauthFailuresRemaining: number;
+  connectStarts?: Array<{
+    providerId: string;
+    ownership: string;
+    returnUrl: string;
+    installationTarget: {
+      instanceKey: string;
+      displayName: string;
+      expectedInstanceVersion?: number;
+    };
+    reconnectAccountId?: string;
+  }>;
   oauthStarts: Array<{
     definitionId: string;
     ownership: "personal" | "workspace";
@@ -327,7 +339,7 @@ describe("custom API control center browser acceptance", () => {
     }
   }, 60_000);
 
-  test("pass 7: adding an account redirects straight to consent and retries one exact account", async () => {
+  test("pass 7: shared Connect opens provider consent and retries one exact account", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
     const state = readyState();
@@ -336,20 +348,26 @@ describe("custom API control center browser acceptance", () => {
       await openCapabilities(page);
       await setTheme(page, "light");
 
-      // Every curated definition is oauth2-reviewed, so adding an account is a
-      // zero-dialog straight redirect - no local account-naming form.
+      // Shared Connect keeps the exact account target and opens consent only
+      // from the explicit user gesture, without a local account-naming form.
       let sheet = await openOutlookMailSheet(page);
       const addAccount = sheet.getByRole("button", { name: "+ Add account" });
       await expectVisible(addAccount);
-      await Promise.all([page.waitForURL(`${webBaseUrl}/provider-consent`), addAccount.click()]);
-      expect(state.oauthStarts).toHaveLength(1);
-      const added = new URL(state.oauthStarts[0]!.returnPath, webBaseUrl);
-      expect(added.searchParams.get("api_integration_instance")).toMatch(/^account-/);
-      expect(added.searchParams.get("api_integration_instance")).not.toBe("account-finance");
-      expect(added.searchParams.get("api_integration_name")).toBe("Outlook Mail - Account 2");
-      expect(added.searchParams.get("api_integration_expected")).toBeNull();
-      expect(state.oauthStarts[0]).toMatchObject({
-        definitionId: "microsoft-outlook-mail",
+      await addAccount.click();
+      const [consent] = await Promise.all([
+        context.waitForEvent("page"),
+        page.getByRole("button", { name: "Authorize connection" }).click(),
+      ]);
+      await consent.waitForURL(consentUrl);
+      await consent.close();
+      expect(state.connectStarts).toHaveLength(1);
+      const added = state.connectStarts![0]!.installationTarget;
+      expect(added.instanceKey).toMatch(/^account-/);
+      expect(added.instanceKey).not.toBe("account-finance");
+      expect(added.displayName).toBe("Outlook Mail - Account 2");
+      expect(added.expectedInstanceVersion).toBeUndefined();
+      expect(state.connectStarts![0]).toMatchObject({
+        providerId: "microsoft-outlook-mail",
         ownership: "workspace",
       });
 
@@ -364,26 +382,33 @@ describe("custom API control center browser acceptance", () => {
       await expectText(account, "Needs attention");
       const reconnect = account.getByRole("button", { name: "Reconnect" });
       await reconnect.click();
-      await expectVisible(repair.getByText("Couldn't start account connection"));
-      expect(repairState.oauthStarts).toHaveLength(1);
+      await expectVisible(repair.getByText("Could not start setup.", { exact: false }));
+      expect(repairState.connectStarts).toHaveLength(1);
       expect(repair.url()).toBe(`${webBaseUrl}/workspaces/${workspaceId}/plugins`);
-      await assertAccessibleAndBounded(repair, '[data-integration-sheet="outlook-mail"]');
+      await assertAccessibleAndBounded(repair, '[data-slot="dialog-content"]');
       await repair.screenshot({
         path: `${evidenceDir}pass-7-add-and-reconnect.png`,
         fullPage: true,
       });
 
-      await Promise.all([repair.waitForURL(`${webBaseUrl}/provider-consent`), reconnect.click()]);
-      expect(repairState.oauthStarts).toHaveLength(2);
-      const firstReturn = new URL(repairState.oauthStarts[0]!.returnPath, webBaseUrl);
-      const retriedReturn = new URL(repairState.oauthStarts[1]!.returnPath, webBaseUrl);
-      expect(firstReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
-      expect(retriedReturn.searchParams.get("api_integration_instance")).toBe("account-finance");
-      expect(retriedReturn.searchParams.get("api_integration_name")).toBe("Outlook Mail — Finance");
-      expect(retriedReturn.searchParams.get("api_integration_expected")).toBe("2");
-      expect(repairState.oauthStarts[1]).toMatchObject({
-        definitionId: "microsoft-outlook-mail",
+      await repair.getByRole("button", { name: "Retry setup" }).click();
+      const [retryConsent] = await Promise.all([
+        context.waitForEvent("page"),
+        repair.getByRole("button", { name: "Authorize connection" }).click(),
+      ]);
+      await retryConsent.waitForURL(consentUrl);
+      await retryConsent.close();
+      expect(repairState.connectStarts).toHaveLength(2);
+      expect(repairState.connectStarts![0]!.installationTarget.instanceKey).toBe("account-finance");
+      expect(repairState.connectStarts![1]!.installationTarget).toEqual({
+        instanceKey: "account-finance",
+        displayName: "Outlook Mail — Finance",
+        expectedInstanceVersion: 2,
+      });
+      expect(repairState.connectStarts![1]).toMatchObject({
+        providerId: "microsoft-outlook-mail",
         ownership: "workspace",
+        reconnectAccountId: outlookConnectionId,
       });
     } finally {
       await context.close();
@@ -519,6 +544,14 @@ async function expectCustomInstances(page: Page): Promise<void> {
 }
 
 async function installApi(page: Page, state: UiState): Promise<void> {
+  let connectAttempt: unknown;
+  await page.context().route(consentUrl, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<!doctype html><title>Provider consent</title><h1>Provider consent</h1>",
+    }),
+  );
   await page.route(`${webBaseUrl}/provider-consent`, (route) =>
     route.fulfill({
       status: 200,
@@ -555,6 +588,32 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts`) {
+      if (request.method() === "GET") return json([]);
+      const input = request.postDataJSON();
+      (state.connectStarts ??= []).push(input);
+      if (state.oauthFailuresRemaining > 0) {
+        state.oauthFailuresRemaining -= 1;
+        return json({ message: "Synthetic setup start failed" }, 503);
+      }
+      connectAttempt = {
+        id: "fixture-connect",
+        workspaceId,
+        providerId: input.providerId,
+        ownership: input.ownership,
+        installationTarget: input.installationTarget,
+        revision: 1,
+        state: "requires_user_action",
+        credentialsCommitted: false,
+        integrationInstalled: false,
+        completionRequirement: "integration",
+        expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        nextAction: { type: "authorize", url: consentUrl },
+      };
+      return json(connectAttempt);
+    }
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
+      return json(connectAttempt);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {

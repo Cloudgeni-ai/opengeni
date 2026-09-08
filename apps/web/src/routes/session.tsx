@@ -1,11 +1,7 @@
 import { PersonalResourceAttachmentSurface } from "@/components/personal-resource-attachment-surface";
 import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { getComposerSendBlocker } from "@/lib/composer-send-blocking";
-import { findConnectRecoveryAccount } from "@opengeni/connect";
-import {
-  NativeConnectSetup,
-  type NativeConnectRequest,
-} from "@/components/capabilities/native-connect-setup";
+import type { NativeConnectRequest } from "@/components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "@/components/session/failure-recovery-boundary";
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
@@ -158,6 +154,12 @@ import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 const FAILURE_CONTINUATION_MESSAGE =
   "Continue from the last failure. Check current progress before repeating work.";
+const NativeConnectSetup = lazy(() =>
+  import("@/components/capabilities/native-connect-setup").then((module) => ({
+    default: module.NativeConnectSetup,
+  })),
+);
+
 const LazyFailedSessionBanner = lazy(() =>
   import("@/components/session/failed-session-banner").then((module) => ({
     default: module.FailedSessionBanner,
@@ -667,6 +669,7 @@ export function SessionRoute({
         return;
       }
       if (item.connectionId) {
+        const { findConnectRecoveryAccount } = await import("@opengeni/connect");
         const account = findConnectRecoveryAccount(
           await reconnectTransport.accounts(workspaceId),
           item.connectionId,
@@ -922,18 +925,20 @@ export function SessionRoute({
   return (
     <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
       {reconnectRequest && (
-        <NativeConnectSetup
-          transport={reconnectTransport}
-          workspaceId={workspaceId}
-          request={reconnectRequest}
-          onClose={() => setReconnectRequest(null)}
-          onComplete={() => {
-            setReconnectRequest(null);
-            toast.success("Connection updated", {
-              description: "New tool calls can use the updated connection.",
-            });
-          }}
-        />
+        <Suspense fallback={<LoadingPanel label="Opening connection setup" />}>
+          <NativeConnectSetup
+            transport={reconnectTransport}
+            workspaceId={workspaceId}
+            request={reconnectRequest}
+            onClose={() => setReconnectRequest(null)}
+            onComplete={() => {
+              setReconnectRequest(null);
+              toast.success("Connection updated", {
+                description: "New tool calls can use the updated connection.",
+              });
+            }}
+          />
+        </Suspense>
       )}
       <SessionDock
         workspaceId={workspaceId}

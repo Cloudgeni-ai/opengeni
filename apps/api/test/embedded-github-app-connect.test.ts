@@ -212,14 +212,39 @@ for (const providerId of ["github-app", "github-lens"] as const)
     });
     expect((await callback(binding.nextAction.url)).headers.get("location")).toBe(returnUrl);
     expect(proofs).toBe(1);
-    const expiredPayload = { accountId: grant.accountId, workspaceId, subjectId: identity.subjectId,
-      connectAttemptId: attempt.id, kind: "github_app_connect", providerId, phase: "bind", personalOwnerVerified: true };
-    const expiredState = createSignedState("embedded-app-state", expiredPayload, Math.floor(Date.now() / 1000) - 7200);
+    const expiredPayload = {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: identity.subjectId,
+      connectAttemptId: attempt.id,
+      kind: "github_app_connect",
+      providerId,
+      phase: "bind",
+      personalOwnerVerified: true,
+    };
+    const expiredState = createSignedState(
+      "embedded-app-state",
+      expiredPayload,
+      Math.floor(Date.now() / 1000) - 7200,
+    );
     const expiredUrl = `https://provider.example/authorize?state=${encodeURIComponent(expiredState)}`;
     expect((await callback(expiredUrl)).headers.get("location")).toBe(returnUrl);
     expect(proofs).toBe(1);
+    const staleState = createSignedState(
+      "embedded-app-state",
+      expiredPayload,
+      Math.floor(Date.now() / 1000) - 25 * 60 * 60,
+    );
+    const stale = await callback(
+      `https://provider.example/authorize?state=${encodeURIComponent(staleState)}`,
+    );
+    expect(stale.status).toBe(400);
+    expect(stale.headers.get("location")).toBeNull();
+    expect(proofs).toBe(1);
     const forgedState = createSignedState("wrong-secret", expiredPayload);
-    const forged = await callback(`https://provider.example/authorize?state=${encodeURIComponent(forgedState)}`);
+    const forged = await callback(
+      `https://provider.example/authorize?state=${encodeURIComponent(forgedState)}`,
+    );
     expect(forged.status).toBe(400);
     expect(forged.headers.get("location")).toBeNull();
     expect(await forged.text()).not.toContain("OpenGeni");

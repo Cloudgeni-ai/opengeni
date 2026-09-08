@@ -1,6 +1,9 @@
 import { createHash, createHmac } from "node:crypto";
 import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import { startSlackBotInstall, requireOpenGeniSlackOAuthSettings } from "../integrations/slack-install";
+import {
+  startSlackBotInstall,
+  requireOpenGeniSlackOAuthSettings,
+} from "../integrations/slack-install";
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
@@ -297,8 +300,15 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     requireLegacyOAuthActor(access);
     const grant = access.grant;
     const payload = OpenGeniSlackBotInstallRequest.parse(await c.req.json());
-    return c.json(await startSlackBotInstall(deps, { accountId: grant.accountId, workspaceId,
-      subjectId: grant.subjectId, requestUrl: c.req.url, ...(payload.connectionId ? { connectionId: payload.connectionId } : {}) }));
+    return c.json(
+      await startSlackBotInstall(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        requestUrl: c.req.url,
+        ...(payload.connectionId ? { connectionId: payload.connectionId } : {}),
+      }),
+    );
   });
 
   app.get("/v1/integrations/slack/callback", async (c) => {
@@ -311,12 +321,22 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       state = readOpenGeniSlackInstallState(c.req.query("state"), settings);
       if (state.connectAttemptId) {
         const stored = await getConnectAttempt(db, state, state.connectAttemptId);
-        if (stored.attempt.providerId !== "slack-bot" || stored.attempt.ownership !== "workspace") throw new HTTPException(403, { message: "Slack attempt mismatch" });
+        if (stored.attempt.providerId !== "slack-bot" || stored.attempt.ownership !== "workspace")
+          throw new HTTPException(403, { message: "Slack attempt mismatch" });
         exactReturnUrl = stored.returnUrl;
-        operation = { attemptId: state.connectAttemptId, operationId: `oauth:${state.nonce}`, inputDigest: createHash("sha256").update(c.req.query("state")!).digest("hex") };
-        const claim = await claimConnectOperation(db, state, { ...operation, expectedRevision: stored.attempt.revision,
-          authorize: (tx, _attempt, origin) => requireConnectOwnerAuthority(tx, state!, "connections:write", origin) });
-        if (claim.status === "replayed") return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
+        operation = {
+          attemptId: state.connectAttemptId,
+          operationId: `oauth:${state.nonce}`,
+          inputDigest: createHash("sha256").update(c.req.query("state")!).digest("hex"),
+        };
+        const claim = await claimConnectOperation(db, state, {
+          ...operation,
+          expectedRevision: stored.attempt.revision,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+        });
+        if (claim.status === "replayed")
+          return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
       }
       await requireSlackInstallCallbackGrant(db, state);
       stage = "nonce_consume";
@@ -336,11 +356,20 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
       }
       if (operation && (c.req.query("error") || !c.req.query("code"))) {
-        await finishConnectOperation(db, state, { ...operation,
-          authorize: (tx, _attempt, origin) => requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
-          commit: async (_tx, current) => ({ ...current, revision: current.revision + 1,
-            state: c.req.query("error") === "access_denied" ? "cancelled" : "failed", nextAction: { type: "none" },
-            error: { code: c.req.query("error") ? "provider_denied" : "missing_code", message: "Authorization was not completed. Start a new connection attempt.", retryable: false },
+        await finishConnectOperation(db, state, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, state!, "connections:write", origin),
+          commit: async (_tx, current) => ({
+            ...current,
+            revision: current.revision + 1,
+            state: c.req.query("error") === "access_denied" ? "cancelled" : "failed",
+            nextAction: { type: "none" },
+            error: {
+              code: c.req.query("error") ? "provider_denied" : "missing_code",
+              message: "Authorization was not completed. Start a new connection attempt.",
+              retryable: false,
+            },
           }),
         });
         return new Response(null, { status: 302, headers: { Location: exactReturnUrl! } });
@@ -387,25 +416,50 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       await requireSlackInstallCallbackGrant(db, state);
       stage = "persistence";
       const acceptedState = state;
-      const persist = (tx: Database) => persistOpenGeniSlackBotConnection({ deps: { ...deps, db: tx }, state: acceptedState, token: authorization.accessToken, verified });
+      const persist = (tx: Database) =>
+        persistOpenGeniSlackBotConnection({
+          deps: { ...deps, db: tx },
+          state: acceptedState,
+          token: authorization.accessToken,
+          verified,
+        });
       if (operation) {
-        await finishConnectOperation(db, acceptedState, { ...operation,
-          authorize: (tx, _attempt, origin) => requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
+        await finishConnectOperation(db, acceptedState, {
+          ...operation,
+          authorize: (tx, _attempt, origin) =>
+            requireConnectOwnerAuthority(tx, acceptedState, "connections:write", origin),
           commit: async (tx, current) => {
             const connection = await persist(tx);
-            return { ...current, revision: current.revision + 1, state: "complete", credentialsCommitted: true, nextAction: { type: "none" },
-              account: { id: connection.id, version: connection.version, providerId: "slack-bot", label: "Slack workspace bot", ownership: "workspace", status: "connected" } };
+            return {
+              ...current,
+              revision: current.revision + 1,
+              state: "complete",
+              credentialsCommitted: true,
+              nextAction: { type: "none" },
+              account: {
+                id: connection.id,
+                version: connection.version,
+                providerId: "slack-bot",
+                label: "Slack workspace bot",
+                ownership: "workspace",
+                status: "connected",
+              },
+            };
           },
         });
         return new Response(null, { status: 302, headers: { Location: exactReturnUrl! } });
       }
-      const connection = await db.transaction(async tx => { await requireSlackInstallCallbackGrant(tx, acceptedState); return persist(tx); });
+      const connection = await db.transaction(async (tx) => {
+        await requireSlackInstallCallbackGrant(tx, acceptedState);
+        return persist(tx);
+      });
       return c.redirect(
         slackInstallReturnUrl(baseUrl, state.returnPath, "connected", connection.id),
         302,
       );
     } catch (error) {
-      if (exactReturnUrl) return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
+      if (exactReturnUrl)
+        return new Response(null, { status: 302, headers: { Location: exactReturnUrl } });
       if (state) {
         const failure = slackInstallCallbackFailure(stage, error);
         try {
@@ -1347,7 +1401,11 @@ function readOpenGeniSlackInstallState(
   if (!payload) {
     throw new HTTPException(400, { message: "invalid or expired Slack installation state" });
   }
-  if ((payload.kind !== undefined && payload.kind !== "slack_bot_install") || (payload.connectAttemptId && payload.kind !== "slack_bot_install")) throw new HTTPException(400, { message: "invalid Slack installation state kind" });
+  if (
+    (payload.kind !== undefined && payload.kind !== "slack_bot_install") ||
+    (payload.connectAttemptId && payload.kind !== "slack_bot_install")
+  )
+    throw new HTTPException(400, { message: "invalid Slack installation state kind" });
   const requiredString = (value: unknown, label: string): string => {
     if (typeof value !== "string" || value.length === 0) {
       throw new HTTPException(400, { message: `invalid Slack installation ${label}` });
@@ -1382,8 +1440,21 @@ function readOpenGeniSlackInstallState(
     workspaceId,
     subjectId,
     returnPath,
-    ...(typeof payload.connectAttemptId === "string" ? { connectAttemptId: payload.connectAttemptId } : {}),
-    ...(typeof payload.encryptedExternalContinuation === "string" ? { externalContinuation: ExternalActorContinuation.parse(JSON.parse(decryptEnvironmentValue(requireEnvironmentEncryption(settings), payload.encryptedExternalContinuation))) } : {}),
+    ...(typeof payload.connectAttemptId === "string"
+      ? { connectAttemptId: payload.connectAttemptId }
+      : {}),
+    ...(typeof payload.encryptedExternalContinuation === "string"
+      ? {
+          externalContinuation: ExternalActorContinuation.parse(
+            JSON.parse(
+              decryptEnvironmentValue(
+                requireEnvironmentEncryption(settings),
+                payload.encryptedExternalContinuation,
+              ),
+            ),
+          ),
+        }
+      : {}),
     ...(connectionId ? { connectionId, connectionVersion: connectionVersion! } : {}),
     nonce: requiredString(payload.nonce, "nonce"),
     iat:

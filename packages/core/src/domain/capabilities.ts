@@ -258,9 +258,10 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     input.settings,
     input.capabilityId,
   );
-  if (isReservedCodexAppsCatalogItem(item)) throw new HTTPException(422, {
-    message: "Codex Apps use the dedicated account designation flow",
-  });
+  if (isReservedCodexAppsCatalogItem(item))
+    throw new HTTPException(422, {
+      message: "Codex Apps use the dedicated account designation flow",
+    });
   if (item.kind === "skill") {
     throw new HTTPException(409, {
       message: "Install Skills through the Skill library or source import flow",

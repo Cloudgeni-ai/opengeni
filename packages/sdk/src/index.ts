@@ -1,4 +1,4 @@
-export { OpenGeniClient } from "./artifact-client";
+export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
 export { createSiteToolBridge, isSiteCatalogStaleError } from "./site-tool-bridge";
 export type {
   SiteToolBridge,

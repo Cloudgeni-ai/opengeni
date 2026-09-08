@@ -169,7 +169,10 @@ test("each physical request rechecks durable authority after credential resoluti
 test("host refs without durable binding preserve the existing transport contract", async () => {
   const input = request();
   delete input.connectionRef.hostBinding;
-  const resolve = buildHostConnectionTokenResolver(async (snapshot) => credential(snapshot), context);
+  const resolve = buildHostConnectionTokenResolver(
+    async (snapshot) => credential(snapshot),
+    context,
+  );
   const result = await resolve(input);
   expect(result.status).toBe("ok");
   if (result.status !== "ok") throw new Error("expected credential resolution");

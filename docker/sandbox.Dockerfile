@@ -91,6 +91,7 @@ COPY packages/capabilities/package.json packages/capabilities/package.json
 COPY packages/codemode/package.json packages/codemode/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/connect/package.json packages/connect/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/core/package.json packages/core/package.json
 COPY packages/db/package.json packages/db/package.json
@@ -130,6 +131,9 @@ RUN if [ "$OPENGENI_LOCAL_SITE_PACKAGES" = true ]; then \
 # and transport behavior without resolving mutable registry versions at runtime.
 RUN set -eux; \
     runtime=/out/codemode-runtime; \
+    install -d -m 0755 "$runtime/node_modules/@opengeni/connect"; \
+    install -m 0644 packages/connect/package.json "$runtime/node_modules/@opengeni/connect/package.json"; \
+    cp -a packages/connect/src "$runtime/node_modules/@opengeni/connect/src"; \
     install -d -m 0755 "$runtime/node_modules/@opengeni/codemode" \
                         "$runtime/node_modules/@opengeni/contracts" \
                         "$runtime/node_modules/@opengeni/sdk" \

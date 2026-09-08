@@ -112,7 +112,9 @@ describe("OpenGeni Product Integration Pack", () => {
     expect(runtime).toContain("not retransmitted on every turn");
     expect(runtime).toContain("same account balance");
     expect(autonomy).toContain("technical capability, not permission");
-    expect(external).toContain("Never retry a denied user request using the unscoped service client");
+    expect(external).toContain(
+      "Never retry a denied user request using the unscoped service client",
+    );
     expect(external).toContain("without adding status parameters");
     expect(external).toContain("Short-lived inline MCP credentials remain a valid simple choice");
     expect(external).toContain("Durable host renewal is opt-in");

@@ -29,7 +29,13 @@ export type ConnectNextAction =
   | { type: "authorize"; url: string }
   | {
       type: "credentials";
-      fields: Array<{ name: string; label: string; required: boolean; secret: boolean; options?: Array<{ value: string; label: string }> }>;
+      fields: Array<{
+        name: string;
+        label: string;
+        required: boolean;
+        secret: boolean;
+        options?: Array<{ value: string; label: string }>;
+      }>;
     }
   | { type: "wait"; pollAfterMs: number; userCode?: string; verificationUrl?: string }
   | { type: "select_account"; accounts: ConnectAccount[] }

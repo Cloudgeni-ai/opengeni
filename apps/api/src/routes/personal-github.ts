@@ -293,7 +293,8 @@ export function registerPersonalGitHubRoutes(app: Hono, deps: ApiRouteDeps): voi
       ...(state ? { state } : {}),
       ...(error ? { error } : {}),
     });
-    if (result.exactReturn) return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
+    if (result.exactReturn)
+      return new Response(null, { status: 302, headers: { Location: result.redirectTo } });
     return c.redirect(result.redirectTo, 302);
   });
 }

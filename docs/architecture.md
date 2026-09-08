@@ -98,7 +98,7 @@ The product has several deliberately separate surfaces:
   Canonical Connect wire validation is in `packages/contracts/src/connect.ts`;
   `packages/db/src/connect-attempts.ts` owns scoped attempt creation, operation
   claims, atomic completion receipts, expiry, and bounded metadata retention.
-  Migration 0430 freezes the credential-free external continuation privately on
+  Migration 0440 freezes the credential-free external continuation privately on
   the attempt. Claim and commit recheck both current actor authority and saved
   origin, including on replay. The exact return destination and named installation
   targets cannot change during setup.
@@ -145,14 +145,14 @@ The product has several deliberately separate surfaces:
   These new request-time lanes recheck live authority before provider invocation
   and approval issuance; existing catalog filtering and approval rules remain
   authoritative. This does not supply durable scheduled/binding delegation.
-  Migration 0419 adds the credential-free `host_mcp_bindings` registry with
+  Migration 0429 adds the credential-free `host_mcp_bindings` registry with
   FORCE-RLS external-owner scope, immutable destination/identity, idempotent
   registration, and terminal generation-advancing revocation. Its DB seam is
   `packages/db/src/host-mcp-bindings.ts`; the API adapter is
   `apps/api/src/routes/host-mcp-bindings.ts`. Registration/read/revoke use verified
   external authority, but registration is not an execution delegation. Do not infer authority
   from a registry row, historical creator, or a host credential response.
-  Migration 0420 adds owner-scoped `host_mcp_delegations` alongside that registry.
+  Migration 0430 adds owner-scoped `host_mcp_delegations` alongside that registry.
   Its internal DB API reuses session/always grant scopes, shared-output
   acknowledgement, binding generation and live owner/workspace checks. Neither
   these metadata rows nor `HostMcpAcceptedAuthority` schemas admit execution:
@@ -165,7 +165,7 @@ The product has several deliberately separate surfaces:
   It is not authentication or storage; production acceptance must invoke it within
   its canonical session-activity transaction and persist an immutable snapshot.
   Scheduled/inherited work is deliberately excluded from this direct-only seam.
-  Migration 0421 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
+  Migration 0431 adds `host_mcp_turn_authorities`, an owner-scoped FORCE-RLS
   direct-turn ledger. `captureDirectHostMcpAuthority` persists the builder's
   snapshot; its insert trigger independently reconstructs and checks canonical
   authority. The runtime role has only SELECT/INSERT, and foreign keys retain
@@ -714,6 +714,13 @@ producers, not consumers.
 Canonical: `packages/sdk/src/`, `packages/react/src/`,
 `packages/contracts/src/index.ts`, and `packages/sdk/test/contract-parity.test.ts`.
 
+The public SDK root exports the full client from `packages/sdk/src/embedding-client.ts`.
+It extends the artifact client with organization-key external-user, identity-link,
+Connect administration, and host-MCP binding/delegation operations. Native web
+uses the narrower `@opengeni/sdk/browser` client; artifact-only consumers use
+`@opengeni/sdk/artifacts`. Keep server-side administration out of those eager
+browser surfaces while preserving the root client's complete API and actor scope.
+
 ### 3.11 Work discovery remains advisory and permission-first
 
 Compact related-work discovery is a read projection over already-authorized
@@ -1261,6 +1268,9 @@ Canonical: [`../agent/README.md`](../agent/README.md) and
   `deploy/stacks/` wraps external dependencies.
 - `docs/` contains current topic docs and point-in-time records; its canonical
   index is [`README.md`](README.md).
+- `docs-site/` is the public documentation site (Mintlify; published at
+  docs.opengeni.ai from `main`, subdirectory `/docs-site`). It is product-facing
+  and links to `docs/` for engineering detail rather than restating it.
 - `scripts/` owns development, static checks, release mechanics, deployment
   helpers, and operator-only utilities.
 - `test/` contains integration, end-to-end, and live suites; package-local
@@ -1762,11 +1772,11 @@ attribution. The internal permission calculator in
 and optional native-link authority without combining identity permissions. These
 are not themselves authentication. External mode is admitted through the
 organization-key resolver in `access/index.ts`, backed by persisted organization-local
-identity mappings in `packages/db/src/external-identities.ts` (migration 0415).
+identity mappings in `packages/db/src/external-identities.ts` (migration 0425).
 Request provenance is held on the exact resolved authorization object, not inferred
 from a subject prefix, copied grant or a fake browser-cookie flag. External
-organization/workspace lifecycle uses migrations 0416–0417 and existing native
-settlement commands. Migration 0418 admits a verified external owner to their exact
+organization/workspace lifecycle uses migrations 0426–0427 and existing native
+settlement commands. Migration 0428 admits a verified external owner to their exact
 Personal workspace and core private-session operations; it does not grant service
 keys ambient Personal access. Linked-native selection remains a contract-only
 lane and is rejected at admission until dual-proof linking is implemented.

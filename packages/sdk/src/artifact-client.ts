@@ -1,5 +1,13 @@
 import { OpenGeniDocumentAuthorityClient } from "./document-authority-client";
 import type { FetchResponse } from "./client";
+import type { SiteToolCallRequest } from "./site-tool-bridge";
+import type { ToolGatewayCallResponse } from "./types";
+import type {
+  CreateWorkspaceArtifactRequest,
+  PublishWorkspaceArtifactVersionRequest,
+  WorkspaceArtifactContentResponse,
+  WorkspaceArtifactMutationResponse,
+} from "./workspace-artifacts";
 import type {
   CreateEditableArtifactMaterializationRequest,
   CreateEditableArtifactResourceRequest,
@@ -128,6 +136,69 @@ export class OpenGeniClient extends OpenGeniDocumentAuthorityClient {
       "GET",
       `/v1/workspaces/${encodeURIComponent(workspaceId)}/editable-artifacts/${encodeURIComponent(artifactId)}/materializations/${encodeURIComponent(jobId)}/download`,
       { replicaId: options.replicaId },
+      options,
+    );
+  }
+  /** Exact Site-version gateway call. Keep this client on the authenticated host;
+   * the API enforces live viewer access and the version's declared tool allowlist. */
+  async callWorkspaceSiteTool(
+    workspaceId: string,
+    request: SiteToolCallRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<ToolGatewayCallResponse> {
+    return this.requestJson<ToolGatewayCallResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/tools/calls`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async getWorkspaceArtifactContent(
+    workspaceId: string,
+    artifactId: string,
+    versionOrOptions?: string | { versionId?: string; signal?: AbortSignal },
+  ): Promise<WorkspaceArtifactContentResponse> {
+    const options =
+      typeof versionOrOptions === "string"
+        ? { versionId: versionOrOptions }
+        : (versionOrOptions ?? {});
+    const query = options.versionId ? `?versionId=${encodeURIComponent(options.versionId)}` : "";
+    return await this.requestJson<WorkspaceArtifactContentResponse>(
+      "GET",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/content${query}`,
+      undefined,
+      undefined,
+      options,
+    );
+  }
+
+  async createWorkspaceArtifact(
+    workspaceId: string,
+    request: CreateWorkspaceArtifactRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts`,
+      request,
+      undefined,
+      options,
+    );
+  }
+
+  async publishWorkspaceArtifactVersion(
+    workspaceId: string,
+    artifactId: string,
+    request: PublishWorkspaceArtifactVersionRequest,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<WorkspaceArtifactMutationResponse> {
+    return await this.requestJson<WorkspaceArtifactMutationResponse>(
+      "POST",
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/published-artifacts/${encodeURIComponent(artifactId)}/versions`,
+      request,
+      undefined,
       options,
     );
   }

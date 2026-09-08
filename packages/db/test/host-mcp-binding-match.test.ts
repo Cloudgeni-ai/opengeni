@@ -59,20 +59,48 @@ test("binding match denies changes to immutable request selection", () => {
   expect(HostMcpBinding.safeParse(binding).success).toBe(true);
   expect(hostMcpBindingMatchesRequest(binding, request())).toBe(true);
   const changes: Array<(input: McpCredentialsRequest) => void> = [
-    (input) => { input.accountId = crypto.randomUUID(); },
-    (input) => { input.workspaceId = crypto.randomUUID(); },
-    (input) => { input.serverId = "other"; },
-    (input) => { input.destinationUrl += "?account=other"; },
-    (input) => { input.destinationUrl += "/other"; },
-    (input) => { input.destinationUrl += "#fragment"; },
-    (input) => { input.destinationUrl = "http://mcp.example/tools"; },
-    (input) => { input.credentialTarget = "http_api"; },
-    (input) => { input.connectionRef.connectionId = "other"; },
-    (input) => { input.connectionRef.scopes = ["read", "write"]; },
-    (input) => { input.connectionRef.resource = "other"; },
-    (input) => { input.connectionRef.hostBinding!.generation++; },
-    (input) => { input.connectionRef.hostBinding!.bindingId = crypto.randomUUID(); },
-    (input) => { delete input.connectionRef.hostBinding; },
+    (input) => {
+      input.accountId = crypto.randomUUID();
+    },
+    (input) => {
+      input.workspaceId = crypto.randomUUID();
+    },
+    (input) => {
+      input.serverId = "other";
+    },
+    (input) => {
+      input.destinationUrl += "?account=other";
+    },
+    (input) => {
+      input.destinationUrl += "/other";
+    },
+    (input) => {
+      input.destinationUrl += "#fragment";
+    },
+    (input) => {
+      input.destinationUrl = "http://mcp.example/tools";
+    },
+    (input) => {
+      input.credentialTarget = "http_api";
+    },
+    (input) => {
+      input.connectionRef.connectionId = "other";
+    },
+    (input) => {
+      input.connectionRef.scopes = ["read", "write"];
+    },
+    (input) => {
+      input.connectionRef.resource = "other";
+    },
+    (input) => {
+      input.connectionRef.hostBinding!.generation++;
+    },
+    (input) => {
+      input.connectionRef.hostBinding!.bindingId = crypto.randomUUID();
+    },
+    (input) => {
+      delete input.connectionRef.hostBinding;
+    },
   ];
   for (const change of changes) {
     const input = request();
@@ -88,5 +116,6 @@ test("binding match rejects revoked and malformed registry metadata", () => {
     { ...binding, generation: 2 },
     { ...binding, authorizationRevision: 0 },
     { ...binding, definition: { ...binding.definition, headers: { authorization: "synthetic" } } },
-  ]) expect(hostMcpBindingMatchesRequest(changed, request())).toBe(false);
+  ])
+    expect(hostMcpBindingMatchesRequest(changed, request())).toBe(false);
 });

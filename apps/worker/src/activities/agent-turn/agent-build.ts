@@ -596,20 +596,39 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     outcome: "completed",
     durationSeconds: (performance.now() - postToolPreparationStartedAt) / 1_000,
   });
-  const linkedToolAuthority = await getExternalLinkTurnAuthorization(db, {
-    accountId: input.accountId, workspaceId: input.workspaceId,
-  }, turn.id);
-  if (linkedToolAuthority && !linkedToolAuthority.authorized) throw new Error("Native identity link was revoked");
+  const linkedToolAuthority = await getExternalLinkTurnAuthorization(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+    },
+    turn.id,
+  );
+  if (linkedToolAuthority && !linkedToolAuthority.authorized)
+    throw new Error("Native identity link was revoked");
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
     try {
       return runtime.buildAgent(eventing.modelRunSettings, runtimeResources, {
-        ...(linkedToolAuthority ? { authorizeAttemptExecution: async () => {
-          const current = await getSessionTurnForAttempt(db, input.workspaceId, input.sessionId, input.attemptId);
-          if (!current || current.id !== turn.id || current.executionGeneration !== turn.executionGeneration)
-            throw new Error("The linked agent attempt is no longer authorized");
-        } } : {}),
+        ...(linkedToolAuthority
+          ? {
+              authorizeAttemptExecution: async () => {
+                const current = await getSessionTurnForAttempt(
+                  db,
+                  input.workspaceId,
+                  input.sessionId,
+                  input.attemptId,
+                );
+                if (
+                  !current ||
+                  current.id !== turn.id ||
+                  current.executionGeneration !== turn.executionGeneration
+                )
+                  throw new Error("The linked agent attempt is no longer authorized");
+              },
+            }
+          : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
         reasoningEffort: turn.reasoningEffort,
         latencyMode: turnExecutionPolicy.latencyMode,

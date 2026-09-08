@@ -12,8 +12,10 @@ export * from "./external-identity-links";
 export * from "./connection-setup-authority";
 export * from "./external-link-work";
 import {
-  inheritExternalLinkTurnAuthority, captureScheduledExternalLinkTurnAuthority,
-  cloneExternalLinkTaskAuthority, getExternalLinkTurnAuthorization,
+  inheritExternalLinkTurnAuthority,
+  captureScheduledExternalLinkTurnAuthority,
+  cloneExternalLinkTaskAuthority,
+  getExternalLinkTurnAuthorization,
 } from "./external-link-work";
 export * from "./host-mcp-bindings";
 import {
@@ -15859,20 +15861,37 @@ export async function upsertSocialOAuthConnection(
     async (scopedDb) => {
       if (input.subjectId) await setSubjectRlsContext(scopedDb, input.subjectId);
       if (input.expectedConnection) {
-        const [updated] = await scopedDb.update(schema.socialConnections).set({
-          accountHandle: input.accountHandle, accountName: input.accountName ?? null,
-          status: "connected", scopes: input.scopes, credentialEncrypted: input.credentialEncrypted,
-          tokenMetadata: input.tokenMetadata ?? {}, updatedAt: new Date(),
-        }).where(and(
-          eq(schema.socialConnections.accountId, input.accountId),
-          eq(schema.socialConnections.workspaceId, input.workspaceId),
-          eq(schema.socialConnections.id, input.expectedConnection.id),
-          eq(schema.socialConnections.version, input.expectedConnection.version),
-          eq(schema.socialConnections.provider, input.provider),
-          input.subjectId ? eq(schema.socialConnections.subjectId, input.subjectId) : isNull(schema.socialConnections.subjectId),
-          input.externalAccountId ? eq(schema.socialConnections.externalAccountId, input.externalAccountId) : sql`false`,
-        )).returning();
-        if (!updated) throw new Error("Social connection changed; authorize the same account again from current state");
+        const [updated] = await scopedDb
+          .update(schema.socialConnections)
+          .set({
+            accountHandle: input.accountHandle,
+            accountName: input.accountName ?? null,
+            status: "connected",
+            scopes: input.scopes,
+            credentialEncrypted: input.credentialEncrypted,
+            tokenMetadata: input.tokenMetadata ?? {},
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.socialConnections.accountId, input.accountId),
+              eq(schema.socialConnections.workspaceId, input.workspaceId),
+              eq(schema.socialConnections.id, input.expectedConnection.id),
+              eq(schema.socialConnections.version, input.expectedConnection.version),
+              eq(schema.socialConnections.provider, input.provider),
+              input.subjectId
+                ? eq(schema.socialConnections.subjectId, input.subjectId)
+                : isNull(schema.socialConnections.subjectId),
+              input.externalAccountId
+                ? eq(schema.socialConnections.externalAccountId, input.externalAccountId)
+                : sql`false`,
+            ),
+          )
+          .returning();
+        if (!updated)
+          throw new Error(
+            "Social connection changed; authorize the same account again from current state",
+          );
         return mapSocialConnection(updated);
       }
       const [row] = await scopedDb
@@ -16386,14 +16405,22 @@ export async function updateScheduledTask(
     const mapped = mapScheduledTask(row);
     if (input.captureLinkAuthority) await input.captureLinkAuthority(scopedDb, mapped);
     else if (previousHostRevision)
-      await cloneExternalLinkTaskAuthority(scopedDb, mapped,
-        input.clonePersonalResourceAuthorityFromRevision ?? input.cloneConnectionAuthorityFromRevision ??
-        previousHostRevision.authorityRevision);
+      await cloneExternalLinkTaskAuthority(
+        scopedDb,
+        mapped,
+        input.clonePersonalResourceAuthorityFromRevision ??
+          input.cloneConnectionAuthorityFromRevision ??
+          previousHostRevision.authorityRevision,
+      );
     if (input.captureHostAuthority) await input.captureHostAuthority(scopedDb, mapped);
     else if (previousHostRevision)
-      await cloneHostMcpTaskAuthorities(scopedDb, mapped,
-        input.clonePersonalResourceAuthorityFromRevision ?? input.cloneConnectionAuthorityFromRevision ??
-        previousHostRevision.authorityRevision);
+      await cloneHostMcpTaskAuthorities(
+        scopedDb,
+        mapped,
+        input.clonePersonalResourceAuthorityFromRevision ??
+          input.cloneConnectionAuthorityFromRevision ??
+          previousHostRevision.authorityRevision,
+      );
     return mapped;
   });
 }
@@ -17308,7 +17335,11 @@ export async function materializeScheduledTaskReusableSessionFromRun(
         materializedTask,
         input.sourceTaskAuthorityRevision,
       );
-      await cloneExternalLinkTaskAuthority(scopedDb, materializedTask, input.sourceTaskAuthorityRevision);
+      await cloneExternalLinkTaskAuthority(
+        scopedDb,
+        materializedTask,
+        input.sourceTaskAuthorityRevision,
+      );
       return Number(row.authorityRevision);
     },
   );
@@ -30804,8 +30835,8 @@ async function setScheduledTaskAuthorityRlsContext(
   // frozenSessionCreatorForInsert verified the agent attempt before reading
   // this separate causal-human field. Keep service audit attribution intact;
   // never substitute the session creator or parse a caller's provenance JSON.
-  const causalHumanSubjectId = frozen.initiatingHumanSubjectId ??
-    (frozen.initiator.kind === "subject" ? subjectId : "");
+  const causalHumanSubjectId =
+    frozen.initiatingHumanSubjectId ?? (frozen.initiator.kind === "subject" ? subjectId : "");
   await tx.execute(sql`select
     set_config('opengeni.subject_id', ${subjectId}, true),
     set_config(
@@ -61519,8 +61550,12 @@ export async function initializeSessionStartAtomically(
           await input.captureInitialTurnAuthority(tx as unknown as Database, turn.id);
         if (insertedTurn && session.parentSessionId && session.parentTurnId)
           await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
-            accountId: session.accountId, workspaceId: input.workspaceId, sessionId: session.id,
-            turnId: turn.id, sourceTurnId: session.parentTurnId, kind: "child",
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            turnId: turn.id,
+            sourceTurnId: session.parentTurnId,
+            kind: "child",
           });
         if (
           insertedTurn &&
@@ -64539,7 +64574,11 @@ export async function claimSessionWorkForAttempt(
           );
           if (scheduledTaskRunId) {
             await captureScheduledExternalLinkTurnAuthority(tx as unknown as Database, {
-              accountId: session.accountId, workspaceId, sessionId, turnId: internalTurn.id, runId: scheduledTaskRunId,
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              runId: scheduledTaskRunId,
             });
             await captureScheduledHostMcpTurnAuthorities(tx as unknown as Database, {
               accountId: session.accountId,
@@ -64550,8 +64589,12 @@ export async function claimSessionWorkForAttempt(
             });
           } else if (causalHumanTurnId && initiatingHumanSubjectId) {
             await inheritExternalLinkTurnAuthority(tx as unknown as Database, {
-              accountId: session.accountId, workspaceId, sessionId, turnId: internalTurn.id,
-              sourceTurnId: causalHumanTurnId, kind: "causal",
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              turnId: internalTurn.id,
+              sourceTurnId: causalHumanTurnId,
+              kind: "causal",
             });
             await inheritCausalHostMcpTurnAuthorities(tx as unknown as Database, {
               accountId: session.accountId,
@@ -71044,9 +71087,14 @@ export async function getActiveSessionTurnForExecution(
       )
       .limit(1);
     if (!row) return null;
-    const linked = await getExternalLinkTurnAuthorization(scopedDb, {
-      accountId: row.turn.accountId, workspaceId,
-    }, row.turn.id);
+    const linked = await getExternalLinkTurnAuthorization(
+      scopedDb,
+      {
+        accountId: row.turn.accountId,
+        workspaceId,
+      },
+      row.turn.id,
+    );
     if (linked && !linked.authorized) return null;
     await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
     return mapSessionTurnForExecution(row.turn);
@@ -71102,9 +71150,14 @@ export async function getSessionTurnForAttempt(
       )
       .limit(1);
     if (!row) return null;
-    const linked = await getExternalLinkTurnAuthorization(scopedDb, {
-      accountId: row.turn.accountId, workspaceId,
-    }, row.turn.id);
+    const linked = await getExternalLinkTurnAuthorization(
+      scopedDb,
+      {
+        accountId: row.turn.accountId,
+        workspaceId,
+      },
+      row.turn.id,
+    );
     if (linked && !linked.authorized) return null;
     await goalSnapshotForAcceptedTurnInTransaction(scopedDb, row.turn);
     return mapSessionTurnForExecution(row.turn);

@@ -204,8 +204,14 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
 
   function reconnect() {
     if (status?.configured && canManage) {
-      setConnectRequest({ scope: { workspaceId, transport: connectTransport }, providerId: "github-app", displayName: "GitHub App",
-        ownership: "workspace", returnUrl: window.location.href, idempotencyKey: crypto.randomUUID() });
+      setConnectRequest({
+        scope: { workspaceId, transport: connectTransport },
+        providerId: "github-app",
+        displayName: "GitHub App",
+        ownership: "workspace",
+        returnUrl: window.location.href,
+        idempotencyKey: crypto.randomUUID(),
+      });
       return;
     }
     if (status?.setupMode === "operator" && !status.configured) {
@@ -428,8 +434,15 @@ export function useGitHubIntegration({ workspaceId }: { workspaceId: string }): 
 
   const dialogs = (
     <>
-      {connectRequest && <NativeConnectSetup transport={connectTransport} workspaceId={workspaceId}
-        request={connectRequest} onClose={() => setConnectRequest(null)} onComplete={completeConnect} />}
+      {connectRequest && (
+        <NativeConnectSetup
+          transport={connectTransport}
+          workspaceId={workspaceId}
+          request={connectRequest}
+          onClose={() => setConnectRequest(null)}
+          onComplete={completeConnect}
+        />
+      )}
       <ConfirmDialog
         open={disconnectOpen}
         onOpenChange={setDisconnectOpen}

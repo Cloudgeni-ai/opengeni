@@ -451,6 +451,10 @@ const effectiveBudgets = {
     // Same September 6 Bun 1.4 graph: untouched main is 643,869 gzip bytes;
     // history anchoring + keyboard/touch demand adds 964, with no new chunk.
     wholeKibEnvelope(644_833, 1.5 * kib),
+    // Exact embedding/main 45405585 integration after isolating Connect setup
+    // and server-only SDK administration: 650,609 gzip bytes. Retain the
+    // established platform-skew allowance and all unrelated limits.
+    wholeKibEnvelope(650_609, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,

@@ -106,7 +106,11 @@ function encryptedFixture(): string {
 async function createMcpCapability(
   workspace: { accountId: string; workspaceId: string },
   id: string,
-  overrides: { endpointUrl?: string; metadata?: Record<string, unknown>; authModel?: string | null } = {},
+  overrides: {
+    endpointUrl?: string;
+    metadata?: Record<string, unknown>;
+    authModel?: string | null;
+  } = {},
 ): Promise<void> {
   await upsertCapabilityCatalogItem(db, {
     ...workspace,
@@ -128,11 +132,23 @@ describe("subject-owned capability connection references", () => {
     if (!available) throw new Error("Real PostgreSQL fixture required");
     const workspace = await freshWorkspace();
     const capabilityId = `mcp:public-${crypto.randomUUID()}`;
-    await createMcpCapability(workspace, capabilityId, { endpointUrl: "https://public.example.test/mcp", authModel: null });
+    await createMcpCapability(workspace, capabilityId, {
+      endpointUrl: "https://public.example.test/mcp",
+      authModel: null,
+    });
     let probes = 0;
-    const prepared = await prepareCapabilityEnable({ db, ...workspace, settings, capabilityId,
-      grant: grant(workspace, "subject-alice"), payload: { config: {}, metadata: {}, headers: {} },
-      probeMcpServer: async input => { probes++; expect(input.headers).toBeUndefined(); return { toolCount: 2 }; },
+    const prepared = await prepareCapabilityEnable({
+      db,
+      ...workspace,
+      settings,
+      capabilityId,
+      grant: grant(workspace, "subject-alice"),
+      payload: { config: {}, metadata: {}, headers: {} },
+      probeMcpServer: async (input) => {
+        probes++;
+        expect(input.headers).toBeUndefined();
+        return { toolCount: 2 };
+      },
     });
     expect(await getCapabilityInstallation(db, workspace.workspaceId, capabilityId)).toBeNull();
     const installed = await prepared.commit(db);

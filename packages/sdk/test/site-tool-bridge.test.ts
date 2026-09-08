@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createSiteToolBridge } from "../src/site";
-import { OpenGeniClient } from "../src/client";
+import { OpenGeniClient } from "../src/index";
 import type { ToolGatewayCatalog, ToolGatewayCallResponse } from "../src/types";
 
 const identity = { serverId: "product", toolName: "lookup" };

@@ -132,7 +132,10 @@ const LazyWorkspaceStateRoute = lazyRouteComponent(
   "WorkspaceStateRoute",
 );
 const LazyArtifactsRoute = lazyRouteComponent(() => import("@/routes/artifacts"), "ArtifactsRoute");
-const LazyIdentityLinkRoute = lazyRouteComponent(() => import("@/routes/identity-link"), "IdentityLinkRoute");
+const LazyIdentityLinkRoute = lazyRouteComponent(
+  () => import("@/routes/identity-link"),
+  "IdentityLinkRoute",
+);
 const LazyEditableArtifactRoute = lazyRouteComponent(
   () => import("@/routes/editable-artifact"),
   "EditableArtifactRoute",
@@ -167,7 +170,8 @@ const identityLinkRoute = createRoute({
   path: "identity-links/$linkId",
   validateSearch: (search: Record<string, unknown>): { organization?: string } =>
     typeof search.organization === "string" && /^[0-9a-f-]{36}$/i.test(search.organization)
-      ? { organization: search.organization } : {},
+      ? { organization: search.organization }
+      : {},
   component: IdentityLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every

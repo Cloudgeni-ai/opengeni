@@ -71,7 +71,9 @@ export function IdentityLinkAccounts({
       if (link) {
         const updated = await client.revokeIdentityLink(workspaceId, link.id, link.revision);
         if (current === generation.current)
-          setLinks((values) => values.map((value) => (value.id === updated.id ? { ...value, ...updated } : value)));
+          setLinks((values) =>
+            values.map((value) => (value.id === updated.id ? { ...value, ...updated } : value)),
+          );
       } else {
         const page = await client.listIdentityLinks(workspaceId, cursor!);
         if (current === generation.current) {

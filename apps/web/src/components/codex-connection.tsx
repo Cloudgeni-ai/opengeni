@@ -1,3 +1,4 @@
+import { trackModelConnection } from "@/lib/analytics-observer";
 // Codex (ChatGPT) subscriptions card for workspace settings: connect MULTIPLE
 // ChatGPT accounts via device code, list them with an ACTIVE radio (the account
 // unpinned sessions use), inline rename, per-account refresh/disconnect, and
@@ -841,6 +842,7 @@ export function CodexSubscriptionsCard({
   }, [loading, data, refreshUsage]);
 
   const connect = useCallback(async () => {
+    const recordOutcome = trackModelConnection("codex", workspaceId);
     setBusy(true);
     try {
       const start = await client.codexConnectStart(workspaceId);
@@ -862,6 +864,7 @@ export function CodexSubscriptionsCard({
         .then(async (result) => {
           if (!result) return;
           if (result.status === "connected") {
+            recordOutcome("connected");
             if (!cancelled.current) {
               setPending(null);
               toast.success(`Codex connected${result.plan ? ` (${result.plan} plan)` : ""}`);
@@ -870,6 +873,7 @@ export function CodexSubscriptionsCard({
             return;
           }
           if (result.status === "expired") {
+            recordOutcome("expired");
             if (!cancelled.current) {
               setPending(null);
               toast.error("The code expired before it was authorized. Try again.");
@@ -878,6 +882,7 @@ export function CodexSubscriptionsCard({
           }
         })
         .catch((error) => {
+          recordOutcome("outcome_unknown");
           if (!cancelled.current) {
             setPending(null);
             toast.error(
@@ -888,6 +893,7 @@ export function CodexSubscriptionsCard({
           }
         });
     } catch (error) {
+      recordOutcome("outcome_unknown");
       setPending(null);
       toast.error(error instanceof Error ? error.message : "Failed to start Codex login");
     } finally {
@@ -1173,6 +1179,7 @@ export function CodexSubscriptionsCard({
             size="sm"
             variant="ghost"
             disabled={busy}
+            data-analytics-action="connect_codex"
             onClick={() => void connect()}
           >
             <PlusIcon className="size-3.5" /> Connect
@@ -1258,7 +1265,13 @@ export function CodexSubscriptionsCard({
                 : "Not connected. Connecting requires connection-management access and a ChatGPT Plus/Pro/Team plan."}
           </p>
           {canManage && workspaceManaged && !sourceDisabled ? (
-            <Button type="button" size="sm" disabled={busy} onClick={() => void connect()}>
+            <Button
+              type="button"
+              size="sm"
+              disabled={busy}
+              data-analytics-action="connect_codex"
+              onClick={() => void connect()}
+            >
               {busy ? (
                 <Loader2Icon className="size-3.5 animate-spin" />
               ) : (

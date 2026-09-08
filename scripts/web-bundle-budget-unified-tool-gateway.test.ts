@@ -19,7 +19,7 @@ describe("unified tool gateway web bundle budget", () => {
     );
   });
   test("fits the measured session-history graph with bounded headroom", () => {
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2263 * KIB);
-    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_315_348).toBe(1_964);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET).toBe(2280 * KIB);
+    expect(EFFECTIVE_DIRECT_SESSION_RAW_BUDGET - 2_333_201).toBe(1_519);
   });
 });

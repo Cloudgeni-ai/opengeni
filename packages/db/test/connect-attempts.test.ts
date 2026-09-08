@@ -8,8 +8,11 @@ import { executeConnectOperation } from "../../core/src/application/connect-oper
 import { createDb, createWorkspace, nestedPostgresSqlState, type DbClient } from "../src";
 import { ensureExternalIdentity } from "../src/external-identities";
 import {
-  beginExternalIdentityLink, confirmExternalIdentityLink, getExternalIdentityLink,
-  resolveExternalIdentityLink, revokeExternalIdentityLink,
+  beginExternalIdentityLink,
+  confirmExternalIdentityLink,
+  getExternalIdentityLink,
+  resolveExternalIdentityLink,
+  revokeExternalIdentityLink,
 } from "../src/external-identity-links";
 import { verifyExternalAdmission } from "../../core/test/external-admission-fixture";
 import { verifyExternalLifecycle } from "../../core/test/external-lifecycle-fixture";
@@ -31,10 +34,14 @@ const digest = "a".repeat(64);
 describe("external identity provisioning", () => {
   test("native identity link requires two principals, narrows permission and revokes without merging", async () => {
     const identity = await ensureExternalIdentity(client.db, {
-      accountId: scope.accountId, externalId: `native-link-${crypto.randomUUID()}`,
+      accountId: scope.accountId,
+      externalId: `native-link-${crypto.randomUUID()}`,
     });
     const nativeSubjectId = `user:${crypto.randomUUID()}`;
-    const personal = await createWorkspace(client.db, { accountId: scope.accountId, name: "Native link owner" });
+    const personal = await createWorkspace(client.db, {
+      accountId: scope.accountId,
+      name: "Native link owner",
+    });
     await shared.admin`insert into organization_memberships
       (account_id, subject_id, role, status, personal_workspace_id, authorization_revision)
       values (${scope.accountId}, ${nativeSubjectId}, 'member', 'active', ${personal.id}, 1)`;
@@ -44,40 +51,133 @@ describe("external identity provisioning", () => {
     expect(pending.link.nativeSubjectId).toBeNull();
     expect(pending.link.status).toBe("pending");
     expect(pending.link.expiresAt).toBeNull();
-    const query = { accountId: scope.accountId, linkId: pending.link.id, subjectId: identity.subjectId };
+    const query = {
+      accountId: scope.accountId,
+      linkId: pending.link.id,
+      subjectId: identity.subjectId,
+    };
     expect(await getExternalIdentityLink(client.db, query)).toEqual(pending.link);
-    expect(JSON.stringify(await getExternalIdentityLink(client.db, query))).not.toContain(pending.challenge);
-    expect(await getExternalIdentityLink(client.db, { ...query, subjectId: nativeSubjectId })).toBeNull();
-    const confirm = { accountId: scope.accountId, linkId: pending.link.id, nativeSubjectId,
-      request: { challenge: pending.challenge, expectedRevision: 1, permissions: ["sessions:read"] as const } };
-    await expect(confirmExternalIdentityLink(client.db, { ...confirm,
-      request: { ...confirm.request, permissions: ["workspace:admin"] } })).rejects.toThrow("unavailable");
-    await expect(confirmExternalIdentityLink(client.db, { ...confirm,
-      request: { ...confirm.request, permissions: ["sessions:read"], challenge: "x".repeat(43) } })).rejects.toThrow("unavailable");
-    const confirmed = await confirmExternalIdentityLink(client.db, { ...confirm,
-      request: { ...confirm.request, permissions: ["sessions:read"] } });
-    expect(confirmed).toMatchObject({ status: "active", revision: 2, nativeSubjectId, permissions: ["sessions:read"] });
-    expect(await confirmExternalIdentityLink(client.db, { ...confirm,
-      request: { ...confirm.request, permissions: ["sessions:read"] } })).toEqual(confirmed);
-    expect((await resolveExternalIdentityLink(client.db, { identity, linkId: confirmed.id, expectedRevision: 2 }))?.personalWorkspaceId).toBe(personal.id);
-    expect(await resolveExternalIdentityLink(client.db, { identity, linkId: confirmed.id, expectedRevision: 1 })).toBeNull();
-    const stranger = await ensureExternalIdentity(client.db, { accountId: scope.accountId, externalId: `stranger-${crypto.randomUUID()}` });
-    expect(await resolveExternalIdentityLink(client.db, { identity: stranger, linkId: confirmed.id, expectedRevision: 2 })).toBeNull();
-    const revoked = await revokeExternalIdentityLink(client.db, { ...query, subjectId: nativeSubjectId, expectedRevision: 2 });
+    expect(JSON.stringify(await getExternalIdentityLink(client.db, query))).not.toContain(
+      pending.challenge,
+    );
+    expect(
+      await getExternalIdentityLink(client.db, { ...query, subjectId: nativeSubjectId }),
+    ).toBeNull();
+    const confirm = {
+      accountId: scope.accountId,
+      linkId: pending.link.id,
+      nativeSubjectId,
+      request: {
+        challenge: pending.challenge,
+        expectedRevision: 1,
+        permissions: ["sessions:read"] as const,
+      },
+    };
+    await expect(
+      confirmExternalIdentityLink(client.db, {
+        ...confirm,
+        request: { ...confirm.request, permissions: ["workspace:admin"] },
+      }),
+    ).rejects.toThrow("unavailable");
+    await expect(
+      confirmExternalIdentityLink(client.db, {
+        ...confirm,
+        request: { ...confirm.request, permissions: ["sessions:read"], challenge: "x".repeat(43) },
+      }),
+    ).rejects.toThrow("unavailable");
+    const confirmed = await confirmExternalIdentityLink(client.db, {
+      ...confirm,
+      request: { ...confirm.request, permissions: ["sessions:read"] },
+    });
+    expect(confirmed).toMatchObject({
+      status: "active",
+      revision: 2,
+      nativeSubjectId,
+      permissions: ["sessions:read"],
+    });
+    expect(
+      await confirmExternalIdentityLink(client.db, {
+        ...confirm,
+        request: { ...confirm.request, permissions: ["sessions:read"] },
+      }),
+    ).toEqual(confirmed);
+    expect(
+      (
+        await resolveExternalIdentityLink(client.db, {
+          identity,
+          linkId: confirmed.id,
+          expectedRevision: 2,
+        })
+      )?.personalWorkspaceId,
+    ).toBe(personal.id);
+    expect(
+      await resolveExternalIdentityLink(client.db, {
+        identity,
+        linkId: confirmed.id,
+        expectedRevision: 1,
+      }),
+    ).toBeNull();
+    const stranger = await ensureExternalIdentity(client.db, {
+      accountId: scope.accountId,
+      externalId: `stranger-${crypto.randomUUID()}`,
+    });
+    expect(
+      await resolveExternalIdentityLink(client.db, {
+        identity: stranger,
+        linkId: confirmed.id,
+        expectedRevision: 2,
+      }),
+    ).toBeNull();
+    const revoked = await revokeExternalIdentityLink(client.db, {
+      ...query,
+      subjectId: nativeSubjectId,
+      expectedRevision: 2,
+    });
     expect(revoked).toMatchObject({ status: "revoked", revision: 3 });
-    expect(await revokeExternalIdentityLink(client.db, { ...query, expectedRevision: 2 })).toEqual(revoked);
-    expect(await resolveExternalIdentityLink(client.db, { identity, linkId: confirmed.id, expectedRevision: 2 })).toBeNull();
-    await expect(confirmExternalIdentityLink(client.db, { ...confirm,
-      request: { ...confirm.request, permissions: ["sessions:read"] } })).rejects.toThrow("unavailable");
-    expect((await ensureExternalIdentity(client.db, { accountId: scope.accountId, externalId: identity.externalId })).subjectId).toBe(identity.subjectId);
-    const [native] = await shared.admin`select status from organization_memberships where account_id = ${scope.accountId} and subject_id = ${nativeSubjectId}`;
+    expect(await revokeExternalIdentityLink(client.db, { ...query, expectedRevision: 2 })).toEqual(
+      revoked,
+    );
+    expect(
+      await resolveExternalIdentityLink(client.db, {
+        identity,
+        linkId: confirmed.id,
+        expectedRevision: 2,
+      }),
+    ).toBeNull();
+    await expect(
+      confirmExternalIdentityLink(client.db, {
+        ...confirm,
+        request: { ...confirm.request, permissions: ["sessions:read"] },
+      }),
+    ).rejects.toThrow("unavailable");
+    expect(
+      (
+        await ensureExternalIdentity(client.db, {
+          accountId: scope.accountId,
+          externalId: identity.externalId,
+        })
+      ).subjectId,
+    ).toBe(identity.subjectId);
+    const [native] =
+      await shared.admin`select status from organization_memberships where account_id = ${scope.accountId} and subject_id = ${nativeSubjectId}`;
     expect(native?.status).toBe("active");
-    const otherPending = await beginExternalIdentityLink(client.db, identity, { permissions: ["sessions:read"] });
+    const otherPending = await beginExternalIdentityLink(client.db, identity, {
+      permissions: ["sessions:read"],
+    });
     expect(otherPending.link.id).not.toBe(confirmed.id);
     await shared.admin`update organization_memberships set status = 'suspended', authorization_revision = authorization_revision + 1
       where account_id = ${scope.accountId} and subject_id = ${nativeSubjectId}`;
-    await expect(confirmExternalIdentityLink(client.db, { ...confirm, linkId: otherPending.link.id,
-      request: { challenge: otherPending.challenge, expectedRevision: 1, permissions: ["sessions:read"] } })).rejects.toThrow("unavailable");
+    await expect(
+      confirmExternalIdentityLink(client.db, {
+        ...confirm,
+        linkId: otherPending.link.id,
+        request: {
+          challenge: otherPending.challenge,
+          expectedRevision: 1,
+          permissions: ["sessions:read"],
+        },
+      }),
+    ).rejects.toThrow("unavailable");
   });
   test("verified external owners can use Personal and private sessions without native cookie authority", async () => {
     // Activation receipts, like native tenancy fixtures, are immutable and
@@ -274,17 +374,40 @@ async function begin(value = attempt()) {
 
 describe("durable Connect attempts", () => {
   test("a claimed operation cannot retarget its named installation or rewrite origin fields", async () => {
-    const value = await begin({ ...attempt(), installationTarget: { instanceKey: "finance", displayName: "Finance", expectedInstanceVersion: 4 } });
-    const input = { attemptId: value.id, operationId: crypto.randomUUID(), expectedRevision: value.revision, inputDigest: digest };
+    const value = await begin({
+      ...attempt(),
+      installationTarget: {
+        instanceKey: "finance",
+        displayName: "Finance",
+        expectedInstanceVersion: 4,
+      },
+    });
+    const input = {
+      attemptId: value.id,
+      operationId: crypto.randomUUID(),
+      expectedRevision: value.revision,
+      inputDigest: digest,
+    };
     await claimConnectOperation(client.db, scope, input);
-    await expect(finishConnectOperation(client.db, scope, {
-      ...input, commit: async (_tx, current) => ({ ...current, revision: current.revision + 1,
-        installationTarget: { instanceKey: "another", displayName: "Another" } }),
-    })).rejects.toThrow("changed");
+    await expect(
+      finishConnectOperation(client.db, scope, {
+        ...input,
+        commit: async (_tx, current) => ({
+          ...current,
+          revision: current.revision + 1,
+          installationTarget: { instanceKey: "another", displayName: "Another" },
+        }),
+      }),
+    ).rejects.toThrow("changed");
     let denial: unknown;
-    try { await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.subjectId, tx => tx.execute(sql`
-      update connect_attempts set return_url = 'https://changed.example' where id = ${value.id}::uuid`)); }
-    catch (error) { denial = error; }
+    try {
+      await withWorkspaceSubjectRls(client.db, scope.workspaceId, scope.subjectId, (tx) =>
+        tx.execute(sql`
+      update connect_attempts set return_url = 'https://changed.example' where id = ${value.id}::uuid`),
+      );
+    } catch (error) {
+      denial = error;
+    }
     expect(nestedPostgresSqlState(denial)).toBe("42501");
     const stored = await getConnectAttempt(client.db, scope, value.id);
     expect(stored.attempt.installationTarget).toEqual(value.installationTarget);

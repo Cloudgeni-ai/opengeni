@@ -78,10 +78,21 @@ export async function requireExternalContinuationAuthority(
     identity.authorizationRevision !== actor.externalAuthorizationRevision
   )
     deny();
-  const linked = actor.actingMode === "linked_native"
-    ? await resolveExternalIdentityLink(tx, { identity, linkId: actor.linkId!, expectedRevision: actor.linkRevision! }) : null;
-  if (actor.actingMode === "linked_native" && (!linked || linked.link.nativeSubjectId !== scope.subjectId ||
-    required.some(value => !hasPermission(linked.link.permissions, value)))) deny();
+  const linked =
+    actor.actingMode === "linked_native"
+      ? await resolveExternalIdentityLink(tx, {
+          identity,
+          linkId: actor.linkId!,
+          expectedRevision: actor.linkRevision!,
+        })
+      : null;
+  if (
+    actor.actingMode === "linked_native" &&
+    (!linked ||
+      linked.link.nativeSubjectId !== scope.subjectId ||
+      required.some((value) => !hasPermission(linked.link.permissions, value)))
+  )
+    deny();
   if (actor.actingMode === "external" && scope.subjectId !== identity.subjectId) deny();
   const grant =
     scope.workspaceId === (linked?.personalWorkspaceId ?? identity.personalWorkspaceId)

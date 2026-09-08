@@ -1283,22 +1283,55 @@ describe("OpenGeni Slack bot connection", () => {
   test("embedded Slack bot setup has a workspace-owned atomic receipt and exact return", async () => {
     if (!available) throw new Error("PostgreSQL required");
     const workspace = await freshWorkspace();
-    const identity = await ensureExternalIdentity(client.db, { accountId: workspace.accountId, externalId: "slack-product-user" });
+    const identity = await ensureExternalIdentity(client.db, {
+      accountId: workspace.accountId,
+      externalId: "slack-product-user",
+    });
     const token = randomBytes(24).toString("hex");
-    await createOrganizationApiKey(client.db, { accountId: workspace.accountId, name: "Slack embedding", prefix: "test", keyHash: createHash("sha256").update(token).digest("hex"), permissions: ["workspace:read", "connections:read", "connections:write"] });
-    const headers = { authorization: `Bearer ${token}`, "content-type": "application/json", "x-opengeni-external-actor": encodeURIComponent(JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } })) };
+    await createOrganizationApiKey(client.db, {
+      accountId: workspace.accountId,
+      name: "Slack embedding",
+      prefix: "test",
+      keyHash: createHash("sha256").update(token).digest("hex"),
+      permissions: ["workspace:read", "connections:read", "connections:write"],
+    });
+    const headers = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({ mode: "external", identity: { externalId: identity.externalId } }),
+      ),
+    };
     const slack = fakeSlack();
     const server = app(slack.fetch, { ...settings, integrationsEnabled: true });
     const base = `/v1/workspaces/${identity.personalWorkspaceId}/connect/attempts`;
     const returnUrl = "https://HOST.example:443/finish?x=%2f#Slack";
-    const begin = await server.request(base, { method: "POST", headers, body: JSON.stringify({ providerId: "slack-bot", ownership: "workspace", returnUrl, idempotencyKey: randomUUID() }) });
+    const begin = await server.request(base, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        providerId: "slack-bot",
+        ownership: "workspace",
+        returnUrl,
+        idempotencyKey: randomUUID(),
+      }),
+    });
     expect(begin.status).toBe(200);
     const attempt = await begin.json();
     const authorization = new URL(attempt.nextAction.url);
     expect(authorization.searchParams.has("user_scope")).toBe(false);
-    const callback = () => server.request(`/v1/integrations/slack/callback?${new URLSearchParams({ code: "fixture-code", state: authorization.searchParams.get("state")! })}`);
+    const callback = () =>
+      server.request(
+        `/v1/integrations/slack/callback?${new URLSearchParams({ code: "fixture-code", state: authorization.searchParams.get("state")! })}`,
+      );
     expect((await callback()).headers.get("location")).toBe(returnUrl);
-    expect(await (await server.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject({ state: "complete", completionRequirement: "connection", account: { ownership: "workspace", providerId: "slack-bot" } });
+    expect(await (await server.request(`${base}/${attempt.id}`, { headers })).json()).toMatchObject(
+      {
+        state: "complete",
+        completionRequirement: "connection",
+        account: { ownership: "workspace", providerId: "slack-bot" },
+      },
+    );
     const calls = slack.calls.length;
     expect((await callback()).headers.get("location")).toBe(returnUrl);
     expect(slack.calls.length).toBe(calls);
