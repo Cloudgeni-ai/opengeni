@@ -72,17 +72,18 @@ function invitation(input: {
   status: "pending" | "accepted";
   revision: number;
 }) {
-  const timestamp = "2026-09-08T12:00:00.000Z";
+  const createdAt = "2026-09-01T12:00:00.000Z";
+  const expiresAt = new Date(Date.now() + 60 * 60_000).toISOString();
   return {
     ...input,
     targetEmail: "member@example.test",
     targetName: "Member",
     initialWorkspaceIds: [crypto.randomUUID()],
     role: "member" as const,
-    expiresAt: timestamp,
+    expiresAt,
     acceptedMembershipId: input.status === "accepted" ? crypto.randomUUID() : null,
-    createdAt: timestamp,
-    updatedAt: timestamp,
+    createdAt,
+    updatedAt: createdAt,
     delivery: null,
   };
 }

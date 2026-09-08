@@ -63,7 +63,7 @@ function invitation(targetEmail: string) {
     organizationId: "00000000-0000-4000-8000-000000000010",
     organizationName: "Northwind Research",
     targetEmail,
-    expiresAt: "2026-09-08T12:00:00.000Z",
+    expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     createdAt: Date.parse("2026-09-01T12:00:00.000Z"),
   };
 }
