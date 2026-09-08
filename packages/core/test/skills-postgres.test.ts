@@ -1055,10 +1055,23 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(await listSkills(client.db, f.context)).toHaveLength(1);
     // Draft authored entries also occupy metadata pages. They must not make
     // a later installed/customized Skill disappear from runtime resolution.
-    await shared!
-      .admin`INSERT INTO preference_registry_preferences(account_id,stable_key,scope,scope_workspace_id,created_by_subject_id)
-      SELECT ${f.context.accountId},'a-padding-'||n::text,'workspace',${f.context.workspaceId},${f.human.actor.subjectId}
-      FROM generate_series(1,1000) n`;
+    await shared!.admin.begin(async (tx) => {
+      await tx`WITH heads AS (
+        INSERT INTO preference_registry_preferences(account_id,stable_key,scope,scope_workspace_id,created_by_subject_id)
+        SELECT ${f.context.accountId},'a-padding-'||n::text,'workspace',${f.context.workspaceId},${f.human.actor.subjectId}
+        FROM generate_series(1,1000) n RETURNING id,account_id
+      ), revisions AS (
+        INSERT INTO preference_registry_revisions(account_id,preference_id,title,description,content,content_hash,
+          conflict_strategy,provenance_source,trust,created_by_subject_id,skill_files,skill_activation_mode)
+        SELECT h.account_id,h.id,r.title,r.description,r.content,r.content_hash,
+          r.conflict_strategy,r.provenance_source,r.trust,${f.human.actor.subjectId},r.skill_files,r.skill_activation_mode
+        FROM heads h CROSS JOIN preference_registry_revisions r WHERE r.id=${custom.revisionId}
+        RETURNING id,account_id,preference_id
+      ) INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,
+          new_scope,new_workspace_id,actor_subject_id,reason)
+        SELECT account_id,preference_id,'proposal_created',1,id,'workspace',${f.context.workspaceId},
+          ${f.human.actor.subjectId},'Pagination fixture inactive Skill proposal' FROM revisions`;
+    });
     const beyondFirstPage = await listInstalledPortableSkills(client.db, f.context.workspaceId);
     expect(beyondFirstPage).toHaveLength(1);
     expect(beyondFirstPage[0]?.name).toBe("test-skill");
