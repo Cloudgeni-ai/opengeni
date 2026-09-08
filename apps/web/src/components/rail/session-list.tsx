@@ -248,6 +248,7 @@ type MoveToChannelFn = (
   restoreFocusTo?: SessionFocusTarget,
 ) => Promise<void>;
 const SESSION_DRAG_TYPE = "application/x-opengeni-session";
+const PROJECT_DRAG_TYPE = "application/x-opengeni-project";
 type UpdateAttentionFn = (
   session: Session,
   update: { unread?: boolean; activelyWorking?: boolean },
@@ -2318,14 +2319,11 @@ export function SessionList() {
     { key: "matching-results", label: "matching sessions", kind: "results" },
     nextCursor,
   );
-  const defaultPagination = paginationForGroup(
-    { key: "channel:default", label: "Default", kind: "channel", channelId: null },
-    nextCursor,
-  );
-  const renderedChannelSections =
-    channelSections.some((section) => section.channelId === null) || !defaultPagination
-      ? channelSections
-      : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
+  // Default is also a move destination: keep its header when its last row
+  // leaves, even if there is no next page of unfiled sessions.
+  const renderedChannelSections = channelSections.some((section) => section.channelId === null)
+    ? channelSections
+    : [...channelSections, { key: "default", channelId: null, name: "Default", sessions: [] }];
   const renderedGroupedBuckets =
     browseGroupBy === "creator"
       ? forest.grouped
@@ -3146,7 +3144,7 @@ function SessionGroup(props: {
           onDragStart={(event: DragEvent<HTMLDivElement>) => {
             if (!props.project) return;
             event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", props.project.id);
+            event.dataTransfer.setData(PROJECT_DRAG_TYPE, props.project.id);
             props.onProjectDragStart?.(props.project.id);
           }}
           onDragOver={(event: DragEvent<HTMLDivElement>) => {
@@ -3157,7 +3155,7 @@ function SessionGroup(props: {
               setSessionDragOver(true);
               return;
             }
-            if (!props.project) return;
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
             event.dataTransfer.dropEffect = "move";
             props.onProjectDragOver?.(props.project.id);
@@ -3176,9 +3174,9 @@ function SessionGroup(props: {
               }
               return;
             }
-            if (!props.project) return;
+            if (!props.project || !event.dataTransfer.types.includes(PROJECT_DRAG_TYPE)) return;
             event.preventDefault();
-            const sourceProjectId = event.dataTransfer.getData("text/plain");
+            const sourceProjectId = event.dataTransfer.getData(PROJECT_DRAG_TYPE);
             if (sourceProjectId) props.onProjectDrop?.(sourceProjectId, props.project.id);
           }}
           onDragEnd={props.onProjectDragEnd}

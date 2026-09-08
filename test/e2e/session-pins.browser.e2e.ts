@@ -166,17 +166,36 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await page.reload();
       const row = page.locator(`a[data-session-row="${session.id}"]`);
-      await row.click({ button: "right" });
+      // macOS Control-click reaches the same native contextmenu event. Do not
+      // turn ordinary modified link clicks into synthetic menu gestures.
+      await row.dispatchEvent("contextmenu", { button: 0, ctrlKey: true });
       const menu = page.locator(`[data-session-menu="${session.id}"]`);
       await menu.getByText("Move to project", { exact: true }).waitFor();
+      expect(await menu.getByRole("menuitem", { name: "Default", exact: true }).isDisabled()).toBe(
+        true,
+      );
+      const persistedMove = (channelId: string | null) =>
+        page.waitForResponse(
+          (response) =>
+            response.request().method() === "PUT" &&
+            response.url().endsWith(`/sessions/${session.id}/channel`) &&
+            response.request().postDataJSON()?.channelId === channelId &&
+            response.ok(),
+        );
+      const menuMove = persistedMove(project.id);
       await menu.getByRole("menuitem", { name: project.name, exact: true }).click();
+      await menuMove;
       const projectGroup = page.getByRole("group", { name: project.name, exact: true });
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
-      // Real HTML dragging must move the session, not reorder its project.
+      // Even after the last unfiled session leaves, Default remains a target.
       const defaultGroup = page.getByRole("group", { name: "Default", exact: true });
+      const defaultMove = persistedMove(null);
       await row.dragTo(defaultGroup.locator(":scope > div[draggable]").first());
+      await defaultMove;
       await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      const projectMove = persistedMove(project.id);
       await row.dragTo(projectGroup.locator(":scope > div[draggable]").first());
+      await projectMove;
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
       await page.reload();
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
