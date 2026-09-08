@@ -18,6 +18,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
+import { withSiteSessionOrigin } from "@opengeni/core";
+import { resolveSiteSessionOrigin } from "../src/site-session-origin";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -169,6 +171,61 @@ afterAll(async () => {
 }, 60_000);
 
 describe("session_create receipts under FORCE RLS (real PostgreSQL)", () => {
+  test("records validated Site origin and preserves keyed replay after archive and rename", async () => {
+    if (!available) return;
+    const grant = await freshGrant();
+    const [site] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_artifacts (account_id, workspace_id, slug, title, created_by_subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, 'origin-test', 'Analytics', ${grant.subjectId}) returning id`;
+    const [version] = await shared!.admin<{ id: string }[]>`
+      insert into workspace_artifact_versions (account_id, workspace_id, artifact_id, revision, content_key, size_bytes, operation_key, created_by_subject_id)
+      values (${grant.accountId}, ${grant.workspaceId}, ${site!.id}, 1, 'synthetic.html', 1, ${crypto.randomUUID()}, ${grant.subjectId}) returning id`;
+    const origin = await resolveSiteSessionOrigin(
+      client.db,
+      grant.workspaceId,
+      site!.id,
+      version!.id,
+    );
+    expect(origin).toEqual({ siteId: site!.id, title: "Analytics" });
+    const other = await freshGrant();
+    await expect(
+      resolveSiteSessionOrigin(client.db, other.workspaceId, site!.id, version!.id),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      resolveSiteSessionOrigin(client.db, grant.workspaceId, site!.id, crypto.randomUUID()),
+    ).rejects.toMatchObject({ status: 404 });
+    const server = buildServer(grant, new FakeWorkflowClient());
+    const args = {
+      initialMessage: "A single Site conversation",
+      model: "scripted-model",
+      sandboxBackend: "none",
+      idempotencyKey: crypto.randomUUID(),
+    };
+    const created = await withSiteSessionOrigin(origin!, () =>
+      callMcpTool<McpMutationReceiptType>(server, "session_create", args),
+    );
+    const sessionId = created.resource.id;
+    const [row] = await shared!.admin<
+      { metadata: Record<string, unknown>; parent_session_id: string | null }[]
+    >`
+      select metadata, parent_session_id from sessions where id = ${sessionId}`;
+    expect(row!.metadata._opengeniSiteOrigin).toEqual(origin);
+    expect(row!.parent_session_id).toBeNull();
+    await shared!
+      .admin`update workspace_artifacts set status = 'archived', title = 'Renamed' where id = ${site!.id}`;
+    const renamed = await resolveSiteSessionOrigin(
+      client.db,
+      grant.workspaceId,
+      site!.id,
+      version!.id,
+    );
+    const replay = await withSiteSessionOrigin(renamed!, () =>
+      callMcpTool<McpMutationReceiptType>(server, "session_create", args),
+    );
+    expect(replay.resource.id).toBe(sessionId);
+    expect((await durableCounts(grant.workspaceId, sessionId)).workspaceSessions).toBe(1);
+  }, 60_000);
+
   test("MCP project selection files a new session and survives keyed replay", async () => {
     if (!available) return;
     const grant = await freshGrant();

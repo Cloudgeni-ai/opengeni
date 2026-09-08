@@ -12326,6 +12326,8 @@ export type SessionSummary = Session;
  */
 export const SessionListResponse = z.object({
   pinned: z.array(Session),
+  filtersApplied: z.literal(true).optional(),
+  originSiteId: z.string().uuid().optional(),
   /** True when older matching pins were omitted from this bounded page. */
   pinnedTruncated: z.boolean().optional(),
   sessions: z.array(Session),

@@ -69,8 +69,15 @@ export function createSiteToolBridge(input: CreateSiteToolBridgeOptions): SiteTo
     ...(input.fetchResponse
       ? {
           fetch: async (message: SiteHttpRequest, signal: AbortSignal) => {
-            const path = siteSessionPath(message.path, input.workspaceId, message.method);
+            const path = siteSessionPath(
+              message.path,
+              input.workspaceId,
+              message.method,
+              input.artifactId,
+            );
             const headers = new Headers();
+            headers.set("x-opengeni-site-id", input.artifactId);
+            headers.set("x-opengeni-site-version", input.siteVersionId);
             for (const [name, value] of message.headers) {
               if (["content-type", "accept", "last-event-id"].includes(name.toLowerCase()))
                 headers.set(name, value);

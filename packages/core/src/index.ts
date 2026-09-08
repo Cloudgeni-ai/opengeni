@@ -121,3 +121,4 @@ export * from "./editable-artifact-live";
 
 // Transport-neutral editable-artifact domain service, ports, and contracts.
 export * from "./editable-artifacts";
+export { withSiteSessionOrigin } from "./site-session-origin";

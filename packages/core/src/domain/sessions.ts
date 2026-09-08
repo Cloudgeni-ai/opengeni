@@ -1,4 +1,5 @@
 import { CODEX_MODEL_ID_PREFIX, isCodexBilledModel } from "@opengeni/codex";
+import { sessionCreationMetadata } from "../site-session-origin";
 import {
   HostMcpBindingDefinition,
   HostMcpCreateSelections,
@@ -1879,6 +1880,7 @@ export async function createSessionForRequestWithOutcome(
   agentChildPresentation?: AgentChildSessionCreatePresentation,
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
+  payload.metadata = sessionCreationMetadata(payload.metadata);
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
   const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
   const hostSelections = payload.selectedHostMcpDelegations ?? [];

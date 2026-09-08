@@ -225,6 +225,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               <Label htmlFor="variableSet-name">Name</Label>
               <Input
                 id="variableSet-name"
+                suppressAutofill
                 name="variable-set-name"
                 value={createName}
                 onChange={(event) => setCreateName(event.target.value)}
@@ -516,6 +517,7 @@ export function VariableSetCard(props: {
                 value={nameDraft}
                 onChange={(event) => setNameDraft(event.target.value)}
                 aria-label="Variable set name"
+                suppressAutofill
                 autoComplete="off"
                 className="h-8 text-sm"
               />
@@ -815,6 +817,7 @@ export function VariableSetCard(props: {
               <div className="grid gap-1">
                 <Input
                   name="variable-name"
+                  suppressAutofill
                   value={variableName}
                   onChange={(event) => setVariableName(event.target.value)}
                   placeholder="VARIABLE_NAME"

@@ -525,6 +525,10 @@ describe("API helpers", () => {
     expect(external.headers.get("access-control-allow-credentials")).toBeNull();
     expect(external.headers.get("access-control-allow-headers")).toContain("Authorization");
     expect(external.headers.get("access-control-allow-headers")).toContain("Range");
+    expect(external.headers.get("access-control-allow-headers")).toContain("X-OpenGeni-Site-Id");
+    expect(external.headers.get("access-control-allow-headers")).toContain(
+      "X-OpenGeni-Site-Version",
+    );
 
     const externalResponse = await app.request("http://localhost/v1/config/client", {
       headers: { origin: "https://product.example" },

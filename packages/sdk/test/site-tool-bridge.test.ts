@@ -28,6 +28,8 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
     headers: [
       ["authorization", "forged"],
       ["x-opengeni-external-actor", "other"],
+      ["x-opengeni-site-id", "forged-site"],
+      ["x-opengeni-site-version", "forged-version"],
       ["accept", "text/event-stream"],
     ] as [string, string][],
   };
@@ -36,13 +38,20 @@ test("shared Site HTTP forwarding preserves main's bounded session API and host 
   expect(new Headers(requests[0]!.init.headers).get("authorization")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("x-opengeni-external-actor")).toBeNull();
   expect(new Headers(requests[0]!.init.headers).get("accept")).toBe("text/event-stream");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-id")).toBe("site");
+  expect(new Headers(requests[0]!.init.headers).get("x-opengeni-site-version")).toBe("version");
+  await bridge.fetch!(
+    { ...message, path: "/v1/workspaces/site-host/sessions?originSiteId=current" },
+    new AbortController().signal,
+  );
+  expect(requests[1]!.path).toBe("/v1/workspaces/workspace/sessions?originSiteId=site");
   await expect(
     bridge.fetch!(
       { ...message, path: "/v1/workspaces/other/sessions" },
       new AbortController().signal,
     ),
   ).rejects.toThrow("Unsupported");
-  expect(requests).toHaveLength(1);
+  expect(requests).toHaveLength(2);
 });
 const catalog: ToolGatewayCatalog = {
   version: 1,

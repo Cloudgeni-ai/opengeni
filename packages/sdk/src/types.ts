@@ -1473,6 +1473,8 @@ export type SessionListResponse = {
   pinnedTruncated?: boolean;
   /** Present only when the server recognized and applied additive list filters. */
   filtersApplied?: true;
+  /** Server-resolved Site origin filter, when requested. */
+  originSiteId?: string;
   sessions: Session[];
   nextCursor: string | null;
 };

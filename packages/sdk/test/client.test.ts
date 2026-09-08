@@ -2082,6 +2082,35 @@ describe("OpenGeniClient", () => {
     ).rejects.toThrow("does not support filtered session lists");
   });
 
+  test("Site-filtered lists require explicit server support, including with other filters", async () => {
+    const old = makeClient(() =>
+      jsonResponse({ pinned: [], sessions: [], nextCursor: null, filtersApplied: true }),
+    );
+    await expect(
+      old.client.listSessions(WORKSPACE_ID, { originSiteId: SESSION_ID }),
+    ).rejects.toThrow("does not support Site-filtered session lists");
+    await expect(
+      old.client.listSessionPage(WORKSPACE_ID, { originSiteId: SESSION_ID, channelId: null }),
+    ).rejects.toThrow("does not support Site-filtered session lists");
+    const modern = makeClient(() =>
+      jsonResponse({
+        pinned: [],
+        sessions: [],
+        nextCursor: null,
+        filtersApplied: true,
+        originSiteId: SESSION_ID,
+      }),
+    );
+    await expect(
+      modern.client.listSessions(WORKSPACE_ID, { originSiteId: SESSION_ID }),
+    ).resolves.toEqual([]);
+    expect(modern.requests[0]!.url).toContain(`originSiteId=${SESSION_ID}`);
+    expect(modern.requests[0]!.url).toContain("view=page");
+    await expect(
+      modern.client.listSessionPage(WORKSPACE_ID, { originSiteId: "current" }),
+    ).resolves.toMatchObject({ originSiteId: SESSION_ID });
+  });
+
   test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
     const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
     const unavailable = makeClient(

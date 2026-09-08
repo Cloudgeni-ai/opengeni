@@ -288,6 +288,7 @@ export function PrReviewSetupCard(props: {
               value={name}
               onChange={(event) => setName(event.target.value)}
               placeholder="Registration name"
+              suppressAutofill
             />
             <Input
               value={providerBaseUrl}

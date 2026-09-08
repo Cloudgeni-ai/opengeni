@@ -47,4 +47,9 @@ export const EFFECTIVE_DIRECT_SESSION_RAW_BUDGET = Math.max(
   // and per-account model access: 2,345,266 raw bytes. Keep settings lazy and
   // all startup, file-count and per-chunk caps unchanged.
   wholeKibEnvelope(2_345_266),
+  // Site-origin navigation and grouping: Bun 1.4 macOS/arm64 measures
+  // 2,324,500 raw bytes. Splitting the tiny heading increases the graph to
+  // 2,324,964 through shared chunk overhead, so retain synchronous rail UI.
+  // Advance only the measured raw envelope; compressed and other caps stay fixed.
+  wholeKibEnvelope(2_324_500),
 );

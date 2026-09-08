@@ -32759,6 +32759,8 @@ export type SessionListKeysetCursor = {
 export type SessionListCursor = SessionListSnapshotCursor | SessionListKeysetCursor;
 
 export type SessionListFilterOptions = {
+  /** Sessions created through this published Site, independent of project. */
+  originSiteId?: string;
   /** Exact workspace project; null selects unfiled sessions. */
   channelId?: string | null;
   /** Exact frozen creator identity. */
@@ -33485,6 +33487,7 @@ function sessionFilters(
     | "subjectId"
     | "archivedOnly"
     | "channelId"
+    | "originSiteId"
     | "createdBy"
     | "updatedFrom"
     | "updatedBefore"
@@ -33502,6 +33505,11 @@ function sessionFilters(
         and private_slack_interaction.owning_subject_id <> ${options.subjectId}
     )`,
   ];
+  if (options.originSiteId) {
+    filters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.originSiteId}`,
+    );
+  }
   const archivedRoot = sql`exists (
     select 1
     from ${schema.sessionPins} archive_state
@@ -33670,6 +33678,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
   const hasChannel = options.channelId !== undefined;
   if (
     !hasChannel &&
+    !options.originSiteId &&
     !options.createdBy &&
     !options.updatedFrom &&
     !options.updatedBefore &&
@@ -33679,6 +33688,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     hasChannel ? ["channel", options.channelId] : null,
     options.createdBy ? ["creator", options.createdBy.kind, options.createdBy.subjectId] : null,
     options.updatedFrom ? ["updatedFrom", options.updatedFrom.toISOString()] : null,
@@ -34879,6 +34889,8 @@ export async function getLatestSessionModelForSubject(
 
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt" | "relevance";
 export type SessionDiscoveryCursor = {
+  /** Site provenance is bound for chronological as well as relevance lists. */
+  originSiteId?: string;
   orderBy: SessionDiscoveryOrderBy;
   /** Stable rank class for relevance order; null for chronological order. */
   sortRank: number | null;
@@ -34990,6 +35002,7 @@ async function readWorkspaceSessionActivityRevision(
 const SESSION_DISCOVERY_QUERY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
 
 type NormalizedSessionDiscoveryFilters = {
+  originSiteId: string | null;
   query: string | null;
   statuses: SessionStatus[];
   activeOnly: boolean;
@@ -35068,6 +35081,7 @@ function normalizeSessionDiscoverySubject(
 }
 
 function normalizeSessionDiscoveryFilters(options: {
+  originSiteId?: string;
   query?: string;
   search?: string;
   statuses?: SessionStatus[];
@@ -35106,6 +35120,7 @@ function normalizeSessionDiscoveryFilters(options: {
   }
   return {
     query,
+    originSiteId: options.originSiteId ?? null,
     statuses,
     activeOnly: options.activeOnly === true,
     recentHours,
@@ -35123,6 +35138,7 @@ function sessionDiscoveryFilterHash(filters: NormalizedSessionDiscoveryFilters):
     .update(
       JSON.stringify({
         query: filters.query,
+        ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
         statuses: filters.statuses,
         activeOnly: filters.activeOnly,
         recentHours: filters.recentHours,
@@ -35188,6 +35204,11 @@ async function selectSessionDiscoveryPageRows(
   }
   if (options.filters.statuses.length > 0) {
     authorizationFilters.push(inArray(schema.sessions.status, options.filters.statuses));
+  }
+  if (options.filters.originSiteId) {
+    authorizationFilters.push(
+      sql`${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'siteId' = ${options.filters.originSiteId}`,
+    );
   }
   if (options.filters.activeOnly) {
     authorizationFilters.push(notInArray(schema.sessions.status, ["failed", "cancelled"]));
@@ -35756,6 +35777,7 @@ export async function listSessionDiscoverySummaries(
   db: Database,
   workspaceId: string,
   options: {
+    originSiteId?: string;
     limit: number;
     cursor?: SessionDiscoveryCursor;
     includeLastMessage?: boolean;
@@ -35790,6 +35812,7 @@ export async function listSessionDiscoverySummaries(
   updatedAfter: string | null;
   /** Internal relevance cursor binding; omitted from row projections. */
   filterHash: string | null;
+  originSiteId?: string;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   const claimLimit = Math.max(
@@ -35811,6 +35834,9 @@ export async function listSessionDiscoverySummaries(
   }
   const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
   const readPage = async (scopedDb: Database) => {
+    if (options.cursor && (options.cursor.originSiteId ?? null) !== filters.originSiteId) {
+      throw new Error("sessions_list cursor Site filter does not match the request");
+    }
     const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
     const updatedAfter =
       requestedUpdatedAfter === null
@@ -36074,6 +36100,7 @@ export async function listSessionDiscoverySummaries(
               snapshotRevision,
               updatedAfter,
               filterHash,
+              ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
             }
           : null,
       total: selected.total,
@@ -36083,6 +36110,7 @@ export async function listSessionDiscoverySummaries(
       updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
       filterHash,
+      ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
     };
   };
   const transactionConfig: PgTransactionConfig =

@@ -23,6 +23,33 @@ beforeAll(() => {
 afterAll(() => GlobalRegistrator.unregister());
 
 describe("BundlesSection", () => {
+  test("filters all bundle kinds using the page query without a second search input", async () => {
+    for (const [query, expected] of [
+      [" RESEARCH ", "plugin:example/research"],
+      ["Terraform", "skill:terraform"],
+      ["Infrastructure operations", "pack:infra-ops"],
+      ["release-operator", "imported:skill:release-operator-abc123"],
+    ] as const) {
+      const rendered = await renderSection({ query });
+      try {
+        expect(rowIds(rendered.container)).toEqual([expected]);
+        expect(count(rendered.container)).toBe("1 of 4");
+        expect(rendered.container.querySelector('input[type="search"]')).toBeNull();
+      } finally {
+        await rendered.unmount();
+      }
+    }
+  });
+
+  test("reports no matches for an unrelated page query", async () => {
+    const rendered = await renderSection({ query: "unmatched-connector" });
+    try {
+      expect(rowIds(rendered.container)).toEqual([]);
+      expect(count(rendered.container)).toBe("0 of 4");
+    } finally {
+      await rendered.unmount();
+    }
+  });
   test("lists every provenance through one uniform row under one heading", async () => {
     const rendered = await renderSection();
     try {
@@ -186,11 +213,13 @@ async function renderSection(
     empty?: boolean;
     loadError?: boolean;
     packsError?: boolean;
+    query?: string;
     onOpenCatalogItem?: (item: CapabilityCatalogItem) => void;
   } = {},
 ) {
   const rendered = await render(
     <BundlesSection
+      query={options.query ?? ""}
       client={stubClient(options.empty ?? false, options.loadError ?? false)}
       workspaceId="00000000-0000-4000-8000-000000000001"
       connections={[]}

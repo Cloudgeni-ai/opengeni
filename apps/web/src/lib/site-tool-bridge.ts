@@ -6,7 +6,7 @@ import {
 import type { PublishedHtmlArtifactToolBridge } from "@opengeni/react/artifacts";
 import { ApiError, request, requestResponse } from "@/api";
 
-/** Native authentication only; Site routing, filtering and version pinning are shared. */
+/** Native authentication only; Site routing, origin, filtering and version pinning are shared. */
 export function createSiteToolBridge(
   input: Omit<CreateSiteToolBridgeOptions, "callTool" | "isCatalogStale" | "fetchResponse"> & {
     callTool?: CreateSiteToolBridgeOptions["callTool"];

@@ -230,7 +230,13 @@ For the Site's ordinary session SDK, optionally supply `fetchResponse` with your
 authenticated host transport. The shared bridge applies the same bounded
 `siteSessionPath` routing as the native console and forwards only content negotiation
 and event replay headers; host authentication and tenant selection remain outside
-the iframe. Omit this transport for tools-only Sites. Display uses
+the iframe. The bridge adds its pinned Site ID/version headers (never trusts
+iframe-supplied ones), enabling the API's verified Site-origin attribution on
+new conversations. `originSiteId=current` resolves to that pinned Site for
+conversation filtering. Provenance does not grant access or replace the acting
+user/workspace authority. Keep these headers through your authenticated proxy;
+do not synthesize provenance from caller-supplied session metadata.
+Omit this transport for tools-only Sites. Display uses
 `getWorkspaceArtifactHtml` at the observed version, not a retained-source download.
 It checks Site read authority every 15 seconds while loaded and clears the frame
 on denial, scope replacement or version/status change. This is bounded UI
