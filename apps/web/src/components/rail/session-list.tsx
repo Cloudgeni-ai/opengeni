@@ -3651,7 +3651,7 @@ function SessionRow(props: {
                   }
                   rail.setDrawerOpen(false);
                 }}
-                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
+                className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface pointer-fine:group-has-[[data-session-quick-actions]]:group-hover:pr-14 pointer-fine:group-has-[[data-session-quick-actions]]:group-focus-within:pr-14"
               >
                 <SessionRowContent
                   title={title}

@@ -140,6 +140,31 @@ describe("Session rail row metadata in Chromium", () => {
     await page.screenshot({ path: "/tmp/opengeni-session-hover-overflow.png", fullPage: true });
   });
 
+  test("keeps hover and keyboard actions beside creator metadata, never over it", async () => {
+    for (const id of [
+      "time-only",
+      "status-time",
+      "schedule-date",
+      "no-metadata",
+      "selected-child",
+      "unselected-child",
+    ]) {
+      const row = page.locator(`[data-row-case="${id}"]`);
+      for (const interaction of ["hover", "focus"] as const) {
+        await page.mouse.move(1000, 700);
+        if (interaction === "hover") await row.hover();
+        else await row.getByRole("button", { name: "Pin session", exact: true }).focus();
+        const metadata = (await row.locator("[data-session-row-metadata]").boundingBox())!;
+        const actions = (await row.locator("[data-session-quick-actions]").boundingBox())!;
+        const rowBox = (await row.boundingBox())!;
+        expect(actions.width).toBeGreaterThan(0);
+        expect(metadata.x + metadata.width).toBeLessThanOrEqual(actions.x);
+        expect(actions.x + actions.width).toBeLessThanOrEqual(rowBox.x + rowBox.width);
+        await page.locator("main").click({ position: { x: 900, y: 600 } });
+      }
+    }
+  });
+
   test("reveals direct pin and archive controls on hover and keyboard focus", async () => {
     const row = page.locator('[data-row-case="time-only"]');
     const link = row.locator("a");

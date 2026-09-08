@@ -157,7 +157,7 @@ export function RailTrailingMetadata({
         </span>
       ) : null}
       {hasRelativeTime ? (
-        <span className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
+        <span className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg pointer-fine:group-hover:hidden pointer-fine:group-focus-within:hidden">
           {relativeTime}
         </span>
       ) : null}

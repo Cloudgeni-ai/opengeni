@@ -68,7 +68,7 @@ function SessionRailRowMetadataFixture() {
                     href={`#${scenario.id}`}
                     aria-current={scenario.active ? "page" : undefined}
                     aria-label={`Open ${longTitle}. Idle`}
-                    className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none"
+                    className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-none pointer-fine:group-has-[[data-session-quick-actions]]:group-hover:pr-14 pointer-fine:group-has-[[data-session-quick-actions]]:group-focus-within:pr-14"
                   >
                     <SessionRowContent
                       title={longTitle}
@@ -108,19 +108,20 @@ function SessionRailRowMetadataFixture() {
                   />
                 </HoverCardContent>
               </HoverCard>
-              {scenario.id === "time-only" ? (
-                <RowQuickActions
-                  session={quickActionSession}
-                  onPin={async (session, pinned) => {
-                    const updated = { ...session, pinned };
-                    setQuickActionSession(updated);
-                    return updated;
-                  }}
-                  onArchive={async (session, archived) => {
-                    setQuickActionSession({ ...session, archived });
-                  }}
-                />
-              ) : null}
+              <RowQuickActions
+                session={{
+                  ...quickActionSession,
+                  parentSessionId: scenario.depth > 0 ? "parent" : null,
+                }}
+                onPin={async (session, pinned) => {
+                  const updated = { ...session, pinned };
+                  setQuickActionSession(updated);
+                  return updated;
+                }}
+                onArchive={async (session, archived) => {
+                  setQuickActionSession({ ...session, archived });
+                }}
+              />
             </div>
           ))}
         </div>
