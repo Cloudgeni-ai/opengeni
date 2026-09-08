@@ -1,3 +1,4 @@
+export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
 export { OpenGeniClient } from "./artifact-client";
 export {
   OpenGeniToolCallError,
@@ -21,6 +22,7 @@ export type {
   OpenGeniClientOptions,
   OpenGeniRequestOptions,
   SendMessageInput,
+  SessionListPageOptions,
   SteerMessageResult,
   TranscribeAudioInput,
   WorkspaceControlEventPage,
@@ -910,6 +912,8 @@ export type {
   SessionPromptRouting,
   SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
+  WorkspacePauseTimer,
+  WorkspacePauseTimerRequest,
   SessionPendingInputPreview,
   SessionSystemUpdate,
   SessionSystemUpdateKind,

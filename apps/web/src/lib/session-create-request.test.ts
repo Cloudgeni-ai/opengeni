@@ -634,9 +634,21 @@ describe("new-session draft option mapping", () => {
   });
 
   test("creates Only-me Personal-workspace sessions with private tenancy", () => {
-    expect(newSessionCreateVisibility(true, "workspace")).toBe("private");
-    expect(newSessionCreateVisibility(true, "private")).toBe("private");
-    expect(newSessionCreateVisibility(false, "workspace")).toBe("workspace");
+    expect(newSessionCreateVisibility(true, "workspace", true)).toBe("private");
+    expect(newSessionCreateVisibility(true, "private", true)).toBe("private");
+    expect(newSessionCreateVisibility(false, "workspace", false)).toBe("workspace");
+  });
+
+  test("Personal sessions remain startable when Only-me tenancy is unavailable", () => {
+    for (const selected of ["private", "workspace"] as const) {
+      const visibility = newSessionCreateVisibility(true, selected, false);
+      const draft = { ...emptySessionDraft(), visibility: selected };
+      const options = newSessionDraftOptionsFromSessionDraft(draft, undefined, visibility);
+      const request = build([], [], { visibility });
+      expect(options.visibility).toBe("workspace");
+      expect(request.visibility).toBe("workspace");
+    }
+    expect(newSessionCreateVisibility(false, "private", false)).toBe("private");
   });
 
   test("preserves ordered Variable Set precedence through create and draft persistence", () => {
@@ -660,7 +672,7 @@ describe("new-session draft option mapping", () => {
       variableSetId: variableSetIds.at(-1),
       personalResourceAttachment,
     });
-    const visibility = newSessionCreateVisibility(true, draft.visibility);
+    const visibility = newSessionCreateVisibility(true, draft.visibility, true);
     const request = build([], [], {
       submission: { text: "start privately", ...submission.extras },
       visibility,

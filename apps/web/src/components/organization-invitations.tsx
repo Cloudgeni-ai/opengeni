@@ -246,6 +246,81 @@ export function useOrganizationInvitations(input: {
   };
 }
 
+export function pendingOrganizationInvitationCue(pendingCount: number): string | null {
+  if (pendingCount <= 0) return null;
+  return pendingCount === 1
+    ? "1 organization invitation pending"
+    : `${pendingCount} organization invitations pending`;
+}
+
+export function accountMenuAriaLabel(input: {
+  displayName?: string | null;
+  pendingCount: number;
+  loading?: boolean;
+}): string {
+  const base = input.loading
+    ? "Loading account menu"
+    : input.displayName
+      ? `Account menu. ${input.displayName} is active.`
+      : "Account menu";
+  const cue = pendingOrganizationInvitationCue(input.pendingCount);
+  return cue ? `${base} ${cue}.` : base;
+}
+
+export function organizationInvitationNoticeLabel(
+  invitations: readonly OrganizationInvitation[],
+): string | null {
+  if (invitations.length === 0) return null;
+  if (invitations.length === 1) {
+    const organizationName = invitations[0]?.organizationName?.trim();
+    return organizationName ? `Join ${organizationName}` : "Review organization invitation";
+  }
+  return `${invitations.length} organization invitations`;
+}
+
+export function OrganizationInvitationCountBadge(props: {
+  pendingCount: number;
+  className?: string;
+}) {
+  if (props.pendingCount <= 0) return null;
+  return (
+    <span
+      aria-hidden="true"
+      data-slot="organization-invitation-count"
+      className={cn(
+        "absolute -right-1 -top-1 z-10 flex min-w-3.5 items-center justify-center rounded-full bg-brand-strong px-1 text-2xs font-semibold leading-tight text-brand-fg",
+        props.className,
+      )}
+    >
+      {props.pendingCount > 9 ? "9+" : props.pendingCount}
+    </span>
+  );
+}
+
+export function OrganizationInvitationRailNotice(props: {
+  controller: OrganizationInvitationsController;
+}) {
+  const label = organizationInvitationNoticeLabel(props.controller.invitations);
+  if (!label) return null;
+  const cue = pendingOrganizationInvitationCue(props.controller.pendingCount);
+  return (
+    <button
+      type="button"
+      aria-label={cue ? `Review invitations. ${cue}.` : "Review organization invitations"}
+      onClick={props.controller.openDialog}
+      className="mb-1 flex min-h-8 w-full items-center gap-2 rounded-md border border-brand/30 bg-brand/[0.06] px-1.5 py-1 text-left transition-colors hover:bg-brand/[0.1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring pointer-coarse:min-h-11"
+    >
+      <MailIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
+      <span className="min-w-0 flex-1 truncate text-xs font-medium text-fg">{label}</span>
+      {props.controller.pendingCount > 1 ? (
+        <Badge variant="secondary" className="min-w-5 px-1.5 py-0 text-2xs tabular-nums">
+          {props.controller.pendingCount > 9 ? "9+" : props.controller.pendingCount}
+        </Badge>
+      ) : null}
+    </button>
+  );
+}
+
 export function OrganizationInvitationsMenuItem(props: {
   controller: OrganizationInvitationsController;
   className?: string;

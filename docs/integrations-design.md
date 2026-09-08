@@ -296,6 +296,11 @@ Served publicly at `GET /v1/integrations/oauth/client-metadata.json`:
 
 - PKCE S256 always; refuse ASes not advertising it.
 - `state` signed, single-use, TTL-bound, workspace+subject-bound; callback validates all of it.
+- RFC 9728 discovery probes the well-known prefix before the resource path,
+  then the origin-root location, after any explicitly advertised metadata URL.
+  It does not guess metadata beneath the resource API path: a protected API
+  catch-all there may return 401 even when metadata is absent. Explicitly
+  advertised URLs remain authoritative regardless of their path shape.
 - RFC 9728 PRM is authoritative whenever present. Malformed, contradictory,
   unreachable, redirected-to-unsafe, or otherwise invalid PRM is a hard failure;
   it never causes a legacy downgrade.

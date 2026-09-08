@@ -1,0 +1,32 @@
+---
+title: "Goals"
+description: "Keep a session working until the job is actually done."
+icon: "bullseye"
+---
+
+Agents stop early. A **goal** flips the default: while a session's goal is active, finishing a turn does not end the work. OpenGeni records a durable obligation to continue, and the agent's next turn starts from "your goal is not done: keep working, or explicitly complete or pause it."
+
+## Lifecycle
+
+A goal is `active`, `paused`, or `completed`.
+
+- **Set** it when creating a session, from a scheduled task, or from inside the run with the agent's `goal_set` tool. A goal carries an objective and success criteria.
+- **Complete** is explicit: the agent calls `goal_complete` with evidence.
+- **Pause** holds the goal with a rationale: the agent's `goal_pause`, a user pause, an API call, or a budget or admission limit. Any pause is resumable with `goal_resume`.
+- **Clear** removes the goal. The session stays usable as an ordinary session.
+
+Pausing the session (the workstream) is separate from pausing the goal: it holds inference without changing goal state.
+
+## No run-length caps by design
+
+OpenGeni runs agents that legitimately work for days. There is no default cap on model calls per turn or on continuation count. What bounds a run is policy and intent: budget and admission limits, explicit goal completion or pause, and human interrupts.
+
+Consecutive continuations that consumed no new input are paced with a growing delay (seconds to minutes) rather than a cap. Any new external input, such as a human message, a child result, or a scheduled occurrence, resumes a pacing pause immediately.
+
+## What the agent sees
+
+The exact goal snapshot accepted for a turn is attached to that turn's newest user-facing input, never to a mutable instruction prefix. Recovery replays the same authority, and later goal edits apply from the next turn.
+
+## Controlling goals
+
+Humans and API clients read, pause, resume, and clear a session's goal through the session goal routes and the SDK. See the repository's [goals document](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/goals.md) for the full contract.

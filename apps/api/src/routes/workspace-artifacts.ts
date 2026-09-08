@@ -36,15 +36,19 @@ import {
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
-import {
-  prepareWorkspaceArtifactContent,
-  readWorkspaceArtifactContent,
-} from "../workspace-artifact-content";
+import { readWorkspaceArtifactContent } from "../workspace-artifact-content";
 import {
   projectWorkspaceArtifactDetailProvenance,
   projectWorkspaceArtifactMutationProvenance,
   redactWorkspaceArtifactListProvenance,
 } from "../workspace-artifact-provenance";
+
+import {
+  prepareWorkspaceArtifactPublication,
+  prepareWorkspaceArtifactUpload,
+  workspaceArtifactDownloads,
+  readArtifactObject,
+} from "../site-uploads";
 
 const ArtifactId = z.string().uuid();
 
@@ -52,6 +56,13 @@ async function body<S extends z.ZodType>(context: Context, schema: S): Promise<z
   const parsed = schema.safeParse(await context.req.json().catch(() => null));
   if (!parsed.success) throw new HTTPException(422, { message: "Invalid artifact request" });
   return parsed.data;
+}
+
+function parseVersionId(value: string | undefined): string | undefined {
+  if (value !== undefined && !ArtifactId.safeParse(value).success) {
+    throw new HTTPException(422, { message: "Invalid artifact version id" });
+  }
+  return value;
 }
 
 function artifactId(context: Context): string {
@@ -94,14 +105,14 @@ export function workspaceArtifactErrorResponse(context: Context, error: unknown)
 
 function prepareContent(
   deps: ApiRouteDeps,
-  workspaceId: string,
-  input: Parameters<typeof prepareWorkspaceArtifactContent>[2],
+  grant: AccessGrant,
+  input: Parameters<typeof prepareWorkspaceArtifactPublication>[2],
 ) {
   if (!deps.objectStorage)
     throw new HTTPException(503, {
       message: "Object storage is not configured",
     });
-  return prepareWorkspaceArtifactContent(deps.objectStorage, workspaceId, input);
+  return prepareWorkspaceArtifactPublication(deps, grant, input);
 }
 
 function provenance(subjectId: string, idempotencyKey: string) {
@@ -156,15 +167,48 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
   // retained-output API. The product route remains simply `/artifacts`.
   const base = "/v1/workspaces/:workspaceId/published-artifacts";
 
-  app.get(base, async (context) => {
+  app.post(`${base}/uploads`, async (context) => {
+    const grant = await requireAccessGrant(
+      context,
+      deps,
+      context.req.param("workspaceId"),
+      "artifacts:publish",
+    );
+    return context.json(await prepareWorkspaceArtifactUpload(deps, grant));
+  });
+
+  app.get(`${base}/:artifactId/downloads`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    if (!deps.objectStorage)
+      throw new HTTPException(503, {
+        message: "Object storage is not configured",
+      });
+    const ref = await getWorkspaceArtifactContentRef(
+      deps.db,
+      workspaceId,
+      artifactId(context),
+      parseVersionId(context.req.query("versionId")),
+    );
+    return context.json(await workspaceArtifactDownloads(deps.objectStorage, ref, "public"));
+  });
+
+  app.get(base, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    const grant = await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
     const query = WorkspaceArtifactListQuery.safeParse({
       limit: context.req.query("limit"),
       cursor: context.req.query("cursor"),
       status: context.req.query("status"),
+      sourceSessionId: context.req.query("sourceSessionId"),
     });
     if (!query.success) throw new HTTPException(422, { message: "Invalid artifact list query" });
+    if (
+      query.data.sourceSessionId &&
+      !(await canReadProvenanceSession(deps, grant, query.data.sourceSessionId))
+    ) {
+      throw new HTTPException(404, { message: "Session not found" });
+    }
     try {
       return context.json(
         WorkspaceArtifactListResponse.parse(
@@ -173,6 +217,9 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
               limit: query.data.limit,
               ...(query.data.cursor ? { cursor: query.data.cursor } : {}),
               ...(query.data.status ? { status: query.data.status } : {}),
+              ...(query.data.sourceSessionId
+                ? { sourceSessionId: query.data.sourceSessionId }
+                : {}),
             }),
           ),
         ),
@@ -195,12 +242,13 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const id = crypto.randomUUID();
     const slugBase = request.slug ?? (normalizeWorkspaceArtifactSlug(request.title) || "artifact");
     const slug = request.slug ?? `${slugBase.slice(0, 87)}-${id.slice(0, 8)}`;
-    const content = prepareContent(deps, workspaceId, {
-      html: request.html,
-      ...(request.source ? { source: request.source } : {}),
-      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
-    });
     try {
+      const content = await prepareContent(deps, grant, {
+        ...(request.html !== undefined ? { html: request.html } : {}),
+        ...(request.uploadId ? { uploadId: request.uploadId } : {}),
+        ...(request.source ? { source: request.source } : {}),
+        ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
+      });
       return context.json(
         await mutationResponse(
           deps,
@@ -241,6 +289,45 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     }
   });
 
+  app.get(`${base}/:artifactId/html`, async (context) => {
+    const workspaceId = context.req.param("workspaceId");
+    await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
+    if (!deps.objectStorage)
+      throw new HTTPException(503, {
+        message: "Object storage is not configured",
+      });
+    const ref = await getWorkspaceArtifactContentRef(
+      deps.db,
+      workspaceId,
+      artifactId(context),
+      parseVersionId(context.req.query("versionId")),
+    );
+    const iterator = readArtifactObject(deps.objectStorage, ref.contentKey);
+    return new Response(
+      new ReadableStream({
+        async pull(controller) {
+          try {
+            const item = await iterator.next();
+            if (item.done) controller.close();
+            else controller.enqueue(item.value);
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+        async cancel() {
+          await iterator.return();
+        },
+      }),
+      {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "sandbox allow-scripts",
+        },
+      },
+    );
+  });
+
   app.get(`${base}/:artifactId/content`, async (context) => {
     const workspaceId = context.req.param("workspaceId");
     await requireAccessGrant(context, deps, workspaceId, "artifacts:read");
@@ -248,10 +335,7 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
       throw new HTTPException(503, {
         message: "Object storage is not configured",
       });
-    const parsedVersion = context.req.query("versionId");
-    if (parsedVersion && !ArtifactId.safeParse(parsedVersion).success) {
-      throw new HTTPException(422, { message: "Invalid artifact version id" });
-    }
+    const parsedVersion = parseVersionId(context.req.query("versionId"));
     try {
       const ref = await getWorkspaceArtifactContentRef(
         deps.db,
@@ -293,12 +377,13 @@ export function registerWorkspaceArtifactRoutes(app: Hono, deps: ApiRouteDeps): 
     const grant = authorization.grant;
     const request = await body(context, PublishWorkspaceArtifactVersionRequest);
     const id = artifactId(context);
-    const content = prepareContent(deps, workspaceId, {
-      html: request.html,
-      ...(request.source ? { source: request.source } : {}),
-      ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
-    });
     try {
+      const content = await prepareContent(deps, grant, {
+        ...(request.html !== undefined ? { html: request.html } : {}),
+        ...(request.uploadId ? { uploadId: request.uploadId } : {}),
+        ...(request.source ? { source: request.source } : {}),
+        ...(request.requestedTools ? { requestedTools: request.requestedTools } : {}),
+      });
       return context.json(
         await mutationResponse(
           deps,

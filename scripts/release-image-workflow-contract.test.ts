@@ -410,6 +410,14 @@ describe("release image workflow contract", () => {
     },
   );
 
+  test.each(["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"])(
+    "%s copies and doctors the native artifact runtime after the stable toolchain",
+    async (path) => {
+      const dockerfile = await readFile(resolve(root, path), "utf8");
+      expect(keepsStableSandboxToolchainBeforeArtifactRuntime(dockerfile)).toBe(true);
+    },
+  );
+
   test("keeps stable sandbox tools cacheable across exact runtime revisions", async () => {
     const dockerfile = await readFile(resolve(root, "docker/sandbox.Dockerfile"), "utf8");
 
@@ -769,7 +777,9 @@ describe("release image workflow contract", () => {
     ]) {
       expect(parsed.jobs[jobName]?.if).toBe(parsed.jobs["worker-image"]?.if);
     }
-    expect(parsed.jobs.images?.if).toBe(parsed.jobs["worker-image"]?.if);
+    expect(parsed.jobs.images?.if).toBe(
+      "${{ always() && needs.plan.result == 'success' && needs.plan.outputs.bake_images == 'true' && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}",
+    );
     expect(images.match(/packages: write/g)).toHaveLength(7);
     for (const jobName of leafNames) {
       const login = parsed.jobs[jobName]?.steps?.find((step) => step.name === "Log in to GHCR");

@@ -1969,6 +1969,9 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId },
     );
+    const historyStart =
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).at(-1)!
+        .position + 1;
     const huge = "x".repeat(500_000);
     const structuredOutput: Record<string, unknown> = {
       type: "界😀".repeat(100_000),
@@ -2016,7 +2019,7 @@ describe("clean session control plane", () => {
         modelToolOutputTruncationTokens: 100,
         items: [
           {
-            position: 0,
+            position: historyStart + 0,
             item: {
               type: "function_call",
               callId: "canonical-call",
@@ -2025,14 +2028,14 @@ describe("clean session control plane", () => {
             },
           },
           {
-            position: 1,
+            position: historyStart + 1,
             item: {
               type: "function_call_result",
               callId: "canonical-call",
               output: { type: "text", text: huge },
             },
           },
-          { position: 2, item: structuredItem },
+          { position: historyStart + 2, item: structuredItem },
         ],
       }),
     ).toBe(true);
@@ -2046,7 +2049,7 @@ describe("clean session control plane", () => {
         expectedAttemptId: attemptId,
         items: [
           {
-            position: 3,
+            position: historyStart + 3,
             item: {
               type: "function_call",
               callId: "canonical-mixed-call",
@@ -2055,11 +2058,13 @@ describe("clean session control plane", () => {
               status: "completed",
             },
           },
-          { position: 4, item: canonicalMixedItem },
+          { position: historyStart + 4, item: canonicalMixedItem },
         ],
       }),
     ).toBe(true);
-    const canonical = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const canonical = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).filter((row) => row.position >= historyStart);
     const canonicalText = (canonical[1]!.item.output as { text: string }).text;
     expect(canonicalText).toContain("tokens truncated");
     expect(canonicalText.length).toBeLessThan(1_000);
@@ -6280,8 +6285,8 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId: firstAttemptId },
     );
-    expect(
-      await appendSessionHistoryItems(client.db, {
+    await expect(
+      appendSessionHistoryItems(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
         sessionId: session.id,
@@ -6295,7 +6300,7 @@ describe("clean session control plane", () => {
           },
         ],
       }),
-    ).toBe(true);
+    ).rejects.toThrow("Conversation history persistence conflict at position 0");
     await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: first!.id,

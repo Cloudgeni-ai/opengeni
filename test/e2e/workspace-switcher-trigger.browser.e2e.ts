@@ -68,10 +68,18 @@ describe("Workspace switcher trigger in Chromium", () => {
       "Research Sandbox",
       "New workspace…",
       "New organization…",
-      "Organization settings",
+      "Organization settings for CloudGeni Product Engineering and Reliability",
     ]) {
       expect(await page.getByRole("menuitem", { name: label, exact: true }).isVisible()).toBe(true);
     }
+    expect(
+      await page
+        .getByRole("menuitem", {
+          name: "Organization settings for CloudGeni Research",
+          exact: true,
+        })
+        .count(),
+    ).toBe(0);
     const personalMenuItem = page.getByRole("menuitem", {
       name: "Personal workspace Personal workspace",
       exact: true,
@@ -106,10 +114,10 @@ describe("Workspace switcher trigger in Chromium", () => {
     expect(await page.getByTestId("last-action").textContent()).toBe("New organization");
 
     const organizationSettings = page.getByRole("menuitem", {
-      name: "Organization settings",
+      name: "Organization settings for CloudGeni Product Engineering and Reliability",
       exact: true,
     });
-    await page.keyboard.press("End");
+    await page.keyboard.press("Home");
     expect(
       await organizationSettings.evaluate((element) => document.activeElement === element),
     ).toBe(true);

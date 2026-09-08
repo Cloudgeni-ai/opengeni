@@ -326,6 +326,61 @@ describe("provider MCP unavailable rendering", () => {
 });
 
 describe("durable machine-input timeline", () => {
+  test("opens the typed child source without treating receipt delivery as work completion", async () => {
+    resetTimelineEvents();
+    const childId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const opened: string[] = [];
+    const r = await renderComponent(
+      <MessageTimeline
+        onOpenSession={(id) => opened.push(id)}
+        events={[
+          timelineEvent("system.update.delivered", {
+            historyItemId: "history-results",
+            count: 3,
+            members: [
+              {
+                id: "result-1",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: childId,
+                summary: "The worker went idle while waiting for CI.",
+              },
+              {
+                id: "result-2",
+                kind: "child_terminal_result",
+                classification: "failure",
+                sourceId: childId,
+                summary: "A later turn failed.",
+              },
+              {
+                id: "result-3",
+                kind: "child_terminal_result",
+                classification: "success",
+                sourceId: "not-a-session",
+                summary: "Merged after verification.",
+              },
+            ],
+          }),
+        ]}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("3 agent results received");
+    expect(r.container.textContent).not.toContain("agents finished");
+    const links = [...r.container.querySelectorAll("button")].filter(
+      (button) => button.textContent === "View session",
+    );
+    expect(links).toHaveLength(2);
+    await act(async () => {
+      links[0]?.click();
+      links[1]?.click();
+    });
+    expect(opened).toEqual([childId, childId]);
+    expect(r.container.textContent).toContain("A later turn failed.");
+    expect(r.container.textContent).toContain("Merged after verification.");
+    await r.unmount();
+  });
+
   test("renders a collapsed landmark pill; details hold typed members", async () => {
     resetTimelineEvents();
     const r = await renderComponent(
@@ -355,7 +410,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("2 updates · Agent update, Agent finished");
+    expect(r.container.textContent).toContain("2 updates · Agent update, Agent result received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(r.container.textContent).not.toContain("Input batch");
     expect(r.container.textContent).not.toContain('"sourceId"');
@@ -367,11 +422,11 @@ describe("durable machine-input timeline", () => {
     // Detail rows stay in the DOM for expand-on-demand audit.
     expect(r.container.textContent).toContain("verification-agent");
     expect(r.container.textContent).toContain("Cache verification completed.");
-    expect(r.container.textContent).toContain("Agent finished");
+    expect(r.container.textContent).toContain("Agent result received");
     await r.unmount();
   });
 
-  test("identical agent-finished members collapse to one plural pill", async () => {
+  test("result receipts collapse to a neutral count", async () => {
     resetTimelineEvents();
     const members = Array.from({ length: 15 }, (_, index) => ({
       id: `update-${index}`,
@@ -392,7 +447,7 @@ describe("durable machine-input timeline", () => {
       />,
     );
     await flush();
-    expect(r.container.textContent).toContain("15 agents finished");
+    expect(r.container.textContent).toContain("15 agent results received");
     expect(r.container.textContent).not.toContain("updates joined this turn");
     expect(
       (

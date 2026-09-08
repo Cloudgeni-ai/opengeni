@@ -24,11 +24,29 @@ terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
 **OpenGeni-rendered product UI.** A host that mounts the styled React surfaces
+should use `SessionConversation` from `@opengeni/react` (or `/session-ui`) for
+a complete existing-session chat: `<SessionConversation sessionId={id} />`
+under `OpenGeniProvider`. It wires queue actions, composer drafts, model policy,
+pause/resume, human-input forms, optimistic delivery, and paged timeline history.
+`ChatComposer` alone is only the input surface. Hosts with deliberately custom
+flows can still compose the individual hooks and components.
+
+The host owns available space; `SessionConversation` fills its container by
+default. Use a sized page/panel with `min-height: 0` on intervening flex/grid
+children. The SDK scrolls the timeline internally and keeps the composer at
+the panel bottom. Do not add a second timeline scroller or fixed/sticky composer.
+
+A host that mounts the styled React surfaces
 can import `@opengeni/react/compiled.css` once. That package-owned artifact is
 already compiled from the component source with Tailwind v4, contains no global
 Preflight or `--tw-*` property registrations, and scopes rules to the `.og-root`
 roots applied by the components. The host therefore needs no Tailwind compiler
-or source scan. Tailwind runtime variables are initialized only within those
+or source scan. SDK form controls include a scoped baseline reset before their
+utilities, so they do not depend on the host loading Preflight. Generic host
+button styles do not replace those defaults; avoid targeting SDK descendants
+with higher-specificity host selectors. `packages/react/demo/standalone-controls.html`
+exercises this standalone path with deliberately conflicting host button CSS.
+Tailwind runtime variables are initialized only within those
 roots; independent defaults inherit without replacing host `--og-*` values,
 while scoped effective values keep derived tokens live. The additive
 `@opengeni/react/styles.css` bridge remains available when a Tailwind v4 host
@@ -286,8 +304,31 @@ runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
 gateway, dispatches allowed calls directly, and aborts pending calls when the
 Site reloads, stops, navigates, replaces its bridge port, or unmounts. Duplicate
 live request ids are rejected, archived Sites receive no bridge, and no
-credential, cookie, API URL, workspace id, or parent DOM authority crosses into
-publisher-controlled code.
+credential, cookie, API URL, or parent DOM authority crosses into
+publisher-controlled code. API response data may contain resource/workspace ids;
+the Site cannot choose a different routing workspace.
+
+### Session SDK inside a Site
+
+`createOpenGeniSiteClient()` exposes `client` (the ordinary `OpenGeniClient`)
+and `workspaceId` (the host-resolved `site-host` alias), alongside the existing
+`tools` facade. Pass these directly to `OpenGeniProvider`. The shared session
+HTTP surface includes sessions, durable drafts, and read-only provider context
+(client config, workspace/model catalog and live event streams). Unrelated
+administration endpoints are not exposed by this adapter.
+
+Published frames forward requests through a response-specific MessagePort,
+with pull-based chunks for SSE and cancellation on abort/unmount. The web host
+supplies its current viewer authentication. Top-level sandbox previews use the
+same `createCodemodeSiteRequestHandler()` mount: `/__opengeni/site-tools/sdk/*`
+forwards to `/codemode/sdk/*`. That API validates the live attempt and frozen
+catalog, then dispatches the ordinary REST handlers with an internal exact-
+attempt credential limited to the session's existing session/workspace-read
+permissions. It never changes the sandbox bearer or gives an agent human
+approval authority. Normal resource authorization and command receipts apply.
+
+See `examples/site-session-embed` for a standard React provider, timeline and
+durable composer using this transport without knowing its execution location.
 
 ### Session Authorization
 
@@ -734,7 +775,7 @@ disable it for embedded products that require a narrower model-visible surface.
 An agent-created child normally needs the same working context as its manager,
 even when the two conversations are separate. When the creating grant carries
 the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
-`resources`, `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+`resources` (repositories only), `skills`, `tools`, and `mcpServers` as inheritance from that trusted immediate
 parent. The snapshot preserves inline session skills, mixed GitHub, GitLab, and Azure DevOps repository
 resources, multiple credential bindings for one provider, selected MCP tool
 refs, full per-session MCP policy, connection refs, and static credential

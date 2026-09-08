@@ -38,6 +38,9 @@ import {
   type EnrollmentRecord,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
+import { observeSessionBackgroundCommandCompletion } from "@opengeni/db/session-background-commands";
+import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
+import type { OpStreamOutputFrame } from "@opengeni/runtime/sandbox";
 import type { EventBus } from "@opengeni/events";
 import {
   buildSelfhostedBackendSession,
@@ -636,6 +639,76 @@ function afterRetainedProcessMutation(
   };
 }
 
+export function captureConnectedCommandOutput(
+  db: Database,
+  ids: { accountId: string; workspaceId: string; sessionId: string },
+  bus?: EventBus,
+) {
+  return async (commandId: string, frames: OpStreamOutputFrame[]) => {
+    for (const frame of frames) {
+      const events = await appendSessionCommandOutput(db, {
+        ...ids,
+        commandId,
+        chunkId: `op-frame:${frame.sequence}`,
+        stream: frame.stream,
+        chunk: frame.chunk,
+      });
+      if (events.length && bus)
+        await bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
+    }
+  };
+}
+
+function captureRetainedProcessOutputForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+) {
+  const accountId = ids.workspaceMutationFence?.accountId;
+  if (!accountId) return undefined;
+  return async ({
+    process,
+    chunkId,
+    chunk,
+    stream,
+    streamFidelity,
+  }: {
+    process: RoutingRetainedProcess;
+    chunkId: string;
+    chunk: string;
+    stream: "stdout" | "stderr";
+    streamFidelity: "separate" | "merged";
+  }) => {
+    const events = await appendSessionCommandOutput(services.db, {
+      accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      commandId: process.id,
+      chunkId,
+      chunk,
+      stream,
+      streamFidelity,
+    });
+    if (events.length && services.bus)
+      await services.bus.publish(ids.workspaceId, ids.sessionId, events).catch(() => undefined);
+  };
+}
+
+function observeRetainedProcessTerminalForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+) {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ process }: { process: RoutingRetainedProcess }) => {
+    await observeSessionBackgroundCommandCompletion(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      commandId: process.id,
+    });
+  };
+}
+
 function settleRetainedProcessForTurn(
   services: RoutingWiringServices,
   ids: RoutingWiringIds,
@@ -840,6 +913,7 @@ export function wrapTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
@@ -847,6 +921,15 @@ export function wrapTurnBoxWithRouting(
                 .catch(() => undefined);
             }
           },
+          selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
+            db,
+            {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+            },
+            bus,
+          ),
         }
       : {}),
     // The turn's declared environment → a selfhosted swap target's manifest, so the
@@ -931,6 +1014,12 @@ export function wrapTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(ids.workspaceMutationFence
+      ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
+      : {}),
+    ...(ids.workspaceMutationFence
+      ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
+      : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(ids.homeLease
       ? {
@@ -1094,6 +1183,7 @@ export function wrapLazyTurnBoxWithRouting(
               outcome: command.outcome,
               exitCode: command.exitCode,
               reason: command.reason,
+              ...(command.failure ? { failure: command.failure } : {}),
             });
             if (settlement && bus) {
               await bus
@@ -1101,6 +1191,15 @@ export function wrapLazyTurnBoxWithRouting(
                 .catch(() => undefined);
             }
           },
+          selfhostedCaptureBackgroundCommandOutput: captureConnectedCommandOutput(
+            db,
+            {
+              accountId: backgroundCommandAccountId,
+              workspaceId: ids.workspaceId,
+              sessionId: ids.sessionId,
+            },
+            bus,
+          ),
         }
       : {}),
     ...(ids.environment !== undefined ? { environment: ids.environment } : {}),
@@ -1154,6 +1253,12 @@ export function wrapLazyTurnBoxWithRouting(
     ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
     ...(afterProcessMutation ? { afterProcessMutation } : {}),
     ...(settleProcess ? { settleProcess } : {}),
+    ...(ids.workspaceMutationFence
+      ? { observeProcessTerminal: observeRetainedProcessTerminalForTurn(services, ids)! }
+      : {}),
+    ...(ids.workspaceMutationFence
+      ? { captureProcessOutput: captureRetainedProcessOutputForTurn(services, ids)! }
+      : {}),
     ...(adoptProcessAsBackgroundCommand ? { adoptProcessAsBackgroundCommand } : {}),
     ...(args.homeLeaseIdentity
       ? {
@@ -1432,6 +1537,15 @@ export async function establishSelfhostedTurnSession(
           },
         }
       : {}),
+    captureBackgroundCommandOutput: captureConnectedCommandOutput(
+      db,
+      {
+        accountId: args.accountId,
+        workspaceId: args.workspaceId,
+        sessionId: args.sessionId,
+      },
+      bus,
+    ),
     settleBackgroundCommand: async (command) => {
       const settlement = await settleConnectedMachineSessionBackgroundCommand(db, {
         accountId: args.accountId,
@@ -1445,6 +1559,7 @@ export async function establishSelfhostedTurnSession(
         outcome: command.outcome,
         exitCode: command.exitCode,
         reason: command.reason,
+        ...(command.failure ? { failure: command.failure } : {}),
       });
       if (settlement && bus) {
         await bus

@@ -8,13 +8,87 @@ import {
   type WorkspaceArtifactVersion,
 } from "@opengeni/contracts";
 import { parseVerifiedAttemptToolCatalog } from "@opengeni/codemode";
-import { createHash } from "node:crypto";
 import { and, desc, eq, lt, or, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { sameSitePublicationRequest, sitePublicationRequest } from "./site-publication-request";
 
 type ArtifactRow = typeof schema.workspaceArtifacts.$inferSelect;
+export async function createWorkspaceArtifactUpload(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    ownerId: string;
+  },
+) {
+  return withRlsContext(db, input, async (scoped) => {
+    const [row] = await scoped
+      .insert(schema.workspaceArtifactUploads)
+      .values({
+        ...input,
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      })
+      .returning();
+    return row!;
+  });
+}
+
+export async function getWorkspaceArtifactUpload(db: Database, workspaceId: string, id: string) {
+  return withWorkspaceRls(db, workspaceId, async (scoped) => {
+    const [row] = await scoped
+      .select()
+      .from(schema.workspaceArtifactUploads)
+      .where(
+        and(
+          eq(schema.workspaceArtifactUploads.workspaceId, workspaceId),
+          eq(schema.workspaceArtifactUploads.id, id),
+        ),
+      );
+    return row ?? null;
+  });
+}
+
+async function retainArtifactUpload(tx: Database, input: PublishMetadata) {
+  if (!input.uploadId) return;
+  const [row] = await tx
+    .update(schema.workspaceArtifactUploads)
+    .set({ status: "published" })
+    .where(
+      and(
+        eq(schema.workspaceArtifactUploads.workspaceId, input.workspaceId),
+        eq(schema.workspaceArtifactUploads.id, input.uploadId),
+        or(
+          eq(schema.workspaceArtifactUploads.status, "published"),
+          and(
+            eq(schema.workspaceArtifactUploads.status, "pending"),
+            sql`${schema.workspaceArtifactUploads.expiresAt} > now()`,
+          ),
+        ),
+      ),
+    )
+    .returning();
+  if (!row) throw new WorkspaceArtifactOperationError("Site upload expired or unavailable");
+}
+
+/** Claim expired uploads before deleting blobs; publication takes the same row lock. */
+export async function expireWorkspaceArtifactUploads(db: Database, workspaceId: string) {
+  return withWorkspaceRls(db, workspaceId, async (scoped) =>
+    scoped
+      .update(schema.workspaceArtifactUploads)
+      .set({
+        status: sql`CASE WHEN ${schema.workspaceArtifactUploads.status} = 'published' THEN 'published' ELSE 'expired' END`,
+      })
+      .where(
+        and(
+          eq(schema.workspaceArtifactUploads.workspaceId, workspaceId),
+          sql`${schema.workspaceArtifactUploads.expiresAt} < now()`,
+        ),
+      )
+      .returning(),
+  );
+}
 type VersionRow = typeof schema.workspaceArtifactVersions.$inferSelect;
 type EventRow = typeof schema.workspaceArtifactEvents.$inferSelect;
 type ArtifactMutationToolName =
@@ -141,6 +215,7 @@ export async function listWorkspaceArtifacts(
     limit?: number;
     cursor?: string;
     status?: "active" | "archived";
+    sourceSessionId?: string;
   } = {},
 ): Promise<{
   artifacts: WorkspaceArtifact[];
@@ -152,6 +227,14 @@ export async function listWorkspaceArtifacts(
     const cursor = options.cursor ? decodeListCursor(options.cursor) : null;
     const visibility = and(
       eq(schema.workspaceArtifacts.workspaceId, workspaceId),
+      ...(options.sourceSessionId
+        ? [
+            sql`exists (select 1 from ${schema.workspaceArtifactVersions} as published_version
+              where published_version.artifact_id = ${schema.workspaceArtifacts.id}
+                and published_version.workspace_id = ${schema.workspaceArtifacts.workspaceId}
+                and published_version.source_session_id = ${options.sourceSessionId}::uuid)`,
+          ]
+        : []),
       ...(options.status ? [eq(schema.workspaceArtifacts.status, options.status)] : []),
       ...(cursor
         ? [
@@ -293,14 +376,15 @@ export async function getWorkspaceArtifactContentRef(
 }
 
 type PublishMetadata = {
+  uploadId?: string;
   accountId: string;
   workspaceId: string;
   contentKey: string;
-  contentSha256: string;
+  contentSha256: string | null;
   sizeBytes: number;
-  sourceKey: string;
-  sourceSha256: string;
-  sourceSizeBytes: number;
+  sourceKey: string | null;
+  sourceSha256: string | null;
+  sourceSizeBytes: number | null;
   requestedTools?: ToolGatewayIdentity[];
   operationKey: string;
   actorSubjectId: string;
@@ -328,7 +412,8 @@ function persistedArtifactContentIsReferenced(
   input: Pick<PublishMetadata, "contentKey" | "sourceKey">,
 ): boolean {
   return (
-    replay.version.contentKey === input.contentKey || replay.version.sourceKey === input.sourceKey
+    replay.version.contentKey === input.contentKey ||
+    (input.sourceKey !== null && replay.version.sourceKey === input.sourceKey)
   );
 }
 
@@ -599,18 +684,11 @@ function assertCreateReplayMatchesInput(
   },
 ): void {
   assertCreateReplay(replay);
-  const requestDigest = createArtifactRequestDigest(input);
-  if (replay.event.requestDigest !== null && replay.event.requestDigest !== requestDigest) {
+  if (!sameSitePublicationRequest(replay.event.requestInput, input)) {
     throw new WorkspaceArtifactConflictError(
-      "Idempotency key was already used with different artifact metadata",
+      "Idempotency key was already used for different publication input",
     );
   }
-  if (replay.version.contentSha256 !== input.contentSha256) {
-    throw new WorkspaceArtifactConflictError(
-      "Idempotency key was already used with different content",
-    );
-  }
-  assertReplayVersionMetadata(replay.version, input, input.requestedTools ?? []);
 }
 
 function assertPublishReplay(
@@ -638,73 +716,17 @@ function assertPublishReplayMatchesInput(
   },
 ): void {
   assertPublishReplay(replay, input.artifactId, input.expectedCurrentVersionId);
+  if (!sameSitePublicationRequest(replay.event.requestInput, input)) {
+    throw new WorkspaceArtifactConflictError(
+      "Idempotency key was already used for different publication input",
+    );
+  }
   const expectedRequestedTools = input.requestedTools ?? replay.fromVersion?.requestedTools;
   if (!expectedRequestedTools) {
     throw new WorkspaceArtifactConflictError(
       "Idempotency key was already used for a publication with missing source authority",
     );
   }
-  const requestDigest = publishArtifactRequestDigest(input, expectedRequestedTools);
-  if (replay.event.requestDigest !== null && replay.event.requestDigest !== requestDigest) {
-    throw new WorkspaceArtifactConflictError(
-      "Idempotency key was already used with different publication metadata",
-    );
-  }
-  if (replay.version.contentSha256 !== input.contentSha256) {
-    throw new WorkspaceArtifactConflictError(
-      "Idempotency key was already used with different content",
-    );
-  }
-  assertReplayVersionMetadata(replay.version, input, expectedRequestedTools);
-}
-
-function hashArtifactRequest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
-}
-
-function createArtifactRequestDigest(
-  input: PublishMetadata & {
-    slug: string;
-    title: string;
-    description: string | null;
-    requestedSlug?: string | null;
-  },
-): string {
-  return hashArtifactRequest({
-    version: 1,
-    operation: "create",
-    requestedSlug: input.requestedSlug === undefined ? input.slug : input.requestedSlug,
-    title: input.title,
-    description: input.description,
-    contentSha256: input.contentSha256,
-    sourceSha256: input.sourceSha256,
-    requestedTools: input.requestedTools ?? [],
-  });
-}
-
-function publishArtifactRequestDigest(
-  input: PublishMetadata & {
-    artifactId: string;
-    expectedCurrentVersionId: string;
-    title?: string;
-    description?: string | null;
-  },
-  requestedTools: readonly ToolGatewayIdentity[],
-): string {
-  return hashArtifactRequest({
-    version: 1,
-    operation: "publish",
-    artifactId: input.artifactId,
-    expectedCurrentVersionId: input.expectedCurrentVersionId,
-    title: input.title === undefined ? { present: false } : { present: true, value: input.title },
-    description:
-      input.description === undefined
-        ? { present: false }
-        : { present: true, value: input.description },
-    contentSha256: input.contentSha256,
-    sourceSha256: input.sourceSha256,
-    requestedTools,
-  });
 }
 
 function assertRollbackReplay(
@@ -795,6 +817,7 @@ export async function createWorkspaceArtifact(
             );
           }
           await assertAttemptAuthority(tx, input);
+          await retainArtifactUpload(tx, input);
           await assertArtifactRequestedToolsInAttemptCatalog(tx, input, input.requestedTools ?? []);
           await input.persistContent();
           contentPersisted = true;
@@ -850,7 +873,8 @@ export async function createWorkspaceArtifact(
               fromVersionId: null,
               toVersionId: version!.id,
               operationKey: input.operationKey,
-              requestDigest: createArtifactRequestDigest(input),
+              requestDigest: null,
+              requestInput: sitePublicationRequest(input),
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
               sourceAttemptId: input.sourceAttemptId,
@@ -902,6 +926,7 @@ export async function publishWorkspaceArtifactVersion(
             );
           }
           await assertAttemptAuthority(tx, input);
+          await retainArtifactUpload(tx, input);
           const artifact = await artifactRow(tx, input.workspaceId, input.artifactId, true);
           if (!artifact) throw new WorkspaceArtifactNotFoundError("Artifact not found");
           if (artifact.status !== "active") {
@@ -976,10 +1001,8 @@ export async function publishWorkspaceArtifactVersion(
               fromVersionId: artifact.currentVersionId,
               toVersionId: version!.id,
               operationKey: input.operationKey,
-              requestDigest: publishArtifactRequestDigest(
-                input,
-                input.requestedTools ?? current.requestedTools,
-              ),
+              requestDigest: null,
+              requestInput: sitePublicationRequest(input),
               sourceSessionId: input.sourceSessionId,
               sourceTurnId: input.sourceTurnId,
               sourceAttemptId: input.sourceAttemptId,
@@ -1188,19 +1211,4 @@ export async function setWorkspaceArtifactStatus(
         return mutationResult(updated!, current, event!, false);
       }),
   );
-}
-
-function assertReplayVersionMetadata(
-  version: VersionRow,
-  input: PublishMetadata,
-  expectedRequestedTools: ToolGatewayIdentity[],
-): void {
-  if (
-    version.sourceSha256 !== input.sourceSha256 ||
-    JSON.stringify(version.requestedTools) !== JSON.stringify(expectedRequestedTools)
-  ) {
-    throw new WorkspaceArtifactConflictError(
-      "Idempotency key was already used with different source or requested tools",
-    );
-  }
 }

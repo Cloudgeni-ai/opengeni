@@ -159,13 +159,14 @@ export function isSessionDraftComputeReady(draft: SessionDraft): boolean {
   return draft.compute.kind !== "machine" || draft.compute.sandboxId !== null;
 }
 
-/** Personal workspaces are presented as Only me and must create the matching
- * private tenancy instead of silently persisting a workspace-visible row. */
+/** Personal workspace access is already owner-only. Use private session tenancy
+ * when the server supports it, without making its activation a prerequisite. */
 export function newSessionCreateVisibility(
   personalWorkspace: boolean,
   selectedVisibility: "private" | "workspace",
+  canCreatePrivate: boolean,
 ): "private" | "workspace" {
-  return personalWorkspace ? "private" : selectedVisibility;
+  return personalWorkspace ? (canCreatePrivate ? "private" : "workspace") : selectedVisibility;
 }
 
 export type SessionDraftSubmission = {

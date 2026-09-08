@@ -1,3 +1,4 @@
+import { ChildSessionLink } from "./child-session-link";
 import type {
   DraftTimelineAnnotation,
   MediaGenerationResult,
@@ -2862,7 +2863,11 @@ export function TimelineRow({
       return <GoalRow item={item} />;
     case "machine-input-batch":
       return (
-        <MachineInputBatchRow item={item} loadVideoArtifactPlayback={loadVideoArtifactPlayback} />
+        <MachineInputBatchRow
+          item={item}
+          onOpenSession={onOpenSession}
+          loadVideoArtifactPlayback={loadVideoArtifactPlayback}
+        />
       );
     case "notice":
       return <NoticeRow item={item} />;
@@ -2919,7 +2924,7 @@ function CompactionRow({ item }: { item: ContextCompactionItem }) {
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.phase === "started"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-center")}>
       <div
@@ -3473,9 +3478,11 @@ function GoalRow({ item }: { item: GoalItem }) {
 
 function MachineInputBatchRow({
   item,
+  onOpenSession,
   loadVideoArtifactPlayback,
 }: {
   item: MachineInputBatchItem;
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   const enter = useEntranceAnimation();
@@ -3522,6 +3529,7 @@ function MachineInputBatchRow({
             <MachineInputRow
               key={member.id}
               member={member}
+              onOpenSession={onOpenSession}
               loadVideoArtifactPlayback={loadVideoArtifactPlayback}
             />
           ))}
@@ -3538,9 +3546,11 @@ function MachineInputBatchRow({
 
 function MachineInputRow({
   member,
+  onOpenSession,
   loadVideoArtifactPlayback,
 }: {
   member: MachineInputBatchItem["members"][number];
+  onOpenSession?: ((sessionId: string) => void) | undefined;
   loadVideoArtifactPlayback?: VideoArtifactPlaybackLoader | undefined;
 }) {
   if (member.kind === "media_generation_result" && member.result) {
@@ -3567,6 +3577,11 @@ function MachineInputRow({
             {truncate(summary, 320)}
           </p>
         ) : null}
+        <ChildSessionLink
+          kind={member.kind}
+          sourceId={member.sourceId}
+          onOpenSession={onOpenSession}
+        />
       </div>
     </div>
   );
@@ -3645,7 +3660,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       ? "border-og-status-failed/35 bg-og-status-failed/10 text-og-status-failed"
       : item.tone === "waiting"
         ? WAITING_PILL_CLASS
-        : "border-og-border bg-og-surface-1 text-og-fg-muted";
+        : NEUTRAL_PILL;
   return (
     <div
       className={cn(
@@ -3675,7 +3690,7 @@ function NoticeRow({ item }: { item: NoticeItem }) {
         {item.details ? (
           <details className="mt-2 text-og-control">
             <summary className="cursor-pointer font-medium">{item.details.label}</summary>
-            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-og-fg/5 p-2 font-mono">
               {JSON.stringify(item.details.value, null, 2)}
             </pre>
           </details>

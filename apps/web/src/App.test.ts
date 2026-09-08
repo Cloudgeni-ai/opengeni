@@ -994,7 +994,9 @@ describe("organization helpers", () => {
   test("lists every org the subject can reach, default first", () => {
     const context = ctx({
       defaultAccountId: "acc-b",
-      accountGrants: [{ accountId: "acc-a", subjectId: "s", permissions: ["billing:read"] }],
+      accountGrants: [
+        { accountId: "acc-a", subjectId: "s", role: "admin", permissions: ["billing:read"] },
+      ],
     });
     const orgs = organizationsForSubject(context, [ws("w1", "acc-b"), ws("w2", "acc-a")]);
     expect(orgs.map((org) => org.accountId)).toEqual(["acc-b", "acc-a"]);
@@ -1636,6 +1638,7 @@ describe("summarizeSessionFailure", () => {
       reason: null,
       safetyRefusal: false,
       failedAt: null,
+      failureEventId: null,
       recoveryCount: 0,
       failedTurnCount: 0,
     });
@@ -1647,6 +1650,7 @@ describe("summarizeSessionFailure", () => {
         "This request was blocked by our safety systems. Reason: Potentially unintended activity.",
     });
     expect(summarizeSessionFailure([refusal], "failed")).toMatchObject({
+      failureEventId: refusal.id,
       safetyRefusal: true,
       reason:
         "The model provider blocked this request. This request was blocked by our safety systems. Reason: Potentially unintended activity.",

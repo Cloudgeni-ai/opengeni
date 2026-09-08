@@ -506,7 +506,7 @@ describe("migration 0234 xAI subscription authority", () => {
       }),
     ).toBe(true);
 
-    const recoveredAt = new Date(resetAt.getTime() + 1);
+    const recoveredAt = new Date(checkedAt.getTime() + 1);
     expect(
       await updateXaiQuotaMetadata(client.db, {
         workspaceId: fixture.workspaceId,
@@ -516,8 +516,23 @@ describe("migration 0234 xAI subscription authority", () => {
         quotaResetAt: null,
         quotaCheckedAt: recoveredAt,
         exhaustedUntil: null,
+        expectedExhaustedUntil: resetAt,
+        expectedQuotaCheckedAt: checkedAt,
       }),
     ).toBe(true);
+    expect(
+      await updateXaiQuotaMetadata(client.db, {
+        workspaceId: fixture.workspaceId,
+        subjectId: subjectId!,
+        credentialId: cooling.id,
+        quotaUsedPercent: 100,
+        quotaResetAt: resetAt,
+        quotaCheckedAt: new Date(recoveredAt.getTime() + 1),
+        exhaustedUntil: resetAt,
+        expectedExhaustedUntil: resetAt,
+        expectedQuotaCheckedAt: checkedAt,
+      }),
+    ).toBe(false);
     const secondTurn = await seedSessionTurn(fixture);
     const recoveredLease = await acquireXaiCredentialLease(client.db, {
       ...fixture,
@@ -950,7 +965,7 @@ describe("migration 0234 xAI subscription authority", () => {
       attemptId: turn.attemptId,
       workflowId: turn.workflowId,
       authoritySnapshot: workspaceSnapshot,
-      earliestResetAt: new Date(Date.now() + 30_000),
+      earliestResetAt: new Date(Date.now() + 86_400_000),
       failurePayload: {
         error: "all connected SuperGrok subscriptions are unavailable",
         code: "xai_capacity_unavailable",
@@ -959,6 +974,9 @@ describe("migration 0234 xAI subscription authority", () => {
     expect(armed.action).toBe("waiting");
     if (armed.action !== "waiting") throw new Error("xAI capacity waiter did not arm");
     const waiter = armed.waiter;
+    // External resets must be detected without waiting until tomorrow's reset.
+    expect(waiter.nextCheckAt.getTime() - waiter.createdAt.getTime()).toBeLessThanOrEqual(60_000);
+    expect(waiter.nextCheckAt.getTime()).toBeLessThan(waiter.earliestResetAt!.getTime());
     expect(waiter).toMatchObject({
       status: "waiting",
       generation: 1,

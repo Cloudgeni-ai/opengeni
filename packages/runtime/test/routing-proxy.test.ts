@@ -1118,6 +1118,149 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     ]);
   });
 
+  test("only model-visible terminal reads observe completion; control drains and running reads do not", async () => {
+    for (const reader of [
+      "writeStdinForProcessMutation",
+      "writeStdinForProcessRead",
+      "writeStdinForProcessControl",
+    ] as const) {
+      const events: string[] = [];
+      let writes = 0;
+      const proxy = new RoutingSandboxSession({
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+        resolveActiveBackend: async () => ({
+          sandboxId: null,
+          kind: "modal",
+          session: {
+            execCommand: async () => "Process running with session ID 174\n\nOutput:\nstart",
+            writeStdin: async () =>
+              ++writes === 1
+                ? "Process running with session ID 174\n\nOutput:\nprogress"
+                : "Process exited with code 0\n\nOutput:\ndone",
+          },
+        }),
+        settleProcess: async () => {
+          events.push("settled");
+        },
+        observeProcessTerminal: async () => {
+          events.push("observed");
+        },
+      });
+      await proxy.execCommand({ cmd: "work" });
+      await proxy[reader]({ sessionId: 174, chars: "" });
+      expect(events).toEqual([]);
+      await proxy[reader]({ sessionId: 174, chars: "" });
+      expect(events).toEqual(
+        reader === "writeStdinForProcessControl" ? ["settled"] : ["settled", "observed"],
+      );
+    }
+  });
+
+  test("retained output includes initial and control-drained chunks without observing completion", async () => {
+    const chunks: string[] = [];
+    const ids: string[] = [];
+    let observed = false;
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "modal",
+        session: {
+          execCommand: async () => "Process running with session ID 177\n\nOutput:\nstart",
+          writeStdin: async () => "Process exited with code 0\n\nOutput:\nend",
+        },
+      }),
+      captureProcessOutput: async ({ process, chunk }) => {
+        ids.push(process.id);
+        chunks.push(chunk);
+      },
+      observeProcessTerminal: async () => {
+        observed = true;
+      },
+    });
+    await proxy.execCommand({ cmd: "work" });
+    await proxy.writeStdinForProcessControl({ sessionId: 177, chars: "" });
+    expect(chunks).toEqual(["start", "end"]);
+    expect(new Set(ids).size).toBe(1);
+    expect(observed).toBe(false);
+  });
+
+  test("failed terminal-output capture retries the same chunk without replaying stdin", async () => {
+    let writes = 0;
+    let captureAttempts = 0;
+    const chunkIds: string[] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "modal",
+        session: {
+          execCommand: async () => "Process running with session ID 178\n\nOutput:\n",
+          writeStdin: async () => {
+            writes += 1;
+            return "Process exited with code 0\n\nOutput:\ndone";
+          },
+        },
+      }),
+      captureProcessOutput: async ({ chunkId }) => {
+        chunkIds.push(chunkId);
+        if (++captureAttempts === 1) throw new Error("storage unavailable");
+      },
+    });
+    await proxy.execCommand({ cmd: "work" });
+    await expect(
+      proxy.writeStdinForProcessMutation({ sessionId: 178, chars: "finish" }),
+    ).rejects.toThrow("output could not be retained");
+    expect(proxy.hasRetainedProcess(178)).toBe(true);
+    expect(await proxy.writeStdinForProcessRead({ sessionId: 178, chars: "" })).toContain("code 0");
+    expect(writes).toBe(1);
+    expect(chunkIds).toHaveLength(2);
+    expect(new Set(chunkIds).size).toBe(1);
+  });
+
+  test("owner refresh captures exact adopted command without pointer lookup or observation", async () => {
+    let pointerReads = 0;
+    let observed = 0;
+    let providerReads = 0;
+    const chunks: string[] = [];
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => {
+        pointerReads++;
+        return { activeSandboxId: null, activeEpoch: 0 };
+      },
+      resolveActiveBackend: async () => ({
+        sandboxId: null,
+        kind: "modal",
+        session: {
+          execCommand: async () => "Process running with session ID 197\n\nOutput:\nstart",
+          writeStdin: async (args) => {
+            expect(args).toEqual({ sessionId: 197, chars: "", yieldTimeMs: 1 });
+            providerReads++;
+            return "Process exited with code 0\n\nOutput:\ntail";
+          },
+        },
+      }),
+      adoptProcessAsBackgroundCommand: async () => {},
+      captureProcessOutput: async ({ chunk }) => {
+        chunks.push(chunk);
+      },
+      observeProcessTerminal: async () => {
+        observed++;
+      },
+    });
+    await proxy.execCommand({ cmd: "work" });
+    const id = proxy.retainedProcessIdentity(197)!.id;
+    expect(await proxy.refreshOwnedCommand(id)).toBe(false);
+    await proxy.adoptRetainedProcessAsBackgroundCommand(197);
+    const priorPointerReads = pointerReads;
+    expect(await proxy.refreshOwnedCommand("unowned")).toBe(false);
+    await Promise.all([proxy.refreshOwnedCommand(id), proxy.refreshOwnedCommand(id)]);
+    expect(pointerReads).toBe(priorPointerReads);
+    expect(providerReads).toBe(1);
+    expect(chunks).toEqual(["start", "tail"]);
+    expect(observed).toBe(0);
+  });
+
   test("retained process promotion and session background adoption are separate and idempotent", async () => {
     let parentPromotions = 0;
     let backgroundAdoptions = 0;
@@ -1149,7 +1292,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
   });
 
   test("process-local provider locators cannot become session background commands", async () => {
-    for (const kind of ["local", "docker"] as const) {
+    for (const kind of ["local", "docker", "opensandbox"] as const) {
       let backgroundAdoptions = 0;
       const backend: RoutableBackendSession = {
         async execCommand() {
@@ -1346,6 +1489,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     let oldWrites = 0;
     let newWrites = 0;
     const retainedIds: string[] = [];
+    const captured: string[] = [];
     const oldBackend: RoutableBackendSession = {
       async execCommand() {
         return "Process running with session ID 76\n\nOutput:\nstarted";
@@ -1368,6 +1512,9 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
           ? { session: oldBackend, sandboxId: null, kind: "modal" }
           : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
       beforeMutation: async () => "parent",
+      captureProcessOutput: async ({ chunk }) => {
+        captured.push(chunk);
+      },
       afterMutation: async ({ retainedProcess }) => {
         promotions += 1;
         retainedIds.push(retainedProcess!.id);
@@ -1391,6 +1538,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(new Set(retainedIds).size).toBe(1);
     expect(oldWrites).toBe(1);
     expect(newWrites).toBe(0);
+    expect(captured).toEqual(["started", "running"]);
   });
 
   test("durable stale-authority promotion rejects output but hands off the exact process without retry", async () => {

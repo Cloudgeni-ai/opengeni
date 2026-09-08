@@ -194,9 +194,11 @@ export function SessionRowHoverDetails({
     descendantCount === 1 && !descendantCountTruncated ? "sub-agent" : "sub-agents";
 
   return (
-    <div data-session-row-hover-details className="grid gap-2.5">
-      <div className="flex items-start gap-3">
-        <p className="min-w-0 flex-1 text-sm font-medium leading-snug text-fg">{title}</p>
+    <div data-session-row-hover-details className="grid min-w-0 grid-cols-1 gap-2.5">
+      <div className="flex min-w-0 items-start gap-3">
+        <p className="min-w-0 flex-1 text-sm font-medium leading-snug text-fg [overflow-wrap:anywhere]">
+          {title}
+        </p>
         {age ? (
           <span
             aria-label={`Created ${age} ago`}
@@ -207,7 +209,7 @@ export function SessionRowHoverDetails({
           </span>
         ) : null}
       </div>
-      <div className="grid gap-1.5 text-xs text-fg-muted">
+      <div className="grid min-w-0 grid-cols-1 gap-1.5 text-xs text-fg-muted">
         {creatorName ? (
           <div className="flex min-w-0 items-center gap-2">
             {createdBy.kind === "subject" ? (

@@ -22,7 +22,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 
-import { request } from "@/api";
+import { request, requestResponse } from "@/api";
 import { EmptyState, LoadErrorState, PageHeader } from "@/components/common";
 import { ArtifactSandbox } from "@/components/artifacts/artifact-sandbox";
 import { Badge } from "@/components/ui/badge";
@@ -197,14 +197,19 @@ function ArtifactListRoute({ workspaceId }: { workspaceId: string }) {
 export function ArtifactDetailRoute({
   workspaceId,
   artifactId,
+  embedded = false,
 }: {
   workspaceId: string;
   artifactId: string;
+  embedded?: boolean;
 }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const [detail, setDetail] = useState<WorkspaceArtifactDetailResponse | null>(null);
-  const [content, setContent] = useState<WorkspaceArtifactContentResponse | null>(null);
+  const [content, setContent] = useState<Pick<
+    WorkspaceArtifactContentResponse,
+    "html" | "versionId" | "requestedTools"
+  > | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [busyVersion, setBusyVersion] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
@@ -213,10 +218,16 @@ export function ArtifactDetailRoute({
     try {
       setError(null);
       const basePath = `/v1/workspaces/${workspaceId}/published-artifacts/${encodeURIComponent(artifactId)}`;
-      const [nextDetail, nextContent] = await Promise.all([
-        request<WorkspaceArtifactDetailResponse>(basePath),
-        request<WorkspaceArtifactContentResponse>(`${basePath}/content`),
-      ]);
+      const nextDetail = await request<WorkspaceArtifactDetailResponse>(basePath);
+      const version = nextDetail.artifact.currentVersion;
+      if (!version) throw new Error("Site has no published version");
+      const response = await requestResponse(`${basePath}/html?versionId=${version.id}`);
+      if (!response.ok) throw new Error("Site HTML could not be loaded");
+      const nextContent = {
+        html: await response.text(),
+        versionId: version.id,
+        requestedTools: version.requestedTools,
+      };
       setDetail(nextDetail);
       setContent(nextContent);
     } catch (nextError) {
@@ -227,7 +238,7 @@ export function ArtifactDetailRoute({
   const requestedTools = content?.requestedTools ?? NO_SITE_TOOLS;
   const siteVersionId = content?.versionId;
   const siteToolBridge = useMemo<PublishedHtmlArtifactToolBridge | undefined>(() => {
-    if (requestedTools.length === 0 || !siteVersionId) return undefined;
+    if (!siteVersionId) return undefined;
     return createSiteToolBridge({
       workspaceTools: context.client.tools.forWorkspace(workspaceId),
       workspaceId,
@@ -329,6 +340,39 @@ export function ArtifactDetailRoute({
     }
   };
   const archived = detail?.artifact.status === "archived";
+  if (embedded) {
+    if (error)
+      return (
+        <LoadErrorState
+          title="Couldn't load Site"
+          error={asError(error)}
+          onRetry={() => void load()}
+        />
+      );
+    if (!detail || !content)
+      return (
+        <div role="status" className="p-4 text-sm text-fg-muted">
+          Loading Site…
+        </div>
+      );
+    if (archived)
+      return (
+        <div className="p-4 text-sm text-fg-muted">
+          This Site is archived. Open it full-page to restore it.
+        </div>
+      );
+    return (
+      <ArtifactSandbox
+        html={content.html}
+        title={detail.artifact.title}
+        versionLabel={`v${detail.artifact.currentVersion?.revision}`}
+        toolBridge={siteToolBridge}
+        connectedToolCount={content.requestedTools.length}
+        fill
+        className="h-full rounded-none border-0"
+      />
+    );
+  }
   return (
     <ContentPage width="wide">
       <div className="mb-5 border-b border-border pb-5">
@@ -427,7 +471,6 @@ export function ArtifactDetailRoute({
             onEdit={() => void editWithGeni()}
             toolBridge={archived ? undefined : siteToolBridge}
             connectedToolCount={content.requestedTools.length}
-            sourceFileCount={content.source.files.length}
           />
           <section className="overflow-hidden rounded-2xl border border-border/80 bg-surface/60 shadow-xs">
             <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border/80 px-4 py-3.5 sm:px-5">
@@ -440,8 +483,7 @@ export function ArtifactDetailRoute({
               <div className="flex items-center gap-3 text-2xs text-fg-subtle">
                 <span className="inline-flex items-center gap-1">
                   <FilesIcon className="size-3" />
-                  {content.source.files.length} source{" "}
-                  {content.source.files.length === 1 ? "file" : "files"}
+                  {detail.artifact.currentVersion?.sourceSizeBytes ? "Source saved" : "HTML-only"}
                 </span>
                 <span className="inline-flex items-center gap-1">
                   <PlugZapIcon className="size-3" />

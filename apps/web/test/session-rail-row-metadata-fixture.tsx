@@ -30,6 +30,7 @@ const cases = [
   { id: "no-metadata", active: false, depth: 0, summary: neutral },
   { id: "selected-child", active: true, depth: 1, summary: neutral, relativeTime: "1h" },
   { id: "unselected-child", active: false, depth: 2, summary: active, relativeTime: "now" },
+  { id: "overflow", active: false, depth: 0, summary: neutral },
 ] as const;
 
 function SessionRailRowMetadataFixture() {
@@ -88,12 +89,19 @@ function SessionRailRowMetadataFixture() {
                 </HoverCardTrigger>
                 <HoverCardContent side="right" collisionPadding={8}>
                   <SessionRowHoverDetails
-                    title={longTitle}
+                    title={
+                      scenario.id === "overflow"
+                        ? "Long_unbroken_session_title_".repeat(8)
+                        : longTitle
+                    }
                     createdAt={new Date(Date.now() - 13 * 3_600_000).toISOString()}
                     createdBy={{
                       kind: "subject",
                       subjectId: "user:bendik",
-                      label: "Bendik Nyheim",
+                      label:
+                        scenario.id === "overflow"
+                          ? "opengeni-workbench-acceptance-".repeat(6)
+                          : "Bendik Nyheim",
                     }}
                     descendantCount={3}
                     descendantCountTruncated={false}

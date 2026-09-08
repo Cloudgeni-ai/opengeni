@@ -3,6 +3,7 @@ import {
   fetchCodexUsageForAccount,
   getCodexCapacityWaitForSession,
   getXaiCapacityWaitForSession,
+  resolveXaiWaiterSubject,
   listCodexAccountStatuses,
   listPendingCodexCapacityWakeTargets,
   reconcileCodexCapacityWait as reconcileCodexCapacityWaitDb,
@@ -11,6 +12,7 @@ import {
   type CodexCapacitySelectionContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { refreshExhaustedXaiQuota } from "./xai-quota";
 import {
   authoritativeCodexCapacityResetAt,
   codexAccountNeedsLiveCapacityRefresh,
@@ -278,6 +280,22 @@ export function createCodexCapacityActivities(services: () => Promise<ControlAct
       if (!current || current.id !== input.waiterId || current.generation !== input.generation) {
         return { action: "stale" };
       }
+      const authority = await resolveXaiWaiterSubject(
+        resolved.db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      if (authority)
+        await refreshExhaustedXaiQuota({
+          db: resolved.db,
+          settings: resolved.settings,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: authority.turnId,
+          subjectId: authority.subjectId,
+          authoritySnapshot: authority.snapshot,
+        });
       const result = await reconcileXaiCapacityWaitDb(resolved.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,

@@ -47,6 +47,10 @@ const sandboxDeadlineRotationPreemptionMigrationName =
 const sessionInputWaitMigrationName = "0402_session_input_wait_and_background_command_results.sql";
 const commandTrackingRetirementMigrationName = "0407_connected_command_tracking_retirement.sql";
 const scheduledSessionTargetIndexMigrationName = "0408_scheduled_session_target_index.sql";
+// 0414 patches the producer fence created by withheld 0275; replay them together.
+const scheduledProducerMaterializationMigrationName =
+  "0414_scheduled_generated_producer_materialization.sql";
+const scheduledInheritedToolAdmissionMigrationName = "0416_scheduled_inherited_tool_admission.sql";
 
 describe("migration 0264 connection authority runtime activation", () => {
   test("is a drained exact-attempt cutover with canonical snapshots and idempotent audit", async () => {
@@ -104,7 +108,9 @@ describe("migration 0264 connection authority runtime activation", () => {
           (${sandboxDeadlineRotationPreemptionMigrationName}),
           (${sessionInputWaitMigrationName}),
           (${commandTrackingRetirementMigrationName}),
-          (${scheduledSessionTargetIndexMigrationName})
+          (${scheduledSessionTargetIndexMigrationName}),
+          (${scheduledProducerMaterializationMigrationName}),
+          (${scheduledInheritedToolAdmissionMigrationName})
       `;
       await migrate(blank.databaseUrl);
       // Current session adapters select the complete sessions row while this
@@ -223,7 +229,9 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${sandboxDeadlineRotationPreemptionMigrationName},
           ${sessionInputWaitMigrationName},
           ${commandTrackingRetirementMigrationName},
-          ${scheduledSessionTargetIndexMigrationName}
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName},
+          ${scheduledInheritedToolAdmissionMigrationName}
         )
       `;
       await expect(migrate(blank.databaseUrl)).rejects.toMatchObject({ code: "55000" });
@@ -285,7 +293,9 @@ describe("migration 0264 connection authority runtime activation", () => {
           ${sandboxDeadlineRotationPreemptionMigrationName},
           ${sessionInputWaitMigrationName},
           ${commandTrackingRetirementMigrationName},
-          ${scheduledSessionTargetIndexMigrationName}
+          ${scheduledSessionTargetIndexMigrationName},
+          ${scheduledProducerMaterializationMigrationName},
+          ${scheduledInheritedToolAdmissionMigrationName}
         )
         order by name
       `;
@@ -303,6 +313,8 @@ describe("migration 0264 connection authority runtime activation", () => {
         sessionInputWaitMigrationName,
         commandTrackingRetirementMigrationName,
         scheduledSessionTargetIndexMigrationName,
+        scheduledProducerMaterializationMigrationName,
+        scheduledInheritedToolAdmissionMigrationName,
       ]);
     } finally {
       await sql.end({ timeout: 1 });

@@ -28,6 +28,75 @@ const catalog: AttemptToolCatalog = {
 };
 
 describe("local Site Codemode handler", () => {
+  test("SDK event streams deliver before completion and retain cancellation", async () => {
+    let cancelled = false;
+    let forwardedHeaders: HeadersInit | undefined;
+    const client = {
+      sessionRequest: async (_path: string, init: RequestInit) => {
+        forwardedHeaders = init.headers;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("data: live\n\n"));
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    } as unknown as CodemodeClient;
+    const response = await createCodemodeSiteRequestHandler(client)(
+      new Request(
+        "http://localhost/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions/one/events/stream",
+        { headers: { "last-event-id": "cursor-42" } },
+      ),
+    );
+    const reader = response.body!.getReader();
+    expect(new Headers(forwardedHeaders).get("last-event-id")).toBe("cursor-42");
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("data: live\n\n");
+    await reader.cancel();
+    expect(cancelled).toBe(true);
+  });
+
+  test("forwards decoded SDK response bodies without stale wire encoding", async () => {
+    const upstream = Bun.serve({
+      port: 0,
+      fetch: () =>
+        new Response(Bun.gzipSync(JSON.stringify({ session: { id: "created" } })), {
+          status: 201,
+          headers: {
+            "content-type": "application/json",
+            "content-encoding": "gzip",
+          },
+        }),
+    });
+    const client = new CodemodeClient({
+      baseUrl: upstream.url.toString(),
+      token: "test",
+    });
+    const preview = Bun.serve({
+      port: 0,
+      fetch: createCodemodeSiteRequestHandler(client),
+    });
+    try {
+      const response = await fetch(
+        new URL("/__opengeni/site-tools/sdk/v1/workspaces/site-host/sessions", preview.url),
+        {
+          method: "POST",
+          body: "{}",
+        },
+      );
+      expect(response.status).toBe(201);
+      expect(response.headers.get("content-encoding")).toBeNull();
+      expect(await response.json()).toEqual({ session: { id: "created" } });
+    } finally {
+      preview.stop(true);
+      upstream.stop(true);
+    }
+  });
+
   test("projects the frozen catalog and executes through the existing client", async () => {
     const calls: unknown[] = [];
     const result: AttemptToolResult = {

@@ -7,7 +7,7 @@ export const MACHINE_INPUT_META: Record<MachineInputMember["kind"], string> = {
   session_wait_timeout: "Wait ended",
   agent_message: "Agent update",
   agent_steer_instruction: "Agent direction",
-  child_terminal_result: "Agent finished",
+  child_terminal_result: "Agent result received",
   media_generation_result: "Video update",
   child_requires_action: "Agent needs input",
   child_requires_action_resolved: "Agent unblocked",
@@ -35,7 +35,7 @@ export function machineInputBatchLabel(members: readonly MachineInputMember[]): 
       case "session_wait_timeout":
         return n === 1 ? "Wait ended" : `${n} waits ended`;
       case "child_terminal_result":
-        return n === 1 ? "Agent finished" : `${n} agents finished`;
+        return n === 1 ? "Agent result received" : `${n} agent results received`;
       case "goal_continuation":
         return n === 1 ? "Goal continued" : `${n} goal continuations`;
       case "scheduled_occurrence":

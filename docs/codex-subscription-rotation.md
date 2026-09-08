@@ -10,28 +10,38 @@ over ChatGPT/Codex subscription credentials. The implementation sources are
 
 The **effective credential pool is the complete scheduling boundary**.
 
-- Personal workspaces always use their own workspace pool.
-- Shared workspaces choose one source: `automatic`, `workspace`, `organization`,
+- Shared and Personal workspaces choose one source: `automatic`, `workspace`, `organization`,
   or `disabled`. `automatic` uses a workspace pool when any local credential is
   connected, otherwise it inherits the organization pool. The allocator never
   union-ranks organization and workspace credentials.
 - Organization credentials have one encrypted row, usage snapshot, cooldown,
-  fairness cursor, and organization rotation row across every inheriting shared
-  workspace. New shared workspaces therefore inherit an already-connected pool
+  fairness cursor, and organization rotation row across every inheriting
+  workspace. New workspaces therefore inherit an already-connected pool
   without copying or reconnecting credentials.
 - Session pins, last-used pointers, capacity waiters, and lease rows remain in
   the target workspace. Schema guards accept an organization credential only
-  while that shared workspace's effective source is `organization`.
+  while that workspace's effective source is `organization`.
 - Workspace-local duplicate connections remain independent. OpenGeni does not
   correlate a ChatGPT account connected separately in multiple workspace pools
   or across managed organizations.
 - Organization rows are visible at management time only to active organization
-  owners/admins using a managed-cookie session, and at runtime only from shared
-  workspaces in the same organization. Personal workspaces cannot inherit them.
+  owners/admins using a managed-cookie session, and at runtime from authorized shared
+  and Personal workspaces in the same organization. Inheritance grants no
+  access to the Personal workspace or its sessions.
 
 This preserves workspace session isolation while making provider quota,
 refresh, health, cooldown, and cumulative fairness truthful for the one shared
 organization credential row.
+
+Migration `0422_personal_workspace_organization_codex_inheritance.sql` activates
+Personal inheritance during a maintenance cutover. Stop every old API, control
+worker, and turn worker, supply the complete application database role list,
+apply the migration, provision roles, and start only the matching release.
+Never restart a pre-0422 binary: its organization mutation and wake paths omit
+Personal workspaces. The Codex-only `list_organization_codex_workspace_ids`
+inventory includes all same-organization workspaces for source locks, active-turn
+checks, and capacity wakeups. The general organization API-key inventory still
+excludes Personal workspaces; neither inventory grants workspace access.
 
 ## Atomic selection and fairness
 

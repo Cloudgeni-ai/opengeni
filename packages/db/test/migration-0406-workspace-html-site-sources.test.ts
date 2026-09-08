@@ -22,7 +22,7 @@ beforeAll(async () => {
   }
   admin = postgres(blank.databaseUrl, { max: 2, prepare: false });
 
-  // Let the canonical runner build the exact pre-0405 schema, including every
+  // Let the canonical runner build the pre-source schema, including every
   // historical directive and maintenance boundary, without copying that logic
   // into this test. Removing the temporary receipt then exercises the ordinary
   // forward-upgrade path through the same runner.
@@ -31,6 +31,10 @@ beforeAll(async () => {
     applied_at timestamptz not null default now()
   )`);
   await admin`insert into schema_migrations (name) values (${migrationName})`;
+  // 0418 depends on the columns introduced by 0406 and deliberately removes
+  // its historical digest/bounds contract. This test isolates the 0406 upgrade;
+  // full-ledger tests cover 0418 after 0406.
+  await admin`insert into schema_migrations (name) values ('0418_site_direct_uploads.sql')`;
   await migrate(blank.databaseUrl);
 }, 900_000);
 

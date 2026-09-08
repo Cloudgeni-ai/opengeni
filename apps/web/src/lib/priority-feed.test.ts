@@ -56,16 +56,22 @@ function stats(patch: Partial<NonNullable<Session["treeStats"]>>) {
 }
 
 describe("buildPriorityFeed", () => {
-  test("tiers by status and ranks blocked work by agent-minutes lost", () => {
+  test("ranks blocked work by verified oldest wait without multiplying child count", () => {
     const feed = buildPriorityFeed(
       [
-        // 1 waiting turn × 60 m = 60 agent-minutes.
-        session({ id: "s-old", status: "requires_action", updatedAt: minutesAgo(60) }),
-        // 5 waiting turns × 25 m = 125 agent-minutes: outranks the older wait.
+        // Oldest verified wait outranks a more recently waiting larger tree.
+        session({
+          id: "s-old",
+          status: "requires_action",
+          updatedAt: minutesAgo(1),
+          requiresActionSince: minutesAgo(60),
+        }),
+        // Five waiting turns do not turn 25 minutes into 125 minutes.
         session({
           id: "s-hot",
           status: "requires_action",
-          updatedAt: minutesAgo(25),
+          updatedAt: minutesAgo(1000),
+          requiresActionSince: minutesAgo(25),
           treeStats: stats({ attentionDescendants: 4, totalDescendants: 6 }),
         }),
         session({ id: "s-failed", status: "failed", updatedAt: minutesAgo(11) }),
@@ -75,9 +81,9 @@ describe("buildPriorityFeed", () => {
       NOW,
     );
 
-    expect(feed.blocked.map((entry) => entry.session.id)).toEqual(["s-hot", "s-old"]);
-    expect(feed.blocked[0]!.costMinutes).toBe(125);
-    expect(feed.blocked[0]!.waitingAgents).toBe(5);
+    expect(feed.blocked.map((entry) => entry.session.id)).toEqual(["s-old", "s-hot"]);
+    expect(feed.blocked[0]!.oldestHumanWaitMinutes).toBe(60);
+    expect(feed.blocked[1]!.waitingAgents).toBe(5);
     // Ranks run sequentially across blocked, broken, finished.
     expect(feed.blocked.map((entry) => entry.rank)).toEqual([1, 2]);
     expect(feed.broken[0]!.rank).toBe(3);
@@ -198,6 +204,21 @@ describe("buildPriorityFeed waiting duration", () => {
     expect(byId.get("s-own")?.reason).toMatch(/ for 1 h 35 m$/);
   });
 
+  test("uses an older child wait even when the parent also needs input", () => {
+    const feed = buildPriorityFeed(
+      [
+        session({
+          id: "parent",
+          status: "requires_action",
+          requiresActionSince: minutesAgo(5),
+          treeStats: stats({ attentionDescendants: 1, attentionSince: minutesAgo(90) }),
+        }),
+      ],
+      NOW,
+    );
+    expect(feed.blocked[0]?.oldestHumanWaitMinutes).toBe(90);
+  });
+
   test("keeps the plain wording when the server reports no waiting timestamp", () => {
     const feed = buildPriorityFeed(
       [
@@ -211,5 +232,6 @@ describe("buildPriorityFeed waiting duration", () => {
       NOW,
     );
     expect(feed.blocked[0]!.reason).toBe("1 spawned agent needs you");
+    expect(feed.blocked[0]!.oldestHumanWaitMinutes).toBeNull();
   });
 });

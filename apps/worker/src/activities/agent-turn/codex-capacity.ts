@@ -1,4 +1,5 @@
 import {
+  connectionModelAllowed,
   getSessionGoal,
   acquireCodexCredentialLease,
   CodexCredentialLeaseAttemptFencedError,
@@ -126,15 +127,29 @@ export async function selectCodexTurnCapacity(
       const selectForTurn = (
         context: CodexCredentialLeaseSelectionContext,
         lockedSessionCodexState: CodexCredentialLeaseSessionState,
-      ) =>
-        selectCodexCredentialLeaseForTurn({
-          context,
+      ) => {
+        const allowed = context.accounts.filter((account) =>
+          connectionModelAllowed(account.allowedModelIds, deps.turnExecutionPolicy.productModelId),
+        );
+        if (context.accounts.length > 0 && allowed.length === 0)
+          throw new Error("This model is disabled for the connected Codex subscriptions");
+        const sessionPin = lockedSessionCodexState.pinnedCredentialId;
+        if (
+          sessionPin &&
+          lockedSessionCodexState.pinSource !== "policy" &&
+          context.accounts.some((account) => account.id === sessionPin) &&
+          !allowed.some((account) => account.id === sessionPin)
+        )
+          throw new Error("This model is disabled for the pinned Codex subscription");
+        return selectCodexCredentialLeaseForTurn({
+          context: { ...context, accounts: allowed },
           sessionId: input.sessionId,
           sessionPinnedCredentialId: lockedSessionCodexState.pinnedCredentialId,
           sessionPinSource: lockedSessionCodexState.pinSource,
           sessionLastCredentialId: lockedSessionCodexState.lastCredentialId,
           now: new Date(),
         });
+      };
 
       let leaseAcquisitionStartedAtMs = performance.now();
       let leased: CodexCredentialLeaseResult<CodexTurnLeaseDecision> =

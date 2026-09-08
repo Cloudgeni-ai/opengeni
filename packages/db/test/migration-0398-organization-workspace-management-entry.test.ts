@@ -56,6 +56,16 @@ test("preserves legacy create outcomes and custom runtime-role access across mig
     await migrate(blank.databaseUrl, undefined, {
       applicationDatabaseRoles: [customRole],
     });
+    // Current access bootstrap writes the complete control-row shape. Keep
+    // these nullable adapter fields while this fixture replays only 0398;
+    // 0420 remains held and this disposable database is released below.
+    await admin`
+      alter table workspace_inference_controls
+      add column timer_id uuid,
+      add column timer_action text,
+      add column timer_due_at timestamptz,
+      add column timer_pause_for_seconds integer,
+      add column timer_pause_revision bigint`;
     await provisionRoles(blank.databaseUrl, {
       appRole: customRole,
       appPassword: customPassword,

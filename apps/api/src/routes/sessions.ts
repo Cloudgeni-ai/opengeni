@@ -669,6 +669,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.archivedOnly ? { archivedOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(query.channelId !== undefined ? { channelId: query.channelId } : {}),
+        ...(query.createdBy ? { createdBy: query.createdBy } : {}),
+        ...(query.updatedFrom ? { updatedFrom: query.updatedFrom } : {}),
+        ...(query.updatedBefore ? { updatedBefore: query.updatedBefore } : {}),
+        ...(query.createdFrom ? { createdFrom: query.createdFrom } : {}),
+        ...(query.createdBefore ? { createdBefore: query.createdBefore } : {}),
         ...(authorizationScope ? { authorizationScope } : {}),
         // A managed human's own personal workspace has no membership row, so
         // the list's removal fence must fall back to the organization-membership
@@ -725,6 +731,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (pageView) {
       return c.json({
         ...page,
+        ...(query.hasPageFilters ? { filtersApplied: true as const } : {}),
         pinned: page.pinned.map(decorate),
         sessions: page.sessions.map(decorate),
       });
@@ -4673,6 +4680,13 @@ function sessionListQuery(
   search: string | undefined;
   pinsOnly: boolean;
   archivedOnly: boolean;
+  channelId: string | null | undefined;
+  createdBy: { kind: "subject" | "service"; subjectId: string } | undefined;
+  updatedFrom: Date | undefined;
+  updatedBefore: Date | undefined;
+  createdFrom: Date | undefined;
+  createdBefore: Date | undefined;
+  hasPageFilters: boolean;
 } {
   const parentSessionId = query.parentSessionId;
   // "null" = roots only; a uuid = children of that session; anything else is
@@ -4708,12 +4722,73 @@ function sessionListQuery(
     throw new HTTPException(400, { message: 'archivedOnly must be the literal "true"' });
   }
   const archivedOnly = query.archivedOnly === "true";
+  const channelId = query.channelId;
+  if (
+    channelId !== undefined &&
+    channelId !== "null" &&
+    !z.string().uuid().safeParse(channelId).success
+  ) {
+    throw new HTTPException(400, {
+      message: 'channelId must be a channel id or the literal "null"',
+    });
+  }
+  const createdByKind = query.createdByKind;
+  const createdBySubjectId = query.createdBySubjectId;
+  if ((createdByKind === undefined) !== (createdBySubjectId === undefined)) {
+    throw new HTTPException(400, {
+      message: "createdByKind and createdBySubjectId must be supplied together",
+    });
+  }
+  if (createdByKind !== undefined && createdByKind !== "subject" && createdByKind !== "service") {
+    throw new HTTPException(400, {
+      message: 'createdByKind must be "subject" or "service"',
+    });
+  }
+  if (
+    createdBySubjectId !== undefined &&
+    (createdBySubjectId.trim().length < 1 || createdBySubjectId.length > 1_024)
+  ) {
+    throw new HTTPException(400, {
+      message: "createdBySubjectId must be between 1 and 1024 characters",
+    });
+  }
+  const parseDateBound = (name: string): Date | undefined => {
+    const raw = query[name];
+    if (raw === undefined) return undefined;
+    const parsed = z.string().datetime({ offset: true }).safeParse(raw);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} must be an ISO-8601 timestamp` });
+    }
+    // Date-backed filters must not silently round accepted microseconds to an
+    // earlier boundary. Clients can use any ISO offset with at most 3 decimals.
+    if (/\.\d{4,}/.test(parsed.data)) {
+      throw new HTTPException(400, { message: `${name} supports at most millisecond precision` });
+    }
+    return new Date(parsed.data);
+  };
+  const updatedFrom = parseDateBound("updatedFrom");
+  const updatedBefore = parseDateBound("updatedBefore");
+  const createdFrom = parseDateBound("createdFrom");
+  const createdBefore = parseDateBound("createdBefore");
+  if (updatedFrom && updatedBefore && updatedFrom >= updatedBefore) {
+    throw new HTTPException(400, { message: "updatedFrom must be earlier than updatedBefore" });
+  }
+  if (createdFrom && createdBefore && createdFrom >= createdBefore) {
+    throw new HTTPException(400, { message: "createdFrom must be earlier than createdBefore" });
+  }
+  const hasPageFilters =
+    channelId !== undefined ||
+    createdByKind !== undefined ||
+    updatedFrom !== undefined ||
+    updatedBefore !== undefined ||
+    createdFrom !== undefined ||
+    createdBefore !== undefined;
   if (pinsOnly && !allowCursor) {
     throw new HTTPException(400, { message: 'pinsOnly requires view="page"' });
   }
-  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search)) {
+  if (pinsOnly && (rawCursor || parentSessionId !== undefined || search || hasPageFilters)) {
     throw new HTTPException(400, {
-      message: "pinsOnly cannot be combined with cursor, parentSessionId, or search",
+      message: "pinsOnly cannot be combined with cursor, parentSessionId, search, or filters",
     });
   }
   if (pinsOnly && archivedOnly) {
@@ -4731,6 +4806,16 @@ function sessionListQuery(
     search: search || undefined,
     pinsOnly,
     archivedOnly,
+    channelId: channelId === undefined ? undefined : channelId === "null" ? null : channelId,
+    createdBy:
+      createdByKind && createdBySubjectId
+        ? { kind: createdByKind, subjectId: createdBySubjectId }
+        : undefined,
+    updatedFrom,
+    updatedBefore,
+    createdFrom,
+    createdBefore,
+    hasPageFilters,
   };
 }
 
@@ -4990,9 +5075,11 @@ export function agentTopologyQuery(query: Record<string, string>): {
     throw new HTTPException(400, { message: "query cannot be combined with an exact subject" });
   }
   const relevanceRequested = Boolean(searchQuery || subject);
+  // An explicit root scopes the whole workstream; only an explicit parent
+  // narrows it to one level. Ordinary browse still defaults to root sessions.
   const parentSessionId =
     rawParent === undefined
-      ? relevanceRequested
+      ? relevanceRequested || Boolean(rootSessionId)
         ? undefined
         : null
       : rawParent === "null"

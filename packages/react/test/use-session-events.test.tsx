@@ -17,7 +17,7 @@ import { buildTimeline, type TimelineItem } from "../src/timeline";
 registerDom();
 
 const SECOND_SESSION_ID = "33333333-3333-4333-8333-333333333333";
-const SESSION_HISTORY_PAGE_SIZE = 255;
+const SESSION_HISTORY_PAGE_SIZE = 1000;
 
 function event(
   sequence: number,
@@ -205,7 +205,7 @@ describe("useSessionEvents", () => {
       },
     ]);
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(946);
+    expect(hook.result.current.events[0]?.sequence).toBe(201);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(streamCalls).toEqual([1200]);
     expect(lengths.filter((length) => length === SESSION_HISTORY_PAGE_SIZE)).toHaveLength(1);
@@ -236,7 +236,7 @@ describe("useSessionEvents", () => {
       },
       listEvents: async (_workspaceId, _sessionId, options = {}) => {
         listCalls.push(options);
-        if (delayedOlder && options.before === 146) {
+        if (delayedOlder && options.before === 401) {
           const page = listPage(store, options);
           await delayedOlder;
           return page;
@@ -338,11 +338,11 @@ describe("useSessionEvents", () => {
       });
       expect(hook.result.current.lastSequence).toBe(200);
 
-      // The same-sized raw gap can instead contain hundreds of visible
-      // messages. That compact probe crosses the semantic group bound, so the
-      // hook discards it and reloads one latest tail before reopening SSE.
-      store = Array.from({ length: 400 }, (_, index) => event(index + 1));
-      durableHead = 400;
+      // A large raw gap skips the compact probe and reloads one latest tail.
+      // Keep enough history behind that tail for the in-flight older-page
+      // invalidation check below.
+      store = Array.from({ length: 1_400 }, (_, index) => event(index + 1));
+      durableHead = 1_400;
       await suspendAndResume();
 
       expect(listCalls).toEqual([
@@ -360,23 +360,16 @@ describe("useSessionEvents", () => {
           payloadMode: "full",
         },
         {
-          after: 200,
-          limit: 200,
-          compact: true,
-          direction: "after",
-          payloadMode: "full",
-        },
-        {
           before: Number.MAX_SAFE_INTEGER,
           limit: SESSION_HISTORY_PAGE_SIZE,
           compact: true,
           payloadMode: "full",
         },
       ]);
-      expect(streamCalls).toEqual([2, 2, 200, 400]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(146);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+      expect(hook.result.current.events[0]?.sequence).toBe(401);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
 
       let releaseOlder!: () => void;
       delayedOlder = new Promise<void>((resolve) => {
@@ -399,8 +392,8 @@ describe("useSessionEvents", () => {
       await suspendAndResume();
       // A foreground replacement is atomic: the prior complete tip remains
       // visible while the bounded latest page is still in flight.
-      expect(hook.result.current.events[0]?.sequence).toBe(146);
-      expect(hook.result.current.events.at(-1)?.sequence).toBe(400);
+      expect(hook.result.current.events[0]?.sequence).toBe(401);
+      expect(hook.result.current.events.at(-1)?.sequence).toBe(1_400);
       await actRun(() => releaseTail(listPage(store, listCalls.at(-1))));
       delayedTail = null;
       await actRun(async () => {
@@ -415,18 +408,18 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       });
       expect(listCalls.some((call) => call.after === 400)).toBe(false);
-      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000]);
       expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
 
       // Replacement retires navigation against the discarded window. The old
-      // page must not splice 1–145 onto 5746–6000, leaving an inaccessible gap.
+      // page must not splice 1–400 onto 5001–6000, leaving an inaccessible gap.
       expect(hook.result.current.loadingOlder).toBe(false);
       releaseOlder();
       await actRun(() => pendingOlder);
       expect(pendingOlder.committed).toBe(false);
-      expect(hook.result.current.events[0]?.sequence).toBe(5_746);
+      expect(hook.result.current.events[0]?.sequence).toBe(5_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_000);
       expect(hook.result.current.hasOlder).toBe(true);
 
@@ -442,7 +435,7 @@ describe("useSessionEvents", () => {
         compact: true,
         payloadMode: "full",
       });
-      expect(streamCalls).toEqual([2, 2, 200, 400, 6_000, 6_000]);
+      expect(streamCalls).toEqual([2, 2, 200, 1_400, 6_000, 6_000]);
       expect(hook.result.current.events.at(-2)?.sequence).toBe(6_001);
       expect(hook.result.current.events.at(-1)?.sequence).toBe(6_002);
       expect(headReadCalls).toHaveLength(5);
@@ -625,7 +618,7 @@ describe("useSessionEvents", () => {
         event(index + 301, "agent.message.delta", { text: "middle" }),
       ),
       event(500),
-      ...Array.from({ length: 200 }, (_, index) =>
+      ...Array.from({ length: 900 }, (_, index) =>
         event(index + 501, "agent.message.delta", { text: "tail" }),
       ),
     ];
@@ -655,16 +648,10 @@ describe("useSessionEvents", () => {
     const more = await actRun(() => hook.result.current.loadOlder());
     await flush(20);
     // The older window starts exactly below the kept window and reaches the log
-    // start within the older two-fetch cap.
+    // start within the older fetch cap.
     expect(more).toBe(false);
     expect(listCalls[1]).toEqual({
       before: 500,
-      limit: SESSION_HISTORY_PAGE_SIZE,
-      compact: true,
-      payloadMode: "full",
-    });
-    expect(listCalls[2]).toEqual({
-      before: 245,
       limit: SESSION_HISTORY_PAGE_SIZE,
       compact: true,
       payloadMode: "full",
@@ -810,7 +797,7 @@ describe("useSessionEvents", () => {
     // This synthetic log has no turn boundary in either page, so the initial
     // read stops after one bounded boundary probe and remains explicitly older.
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE * 2);
-    expect(hook.result.current.events[0]?.sequence).toBe(39_491);
+    expect(hook.result.current.events[0]?.sequence).toBe(38_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(listCalls).toEqual([
       {
@@ -820,7 +807,7 @@ describe("useSessionEvents", () => {
         payloadMode: "full",
       },
       {
-        before: 39_746,
+        before: 39_001,
         limit: SESSION_HISTORY_PAGE_SIZE,
         compact: true,
         payloadMode: "full",
@@ -955,7 +942,7 @@ describe("useSessionEvents", () => {
       },
     ]);
     expect(hook.result.current.events).toHaveLength(SESSION_HISTORY_PAGE_SIZE);
-    expect(hook.result.current.events[0]?.sequence).toBe(19_746);
+    expect(hook.result.current.events[0]?.sequence).toBe(19_001);
     expect(hook.result.current.hasOlder).toBe(true);
 
     await hook.unmount();
@@ -1320,7 +1307,7 @@ describe("useSessionEvents", () => {
     );
     await flush(20);
 
-    expect(hook.result.current.events[0]?.sequence).toBe(4_746);
+    expect(hook.result.current.events[0]?.sequence).toBe(4_001);
     expect(hook.result.current.hasOlder).toBe(true);
     expect(hook.result.current.hasNewer).toBe(false);
     expect(streamCalls).toEqual([5_000]);

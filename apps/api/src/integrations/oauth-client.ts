@@ -15,6 +15,7 @@ import {
   createConnection,
   decryptEnvironmentValue,
   encryptEnvironmentValue,
+  findActiveWorkspaceApiKeyById,
   getConnectionMetadata,
   getGlobalCatalogOAuthProfile,
   getWorkspaceGrant,
@@ -818,7 +819,7 @@ async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload)
       ? membershipGrant
       : state.personalOwnerVerified
         ? await resolveNamedManagedPersonalWorkspaceGrant(db, state)
-        : null;
+        : await apiKeyCallbackGrant(db, state);
   if (
     !grant ||
     grant.accountId !== state.accountId ||
@@ -828,6 +829,25 @@ async function requireOAuthCallbackGrant(db: Database, state: OAuthStatePayload)
       message: "OAuth subject no longer has permission to write this workspace connection",
     });
   }
+}
+
+async function apiKeyCallbackGrant(
+  db: Database,
+  state: OAuthStatePayload,
+): Promise<{ accountId: string; permissions: Parameters<typeof hasPermission>[0] } | null> {
+  const prefix = "api_key:";
+  if (!state.subjectId.startsWith(prefix)) {
+    return null;
+  }
+  const apiKey = await findActiveWorkspaceApiKeyById(db, {
+    accountId: state.accountId,
+    workspaceId: state.workspaceId,
+    apiKeyId: state.subjectId.slice(prefix.length),
+  });
+  if (!apiKey) {
+    return null;
+  }
+  return { accountId: apiKey.accountId, permissions: apiKey.permissions };
 }
 
 /** The hosted-Slack profile's origin pins, kept exported for its tests. */

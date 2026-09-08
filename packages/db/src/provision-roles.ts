@@ -535,6 +535,7 @@ async function grantAppRoleIfSchemaExists(
     "get_workspace_kind(uuid,uuid)",
     "resolve_workspace_codex_subscription_source(uuid,uuid)",
     "list_organization_workspace_ids(uuid)",
+    "list_organization_codex_workspace_ids(uuid)",
     "organization_workspace_command(jsonb)",
     "authorize_organization_shared_workspace_administration(uuid,uuid,text)",
     "resolve_organization_workspace_removal_subject(uuid,text,uuid)",

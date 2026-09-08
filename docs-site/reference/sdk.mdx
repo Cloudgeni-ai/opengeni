@@ -1,0 +1,72 @@
+---
+title: "SDK"
+description: "The TypeScript SDK and React components for the OpenGeni API."
+icon: "code"
+---
+
+<Note>
+  The SDK surface is changing quickly. This page describes the shape; the package READMEs in the
+  repository are the authority for exact method signatures and the current version.
+</Note>
+
+## @opengeni/sdk
+
+A framework-agnostic TypeScript client with zero runtime dependencies. It needs only WHATWG `fetch` and streams, so it runs in Node 18+, Bun, Deno, browsers, and edge runtimes.
+
+```bash
+bun add @opengeni/sdk
+```
+
+```ts
+import { OpenGeniClient } from "@opengeni/sdk";
+
+const client = new OpenGeniClient({
+  baseUrl: "https://your-deployment.example.com",
+  apiKey: process.env.OPENGENI_API_KEY!,
+});
+
+const session = await client.createSession(workspaceId, {
+  initialMessage: "Investigate the failing deploy on staging",
+  resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+});
+
+for await (const event of client.streamEvents(workspaceId, session.id)) {
+  if (event.type === "agent.message.delta") {
+    process.stdout.write((event.payload as { text: string }).text);
+  }
+}
+```
+
+What it covers:
+
+| Area                         | Highlights                                                                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Organizations and workspaces | Organization API keys, idempotent `ensureWorkspace`, workspace settings                                                           |
+| Sessions                     | Create with resources, files, Skills, tools, a goal, and a compute target; list, get, archive, cancel                             |
+| Input and control            | Send, Steer, queue management, Pause and Resume, approval decisions, human-input answers                                          |
+| Events                       | Replay by sequence, bounded event pages, and a streaming iterator with reconnect, resume, gap backfill, and duplicate suppression |
+| Files                        | Upload, attach, and download workspace files                                                                                      |
+| Goals                        | Read, pause, resume, and clear a session goal                                                                                     |
+| Connected Machines           | Enrollment tokens, device-flow approval, machine discovery and metrics, active-target swap                                        |
+| Proxy helpers                | Re-emit a session stream from your own server with an identical wire format                                                       |
+
+Full reference: [packages/sdk/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/sdk/README.md).
+
+## @opengeni/react
+
+Hooks and styled components built on the SDK: live session streaming, a composer, a timeline that renders streaming deltas, tool calls, approvals, and child-session status, session status badges, and workspace fleet tiles. Every visual decision routes through `--og-*` CSS variables, so a host rebrands by overriding tokens. Dark mode is the default; light is opt-in.
+
+Subpaths keep the root import lean:
+
+| Import                     | Contents                                             |
+| -------------------------- | ---------------------------------------------------- |
+| `@opengeni/react`          | Timeline, composer, hooks, and the sandbox workbench |
+| `@opengeni/react/composer` | Advanced composer composition                        |
+| `@opengeni/react/machines` | Connected Machines dashboard and enrollment flow     |
+| `@opengeni/react/realtime` | Voice controls, lazily loadable                      |
+
+Full reference: [packages/react/README.md](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/README.md).
+
+## Compatibility
+
+Published clients and server builds are compatible within the same major version. Within a major, evolution is additive and both sides are tolerant readers: servers ignore unknown request parameters, clients ignore unknown response fields and event types, and removing or retyping a field requires a major release. Servers expose their version through the health and client-config responses. See the [compatibility policy](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/architecture.md#310-clientserver-compatibility-policy).

@@ -1582,7 +1582,10 @@ export async function postUserMessageTurn(
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   const sessionForModelGate = await requireSession(db, workspaceId, sessionId);
-  const effectiveModelForGate = requestedModel ?? sessionForModelGate.model;
+  // Acceptance already froze this policy before resource/credential validation.
+  // A different turn starting meanwhile must not change the model we gate here.
+  const effectiveModelForGate =
+    input.turnExecutionPolicy?.productModelId ?? requestedModel ?? sessionForModelGate.model;
   const freshWorkspaceCustomModel =
     requestedModel !== null &&
     isWorkspaceCustomModelId(settings, requestedModel) &&
@@ -1715,8 +1718,9 @@ export async function postUserMessageTurn(
  * `session_create` tool: payload validation, resource/tool/variableSet
  * checks, usage limits, session start, and usage recording. `rawPayload` is
  * the unparsed request body so absent-vs-empty execution-context fields keep
- * their meaning: a child inherits omitted resources/tools/mcpServers from its
- * trusted immediate parent, while explicit arrays (including []) win. A
+ * their meaning: a child inherits repositories (never files), tools, and MCP
+ * servers from its trusted immediate parent when omitted; explicit arrays
+ * (including []) win. A
  * top-level create with omitted tools applies workspace-default capability MCPs.
  */
 export function resolveChildGoalFromAcceptedSnapshot(
@@ -2102,7 +2106,8 @@ export async function createSessionForRequestWithOutcome(
   const resources = normalizeResources(
     hasOwnProperty(rawPayload, "resources")
       ? payload.resources
-      : (parentSession?.resources ?? payload.resources),
+      : (parentSession?.resources.filter((resource) => resource.kind === "repository") ??
+          payload.resources),
   );
   const inheritedOrSubmittedSkills = hasOwnProperty(rawPayload, "skills")
     ? payload.skills

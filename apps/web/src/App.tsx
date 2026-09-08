@@ -5,7 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
-//   /workspaces/:id/priority                 → "For you" priority feed (agent-time-lost ledger)
+//   /workspaces/:id/priority                 → "For you" priority feed (verified human waits)
 //   /workspaces/:id/agents                   → workspace agent topology
 //   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
@@ -313,7 +313,7 @@ const workspaceCapabilitiesRoute = createRoute({
   path: "plugins",
   // `?section=packs` focuses the Packs subsection (used by the legacy
   // /packs redirect and the nav). Unknown values fall back to the catalog.
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: Capabilities,
@@ -321,7 +321,7 @@ const workspaceCapabilitiesRoute = createRoute({
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "packs" } => ({
+  validateSearch: (search: Record<string, unknown>) => ({
     ...(search.section === "packs" ? { section: "packs" as const } : {}),
   }),
   component: CapabilitiesLegacyRedirect,
@@ -625,12 +625,7 @@ function CapabilitiesLegacyRedirect() {
   const { workspaceId } = workspaceLegacyCapabilitiesRoute.useParams();
   const { section } = workspaceLegacyCapabilitiesRoute.useSearch();
   return (
-    <Navigate
-      to="/workspaces/$workspaceId/plugins"
-      params={{ workspaceId }}
-      search={section ? { section } : {}}
-      replace
-    />
+    <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} legacyRedirect />
   );
 }
 

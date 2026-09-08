@@ -1,4 +1,8 @@
-import { mergeResourceRefs } from "@opengeni/contracts";
+import {
+  mergeResourceRefs,
+  normalizeRepositoryTransportUri,
+  stableJson,
+} from "@opengeni/contracts";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -10,6 +14,23 @@ import {
   type RepoDraft,
 } from "@/lib/session-tools";
 import type { GitHubRepository, ResourceRef, Session } from "@/types";
+
+type RepositoryResource = Extract<ResourceRef, { kind: "repository" }>;
+
+function manualDraftSignature(draft: RepoDraft): string | null {
+  try {
+    const uri = normalizeRepositoryTransportUri(
+      draft.url.includes("://") ? draft.url : `https://${draft.url}`,
+    );
+    return `${uri}\u0000${draft.ref.trim()}\u0000${draft.expectedCommitSha ?? ""}`;
+  } catch {
+    return null;
+  }
+}
+
+function manualResourceSignature(resource: RepositoryResource): string {
+  return `${resource.uri}\u0000${resource.ref}\u0000${resource.expectedCommitSha ?? ""}`;
+}
 
 /**
  * Session-scoped repository additions for the follow-up composer. Session
@@ -135,6 +156,8 @@ export function useFollowUpRepositories(session: Session): {
     pendingRepoIds,
     pendingRepoRefs,
   ]);
+  const pendingResourcesRef = useRef(pendingBuild.resources);
+  pendingResourcesRef.current = pendingBuild.resources;
   const selectionCount =
     selectedRepoIds.size +
     selectedPersonalRepoIds.size +
@@ -508,13 +531,71 @@ export function useFollowUpRepositories(session: Session): {
     );
     if (repositories.length === 0) return;
     setOptimisticMountedRepos((current) => mergeResourceRefs(current, repositories));
-    // The picker is disabled during delivery, so every pending selection belongs
-    // to the immutable wire input accepted by this callback.
-    setPendingRepoIds(new Set());
-    setPendingRepoRefs({});
-    setPendingPersonalRepoIds(new Set());
-    setPendingPersonalRepoRefs({});
-    setPendingManualRepos([]);
+
+    // An optimistic Send can be accepted after the picker becomes editable
+    // again. Remove only pending selections represented by this immutable wire
+    // snapshot; later additions must remain queued for the next message.
+    const acceptedKeys = new Set(repositories.map(stableJson));
+    const pendingResources = pendingResourcesRef.current;
+    const acceptedRepoIds = new Set(
+      pendingResources.flatMap((resource) =>
+        resource.kind === "repository" &&
+        resource.githubRepositoryId !== undefined &&
+        acceptedKeys.has(stableJson(resource))
+          ? [resource.githubRepositoryId]
+          : [],
+      ),
+    );
+    const acceptedPersonalRepoIds = new Set(
+      pendingResources.flatMap((resource) =>
+        resource.kind === "repository" &&
+        resource.connectionType === "github_personal" &&
+        typeof resource.repositoryId === "string" &&
+        acceptedKeys.has(stableJson(resource))
+          ? [resource.repositoryId]
+          : [],
+      ),
+    );
+    const acceptedManualDraftKeys = new Set(
+      pendingResources.flatMap((resource) => {
+        if (
+          resource.kind !== "repository" ||
+          resource.connectionType === "github_personal" ||
+          resource.githubRepositoryId !== undefined ||
+          resource.githubInstallationId !== undefined ||
+          !acceptedKeys.has(stableJson(resource))
+        ) {
+          return [];
+        }
+        return [manualResourceSignature(resource)];
+      }),
+    );
+
+    setPendingRepoIds((current) => {
+      const next = new Set([...current].filter((id) => !acceptedRepoIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setPendingRepoRefs((current) => {
+      const next = { ...current };
+      for (const id of acceptedRepoIds) delete next[id];
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setPendingPersonalRepoIds((current) => {
+      const next = new Set([...current].filter((id) => !acceptedPersonalRepoIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+    setPendingPersonalRepoRefs((current) => {
+      const next = { ...current };
+      for (const id of acceptedPersonalRepoIds) delete next[id];
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
+    setPendingManualRepos((current) => {
+      const next = current.filter((draft) => {
+        const signature = manualDraftSignature(draft);
+        return signature === null || !acceptedManualDraftKeys.has(signature);
+      });
+      return next.length === current.length ? current : next;
+    });
   }, []);
 
   return {

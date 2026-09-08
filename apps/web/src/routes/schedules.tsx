@@ -1,8 +1,9 @@
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 import { loadSessionSchedules } from "@/lib/scheduled-tasks";
 // Shared schedules for agent turns and deterministic knowledge-source syncs,
 // with honest per-run outcomes and no implied agent session for connector work.
 import { useNavigate } from "@tanstack/react-router";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   BotIcon,
   CalendarClockIcon,
@@ -160,7 +161,7 @@ export function SchedulesRoute({
   const navigate = useNavigate();
   const client = context.client;
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const fleet = useMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: MACHINES_COMPOSER_POLL_MS });
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);

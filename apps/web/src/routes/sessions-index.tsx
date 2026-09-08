@@ -1,3 +1,10 @@
+import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "@/lib/analytics-consent";
+import { PersonalResourceScopeChoice } from "@/components/personal-resource-scope-choice";
+import { usePersonalResourceScopeChoice } from "@/lib/use-personal-resource-scope-choice";
+import type { PersonalAttachmentMode } from "@/lib/personal-resource-attachments";
+import { useWorkspaceRigs } from "@/lib/use-workspace-rigs";
+import { captureAnalyticsEvent } from "@/lib/analytics-observer";
+import { useWorkspaceMachines } from "@/lib/use-workspace-machines";
 // The sessions index: the centered "Start a session" composer. The form is
 // organised top-down — (A) message + model/tools/repos pills → (B) WHERE SHOULD
 // THIS RUN? (when machines exist) → (C) rig/variable-set or machine fields.
@@ -17,13 +24,12 @@ import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
   useChannels,
-  useRigs,
   useVariableSets,
   useWorkspaceSessions,
   type ComposerState,
 } from "@opengeni/react";
 import { resolveWorkspaceSessionToolDefaults } from "@opengeni/contracts";
-import { MACHINES_COMPOSER_POLL_MS, useMachines, type MachineView } from "@opengeni/react/machines";
+import { MACHINES_COMPOSER_POLL_MS, type MachineView } from "@opengeni/react/machines";
 import {
   NewSessionRealtimeControl,
   RealtimeVoiceModelPanel,
@@ -50,6 +56,8 @@ import {
 } from "lucide-react";
 import {
   createElement,
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -113,7 +121,7 @@ import {
 import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
-import { hasWorkspacePermission } from "@/lib/permissions";
+import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
 import {
   isPersonalAttachmentConflict,
   newSessionFixedResourceCatalogFailed,
@@ -167,6 +175,12 @@ import {
 import type { Channel, SandboxBackend, Session } from "@/types";
 
 const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+const EmptyCreditsNotice = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.EmptyCreditsNotice,
+  })),
+);
 
 export function SessionsIndexRoute({
   workspaceId,
@@ -273,7 +287,8 @@ function SessionsIndexRouteContent({
   const variableSets = useVariableSets({
     enabled: fixedResourceCatalogEnabled && canLoadVariableSetCatalog,
   });
-  const rigs = useRigs({ enabled: fixedResourceCatalogEnabled });
+  const canUseRigs = hasWorkspacePermission(context.accessContext, workspaceId, "rigs:use");
+  const rigs = useWorkspaceRigs({ enabled: fixedResourceCatalogEnabled && canUseRigs });
   const [tenancyCapabilities, setTenancyCapabilities] = useState<{
     activated: boolean;
     canCreatePrivate: boolean;
@@ -282,14 +297,6 @@ function SessionsIndexRouteContent({
   const tenancyCapabilityGeneration = useRef(0);
   useEffect(() => {
     const generation = ++tenancyCapabilityGeneration.current;
-    if (personalWorkspace) {
-      setTenancyCapabilities({
-        activated: true,
-        canCreatePrivate: true,
-        reason: "available",
-      });
-      return;
-    }
     setTenancyCapabilities(null);
     void context.client
       .getSessionTenancyCreateCapabilities(workspaceId)
@@ -314,6 +321,11 @@ function SessionsIndexRouteContent({
         );
       });
   }, [context.client, personalWorkspace, workspaceId]);
+  const createVisibility = newSessionCreateVisibility(
+    personalWorkspace,
+    draft.visibility,
+    tenancyCapabilities?.canCreatePrivate === true,
+  );
   const personalOwnerScope = resolvePersonalResourceOwnerScope({
     authMode: context.clientConfig.auth.mode,
     authSession: context.authSession,
@@ -500,7 +512,7 @@ function SessionsIndexRouteContent({
       : [];
   });
   const [fleetPollMs, setFleetPollMs] = useState<number | undefined>(undefined);
-  const fleet = useMachines({ pollIntervalMs: fleetPollMs });
+  const fleet = useWorkspaceMachines({ pollIntervalMs: fleetPollMs });
   const machines = fleet.machines.filter((machine) => machine.kind === "selfhosted");
   const fleetEmpty = machines.length === 0;
   const fleetLoadFailed =
@@ -536,9 +548,19 @@ function SessionsIndexRouteContent({
   const [personalResourceCatalogRefreshPending, setPersonalResourceCatalogRefreshPending] =
     useState(false);
   const personalResourceCatalogRefreshGeneration = useRef(0);
+  const [personalScopeGeneration, setPersonalScopeGeneration] = useState(0);
+  const personalScopeChoice = usePersonalResourceScopeChoice(
+    [
+      personalOwnerScope?.identityKey ?? "ineligible",
+      personalResourceSelectionKey,
+      personalScopeGeneration,
+    ].join(":"),
+    createVisibility,
+  );
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
+    mode: personalScopeChoice.mode,
     personalResourceCount: selectedPersonalResourceCount,
-    visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+    visibility: createVisibility,
   });
   const refreshPersonalResourceCatalogs = useLatestCallback(async (): Promise<void> => {
     const generation = ++personalResourceCatalogRefreshGeneration.current;
@@ -550,7 +572,7 @@ function SessionsIndexRouteContent({
           : canResolveVariableSetAttachments
             ? resolveVariableSetAttachments()
             : Promise.resolve(),
-        rigs.refresh(),
+        canUseRigs ? rigs.refresh() : Promise.resolve(),
       ]);
     } finally {
       if (personalResourceCatalogRefreshGeneration.current === generation) {
@@ -702,7 +724,7 @@ function SessionsIndexRouteContent({
       options: newSessionDraftOptionsFromSessionDraft(
         draft,
         defaultFirstPartyMcpTools,
-        newSessionCreateVisibility(personalWorkspace, draft.visibility),
+        createVisibility,
       ),
     }),
     [
@@ -714,7 +736,7 @@ function SessionsIndexRouteContent({
       draft,
       defaultFirstPartyMcpTools,
       message,
-      personalWorkspace,
+      createVisibility,
       persistedToolPolicy,
       projectProvenancePresent,
       selectedChannelId,
@@ -756,6 +778,7 @@ function SessionsIndexRouteContent({
   const workspaceDefaultToolIdsForHydration = context.workspaceDefaultToolIds;
   const applyRemoteDraft = useCallback(
     (remote: NewSessionDraftEditable, history: NewSessionSelectionHistory) => {
+      setPersonalScopeGeneration((generation) => generation + 1);
       setMessage(remote.text);
       const restored = sessionDraftFromNewSessionDraftOptions(
         remote.options,
@@ -826,9 +849,10 @@ function SessionsIndexRouteContent({
   });
   const busy = context.busy || submitting;
   const privateCreateUnavailable =
-    !personalWorkspace &&
-    draft.visibility === "private" &&
-    tenancyCapabilities?.canCreatePrivate !== true;
+    (personalWorkspace && tenancyCapabilities === null) ||
+    (!personalWorkspace &&
+      draft.visibility === "private" &&
+      tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
@@ -845,6 +869,40 @@ function SessionsIndexRouteContent({
       candidate.provider === "codex-subscription" &&
       candidate.credentialReadiness.status === "ready",
   );
+  const startBlocker =
+    modelCatalog.loading || newSessionDraft.loading
+      ? null
+      : modelCatalog.error
+        ? "model_catalog_unavailable"
+        : !newSessionPolicyValid
+          ? !modelCatalog.rows.some((row) => row.selectable)
+            ? "no_model_connected"
+            : selectedPolicyRow &&
+                selectedPolicyRow.billingClass !== "opengeni_credits" &&
+                selectedPolicyRow.catalog.credentialReadiness.status !== "ready"
+              ? "selected_model_not_connected"
+              : "model_policy_unavailable"
+          : privateCreateUnavailable
+            ? "private_session_unavailable"
+            : newSessionDraft.conflict
+              ? "draft_conflict"
+              : attachments.hasUnresolved
+                ? "attachments_pending"
+                : !computeReady
+                  ? "compute_unavailable"
+                  : null;
+  useEffect(() => {
+    const record = () => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocker_viewed", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
+    };
+    record();
+    window.addEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+    return () => window.removeEventListener(ANALYTICS_COLLECTION_ENABLED_EVENT, record);
+  }, [startBlocker, workspaceId]);
   // Shared with the bar start control and the mobile “+ → Voice model” panel.
   const voiceSelection = useRealtimeModelSelection({
     client: context.client,
@@ -864,6 +922,11 @@ function SessionsIndexRouteContent({
       realtimeModel: SessionRealtimeModel | null,
       policy?: Pick<ComposerLaunchSearch, "model" | "effort" | "latency">,
     ): Promise<boolean> => {
+      if (startBlocker)
+        captureAnalyticsEvent("session_start_blocked", {
+          workspace_id: workspaceId,
+          reason: startBlocker,
+        });
       const hasTypedText = message.trim().length > 0;
       const text = hasTypedText
         ? message
@@ -945,6 +1008,7 @@ function SessionsIndexRouteContent({
                   visibility: newSessionCreateVisibility(
                     personalWorkspace,
                     submission.options.visibility ?? "workspace",
+                    tenancyCapabilities?.canCreatePrivate === true,
                   ),
                   onFailure: ({ error, request }) => {
                     newSessionDraft.captureConflict(error);
@@ -953,6 +1017,7 @@ function SessionsIndexRouteContent({
                 },
               );
               if (!created) return null;
+              setPersonalScopeGeneration((generation) => generation + 1);
               return {
                 sessionId: created.id,
                 settleDraft: async () => true,
@@ -998,6 +1063,7 @@ function SessionsIndexRouteContent({
                 visibility: newSessionCreateVisibility(
                   personalWorkspace,
                   submission.options.visibility ?? "workspace",
+                  tenancyCapabilities?.canCreatePrivate === true,
                 ),
                 onFailure: ({ error, request }) => {
                   newSessionDraft.captureConflict(error);
@@ -1006,6 +1072,7 @@ function SessionsIndexRouteContent({
               },
             );
             if (!created) return null;
+            setPersonalScopeGeneration((generation) => generation + 1);
             return {
               sessionId: created.id,
               settleDraft: async () => {
@@ -1219,6 +1286,24 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
+        {selectedPolicyRow?.billingClass === "opengeni_credits" &&
+        hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:read") ? (
+          <div className="mt-6">
+            <Suspense fallback={null}>
+              <EmptyCreditsNotice
+                workspaceId={workspaceId}
+                accountId={workspace?.accountId ?? null}
+                canBuyCredits={hasAccountPermission(
+                  context.accessContext,
+                  workspace?.accountId ?? "",
+                  "billing:manage",
+                )}
+                canReadBilling
+              />
+            </Suspense>
+          </div>
+        ) : null}
+
         <div ref={composerRegionRef} className="mt-8">
           <ConsoleComposer
             workspaceId={workspaceId}
@@ -1365,7 +1450,9 @@ function SessionsIndexRouteContent({
             disabled={busy || newSessionDraft.loading}
             personalResourceAccess={{
               names: selectedPersonalResourceNames,
-              visibility: newSessionCreateVisibility(personalWorkspace, draft.visibility),
+              mode: personalScopeChoice.mode,
+              onModeChange: personalScopeChoice.setMode,
+              visibility: createVisibility,
             }}
             fleet={fleet}
             machines={machines}
@@ -1895,6 +1982,8 @@ function WorkspaceRepositoryMenuBody({
 
 type NewSessionPersonalResourceAccess = {
   names: string[];
+  mode: PersonalAttachmentMode;
+  onModeChange: (mode: PersonalAttachmentMode) => void;
   visibility: "private" | "workspace";
 };
 
@@ -1912,7 +2001,7 @@ function ComputeTargetControl(props: {
   onComputeChange: (draft: SessionDraft) => void;
   disabled: boolean;
   personalResourceAccess: NewSessionPersonalResourceAccess;
-  fleet: ReturnType<typeof useMachines>;
+  fleet: ReturnType<typeof useWorkspaceMachines>;
   machines: MachineView[];
   variableSets: VariableSet[];
   rigs: Rig[];
@@ -2422,10 +2511,14 @@ function PersonalResourceAccessInline(props: {
   if (props.access.names.length === 0) return null;
   const content =
     props.access.visibility === "workspace" ? (
-      <p className="text-2xs leading-4 text-fg-subtle">
-        {props.access.names.join(", ")} will be used only for the message you send. Other members
-        may see the result, but cannot use your private credential or resource.
-      </p>
+      <div className="space-y-2">
+        <p className="text-2xs text-fg-subtle">{props.access.names.join(", ")}</p>
+        <PersonalResourceScopeChoice
+          mode={props.access.mode}
+          onModeChange={props.access.onModeChange}
+          disabled={props.disabled}
+        />
+      </div>
     ) : (
       <p className="text-2xs text-fg-subtle">
         {props.access.names.join(", ")} will be available only to this session.

@@ -38,6 +38,23 @@
         }
       })();
     </script>
+    <script id="opengeni-appearance-bootstrap">
+      // Apply before styles paint; keep in sync with src/lib/appearance.tsx.
+      (() => {
+        let preference = "system";
+        try {
+          preference = localStorage.getItem("opengeni.appearance") || "system";
+        } catch {}
+        const theme =
+          preference === "light" || preference === "dark"
+            ? preference
+            : matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark"
+              : "light";
+        document.documentElement.dataset.ogTheme = theme;
+        document.documentElement.classList.toggle("dark", theme === "dark");
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>OpenGeni</title>
   </head>
