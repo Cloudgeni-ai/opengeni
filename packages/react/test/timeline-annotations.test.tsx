@@ -424,10 +424,10 @@ describe("timeline annotations", () => {
   });
 
   test("keeps the Add note popover through pointerdown so the click can land", async () => {
-    let captured: DraftTimelineAnnotation | null = null;
+    const captured: DraftTimelineAnnotation[] = [];
     const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
     const rendered = await renderComponent(
-      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+      <MessageTimeline items={[item]} onAnnotate={(next) => captured.push(next)} />,
     );
     await flush();
     const source = rendered.container.querySelector<HTMLElement>(
@@ -443,7 +443,7 @@ describe("timeline annotations", () => {
     expect(addNoteButton()).toBeDefined();
     expect(addNoteButton()?.textContent).toContain("beta");
     await act(async () => action?.click());
-    expect(captured?.quote).toBe("beta");
+    expect(captured[0]?.quote).toBe("beta");
     await rendered.unmount();
   });
 
@@ -485,11 +485,11 @@ describe("timeline annotations", () => {
   });
 
   test("clips a chrome-inclusive highlight back to the assistant sentence", async () => {
-    let captured: DraftTimelineAnnotation | null = null;
+    const captured: DraftTimelineAnnotation[] = [];
     const text = "OpenGeni stack is working.";
     const item = agentItem(SOURCE_EVENT_ID, text, 4);
     const rendered = await renderComponent(
-      <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+      <MessageTimeline items={[item]} onAnnotate={(next) => captured.push(next)} />,
     );
     await flush();
     const source = rendered.container.querySelector<HTMLElement>(
@@ -510,7 +510,7 @@ describe("timeline annotations", () => {
     const action = addNoteButton();
     expect(action?.textContent).toContain("OpenGeni stack is working.");
     await act(async () => action?.click());
-    expect(captured?.quote).toBe(text);
+    expect(captured[0]?.quote).toBe(text);
     await rendered.unmount();
   });
 

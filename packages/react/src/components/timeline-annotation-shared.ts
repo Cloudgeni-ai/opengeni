@@ -8,7 +8,7 @@ export function annotationHasNote(note: string): boolean {
 }
 
 export function annotationDisplayOrdinal(
-  annotation: { ordinal?: number | undefined },
+  annotation: { readonly id?: string; readonly ordinal?: number | undefined },
   index: number,
 ): number {
   return typeof annotation.ordinal === "number" ? annotation.ordinal : index + 1;
