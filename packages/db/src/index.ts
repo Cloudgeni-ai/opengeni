@@ -8821,7 +8821,9 @@ export async function listInstalledPortableSkills(
       return [
         {
           ...skill,
-          name: current.title ?? skill.name,
+          // Runtime names are validated portable identifiers, not display titles.
+          // A customized registry title may contain spaces or punctuation.
+          name: skill.name,
           description: current.description ?? skill.description,
           contentSha256: skillFilesContentHash(current.files),
           files: current.files,
