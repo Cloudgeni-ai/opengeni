@@ -1,9 +1,11 @@
 #!/usr/bin/env bun
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   publishableWorkspacePackages,
+  repoRoot,
   topologicallySortedPackages,
   type WorkspacePackage,
 } from "./publishable-workspaces";
@@ -16,6 +18,35 @@ export function nextCanaryVersion(baseVersion: string, lastCanary: string | null
     if (Number.isInteger(n) && n >= 0) return `${prefix}${n + 1}`;
   }
   return `${prefix}0`;
+}
+
+export function planCanaryVersions(
+  packages: readonly { name: string; version: string }[],
+  tags: ReadonlyMap<string, string | null>,
+  fixedGroups: readonly (readonly string[])[],
+): Map<string, string> {
+  const versions = new Map(
+    packages.map((pkg) => [pkg.name, nextCanaryVersion(pkg.version, tags.get(pkg.name) ?? null)]),
+  );
+  for (const group of fixedGroups) {
+    if (group.length === 0) continue;
+    const planned = group.map((name) => {
+      const version = versions.get(name);
+      if (!version) throw new Error(`Fixed canary package is not publishable: ${name}`);
+      return version;
+    });
+    const base = planned[0]!.replace(/-canary\.\d+$/, "");
+    if (planned.some((version) => !version.startsWith(`${base}-canary.`))) {
+      throw new Error(
+        `Fixed canary packages must share a committed base version: ${group.join(", ")}`,
+      );
+    }
+    const next = Math.max(
+      ...planned.map((version) => Number(version.slice(`${base}-canary.`.length))),
+    );
+    for (const name of group) versions.set(name, `${base}-canary.${next}`);
+  }
+  return versions;
 }
 
 function npmCanaryTag(name: string): string | null {
@@ -45,8 +76,16 @@ export function main(): void {
     throw new Error("NODE_AUTH_TOKEN is required to publish canary packages");
   }
   const packages = topologicallySortedPackages(publishableWorkspacePackages());
+  const config = JSON.parse(readFileSync(join(repoRoot, ".changeset/config.json"), "utf8")) as {
+    fixed?: string[][];
+  };
+  const versions = planCanaryVersions(
+    packages,
+    new Map(packages.map((pkg) => [pkg.name, npmCanaryTag(pkg.name)])),
+    config.fixed ?? [],
+  );
   for (const pkg of packages) {
-    const next = nextCanaryVersion(pkg.version, npmCanaryTag(pkg.name));
+    const next = versions.get(pkg.name)!;
     writeVersion(pkg, next);
     process.stdout.write(`${pkg.name}@${next}\n`);
   }
