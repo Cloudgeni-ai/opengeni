@@ -32620,6 +32620,8 @@ export type SessionListSnapshotCursor = {
 
 export type SessionListKeysetCursor = {
   kind: "keyset";
+  /** Absent on v2 cursors, which always used session updatedAt. */
+  sortBy?: "updatedAt" | "archivedAt";
   /** Decimal committed workspace activity revision frozen on page one. */
   snapshotRevision: string;
   /** Exact PostgreSQL timestamp text, including microseconds. */
@@ -33570,7 +33572,7 @@ export function encodeSessionListCursor(cursor: SessionListCursor): string {
     JSON.stringify(
       cursor.kind === "keyset"
         ? {
-            version: 2,
+            version: cursor.sortBy === "archivedAt" ? 3 : 2,
             // Preserve the old cursor envelope until every pre-v2 replica has
             // rolled away. It resolves only to the typed expiry/rebase path.
             snapshotId: SESSION_LIST_KEYSET_LEGACY_SNAPSHOT_ID,
@@ -33624,8 +33626,9 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       filter.length <= 2_048;
     if (!filtersAreValid) return null;
 
-    if (parsed.version === 2) {
+    if (parsed.version === 2 || parsed.version === 3) {
       if (
+        (parsed.version === 3 && archiveMode !== "archived") ||
         typeof parsed.snapshotRevision !== "string" ||
         typeof parsed.sortAt !== "string" ||
         !isSessionListCursorTimestamp(parsed.sortAt) ||
@@ -33636,6 +33639,7 @@ export function decodeSessionListCursor(value: string): SessionListCursor | null
       }
       return {
         kind: "keyset",
+        ...(parsed.version === 3 ? { sortBy: "archivedAt" as const } : {}),
         snapshotRevision: normalizeSessionActivityRevision(
           parsed.snapshotRevision,
           "cursor snapshot revision",
@@ -33772,6 +33776,16 @@ export async function listSessionsForSubject(
         const parentFilter = sessionParentFilter(options.parentSessionId);
         const searchFilter = sessionSearchFilter(options.search);
         const archiveMode = options.archivedOnly ? "archived" : "active";
+        // Descendants inherit their root's subject-specific archive ordering,
+        // just as they inherit its archive visibility in sessionFilters.
+        const ordinarySortAt = options.archivedOnly
+          ? sql`(select archive_order.archived_at
+              from ${schema.sessionPins} archive_order
+              where archive_order.workspace_id = ${schema.sessions.workspaceId}
+                and archive_order.subject_id = ${options.subjectId}
+                and archive_order.session_id = ${schema.sessions.rootSessionId}
+                and archive_order.archived = true)`
+          : schema.sessions.updatedAt;
         const listFilter = sessionListFilterIdentity(options);
         const now = new Date();
 
@@ -33782,6 +33796,16 @@ export async function listSessionsForSubject(
         }
         if (options.pinsOnly && options.cursor) {
           throw new SessionListCursorError("pins-only session lists do not accept a cursor");
+        }
+        // Never reinterpret an updatedAt boundary as an archivedAt boundary.
+        // v3 envelopes retain the reserved snapshot id so older replicas also
+        // take the typed expiry/rebase path instead of mixing sort domains.
+        if (
+          options.cursor &&
+          options.cursor.archiveMode === "archived" &&
+          (options.cursor.kind === "snapshot" || options.cursor.sortBy !== "archivedAt")
+        ) {
+          throw new SessionListCursorExpiredError();
         }
 
         let pageIds: string[];
@@ -33903,7 +33927,7 @@ export async function listSessionsForSubject(
               ),
             )
             .where(and(...filters, ordinaryPinFilter))
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
             .limit(limit);
           pageIds = ordinaryIdRows.map((row) => row.id);
           selectedOrdinaryRows = ordinaryIdRows;
@@ -33923,9 +33947,9 @@ export async function listSessionsForSubject(
             : await readWorkspaceSessionActivityRevision(tx, workspaceId);
           const cursorPredicate = cursor
             ? or(
-                sql`${schema.sessions.updatedAt} < ${cursor.sortAt}::text::timestamptz`,
+                sql`${ordinarySortAt} < ${cursor.sortAt}::text::timestamptz`,
                 and(
-                  sql`${schema.sessions.updatedAt} = ${cursor.sortAt}::text::timestamptz`,
+                  sql`${ordinarySortAt} = ${cursor.sortAt}::text::timestamptz`,
                   lt(schema.sessions.id, cursor.id),
                 ),
               )
@@ -33935,7 +33959,7 @@ export async function listSessionsForSubject(
               id: schema.sessions.id,
               session: schema.sessions,
               pin: schema.sessionPins,
-              sortAt: sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+              sortAt: sql<string>`to_char(${ordinarySortAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
             })
             .from(schema.sessions)
             .leftJoin(
@@ -33954,7 +33978,7 @@ export async function listSessionsForSubject(
                 cursorPredicate,
               ),
             )
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .orderBy(desc(ordinarySortAt), desc(schema.sessions.id))
             .limit(limit + 1);
           const hasMore = ordinaryIdRows.length > limit;
           const page = ordinaryIdRows.slice(0, limit);
@@ -33964,6 +33988,7 @@ export async function listSessionsForSubject(
           if (hasMore && last) {
             nextCursor = encodeSessionListCursor({
               kind: "keyset",
+              ...(options.archivedOnly ? { sortBy: "archivedAt" as const } : {}),
               snapshotRevision,
               sortAt: last.sortAt,
               id: last.id,

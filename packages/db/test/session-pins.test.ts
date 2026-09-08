@@ -2130,6 +2130,177 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     ).toContain(root.id);
   });
 
+  test("pages archives by personal root archive time with exact ties and live re-archiving", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:archive-order";
+    const otherSubject = "user:archive-order-other";
+    await grantMember(workspace, subjectId);
+    await grantMember(workspace, otherSubject);
+    const roots = await Promise.all(
+      [0, 1, 2].map((index) => session({ ...workspace, message: `archive order ${index}` })),
+    );
+    for (const root of roots) {
+      await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+    }
+    await admin`update session_pins set archived_at = case session_id
+      when ${roots[0]!.id} then '2026-01-01T00:00:00.123455Z'::timestamptz
+      else '2026-01-01T00:00:00.123456Z'::timestamptz end
+      where workspace_id = ${workspace.workspaceId} and subject_id = ${subjectId}`;
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = case id
+      when ${roots[0]!.id} then '2026-02-03'::timestamptz
+      when ${roots[1]!.id} then '2026-02-02'::timestamptz
+      else '2026-02-01'::timestamptz end where workspace_id = ${workspace.workspaceId}`,
+    );
+    const expected = [roots[1]!.id, roots[2]!.id].sort().reverse().concat(roots[0]!.id);
+    const options = { subjectId, archivedOnly: true, parentSessionId: null, limit: 1 };
+    const first = await listSessionsForSubject(db, workspace.workspaceId, options);
+    expect(first.sessions.map((row) => row.id)).toEqual(expected.slice(0, 1));
+    const cursor = decodeSessionListCursor(first.nextCursor!);
+    expect(cursor).toMatchObject({ sortBy: "archivedAt", sortAt: "2026-01-01T00:00:00.123456Z" });
+    const second = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: cursor!,
+    });
+    const third = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: decodeSessionListCursor(second.nextCursor!)!,
+    });
+    expect([...first.sessions, ...second.sessions, ...third.sessions].map((row) => row.id)).toEqual(
+      expected,
+    );
+    expect(third.nextCursor).toBeNull();
+    const unpaged = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      limit: 3,
+      materializeSnapshot: false,
+    });
+    expect(unpaged.sessions.map((row) => row.id)).toEqual(expected);
+    // A narrowed continuation grant must filter out the tied middle row before
+    // applying the page limit, without leaking it or returning a short page.
+    const narrowed = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: cursor!,
+      authorizationScope: { kind: "scoped", rootSessionIds: [roots[0]!.id], sessionIds: [] },
+    });
+    expect(narrowed.sessions.map((row) => row.id)).toEqual([roots[0]!.id]);
+    expect(narrowed.nextCursor).toBeNull();
+    const active = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId: otherSubject,
+      parentSessionId: null,
+      limit: 3,
+    });
+    expect(active.sessions.map((row) => row.id)).toEqual(roots.map((row) => row.id));
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          ...options,
+          subjectId: otherSubject,
+        })
+      ).sessions,
+    ).toEqual([]);
+
+    const envelope = JSON.parse(Buffer.from(first.nextCursor!, "base64url").toString("utf8"));
+    expect(envelope.version).toBe(3);
+    for (const version of [undefined, 2]) {
+      const legacy = decodeSessionListCursor(
+        Buffer.from(JSON.stringify({ ...envelope, version })).toString("base64url"),
+      );
+      expect(legacy).not.toBeNull();
+      await expect(
+        listSessionsForSubject(db, workspace.workspaceId, { ...options, cursor: legacy! }),
+      ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    }
+    // A v2 replica treats the unknown v3 version as this reserved snapshot.
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        ...options,
+        cursor: {
+          kind: "snapshot",
+          snapshotId: envelope.snapshotId,
+          offset: 0,
+          parentSessionFilter: "null",
+          search: null,
+          archiveMode: "archived",
+        },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    expect(
+      decodeSessionListCursor(
+        Buffer.from(JSON.stringify({ ...envelope, archiveMode: "active" })).toString("base64url"),
+      ),
+    ).toBeNull();
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        ...options,
+        search: "different",
+        cursor: cursor!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    await setSessionArchive(db, {
+      ...workspace,
+      subjectId,
+      sessionId: roots[0]!.id,
+      archived: false,
+    });
+    await setSessionArchive(db, {
+      ...workspace,
+      subjectId,
+      sessionId: roots[0]!.id,
+      archived: true,
+    });
+    expect((await listSessionsForSubject(db, workspace.workspaceId, options)).sessions[0]!.id).toBe(
+      roots[0]!.id,
+    );
+  }, 60_000);
+
+  test("archived child pages inherit root timestamps without child personal state", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:archive-child-order";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "archived root" });
+    const children = await Promise.all(
+      [0, 1].map((index) =>
+        session({
+          ...workspace,
+          parentSessionId: root.id,
+          message: `archived child ${index}`,
+        }),
+      ),
+    );
+    const expected = children
+      .map((row) => row.id)
+      .sort()
+      .reverse();
+    await executeSessionActivity(
+      workspace.workspaceId,
+      sql`update sessions set updated_at = case id
+      when ${expected[0]} then '2026-01-01'::timestamptz else '2026-02-01'::timestamptz end
+      where parent_session_id = ${root.id}`,
+    );
+    await setSessionArchive(db, { ...workspace, subjectId, sessionId: root.id, archived: true });
+    const options = { subjectId, archivedOnly: true, parentSessionId: root.id, limit: 1 };
+    const first = await listSessionsForSubject(db, workspace.workspaceId, options);
+    const second = await listSessionsForSubject(db, workspace.workspaceId, {
+      ...options,
+      cursor: decodeSessionListCursor(first.nextCursor!)!,
+    });
+    expect([...first.sessions, ...second.sessions].map((row) => row.id)).toEqual(expected);
+    expect(second.nextCursor).toBeNull();
+    expect(
+      (
+        await listSessionsForSubject(db, workspace.workspaceId, {
+          ...options,
+          archivedOnly: false,
+        })
+      ).sessions,
+    ).toEqual([]);
+  }, 60_000);
+
   test("serves concurrent first pages from the same bounded revision keyset", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
