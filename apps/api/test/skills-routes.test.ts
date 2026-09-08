@@ -110,7 +110,7 @@ async function auth(): Promise<string> {
     accountId,
     workspaceId,
     subjectId,
-    permissions: ["workspace:read", "capabilities:manage"],
+    permissions: ["workspace:read", "capabilities:manage", "workspace:admin"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1_000) + 3_600,
   })}`;
@@ -128,6 +128,93 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
 }
 
 describe("portable Skill routes", () => {
+  test("shared content routes preserve folders, replay saves, reject stale heads and restore history", async () => {
+    if (!available) return;
+    const skillId = crypto.randomUUID();
+    const initial = {
+      skillId,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: null,
+      expectedScopeVersion: 1,
+      stableKey: `authored-${skillId}`,
+      title: "Release checks",
+      description: "Check a release",
+      files: [
+        { path: "SKILL.md", content: skillMarkdown },
+        { path: "references/checks.txt", content: "Original checks" },
+      ],
+      reason: "Create test Skill",
+    };
+    const create = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(initial),
+    });
+    expect(create.status).toBe(200);
+    const first = await create.json();
+    expect(first).toMatchObject({ skillId, outcome: "applied", replayed: false });
+    const replay = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(initial),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ revisionId: first.revisionId, replayed: true });
+    const update = {
+      ...initial,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: first.revisionId,
+      files: [{ path: "references/checks.txt", content: "Updated checks" }],
+    };
+    const saved = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify(update),
+    });
+    expect(saved.status).toBe(200);
+    const second = await saved.json();
+    const read = await request(`/skills/content/${skillId}`);
+    expect(read.status).toBe(200);
+    expect((await read.json()).files).toEqual([
+      { path: "SKILL.md", content: skillMarkdown },
+      { path: "references/checks.txt", content: "Updated checks" },
+    ]);
+    const stale = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({ ...update, operationId: crypto.randomUUID() }),
+    });
+    expect(stale.status).toBe(409);
+    const restore = await request(`/skills/content/${skillId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({
+        operationId: crypto.randomUUID(),
+        revisionId: first.revisionId,
+        expectedRevisionId: second.revisionId,
+        expectedScopeVersion: 1,
+        reason: "Restore original checks",
+      }),
+    });
+    expect(restore.status).toBe(200);
+    expect((await restore.json()).revisionId).not.toBe(first.revisionId);
+    const restored = await request(`/skills/content/${skillId}`).then((response) =>
+      response.json(),
+    );
+    expect(restored.files).toEqual(initial.files);
+    const inventory = await request("/skills/content").then((response) => response.json());
+    expect(
+      inventory.skills.find((skill: { id: string }) => skill.id === skillId),
+    ).not.toHaveProperty("files");
+    const invalid = await request("/skills/content/save", {
+      method: "POST",
+      body: JSON.stringify({
+        ...initial,
+        skillId: crypto.randomUUID(),
+        operationId: crypto.randomUUID(),
+        files: [{ path: "../SKILL.md", content: "Invalid" }],
+      }),
+    });
+    expect(invalid.status).toBe(400);
+    const malformed = await request("/skills/content/save", { method: "POST", body: "{" });
+    expect(malformed.status).toBe(422);
+  }, 60_000);
+
   test("installs and lists an exact reviewed curated-library Skill", async () => {
     if (!available) return;
     const entry = listSkillLibraryEntries()[0]!;

@@ -45,13 +45,14 @@ export type SkillInstallInput = SkillWriteContext & {
   skillFacetId: string;
   reason: string;
 };
-export type SkillWriteReceipt = {
-  operationId: string;
-  skillId: string;
-  revisionId: string;
-  outcome: "applied" | "pending" | "preserved";
-  replayed: boolean;
-};
+export const SkillWriteReceipt = z.object({
+  operationId: z.uuid(),
+  skillId: z.uuid(),
+  revisionId: z.uuid(),
+  outcome: z.enum(["applied", "pending", "preserved"]),
+  replayed: z.boolean(),
+});
+export type SkillWriteReceipt = z.infer<typeof SkillWriteReceipt>;
 export type SkillRecord = {
   activationMode: "workspace_managed" | "session_selected";
   pendingRevisionIds: string[];

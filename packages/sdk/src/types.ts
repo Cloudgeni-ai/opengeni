@@ -6873,6 +6873,7 @@ export type InstallLibrarySkillRequest = {
 };
 
 export type InstalledSkill = {
+  skillReceipt?: import("./skills").SkillWriteReceipt | undefined;
   capabilityId: string;
   pluginId: string;
   pluginVersionId: string;

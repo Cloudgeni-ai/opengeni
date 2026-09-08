@@ -65,6 +65,14 @@ Canonical introductions: [`../README.md`](../README.md),
 [`run-lifecycle.md`](run-lifecycle.md), and [`embedding.md`](embedding.md).
 
 Unified Skill content and write authority: [`skills-lifecycle.md`](skills-lifecycle.md).
+The shared human file editor uses `apps/api/src/routes/skill-content.ts`
+(`/v1/workspaces/:workspaceId/skills/content`) and the SDK's
+`listWorkspaceSkills`, `readWorkspaceSkill`, `saveWorkspaceSkill`,
+`approveWorkspaceSkill`, and `restoreWorkspaceSkill`. Both web destinations use
+`apps/web/src/routes/skills-panel.tsx`; file bodies are fetched on opening a
+Skill, not while listing the catalog. Existing registry scope authorization
+still gates human mutations. Legacy agent preference-write tools return a
+redirect to `skill_save` without creating Knowledge evidence or a second Skill.
 Authored and installed Skills share the preference registry head/history;
 portable installations retain upstream ownership and bind to that identity.
 The core `domain/skills.ts` boundary owns Learning-controlled saves, installation,

@@ -50,7 +50,8 @@ import {
 import { getDocumentBase } from "@opengeni/documents";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import { requireAccessGrant, requireAccessGrantAuthorization } from "@opengeni/core";
+import { skillInstallerActor } from "./skill-install-authority";
 import { requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { validateVariableSetAttachment } from "@opengeni/core";
@@ -172,8 +173,15 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.post("/v1/workspaces/:workspaceId/packs/:packId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
     const pack = await requirePack(db, workspaceId, c.req.param("packId"));
+    const skillActor = pack.skills.length ? skillInstallerActor(access) : undefined;
     const payload = InstallPackRequest.parse(await c.req.json());
     const preview = PackInstallationPreview.parse(
       await previewCapabilityPackInstallation(db, grant, pack, {
@@ -261,10 +269,13 @@ export function registerPackRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     try {
       for (const skill of pack.skills) {
+        if (!skillActor)
+          throw new HTTPException(403, { message: "Skill installer authority is missing" });
         await heartbeat();
         const inline = inlinePackSkillInstall(pack, skill);
         activeComponentKey = inline.componentKey;
         const installed = await installPortableSkill(db, {
+          skillActor,
           accountId: grant.accountId,
           workspaceId,
           subjectId: grant.subjectId,

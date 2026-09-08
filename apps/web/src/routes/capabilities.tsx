@@ -37,6 +37,7 @@ import { toast } from "sonner";
 
 import { AddCustomDialog } from "@/components/capabilities/add-custom-dialog";
 import { BundlesSection } from "@/components/capabilities/bundles-section";
+import { SkillsPanel } from "./skills-panel";
 import {
   CapabilityBrowseSection,
   CapabilityDiscoveryControls,
@@ -1860,6 +1861,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
         </section>
 
         <div ref={bundlesRef}>
+          <SkillsPanel key={workspaceId} workspaceId={workspaceId} />
           <BundlesSection
             client={client}
             workspaceId={workspaceId}

@@ -18,15 +18,18 @@ import {
   UninstallPluginResult,
   stableJson,
   type PluginComponentPreview,
+  type SkillActor,
 } from "@opengeni/contracts";
 import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
 } from "@opengeni/core";
+import { skillInstallerActor } from "./skill-install-authority";
 import {
   buildConnectionTokenResolver,
   CapabilityComponentVersionConflictError,
@@ -120,9 +123,16 @@ export function registerPluginRoutes(
 
   app.post("/v1/workspaces/:workspaceId/plugins/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
     const payload = InstallPluginRequest.parse(await c.req.json());
     const resolved = await resolvePluginPackage({
+      skillActor: () => skillInstallerActor(access),
       deps,
       github,
       transport,
@@ -283,6 +293,7 @@ async function resolvePluginPackage(input: {
   accountId: string;
   workspaceId: string;
   subjectId: string;
+  skillActor?: () => SkillActor;
   url: string;
   bindings: Record<
     string,
@@ -342,10 +353,13 @@ async function resolvePluginPackage(input: {
           },
         },
         install: async (ownerPluginInstallationId) => {
+          if (!input.skillActor)
+            throw new HTTPException(403, { message: "Skill installer authority is missing" });
           const summaries = new Map(
             resolved.preview.files.map((file) => [file.path, file] as const),
           );
           const installed = await installPortableSkill(input.deps.db, {
+            skillActor: input.skillActor(),
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             subjectId: input.subjectId,

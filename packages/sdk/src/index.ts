@@ -367,6 +367,15 @@ export type {
 } from "./memory-slack-delivery";
 export { normalizePreferenceRegistryStableKey } from "./preference-registry";
 export type {
+  SkillFile,
+  SkillScope,
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
+export type {
   ActivatePreferenceRegistryRevisionRequest,
   ChangePreferenceRegistryScopeRequest,
   CorrectPreferenceRegistryRequest,

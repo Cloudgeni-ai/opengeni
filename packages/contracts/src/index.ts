@@ -1,4 +1,5 @@
 export * from "./skills";
+import { SkillWriteReceipt } from "./skills";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";
@@ -11179,6 +11180,7 @@ export const InstallLibrarySkillRequest = z
 export type InstallLibrarySkillRequest = z.infer<typeof InstallLibrarySkillRequest>;
 
 export const InstalledSkill = z.object({
+  skillReceipt: SkillWriteReceipt.optional(),
   capabilityId: z.string().min(1),
   pluginId: z.string().uuid(),
   pluginVersionId: z.string().uuid(),

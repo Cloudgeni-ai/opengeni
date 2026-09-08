@@ -11,6 +11,13 @@ import {
   type StreamSessionEventsOptions,
 } from "./stream";
 import type { SessionModelContextResponse } from "./model-context";
+import type {
+  SkillRecord,
+  SkillSummary,
+  SkillWriteReceipt,
+  SaveWorkspaceSkillRequest,
+  ApplyWorkspaceSkillRevisionRequest,
+} from "./skills";
 import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
@@ -6874,6 +6881,54 @@ export class OpenGeniClient {
     return await this.requestJson<ListInstalledSkillsResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/skills`,
+    );
+  }
+
+  /** Shared authored/installed catalog metadata. File bodies are read on demand. */
+  async listWorkspaceSkills(workspaceId: string): Promise<{ skills: SkillSummary[] }> {
+    return this.requestJson("GET", `/v1/workspaces/${workspaceId}/skills/content`);
+  }
+
+  async readWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    revisionId?: string,
+  ): Promise<SkillRecord> {
+    const query = revisionId ? `?revisionId=${encodeURIComponent(revisionId)}` : "";
+    return this.requestJson(
+      "GET",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}${query}`,
+    );
+  }
+
+  async saveWorkspaceSkill(
+    workspaceId: string,
+    request: SaveWorkspaceSkillRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson("POST", `/v1/workspaces/${workspaceId}/skills/content/save`, request);
+  }
+
+  async approveWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/approve`,
+      request,
+    );
+  }
+
+  async restoreWorkspaceSkill(
+    workspaceId: string,
+    skillId: string,
+    request: ApplyWorkspaceSkillRevisionRequest,
+  ): Promise<SkillWriteReceipt> {
+    return this.requestJson(
+      "POST",
+      `/v1/workspaces/${workspaceId}/skills/content/${encodeURIComponent(skillId)}/restore`,
+      request,
     );
   }
 

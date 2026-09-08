@@ -13,6 +13,7 @@ import {
   portableSkillCapabilityId,
   portableSkillPluginKey,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   resolveSkillImport,
   type ApiRouteDeps,
   type GitHubSkillSourceClient,
@@ -31,6 +32,8 @@ import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 
 import { createGitHubSkillSourceClient } from "../integrations/github-skill-source";
+import { registerSkillContentRoutes } from "./skill-content";
+import { skillInstallerActor } from "./skill-install-authority";
 
 export type SkillRouteOverrides = Readonly<{
   github?: GitHubSkillSourceClient;
@@ -41,6 +44,7 @@ export function registerSkillRoutes(
   deps: ApiRouteDeps,
   overrides: SkillRouteOverrides = {},
 ): void {
+  registerSkillContentRoutes(app, deps);
   const github = overrides.github ?? createGitHubSkillSourceClient(deps.settings);
 
   app.get("/v1/workspaces/:workspaceId/skills", async (c) => {
@@ -55,7 +59,14 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/library/:libraryId/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillInstallerActor(access);
     const libraryId = decodeURIComponent(c.req.param("libraryId"));
     const payload = InstallLibrarySkillRequest.parse(await c.req.json());
     let loaded: ReturnType<typeof loadSkillLibrarySkill>;
@@ -81,6 +92,7 @@ export function registerSkillRoutes(
     });
     try {
       const installed = await installPortableSkill(deps.db, {
+        skillActor,
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
@@ -136,7 +148,14 @@ export function registerSkillRoutes(
 
   app.post("/v1/workspaces/:workspaceId/skills/install", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "capabilities:manage");
+    const access = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "capabilities:manage",
+    );
+    const { grant } = access;
+    const skillActor = skillInstallerActor(access);
     const payload = InstallSkillRequest.parse(await c.req.json());
     const resolved = await resolveForRoute(payload.url, github);
     if (
@@ -153,6 +172,7 @@ export function registerSkillRoutes(
     );
     try {
       const installed = await installPortableSkill(deps.db, {
+        skillActor,
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
