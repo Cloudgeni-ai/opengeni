@@ -553,7 +553,7 @@ function SessionsIndexRouteContent({
       personalResourceSelectionKey,
       personalScopeGeneration,
     ].join(":"),
-    newSessionCreateVisibility(personalWorkspace, draft.visibility),
+    createVisibility,
   );
   const personalResourceAttachment = newSessionPersonalResourceAttachment({
     mode: personalScopeChoice.mode,
