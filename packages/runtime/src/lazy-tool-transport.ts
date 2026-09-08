@@ -17,6 +17,7 @@ import { notifyModelRequestCapture } from "./model-request-capture";
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
 
 const TOOL_SEARCH_NAME = "tool_search";
+const TOOL_LIST_NAME = "tool_list";
 const TOOL_INVOKE_NAME = "tool_invoke";
 /**
  * Base runtime tools that stay in the first request on every transport. These
@@ -43,7 +44,7 @@ const INTERNAL_REGISTRATION_TOOL_MARKER_KEY = "opengeni.internal_lazy_registrati
 const INTERNAL_DISPATCH_REGISTRATION_CALL_PREFIX = "opengeni:lazy-dispatch:register:";
 
 const SEARCH_DESCRIPTION =
-  "Search the currently authorized tools by capability. Describe what you need to do in plain language. Returns only matching tool names and input schemas.";
+  "Search the currently authorized tools by capability. Describe what you need to do in plain language. Returns matching tool names and input schemas. Search is ranked, not exhaustive: if relevant tools are missing, use tool_list to browse, then pass exact names here with query set to an empty string. Names selects exact tools only; it does not broaden authorization.";
 const INVOKE_DESCRIPTION =
   "Invoke a tool returned by tool_search. Pass the exact returned tool name and put that tool's arguments in the nested arguments object.";
 
@@ -59,6 +60,13 @@ const SEARCH_PARAMETERS = {
       minimum: 1,
       maximum: 20,
       description: "Maximum matching tools to return (default 8).",
+    },
+    names: {
+      type: "array",
+      items: { type: "string", maxLength: 512 },
+      maxItems: 20,
+      description:
+        "Exact tool names from tool_list. When supplied, replaces keyword ranking; use query: ''.",
     },
   },
   required: ["query"],
@@ -180,8 +188,8 @@ export class LazyToolRuntime {
   ) {
     this.controlTools =
       transport !== "generic_dispatch"
-        ? [this.buildNativeSearchTool()]
-        : [this.buildGenericSearchTool(), this.buildGenericInvokeTool()];
+        ? [this.buildNativeSearchTool(), this.buildListTool()]
+        : [this.buildGenericSearchTool(), this.buildGenericInvokeTool(), this.buildListTool()];
     if (toolPreparationReady) {
       void toolPreparationReady.then(
         () => {
@@ -270,6 +278,7 @@ export class LazyToolRuntime {
       if (
         isFunctionTool(tool) &&
         (tool.name === TOOL_SEARCH_NAME ||
+          tool.name === TOOL_LIST_NAME ||
           (this.transport === "generic_dispatch" && tool.name === TOOL_INVOKE_NAME))
       ) {
         throw new Error(
@@ -396,6 +405,93 @@ export class LazyToolRuntime {
       definitions.push(definition);
     }
     return JSON.stringify({ tools: definitions });
+  }
+
+  private buildListTool(): Tool {
+    return agentTool({
+      name: TOOL_LIST_NAME,
+      description:
+        "Browse currently authorized deferred tools without keyword ranking. Returns compact names/descriptions, not schemas. Follow nextCursor until null; optionally filter by a literal namePrefix. Use tool_search with exact names to load schemas. Missing evidence is not permission to invent facts; exhaust relevant discovery or report the gap.",
+      // The SDK's non-strict schema type requires additionalProperties: true,
+      // although a closed object with optional fields is valid non-strict JSON Schema.
+      // Keep the wire contract closed, as with search/invoke below.
+      parameters: {
+        type: "object",
+        properties: {
+          cursor: {
+            type: "string",
+            maxLength: 512,
+            description: "Exact nextCursor from the previous page with the same namePrefix.",
+          },
+          namePrefix: {
+            type: "string",
+            maxLength: 512,
+            description:
+              "Optional literal tool-name prefix, not an authorization or connection identifier.",
+          },
+          limit: {
+            type: "integer",
+            minimum: 1,
+            maximum: 40,
+            description: "Maximum descriptors (default 20).",
+          },
+        },
+        required: [],
+        additionalProperties: false,
+      } as never,
+      strict: false,
+      execute: async (input: unknown) => {
+        await this.ensurePrepared();
+        const args = isRecord(input) ? input : {};
+        const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
+        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+        const limit =
+          typeof args.limit === "number" && Number.isFinite(args.limit)
+            ? Math.max(1, Math.min(40, Math.floor(args.limit)))
+            : 20;
+        const tools = [...new Set(this.searchableTools(this.currentTools))]
+          .filter(isFunctionTool)
+          .filter((tool) => tool.name.startsWith(prefix))
+          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        const cursorIndex =
+          cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
+        if (cursor !== undefined && cursorIndex === -1) {
+          return JSON.stringify({
+            error: "invalid_cursor",
+            message: "Restart listing without a cursor in the current authorized catalog.",
+          });
+        }
+        const descriptors: { name: string; description: string }[] = [];
+        let index = cursorIndex + 1;
+        for (; index < tools.length && descriptors.length < limit; index++) {
+          const tool = tools[index]!;
+          const descriptor = {
+            name: tool.name,
+            description: Array.from(tool.description).slice(0, 160).join(""),
+          };
+          const candidate = {
+            tools: [...descriptors, descriptor],
+            total: tools.length,
+            nextCursor: tool.name,
+          };
+          if (Buffer.byteLength(JSON.stringify(candidate)) > 16 * 1024) {
+            if (descriptors.length === 0) {
+              return JSON.stringify({
+                error: "descriptor_too_large",
+                message: "A tool name exceeds the listing budget.",
+              });
+            }
+            break;
+          }
+          descriptors.push(descriptor);
+        }
+        return JSON.stringify({
+          tools: descriptors,
+          total: tools.length,
+          nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+        });
+      },
+    }) as unknown as Tool;
   }
 
   private buildNativeSearchTool(): Tool {

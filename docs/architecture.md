@@ -1129,6 +1129,14 @@ Capabilities define available integration/tool shapes. Connections bind live
 credentials and ownership. Session tool policy selects from authorized tools.
 MCP and Codemode are execution surfaces, not grant sources.
 
+Progressive model-tool discovery stays inside the authorized deferred pool:
+bounded `tool_list` browsing and exact-name `tool_search` disclosure recover
+keyword misses without adding another executor or changing approval identity.
+Native Codemode failure receipts retain operation identity, and its read-only
+journal command observes that same operation under current attempt authority.
+See [`mcp-surfaces.md`](mcp-surfaces.md) for these recovery contracts and
+packaged-client verification.
+
 `@opengeni/tool-gateway` is the protocol-neutral catalog, validation,
 authorization, approval-classification, and execution boundary. Runtime prepares
 one canonical provider set from enabled first-party and integration MCP servers;
