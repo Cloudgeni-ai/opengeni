@@ -49,7 +49,7 @@ export function TimelineAnnotationsDialog({
   onDismiss: (restoreFocus: boolean) => void;
 }) {
   const [unavailableId, setUnavailableId] = useState<string | null>(null);
-  const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 280 });
+  const [position, setPosition] = useState({ left: 12, top: 12, maxHeight: 0 });
   const panelRef = useRef<HTMLDivElement | null>(null);
   const headerRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -108,11 +108,11 @@ export function TimelineAnnotationsDialog({
   }, [annotations, triggerRef]);
 
   useLayoutEffect(() => {
-    if (!focusAnnotationId) return;
+    if (!focusAnnotationId || position.maxHeight <= 0) return;
     revealNote(focusAnnotationId);
     const note = noteRefs.current.get(focusAnnotationId);
     if (note && document.activeElement === note) onFocusConsumed?.();
-  }, [focusAnnotationId, onFocusConsumed, annotations.length]);
+  }, [focusAnnotationId, onFocusConsumed, annotations.length, position.maxHeight]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
