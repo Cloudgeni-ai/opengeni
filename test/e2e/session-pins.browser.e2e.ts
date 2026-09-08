@@ -185,18 +185,31 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const menuMove = persistedMove(project.id);
       await menu.getByRole("menuitem", { name: project.name, exact: true }).click();
       await menuMove;
+      // A PUT response precedes the rail's post-write verification and list
+      // refresh. Reload to prove persistence and avoid racing its in-flight
+      // duplicate-move guard with the next gesture.
+      await page.reload();
       const projectGroup = page.getByRole("group", { name: project.name, exact: true });
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
       // Even after the last unfiled session leaves, Default remains a target.
       const defaultGroup = page.getByRole("group", { name: "Default", exact: true });
-      const defaultMove = persistedMove(null);
-      await row.dragTo(defaultGroup.locator(":scope > div[draggable]").first());
-      await defaultMove;
+      const dragToGroup = async (group: typeof defaultGroup) => {
+        await row.hover();
+        await page.mouse.down();
+        try {
+          const header = group.locator(":scope > div[draggable]").first();
+          // Deliver dragover after entering the target before releasing the
+          // mouse, including on browsers that need a second pointer move.
+          await header.hover();
+          await header.hover();
+        } finally {
+          await page.mouse.up();
+        }
+      };
+      await Promise.all([persistedMove(null), dragToGroup(defaultGroup)]);
+      await page.reload();
       await defaultGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
-      const projectMove = persistedMove(project.id);
-      await row.dragTo(projectGroup.locator(":scope > div[draggable]").first());
-      await projectMove;
-      await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
+      await Promise.all([persistedMove(project.id), dragToGroup(projectGroup)]);
       await page.reload();
       await projectGroup.locator(`a[data-session-row="${session.id}"]`).waitFor();
     } finally {
