@@ -3,10 +3,11 @@ import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
 } from "@opengeni/testing";
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import postgres from "postgres";
 import { migrate } from "../src/migrate";
+import { readSkillMetadata } from "@opengeni/contracts";
 
 const cutover = "0423_unified_skill_lifecycle.sql";
 const windowTables = [
@@ -83,6 +84,14 @@ describe("0423 owner-only Skill backfill", () => {
         { path: "references/context.txt", content: "Keep supporting text" },
       ];
       const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+      const legacyRows: Array<{
+        id: string;
+        revisionId: string;
+        content: string;
+        scope: string;
+        title: string;
+        description: string;
+      }> = [];
       for (let index = 0; index < 2; index++) {
         const accountId = crypto.randomUUID();
         const workspaceId = crypto.randomUUID();
@@ -113,8 +122,85 @@ describe("0423 owner-only Skill backfill", () => {
           values(${accountId},${workspaceId},${facetInstallationId},'direct',${ownerId},true)`;
         fixtures.push({ accountId, workspaceId, pluginId, facetId, installationId, ownerId });
       }
+      const seedLegacy = async (
+        scope: string,
+        content: string,
+        title: string,
+        legacyDescription: string,
+      ) => {
+        const fixture = fixtures[0]!;
+        const id = crypto.randomUUID();
+        const revisionId = crypto.randomUUID();
+        await admin.begin(async (tx) => {
+          await tx`INSERT INTO preference_registry_preferences(id,account_id,stable_key,scope,scope_workspace_id,scope_subject_id,created_by_subject_id)
+            VALUES(${id},${fixture.accountId},${`legacy-${id}`},${scope},${scope === "workspace" ? fixture.workspaceId : null},${scope === "user" ? "user:original" : null},'user:original')`;
+          await tx`INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,conflict_strategy,provenance_source,trust,created_by_subject_id)
+            VALUES(${revisionId},${fixture.accountId},${id},${title},${legacyDescription},${content},${digest(content)},'override','human','workspace_managed','user:original')`;
+          await tx`INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,new_scope,new_workspace_id,new_subject_id,actor_subject_id,reason)
+            VALUES(${fixture.accountId},${id},'proposal_created',1,${revisionId},${scope},${scope === "workspace" ? fixture.workspaceId : null},${scope === "user" ? "user:original" : null},'user:original','Legacy fixture')`;
+          await tx`SELECT set_config('opengeni.preference_lifecycle_head_id',${id},true),set_config('opengeni.preference_lifecycle_operation','activate',true)`;
+          await tx`UPDATE preference_registry_preferences h SET status='active',active_revision_id=${revisionId},
+            active_revision=r.revision,active_content_hash=r.content_hash,activation_version=1
+            FROM preference_registry_revisions r WHERE h.id=${id} AND r.id=${revisionId}`;
+          await tx`INSERT INTO preference_registry_events(account_id,preference_id,type,version,new_revision_id,actor_subject_id,reason)
+            VALUES(${fixture.accountId},${id},'activated',2,${revisionId},'user:original','Legacy activation')`;
+        });
+        return { id, revisionId, content, scope, title, description: legacyDescription };
+      };
+      legacyRows.push(
+        await seedLegacy(
+          "workspace",
+          "Original legacy body\n\nTrailing spaces  \n",
+          "Legacy Authored",
+          "Preserve this description",
+        ),
+      );
+      const yaml =
+        "---\r\nname: yaml-original\r\ndescription: |-\r\n  First line\r\n  Second line\r\n---\r\nBody\r\n";
+      legacyRows.push(await seedLegacy("organization", yaml, "Stale title", "Stale description"));
+      legacyRows.push(
+        await seedLegacy("user", yaml, "Other stale title", "Other stale description"),
+      );
+      const invalid = await seedLegacy(
+        "workspace",
+        "---\nname: [\ndescription: invalid\n---\nBody",
+        "Invalid Header",
+        "Explicit repair required",
+      );
       expect(await owner`select id from capability_plugin_installations`).toHaveLength(0);
+      const rawMigration = await readFile(
+        new URL(`../drizzle/${cutover}`, import.meta.url),
+        "utf8",
+      );
+      await expect(
+        owner.begin(async (tx) => {
+          await tx.unsafe(rawMigration);
+        }),
+      ).rejects.toThrow("requires the parser-backed TypeScript migration runner");
+      await expect(migrate(ownerUrl)).rejects.toThrow("needs explicit frontmatter repair");
+      expect(await admin`select name from schema_migrations where name=${cutover}`).toHaveLength(0);
+      expect(
+        await admin`select column_name from information_schema.columns where table_name='preference_registry_revisions' and column_name='skill_files'`,
+      ).toHaveLength(0);
+      expect(
+        await admin`select id from preference_registry_preferences where status='active'`,
+      ).toHaveLength(4);
+      // Explicit operator repair archives the bad head, never edits its immutable
+      // content and never lets the migration silently drop it.
+      await admin.begin(async (tx) => {
+        await tx`SELECT set_config('opengeni.preference_lifecycle_head_id',${invalid.id},true),set_config('opengeni.preference_lifecycle_operation','deactivate',true)`;
+        await tx`UPDATE preference_registry_preferences SET status='inactive',active_revision_id=NULL,active_revision=NULL,active_content_hash=NULL,activation_version=2 WHERE id=${invalid.id}`;
+        await tx`INSERT INTO preference_registry_events(account_id,preference_id,type,version,old_revision_id,actor_subject_id,reason)
+          VALUES(${fixtures[0]!.accountId},${invalid.id},'deactivated',3,${invalid.revisionId},'user:original','Explicitly archive invalid fixture after cutover rejection')`;
+      });
       await migrate(ownerUrl);
+      const migratedFiles = [
+        {
+          path: "SKILL.md",
+          content: `---\nname: "same-name"\ndescription: "${description}"\n---\n${files[0]!.content}`,
+        },
+        files[1]!,
+      ];
       const heads =
         await admin`select b.account_id,b.workspace_id,b.plugin_id,b.skill_facet_id,h.id,h.status,r.skill_files,r.content_hash,r.description
         from skill_source_bindings b join preference_registry_preferences h on h.id=b.preference_id
@@ -127,9 +213,9 @@ describe("0423 owner-only Skill backfill", () => {
           plugin_id: fixture.pluginId,
           skill_facet_id: fixture.facetId,
           status: "active",
-          skill_files: files,
+          skill_files: migratedFiles,
           description,
-          content_hash: digest(files[0]!.content),
+          content_hash: digest(migratedFiles[0]!.content),
         });
         expect([
           ...(await admin`select owner_id from capability_component_owners where workspace_id=${fixture.workspaceId}`),
@@ -138,7 +224,41 @@ describe("0423 owner-only Skill backfill", () => {
           ...(await admin`select source_commit from capability_skill_facets where facet_id=${fixture.facetId}`),
         ]).toEqual([{ source_commit: "a".repeat(40) }]);
       }
-      expect(await admin`select id from preference_registry_events`).toHaveLength(4);
+      for (const legacy of legacyRows) {
+        const [current] =
+          await admin`SELECT h.scope,h.scope_workspace_id,h.scope_subject_id,r.id,r.content,r.title,r.description,r.corrects_revision_id,r.skill_files
+          FROM preference_registry_preferences h JOIN preference_registry_revisions r ON r.id=h.active_revision_id WHERE h.id=${legacy.id}`;
+        expect(current!.id).not.toBe(legacy.revisionId);
+        expect(current!.corrects_revision_id).toBe(legacy.revisionId);
+        expect(current!.scope).toBe(legacy.scope);
+        const metadata = readSkillMetadata(current!.content);
+        expect(current!.title).toBe(metadata.name);
+        expect(current!.description).toBe(metadata.description);
+        if (legacy.scope === "workspace") {
+          expect(current!.content).toBe(
+            `---\nname: "legacy-authored"\ndescription: "Preserve this description"\n---\n${legacy.content}`,
+          );
+          expect(current!.scope_workspace_id).toBe(fixtures[0]!.workspaceId);
+        } else {
+          expect(current!.content).toBe(yaml);
+          expect(current!.description).toBe("First line\nSecond line");
+        }
+        const [historical] =
+          await admin`SELECT content,content_hash,skill_files FROM preference_registry_revisions WHERE id=${legacy.revisionId}`;
+        expect(historical!.content).toBe(legacy.content);
+        expect(historical!.content_hash).toBe(digest(legacy.content));
+        expect(historical!.skill_files).toBeNull();
+        await expect(
+          admin.begin(async (tx) => {
+            await tx`SELECT set_config('opengeni.preference_lifecycle_head_id',${legacy.id},true),set_config('opengeni.preference_lifecycle_operation','activate',true)`;
+            await tx`UPDATE preference_registry_preferences h SET active_revision_id=${legacy.revisionId},active_revision=r.revision,active_content_hash=r.content_hash,activation_version=h.activation_version+1
+            FROM preference_registry_revisions r WHERE h.id=${legacy.id} AND r.id=${legacy.revisionId}`;
+          }),
+        ).rejects.toThrow("files-bearing revision");
+      }
+      expect(
+        await admin`select id from preference_registry_events where actor_subject_id='service:skill-migration:0423'`,
+      ).toHaveLength(7);
       const restored =
         await admin`select relname,relrowsecurity,relforcerowsecurity from pg_class where relnamespace='public'::regnamespace and relname=any(${windowTables})`;
       expect(restored).toHaveLength(windowTables.length);

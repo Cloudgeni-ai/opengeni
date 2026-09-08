@@ -6,6 +6,9 @@ SET LOCAL statement_timeout = '10min';
 DO $drain$
 DECLARE roles jsonb := nullif(current_setting('opengeni.migration_application_roles', true), '')::jsonb;
 BEGIN
+  IF to_regclass('pg_temp.skill_metadata_0423') IS NULL THEN
+    RAISE EXCEPTION '0423 requires the parser-backed TypeScript migration runner' USING ERRCODE='55000';
+  END IF;
   IF roles IS NULL OR jsonb_typeof(roles) <> 'array' OR jsonb_array_length(roles) NOT BETWEEN 1 AND 16
     OR EXISTS (SELECT 1 FROM jsonb_array_elements(roles) r WHERE jsonb_typeof(r) <> 'string' OR length(btrim(r #>> '{}')) NOT BETWEEN 1 AND 63)
   THEN RAISE EXCEPTION '0423 requires explicit application database roles' USING ERRCODE = '55000'; END IF;
@@ -174,7 +177,7 @@ BEGIN
     SELECT * INTO binding FROM skill_source_bindings b WHERE b.workspace_id=p_workspace_id
       AND b.plugin_id=source.plugin_id AND b.facet_key=source.facet_key;
     skill_id := coalesce(binding.preference_id,gen_random_uuid());
-    files := source.files; title := source.name; description := source.description;
+    files := source.files; title := p_request->>'title'; description := p_request->>'description';
     stable_key := 'installed-'||replace(skill_id::text,'-',''); source_id := source.facet_id::text;
     activation_mode := source.activation_mode;
   END IF;
@@ -215,7 +218,7 @@ BEGIN
         AND r.account_id=p_account_id AND r.preference_id=skill_id;
       IF NOT FOUND THEN RAISE EXCEPTION 'Skill revision unavailable' USING ERRCODE='42501'; END IF;
       files := coalesce(rev.skill_files,jsonb_build_array(jsonb_build_object('path','SKILL.md','content',rev.content)));
-      title := rev.title; description := rev.description;
+      title := p_request->>'title'; description := p_request->>'description';
       activation_mode := coalesce(rev.skill_activation_mode,'workspace_managed');
     END IF;
     IF NOT skill_files_valid(files) THEN RAISE EXCEPTION 'Invalid Skill text folder' USING ERRCODE='22023'; END IF;
@@ -283,16 +286,20 @@ ALTER TABLE preference_registry_preferences NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_revisions NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_source_bindings NO FORCE ROW LEVEL SECURITY;
+-- The runner invokes the shared contracts parser here, inside this transaction.
+-- Raw SQL execution fails closed below without its owner-local staging table.
+-- opengeni:skill-metadata-stage-v1
 DO $backfill$
-DECLARE source record; skill_id uuid; revision_id uuid; main_content text;
+DECLARE source record; legacy record; skill_id uuid; revision_id uuid; main_content text; next_event bigint;
 BEGIN
   FOR source IN
-    SELECT i.account_id,i.workspace_id,i.plugin_id,f.facet_key,f.activation_mode,sf.*,
-      jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path) AS files
+    SELECT i.account_id,i.workspace_id,i.plugin_id,f.facet_key,f.activation_mode,sf.facet_id,
+      metadata.files,metadata.name,metadata.description
     FROM capability_plugin_installations i JOIN capability_facets f ON f.plugin_version_id=i.plugin_version_id
-    JOIN capability_skill_facets sf ON sf.facet_id=f.id JOIN capability_skill_files ff ON ff.skill_facet_id=sf.facet_id
+    JOIN capability_skill_facets sf ON sf.facet_id=f.id
+    JOIN pg_temp.skill_metadata_0423 metadata ON metadata.source_kind='installed' AND metadata.source_id=sf.facet_id
+      AND metadata.account_id=i.account_id AND metadata.workspace_id=i.workspace_id
     WHERE i.status='active'
-    GROUP BY i.account_id,i.workspace_id,i.plugin_id,f.facet_key,f.activation_mode,sf.facet_id
   LOOP
     IF NOT skill_files_valid(source.files) THEN RAISE EXCEPTION 'Installed Skill % has invalid text folder; repair before cutover',source.facet_id USING ERRCODE='22023'; END IF;
     skill_id := gen_random_uuid(); revision_id := gen_random_uuid();
@@ -316,6 +323,35 @@ BEGIN
       VALUES(source.account_id,skill_id,'activated',2,revision_id,'service:skill-migration:0423','Preserve existing installation activation');
     INSERT INTO skill_source_bindings VALUES(source.account_id,source.workspace_id,source.plugin_id,source.facet_key,skill_id,source.facet_id);
   END LOOP;
+  FOR legacy IN
+    SELECT h.id,h.account_id,h.active_revision_id,h.activation_version,r.precedence_rank,r.conflict_strategy,
+      r.conflicts_with,r.provenance_source,r.provenance_source_id,r.trust,r.expires_at,
+      coalesce(r.skill_activation_mode,'workspace_managed') AS activation_mode,metadata.files,metadata.name,metadata.description
+    FROM preference_registry_preferences h JOIN preference_registry_revisions r ON r.id=h.active_revision_id
+      AND r.preference_id=h.id AND r.account_id=h.account_id
+    JOIN pg_temp.skill_metadata_0423 metadata ON metadata.source_kind='authored' AND metadata.source_id=h.id
+      AND metadata.account_id=h.account_id
+    WHERE h.status='active'
+  LOOP
+    revision_id := gen_random_uuid();
+    SELECT f->>'content' INTO main_content FROM jsonb_array_elements(legacy.files) f WHERE f->>'path'='SKILL.md';
+    INSERT INTO preference_registry_revisions(id,account_id,preference_id,title,description,content,content_hash,
+      precedence_rank,conflict_strategy,conflicts_with,provenance_source,provenance_source_id,trust,expires_at,
+      created_by_subject_id,corrects_revision_id,skill_files,skill_activation_mode)
+      VALUES(revision_id,legacy.account_id,legacy.id,legacy.name,legacy.description,main_content,
+        encode(sha256(convert_to(main_content,'UTF8')),'hex'),legacy.precedence_rank,legacy.conflict_strategy,
+        legacy.conflicts_with,legacy.provenance_source,legacy.provenance_source_id,legacy.trust,legacy.expires_at,
+        'service:skill-migration:0423',legacy.active_revision_id,legacy.files,legacy.activation_mode);
+    PERFORM set_config('opengeni.preference_lifecycle_head_id',legacy.id::text,true);
+    PERFORM set_config('opengeni.preference_lifecycle_operation','correct',true);
+    UPDATE preference_registry_preferences h SET active_revision_id=revision_id,active_revision=r.revision,
+      active_content_hash=r.content_hash,activation_version=legacy.activation_version+1
+      FROM preference_registry_revisions r WHERE h.id=legacy.id AND r.id=revision_id;
+    SELECT coalesce(max(e.version),0)+1 INTO next_event FROM preference_registry_events e WHERE e.preference_id=legacy.id;
+    INSERT INTO preference_registry_events(account_id,preference_id,type,version,old_revision_id,new_revision_id,actor_subject_id,reason)
+      VALUES(legacy.account_id,legacy.id,'corrected',next_event,legacy.active_revision_id,revision_id,
+        'service:skill-migration:0423','Derive canonical Skill metadata; retain original immutable revision');
+  END LOOP;
 END $backfill$;
 -- Flush creation-event validation while its exact event is owner-visible, and
 -- deferred head/revision foreign keys before ALTER TABLE restores protection.
@@ -330,15 +366,11 @@ ALTER TABLE preference_registry_revisions FORCE ROW LEVEL SECURITY;
 ALTER TABLE preference_registry_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE skill_source_bindings FORCE ROW LEVEL SECURITY;
 
--- Once a head adopts unified folders, old single-text writes cannot discard them.
+-- All new writes use files after cutover, including formerly legacy CREATE.
 -- Keep historical rows/hashes unchanged; explicit restore creates a new folder revision.
 CREATE FUNCTION skill_guard_legacy_revision() RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
-  IF NEW.skill_files IS NULL AND (
-    EXISTS(SELECT 1 FROM skill_source_bindings b WHERE b.account_id=NEW.account_id AND b.preference_id=NEW.preference_id)
-    OR EXISTS(SELECT 1 FROM preference_registry_revisions r
-      WHERE r.account_id=NEW.account_id AND r.preference_id=NEW.preference_id AND r.skill_files IS NOT NULL)
-  ) THEN
+  IF NEW.skill_files IS NULL THEN
     RAISE EXCEPTION 'Skill folder saves require the unified file lifecycle' USING ERRCODE='55000';
   END IF;
   RETURN NEW;
@@ -349,20 +381,16 @@ FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_revision();
 -- INSERT protection alone cannot stop legacy activation of a pre-cutover revision.
 CREATE FUNCTION skill_guard_legacy_activation() RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
-  IF NEW.active_revision_id IS NOT NULL AND NEW.active_revision_id IS DISTINCT FROM OLD.active_revision_id
+  IF NEW.active_revision_id IS NOT NULL
     AND EXISTS(SELECT 1 FROM preference_registry_revisions target
       WHERE target.account_id=NEW.account_id AND target.preference_id=NEW.id
         AND target.id=NEW.active_revision_id AND target.skill_files IS NULL)
-    AND (
-      EXISTS(SELECT 1 FROM skill_source_bindings b WHERE b.account_id=NEW.account_id AND b.preference_id=NEW.id)
-      OR EXISTS(SELECT 1 FROM preference_registry_revisions r
-        WHERE r.account_id=NEW.account_id AND r.preference_id=NEW.id AND r.skill_files IS NOT NULL)
-    ) THEN
+    THEN
     RAISE EXCEPTION 'Skill folder activation requires a files-bearing revision; use unified restore' USING ERRCODE='55000';
   END IF;
   RETURN NEW;
 END $$;
-CREATE TRIGGER skill_guard_legacy_activation BEFORE UPDATE OF active_revision_id ON preference_registry_preferences
+CREATE TRIGGER skill_guard_legacy_activation BEFORE INSERT OR UPDATE ON preference_registry_preferences
 FOR EACH ROW EXECUTE FUNCTION skill_guard_legacy_activation();
 
 -- Activation metadata is bound to the exact event, so a later legacy human

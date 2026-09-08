@@ -99,12 +99,26 @@ when finalizing their operation result.
 
 ## Release
 
-Once any authored or installed head has unified-folder history, legacy single-text
-revision insertion and activation of historical null-files revisions fail closed.
-This also protects inactive/pending folder history, not just the current head.
-Historical rows and hashes remain unchanged. Use explicit unified restore to
-create a new files-bearing revision from older text; activating an already
-files-bearing revision remains compatible with human governance.
+After cutover every new revision must have files, including legacy human CREATE;
+activation of historical null-files revisions fails closed. History reads remain
+available. Save, install, restore and approval derive metadata with the one
+`@opengeni/contracts` parser. Valid YAML bytes and decoded metadata are preserved;
+SQL enforces structure, hashes, actor/tenant authority and atomicity, not a second
+interpretation of YAML. Restore requires valid frontmatter; plain archived content
+must be explicitly repaired through save. Files-bearing activation remains
+compatible with human governance.
+
+The exact 0423 runner stage executes inside an explicit migration transaction:
+setup and owner window, TypeScript parsing into a temporary staging table, then
+SQL backfill/guards and the migration ledger receipt. Raw SQL without that stage
+fails closed. All existing active authored heads receive new canonical revisions;
+original revisions, hashes, scope and provenance remain in history. Already valid
+frontmatter wins over stale DB metadata and keeps its exact bytes. Plain text gets
+a deterministic header from legacy metadata without changing its body. Legacy
+names use a safe lowercase slug, or `legacy-<stable UUID>` if no legal name can be
+derived without truncation. Invalid/ambiguous headers and oversized descriptions
+abort the entire cutover for explicit repair. No malformed record is silently
+dropped, and no additional summary field is created.
 
 The installed-source backfill opens an owner-only `NO FORCE` window on the four
 portable source tables and the registry heads, revisions, events, and source

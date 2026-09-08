@@ -3,6 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { batchedBackfillTransactionLocalSetting } from "./migration-runner-settings";
+import {
+  SKILL_METADATA_MIGRATION_MARKER,
+  createSkillMetadataMigrationStage,
+  stageSkillMetadataMigration,
+} from "./skill-metadata-migration";
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
@@ -167,6 +172,25 @@ async function executeMigrationFile(
   file: string,
   sqlText: string,
 ): Promise<void> {
+  if (sqlText.includes(SKILL_METADATA_MIGRATION_MARKER)) {
+    if (file !== "0423_unified_skill_lifecycle.sql")
+      throw new Error("Skill metadata stage is restricted to migration 0423");
+    const parts = sqlText.split(SKILL_METADATA_MIGRATION_MARKER);
+    if (parts.length !== 2) throw new Error("0423 requires exactly one Skill metadata stage");
+    await sql.begin(async (transaction) => {
+      await createSkillMetadataMigrationStage(transaction);
+      await transaction`SELECT
+        pg_catalog.set_config('opengeni.sandbox_recovery_protocol_v2','1',true),
+        pg_catalog.set_config('opengeni.session_variable_set_attachments_v1','1',true)`;
+      await transaction.unsafe(parts[0]!);
+      await stageSkillMetadataMigration(transaction);
+      await transaction.unsafe(parts[1]!);
+      // Unlike historical one-query migrations, include this hook's ledger
+      // receipt in the same transaction so retry cannot rerun committed DDL.
+      await transaction`INSERT INTO schema_migrations(name) VALUES(${file}) ON CONFLICT DO NOTHING`;
+    });
+    return;
+  }
   const batchedBackfill = parseBatchedBackfillMigration(file, sqlText);
   if (batchedBackfill) {
     await sql`select set_config('lock_timeout', ${batchedBackfill.lockTimeout}, false)`;

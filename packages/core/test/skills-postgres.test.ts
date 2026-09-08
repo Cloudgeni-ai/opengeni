@@ -29,6 +29,8 @@ import { approveSkill, listSkills, readSkill, restoreSkill, saveSkill } from "..
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
+const skillMarkdown = (body: string) =>
+  `---\nname: test-skill\ndescription: Test Skill folder\n---\n${body}`;
 async function expectDatabaseGuard(operation: Promise<unknown>, message: string) {
   let rejected = false;
   try {
@@ -154,10 +156,8 @@ async function fixture(mode: "off" | "suggest" | "automatic" | null) {
     expectedRevisionId: null,
     expectedScopeVersion: 1,
     stableKey: `test-${key}`,
-    title: "Test Skill",
-    description: "Test Skill folder",
     files: [
-      { path: "SKILL.md", content: "# Test Skill\nUse original behavior." },
+      { path: "SKILL.md", content: skillMarkdown("# Test Skill\nUse original behavior.") },
       { path: "references/context.txt", content: "context" },
     ],
     reason: "Skill test",
@@ -176,7 +176,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         content: `---\nname: test-skill\ndescription: ${description}\n---\nSkill body`,
       },
     ];
-    const saved = await saveSkill(client.db, { ...f.input, description, files });
+    const saved = await saveSkill(client.db, { ...f.input, files });
     expect((await readSkill(client.db, f.context, saved.skillId))?.description).toBe(description);
     expect((await readSkill(client.db, f.context, saved.skillId))?.files).toEqual(files);
     await expect(
@@ -185,7 +185,6 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
         skillId: saved.skillId,
         operationId: crypto.randomUUID(),
         expectedRevisionId: saved.revisionId,
-        description: `${description}x`,
         files: [
           {
             path: "SKILL.md",
@@ -199,7 +198,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     );
   }, 30_000);
 
-  test("legacy correction and activation cannot discard authored folders; explicit restore preserves history", async () => {
+  test("legacy creation/correction are retired; files-bearing activation and restore preserve history", async () => {
     if (!client) return;
     const f = await fixture("off");
     const governance = {
@@ -219,70 +218,61 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       conflictsWith: [],
       expiresAt: null,
     };
-    const legacy = await createPreferenceRegistryProposal(client.db, {
-      ...governance,
-      ...legacyFields,
-      stableKey: f.input.stableKey,
-      scope: "workspace",
-      provenanceSource: "human",
-      provenanceSourceId: null,
-    });
-    const [historical] = await shared!
-      .admin`select id,content_hash,skill_files from preference_registry_revisions where preference_id=${legacy.id}`;
-    expect(historical!.skill_files).toBeNull();
-    await activatePreferenceRegistryRevision(client.db, {
-      ...governance,
-      preferenceId: legacy.id,
-      revisionId: historical!.id,
-      expectedCurrentRevisionId: null,
-    });
-    const folder = await saveSkill(client.db, {
-      ...f.input,
-      skillId: legacy.id,
-      expectedRevisionId: historical!.id,
-    });
+    await expectDatabaseGuard(
+      createPreferenceRegistryProposal(client.db, {
+        ...governance,
+        ...legacyFields,
+        stableKey: f.input.stableKey,
+        scope: "workspace",
+        provenanceSource: "human",
+        provenanceSourceId: null,
+      }),
+      "Skill folder saves require the unified file lifecycle",
+    );
+    const folder = await saveSkill(client.db, f.input);
     await expectDatabaseGuard(
       correctPreferenceRegistry(client.db, {
         ...governance,
         ...legacyFields,
-        preferenceId: legacy.id,
+        preferenceId: folder.skillId,
         expectedCurrentRevisionId: folder.revisionId,
       }),
       "Skill folder saves require the unified file lifecycle",
     );
-    await expectDatabaseGuard(
-      activatePreferenceRegistryRevision(client.db, {
-        ...governance,
-        preferenceId: legacy.id,
-        revisionId: historical!.id,
-        expectedCurrentRevisionId: folder.revisionId,
-      }),
-      "Skill folder activation requires a files-bearing revision",
-    );
-    expect((await readSkill(client.db, f.context, legacy.id))?.files).toEqual(f.input.files);
+    const updated = await saveSkill(client.db, {
+      ...f.input,
+      operationId: crypto.randomUUID(),
+      expectedRevisionId: folder.revisionId,
+      files: [{ path: "SKILL.md", content: skillMarkdown("Updated body") }],
+    });
+    await activatePreferenceRegistryRevision(client.db, {
+      ...governance,
+      preferenceId: folder.skillId,
+      revisionId: folder.revisionId,
+      expectedCurrentRevisionId: updated.revisionId,
+    });
+    expect((await readSkill(client.db, f.context, folder.skillId))?.files).toEqual(f.input.files);
     const restored = await restoreSkill(client.db, {
       ...f.human,
       operationId: crypto.randomUUID(),
-      skillId: legacy.id,
-      revisionId: historical!.id,
+      skillId: folder.skillId,
+      revisionId: folder.revisionId,
       expectedRevisionId: folder.revisionId,
       expectedScopeVersion: 1,
       reason: "Explicitly restore historical text as a folder",
     });
-    expect(restored.revisionId).not.toBe(historical!.id);
-    expect((await readSkill(client.db, f.context, legacy.id))?.files).toEqual([
-      { path: "SKILL.md", content: legacyFields.content },
-    ]);
+    expect(restored.revisionId).not.toBe(folder.revisionId);
+    expect((await readSkill(client.db, f.context, folder.skillId))?.files).toEqual(f.input.files);
     const [unchanged] = await shared!
-      .admin`select content_hash,skill_files from preference_registry_revisions where id=${historical!.id}`;
-    expect(unchanged).toEqual({ content_hash: historical!.content_hash, skill_files: null });
+      .admin`select content,skill_files from preference_registry_revisions where id=${folder.revisionId}`;
+    expect(unchanged!.skill_files).toEqual(f.input.files);
   }, 30_000);
 
   test("portable retries replay before distribution CAS or moving-source resolution", async () => {
     if (!client) return;
     const f = await fixture("automatic");
     const key = crypto.randomUUID();
-    const content = "Original replay source";
+    const content = skillMarkdown("Original replay source");
     const digest = createHash("sha256").update(content).digest("hex");
     const requestIdentity = {
       sourceUrl: "https://example.test/moving",
@@ -417,13 +407,16 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect(await saveSkill(client.db, f.input)).toEqual({ ...first, replayed: true });
     expect((await readSkill(client.db, f.context, first.skillId))?.files).toEqual(f.input.files);
     await expect(
-      saveSkill(client.db, { ...f.input, title: "different same key" }),
+      saveSkill(client.db, {
+        ...f.input,
+        files: [{ path: "SKILL.md", content: skillMarkdown("different same key") }],
+      }),
     ).rejects.toThrow();
     const second = await saveSkill(client.db, {
       ...f.input,
       operationId: crypto.randomUUID(),
       expectedRevisionId: first.revisionId,
-      files: [{ path: "SKILL.md", content: "changed" }],
+      files: [{ path: "SKILL.md", content: skillMarkdown("changed") }],
     });
     await expect(
       saveSkill(client.db, {
@@ -445,7 +438,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     expect((await readSkill(client.db, f.context, first.skillId))?.files).toEqual(f.input.files);
     expect(
       (await readSkill(client.db, f.context, first.skillId, second.revisionId))?.files[0]?.content,
-    ).toBe("changed");
+    ).toBe(skillMarkdown("changed"));
   });
   test("Off refuses without receipts or heads; Suggest stays pending until human approval", async () => {
     if (!client) return;
@@ -543,7 +536,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
           ...f.input,
           operationId: crypto.randomUUID(),
           expectedRevisionId: first.revisionId,
-          files: [{ path: "SKILL.md", content }],
+          files: [{ path: "SKILL.md", content: skillMarkdown(content) }],
         }),
       ),
     );
@@ -564,7 +557,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     if (!client) return;
     const f = await fixture("off");
     const key = crypto.randomUUID();
-    const content = "# Source Skill\nOriginal source instructions.";
+    const content = skillMarkdown("# Source Skill\nOriginal source instructions.");
     const digest = createHash("sha256").update(content).digest("hex");
     const input: InstallPortableSkillInput = {
       ...f.context,
@@ -588,7 +581,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
     const installed = await installPortableSkill(client.db, input);
     expect(installed.skillReceipt.outcome).toBe("applied");
     const customFiles = [
-      { path: "SKILL.md", content: "Customized behavior" },
+      { path: "SKILL.md", content: skillMarkdown("Customized behavior") },
       { path: "reference.txt", content: "keep me" },
     ];
     const custom = await saveSkill(client.db, {
@@ -597,7 +590,7 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       expectedRevisionId: installed.skillReceipt.revisionId,
       files: customFiles,
     });
-    const updatedContent = "Updated upstream source";
+    const updatedContent = skillMarkdown("Updated upstream source");
     const updatedDigest = createHash("sha256").update(updatedContent).digest("hex");
     const refreshed = await installPortableSkill(client.db, {
       ...input,
