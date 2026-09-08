@@ -963,6 +963,7 @@ export function OrganizationOverviewSection(props: {
                 <Input
                   aria-label="Organization name"
                   name="organization-name"
+                  suppressAutofill
                   autoComplete="off"
                   value={name}
                   onChange={(event) => setName(event.target.value)}
@@ -1093,6 +1094,7 @@ export function OrganizationOverviewSection(props: {
                         <Input
                           aria-label={`Workspace name for ${workspace.name}`}
                           name={`workspace-name-${workspace.id}`}
+                          suppressAutofill
                           autoComplete="off"
                           value={workspaceNameDrafts[workspace.id] ?? workspace.name}
                           disabled={accessBusyWorkspaceId === workspace.id}
@@ -1323,6 +1325,7 @@ export function OrganizationOverviewSection(props: {
               <Label htmlFor="new-workspace-name">Workspace name</Label>
               <Input
                 id="new-workspace-name"
+                suppressAutofill
                 aria-label="New workspace name"
                 name="workspace-name"
                 autoComplete="off"
@@ -2709,6 +2712,7 @@ export function OrganizationPeopleSection(props: {
                   <Label htmlFor="organization-invite-name">Name</Label>
                   <Input
                     id="organization-invite-name"
+                    suppressAutofill
                     name="name"
                     autoComplete="name"
                     value={inviteName}
