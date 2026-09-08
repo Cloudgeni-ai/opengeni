@@ -1,3 +1,4 @@
+export * from "./skills";
 import { z } from "zod";
 import { Permission } from "./permissions";
 import { ScopedKnowledgeScope } from "./scoped-knowledge";

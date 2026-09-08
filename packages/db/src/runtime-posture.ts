@@ -549,6 +549,7 @@ const XAI_AUTHORITY_TABLES = [
 ] as const;
 
 export const RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES = [
+  "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)",
   COMPANY_BRAIN_CONTEXT_INSPECTION_ROUTINE,
   COMPANY_BRAIN_CONTEXT_SELECTION_ROUTINE,
   ...COMPANY_PROFILE_AGENT_ADMIN_ROUTINES,
@@ -915,6 +916,8 @@ export const FORCE_RLS_TABLES = [
   "session_workflow_wake_outbox",
   "sessions",
   "site_auth_connections",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_app_home_refreshes",
   "slack_bot_delete_operations",
   "slack_bot_post_operations",
@@ -1206,6 +1209,8 @@ export const RUNTIME_READ_ONLY_TABLES = [
   "preference_registry_snapshots",
   "session_tenancy_activations",
   "session_work_claims",
+  "skill_source_bindings",
+  "skill_write_receipts",
   "slack_installation_bindings",
   "slack_task_policy_activation_events",
   "slack_task_policy_heads",
@@ -2416,6 +2421,20 @@ export function evaluateRuntimeDatabasePosture(
             `target-schema runtime capability ${routine.name} owner ${routine.owner} does not match authority table owner ${authorityTables[0]!.owner}`,
           );
         }
+      }
+    } else if (routine.name === "skill_apply_lifecycle(uuid, uuid, jsonb, jsonb)") {
+      const authorityTables = [
+        "preference_registry_preferences",
+        "preference_registry_revisions",
+        "preference_registry_events",
+      ];
+      for (const name of authorityTables) {
+        const table = tableByName.get(name);
+        if (!table) violations.push(`Skill lifecycle authority table ${name} is missing`);
+        else if (routine.owner !== table.owner)
+          violations.push(
+            `Skill lifecycle owner ${routine.owner} does not match ${name} owner ${table.owner}`,
+          );
       }
     } else if (routine.name === PREFERENCE_KNOWLEDGE_PROPOSAL_ROUTINE) {
       if (!tableByName.has("company_brain_preference_proposal_receipts")) {

@@ -30,6 +30,8 @@ export const PreferenceRegistryProvenanceSource = z.enum([
   "slack",
   "meeting_transcript",
   "call_transcript",
+  "agent",
+  "portable_skill",
 ]);
 export type PreferenceRegistryProvenanceSource = z.infer<typeof PreferenceRegistryProvenanceSource>;
 

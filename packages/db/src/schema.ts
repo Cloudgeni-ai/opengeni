@@ -13351,6 +13351,7 @@ export * from "./company-profile-schema";
 export * from "./workspace-learning-policy-schema";
 export * from "./slack-task-policy-schema";
 export * from "./preference-registry-schema";
+export * from "./skills-schema";
 export * from "./memory-governance-schema";
 export * from "./scoped-knowledge-schema";
 export * from "./task-notes-schema";
