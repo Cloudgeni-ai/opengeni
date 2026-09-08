@@ -465,7 +465,7 @@ describe("usePersonalResourceAttachment", () => {
     });
     expect(hook.result.current.refreshing).toBe(false);
     expect(hook.result.current.requiresDecision).toBe(false);
-    expect(hook.result.current.notice).toContain("Personal resources were reloaded");
+    expect(hook.result.current.notice).toBe("reloaded");
     await hook.unmount();
   });
 
@@ -532,9 +532,7 @@ describe("usePersonalResourceAttachment", () => {
     expect(hook.result.current.sourceLost).toBe(true);
     expect(hook.result.current.requiresDecision).toBe(true);
     expect(hook.result.current.intent).toBeUndefined();
-    expect(hook.result.current.notice).toContain(
-      "Access to the selected personal resource changed",
-    );
+    expect(hook.result.current.notice).toBe("source_changed");
     await hook.unmount();
   });
 
@@ -591,7 +589,7 @@ describe("usePersonalResourceAttachment", () => {
     await flush();
     expect(sessionReloads).toBe(1);
     expect(hook.result.current.error?.message).toContain("could not be refreshed");
-    expect(hook.result.current.notice).toContain("could not be refreshed");
+    expect(hook.result.current.notice).toBe("reload_failed");
     expect(hook.result.current.refreshing).toBe(false);
     expect(hook.result.current.requiresDecision).toBe(true);
     expect(hook.result.current.intent).toBeUndefined();

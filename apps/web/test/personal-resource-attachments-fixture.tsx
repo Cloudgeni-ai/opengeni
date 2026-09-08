@@ -9,7 +9,10 @@ import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 
 import { PersonalResourceAttachmentSurface as PersonalResourceAttachmentControl } from "../src/components/personal-resource-attachment-surface";
-import type { PersonalResourceAttachmentController } from "../src/lib/use-personal-resource-attachment";
+import type {
+  PersonalResourceAttachmentController,
+  PersonalResourceNotice,
+} from "../src/lib/use-personal-resource-attachment";
 import "../src/styles.css";
 
 const variableSet = {
@@ -31,7 +34,7 @@ function Fixture() {
   const [epoch, setEpoch] = useState(3);
   const [sourceLost, setSourceLost] = useState(false);
   const [authorityUnavailable, setAuthorityUnavailable] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<PersonalResourceNotice | null>(null);
   const [createReceipt, setCreateReceipt] = useState("");
   const [sendReceipt, setSendReceipt] = useState("");
 
@@ -91,7 +94,7 @@ function Fixture() {
     sendChoice.setMode,
   ]);
 
-  const resetDecision = (message: string) => {
+  const resetDecision = (message: PersonalResourceNotice | null) => {
     setNotice(message);
   };
 
@@ -219,9 +222,7 @@ function Fixture() {
           className="rounded-md border p-2"
           onClick={() => {
             setEpoch((current) => current + 1);
-            resetDecision(
-              "Session authority changed. Personal resources were reloaded before retrying.",
-            );
+            resetDecision("reloaded");
           }}
         >
           Simulate stale epoch
@@ -231,9 +232,7 @@ function Fixture() {
           className="rounded-md border p-2"
           onClick={() => {
             setSourceLost(true);
-            resetDecision(
-              "Access to the selected personal resource changed. Choose an available resource before submitting.",
-            );
+            resetDecision("source_changed");
           }}
         >
           Lose source access
@@ -244,7 +243,7 @@ function Fixture() {
           onClick={() => {
             setSourceLost(false);
             setAuthorityUnavailable(true);
-            resetDecision("");
+            resetDecision(null);
           }}
         >
           Truncate authority catalog
@@ -256,7 +255,7 @@ function Fixture() {
             setPrincipal("shared-user");
             setSourceLost(false);
             setAuthorityUnavailable(false);
-            resetDecision("");
+            resetDecision(null);
           }}
         >
           Switch principal

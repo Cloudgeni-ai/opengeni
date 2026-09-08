@@ -34,12 +34,19 @@ type SessionAuthorityRecovery = Readonly<{
   error: Error | null;
 }>;
 
+export type PersonalResourceNotice =
+  | "source_changed"
+  | "reloading"
+  | "reload_failed"
+  | "reloaded"
+  | "accepted";
+
 export type PersonalResourceAttachmentController = Readonly<{
   eligible: boolean;
   loading: boolean;
   refreshing: boolean;
   error: Error | null;
-  notice: string | null;
+  notice: PersonalResourceNotice | null;
   sourceLost: boolean;
   truncated: boolean;
   catalog: PersonalResourceCatalog | null;
@@ -193,7 +200,7 @@ export function usePersonalResourceAttachment(input: {
   const [loading, setLoading] = useState(scope !== null);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<PersonalResourceNotice | null>(null);
   const [sourceLost, setSourceLost] = useState(false);
   const [sessionAuthorityRecovery, setSessionAuthorityRecovery] =
     useState<SessionAuthorityRecovery | null>(null);
@@ -290,11 +297,7 @@ export function usePersonalResourceAttachment(input: {
     priorSelectionScopeKey.current = scopeKey;
     priorSelectedCount.current = selected.resourceCount;
     setSourceLost(lost);
-    setNotice(
-      lost
-        ? "Access to the selected personal resource changed. Choose an available resource before submitting."
-        : null,
-    );
+    setNotice(lost ? "source_changed" : null);
   }, [fixedIdentity, scopeKey, selected.resourceCount, selectedIdentity]);
 
   const visibility = input.session?.tenancy
@@ -389,7 +392,7 @@ export function usePersonalResourceAttachment(input: {
         status: "pending",
         error: null,
       });
-      setNotice("Session authority changed. Reloading personal resources before retrying.");
+      setNotice("reloading");
       const [, reloadResult] = await Promise.allSettled([
         load(true),
         onReloadSession
@@ -405,7 +408,7 @@ export function usePersonalResourceAttachment(input: {
           status: "failed",
           error: new Error("The session authority could not be refreshed. Retry before sending."),
         });
-        setNotice("Session authority could not be refreshed. Retry before sending again.");
+        setNotice("reload_failed");
         return;
       }
       // Give the parent session read one render turn to publish its new
@@ -439,7 +442,7 @@ export function usePersonalResourceAttachment(input: {
           status: "failed",
           error: new Error("The session authority could not be refreshed. Retry before sending."),
         });
-        setNotice("Session authority could not be refreshed. Retry before sending again.");
+        setNotice("reload_failed");
       }
       return;
     }
@@ -456,13 +459,11 @@ export function usePersonalResourceAttachment(input: {
     if (selected.resourceCount < activeSessionAuthorityRecovery.selectedResourceCount) {
       setSessionAuthorityRecovery(null);
       setSourceLost(true);
-      setNotice(
-        "Access to the selected personal resource changed. Choose an available resource before submitting.",
-      );
+      setNotice("source_changed");
       return;
     }
     setSessionAuthorityRecovery(null);
-    setNotice("Session authority changed. Personal resources were reloaded before retrying.");
+    setNotice("reloaded");
   }, [
     activeSessionAuthorityRecovery,
     expectedAuthorityEpoch,
@@ -497,7 +498,7 @@ export function usePersonalResourceAttachment(input: {
       const acceptedIntent = acceptedInput.personalResourceAttachment;
       intentConsumers.current.get(acceptedIntent)?.();
       intentConsumers.current.delete(acceptedIntent);
-      setNotice("Personal-resource use was accepted for this work.");
+      setNotice("accepted");
       void load(true);
     },
     [load],
