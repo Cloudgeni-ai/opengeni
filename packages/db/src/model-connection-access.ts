@@ -59,7 +59,8 @@ function relation(target: ModelConnectionTarget): { table: SQLWrapper; condition
   if (target.workspaceId === null)
     return {
       table: sql.identifier("organization_model_provider_connections"),
-      condition: sql`account_id = ${target.accountId}::uuid AND provider_kind = ${target.kind} AND status = 'active'`,
+      condition: sql`account_id = ${target.accountId}::uuid AND provider_kind = ${target.kind} AND status = 'active'
+        AND ${target.connectionId === "current" ? sql`true` : sql`id::text = ${target.connectionId}`}`,
     };
   return {
     table: sql.identifier("connections"),

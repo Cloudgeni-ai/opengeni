@@ -195,6 +195,29 @@ realTest(
       };
       const initial = await getModelConnectionAccess(client.db, target);
       expect(initial?.allowedWorkspaces).toBeNull();
+      if (kind !== "codex") {
+        const invalidTarget = { ...target, connectionId: crypto.randomUUID() };
+        expect(await getModelConnectionAccess(client.db, invalidTarget)).toBeNull();
+        expect(
+          await getModelConnectionAccess(client.db, { ...target, connectionId: "not-current" }),
+        ).toBeNull();
+        expect(
+          await updateModelConnectionAccess(client.db, invalidTarget, {
+            ...initial!,
+            allowedModels: [],
+          }),
+        ).toBeNull();
+        expect(await getModelConnectionAccess(client.db, target)).toEqual(initial);
+        const [stored] = await shared.admin<{ id: string }[]>`
+          select id from organization_model_provider_connections
+          where account_id = ${setup.organizationId} and provider_kind = ${kind}`;
+        expect(
+          await getModelConnectionAccess(client.db, {
+            ...target,
+            connectionId: stored!.id,
+          }),
+        ).toEqual(initial);
+      }
       const modelId =
         kind === "codex"
           ? "codex/allowed"
