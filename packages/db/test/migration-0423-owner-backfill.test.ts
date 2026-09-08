@@ -10,6 +10,7 @@ import { migrate } from "../src/migrate";
 import { readSkillMetadata } from "@opengeni/contracts";
 import { createDb } from "../src/database";
 import { listSkillDescriptors, listSkillRecords } from "../src/skills";
+import { migrateLegacySkillConfigurations } from "../src/skill-config-migration";
 
 const cutover = "0423_unified_skill_lifecycle.sql";
 const windowTables = [
@@ -463,6 +464,11 @@ describe("0423 owner-only Skill backfill", () => {
       expect(await owner`select id from capability_plugin_installations`).toHaveLength(0);
       expect(await owner`select id from preference_registry_preferences`).toHaveLength(0);
       expect(await owner`select preference_id from skill_source_bindings`).toHaveLength(0);
+      await expect(
+        owner.begin(async (tx) => {
+          await migrateLegacySkillConfigurations(tx);
+        }),
+      ).rejects.toThrow("maintenance owner window");
       // Conversion archives are private workspace-owned evidence, not a reason
       // to retain a deleted workspace or grant its runtime access to old text.
       const archiveWorkspaceId = crypto.randomUUID();

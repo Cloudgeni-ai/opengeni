@@ -4301,7 +4301,13 @@ const DEVOPS_PACK: CapabilityPack = fabricatePack({
   skills: [
     {
       name: "drift-checks",
-      files: [{ path: "SKILL.md", content: "# Drift checks" }],
+      files: [
+        {
+          path: "SKILL.md",
+          content:
+            "---\nname: drift-checks\ndescription: Check infrastructure for drift\n---\n# Drift checks",
+        },
+      ],
     },
   ],
 });

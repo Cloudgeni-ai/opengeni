@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   StoredSessionSkills,
+  readSkillMetadata,
   withBundledSkillSelectionMetadata,
   bundledSkillSelectionFromMetadata,
   type BundledSkillId,
+  type SkillRecord,
 } from "@opengeni/contracts";
 import {
   applySkillLifecycle,
@@ -8814,11 +8816,21 @@ export async function listInstalledPortableSkills(
       .where(eq(schema.workspaces.id, workspaceId))
       .limit(1);
     if (!workspace) return [];
-    const currentSkills = await listSkillRecords(
-      scopedDb,
-      { accountId: workspace.accountId, workspaceId },
-      { limit: 1000 },
-    );
+    const currentSkills = new Map<string, SkillRecord>();
+    let after: { stableKey: string; id: string } | undefined;
+    for (;;) {
+      const page = await listSkillRecords(
+        scopedDb,
+        { accountId: workspace.accountId, workspaceId },
+        { limit: 1000, ...(after ? { after } : {}) },
+      );
+      for (const record of page) {
+        if (record.source) currentSkills.set(record.source.skillFacetId, record);
+      }
+      if (page.length < 1000) break;
+      const last = page[page.length - 1]!;
+      after = { stableKey: last.stableKey, id: last.id };
+    }
     const rows = await scopedDb
       .select({
         capabilityId: schema.capabilitySkillFacets.capabilityId,
@@ -8878,9 +8890,7 @@ export async function listInstalledPortableSkills(
       .orderBy(asc(schema.capabilitySkillFacets.name), asc(schema.capabilitySkillFiles.path));
     const skills = new Map<string, PortableSkillRuntime>();
     for (const row of rows) {
-      const current = currentSkills.find(
-        (candidate) => candidate.source?.skillFacetId === row.facetId,
-      );
+      const current = currentSkills.get(row.facetId);
       if (!current || current.status !== "active" || !current.activeRevisionId) continue;
       if (row.activationMode !== "workspace_managed" && row.activationMode !== "session_selected") {
         throw new Error(
@@ -8911,15 +8921,18 @@ export async function listInstalledPortableSkills(
       });
     }
     return [...skills.entries()].flatMap(([facetId, skill]) => {
-      const current = currentSkills.find((candidate) => candidate.source?.skillFacetId === facetId);
+      const current = currentSkills.get(facetId);
       if (!current || current.status !== "active" || !current.activeRevisionId) return [];
+      const metadata = readSkillMetadata(
+        current.files.find((file) => file.path === "SKILL.md")?.content ?? "",
+      );
       return [
         {
           ...skill,
-          // Runtime names are validated portable identifiers, not display titles.
-          // A customized registry title may contain spaces or punctuation.
-          name: skill.name,
-          description: current.description ?? skill.description,
+          // The active folder owns descriptors even after an upstream Skill
+          // was renamed locally. Source labels remain provenance only.
+          name: metadata.name,
+          description: metadata.description,
           contentSha256: skillFilesContentHash(current.files),
           files: current.files,
         },

@@ -78,8 +78,22 @@ export function convertLegacyPackConfig(value: unknown, identity: string): Objec
   return converted;
 }
 
+async function assertSkillConfigurationMaintenanceWindow(
+  tx: postgres.TransactionSql,
+): Promise<void> {
+  const rows = await tx`SELECT c.oid FROM pg_class c
+    WHERE c.oid='sessions'::regclass AND pg_get_userbyid(c.relowner)=current_user
+      AND c.relrowsecurity AND NOT c.relforcerowsecurity
+      AND to_regclass('pg_temp.skill_metadata_0423') IS NOT NULL`;
+  if (rows.length !== 1)
+    throw new Error(
+      "Skill configuration conversion requires the parser-backed maintenance owner window",
+    );
+}
+
 /** Maintenance-only: caller holds the 0423 owner window and drained runtime fence. */
 export async function migrateLegacySkillConfigurations(tx: postgres.TransactionSql): Promise<void> {
+  await assertSkillConfigurationMaintenanceWindow(tx);
   await tx`SELECT pg_advisory_xact_lock(hashtextextended('session-tenancy:'||workspace_id::text,0))
     FROM (SELECT DISTINCT workspace_id FROM sessions ORDER BY workspace_id) workspaces`;
   // All candidates are read under table locks, preventing changes between

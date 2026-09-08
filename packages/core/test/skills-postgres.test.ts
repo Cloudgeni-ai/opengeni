@@ -756,9 +756,20 @@ describe("unified Skill real PostgreSQL lifecycle", () => {
       }),
     ).rejects.toThrow("requires a trusted human session actor");
     const projection = await listInstalledPortableSkills(client.db, f.context.workspaceId);
-    expect(projection[0]?.name).toBe("source-skill");
+    expect(projection[0]?.name).toBe("test-skill");
+    expect(projection[0]?.description).toBe("Test Skill folder");
     expect(projection[0]?.files).toEqual(customFiles);
     expect(await listSkills(client.db, f.context)).toHaveLength(1);
+    // Draft authored entries also occupy metadata pages. They must not make
+    // a later installed/customized Skill disappear from runtime resolution.
+    await shared!
+      .admin`INSERT INTO preference_registry_preferences(account_id,stable_key,scope,scope_workspace_id,created_by_subject_id)
+      SELECT ${f.context.accountId},'a-padding-'||n::text,'workspace',${f.context.workspaceId},${f.human.actor.subjectId}
+      FROM generate_series(1,1000) n`;
+    const beyondFirstPage = await listInstalledPortableSkills(client.db, f.context.workspaceId);
+    expect(beyondFirstPage).toHaveLength(1);
+    expect(beyondFirstPage[0]?.name).toBe("test-skill");
+    expect(beyondFirstPage[0]?.files).toEqual(customFiles);
     const [owners] = await shared!
       .admin`select count(*)::integer as count from capability_component_owners where workspace_id=${f.context.workspaceId}`;
     expect(owners!.count).toBeGreaterThan(0);

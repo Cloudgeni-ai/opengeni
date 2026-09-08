@@ -170,7 +170,10 @@ runtime table privileges**, including SELECT: an archived private Session's
 configuration must not become workspace-readable audit content. Authorized
 database maintenance uses explicit account/workspace context to inspect it.
 Workspace tenancy advisory locks, table locks and old-value CAS protect writes;
-the migration ledger makes committed retries no-ops. A failure rolls back all
+the conversion entry also verifies that it is running as the table owner inside
+the parser-backed migration's temporary owner window. It cannot be reused as an
+ordinary runtime session-configuration writer.
+The migration ledger makes committed retries no-ops. A failure rolls back all
 configuration changes, receipts, registry conversion and schema changes.
 
 Pack installation `manifestSnapshot` is returned as exact saved JSON alongside

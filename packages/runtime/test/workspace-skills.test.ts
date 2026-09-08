@@ -276,7 +276,12 @@ description: Prepare a safe release.
   test("deduplicates identical inline session skills and rejects conflicts", () => {
     const release = {
       name: "release",
-      files: [{ path: "SKILL.md", content: "# Release\n" }],
+      files: [
+        {
+          path: "SKILL.md",
+          content: "---\nname: release\ndescription: Release instructions\n---\n# Release\n",
+        },
+      ],
     };
     expect(() =>
       buildAgentCapabilities(testSettings(), [
@@ -288,7 +293,16 @@ description: Prepare a safe release.
       buildAgentCapabilities(testSettings(), [
         sessionActivation(release, "one"),
         sessionActivation(
-          { name: "release", files: [{ path: "SKILL.md", content: "# Different\n" }] },
+          {
+            name: "release",
+            files: [
+              {
+                path: "SKILL.md",
+                content:
+                  "---\nname: release\ndescription: Release instructions\n---\n# Different\n",
+              },
+            ],
+          },
           "two",
         ),
       ]),
