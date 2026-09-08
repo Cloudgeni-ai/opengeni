@@ -21,6 +21,7 @@ export function registerFeedbackRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/feedback", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const parsed = CreateFeedbackRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success)
       throw new HTTPException(400, {

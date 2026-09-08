@@ -44,7 +44,9 @@ latest session-level rating returned for the viewer.
 
 ## Authority and analysis
 
-General submission/read requires `workspace:read`; a session reference also
+Reading requires `workspace:read`. All submissions additionally require the
+write-capable `sessions:create` permission, including general comments; read-only
+credentials cannot append feedback. A session reference also
 requires `sessions:read`, the normal private-session boundary, and the embedding
 host's authorization (`session.feedback.write` for submission, `session.read`
 for reads). Workspace membership does not grant access to a private session.

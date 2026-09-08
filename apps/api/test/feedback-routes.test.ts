@@ -32,7 +32,7 @@ let accountId: string;
 let sessionId: string;
 const subjectId = "user:feedback-author";
 const secret = "feedback-route-test-delegation-secret";
-const permissions = ["workspace:read", "sessions:read"] as const;
+const permissions = ["workspace:read", "sessions:read", "sessions:create"] as const;
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("feedback-routes");
   if (!shared) throw new Error("Real PostgreSQL is required for feedback isolation verification");
@@ -71,14 +71,19 @@ afterAll(async () => {
 }, 180_000);
 async function request(
   payload?: unknown,
-  options: { query?: string; actor?: string; kind?: "human_session" | "agent_attempt" } = {},
+  options: {
+    query?: string;
+    actor?: string;
+    kind?: "human_session" | "agent_attempt";
+    readOnly?: boolean;
+  } = {},
 ) {
   const bearer = await signDelegatedAccessToken(secret, {
     accountId,
     workspaceId,
     subjectId: options.actor ?? subjectId,
     principalKind: options.kind ?? "human_session",
-    permissions: [...permissions],
+    permissions: options.readOnly ? ["workspace:read", "sessions:read"] : [...permissions],
     ...(options.kind === "agent_attempt"
       ? {
           sessionId,
@@ -356,4 +361,15 @@ test("private-session feedback requires the session owner even with workspace pe
     });
     expect(response.status).toBe(actor === owner ? 201 : 404);
   }
+});
+
+test("read-only credentials can read own feedback but cannot submit it", async () => {
+  for (const target of [{}, { sessionId, sentiment: "positive" }]) {
+    const response = await request(
+      { idempotencyKey: crypto.randomUUID(), comment: "read-only feedback", ...target },
+      { readOnly: true },
+    );
+    expect(response.status).toBe(403);
+  }
+  expect((await request(undefined, { readOnly: true })).status).toBe(200);
 });
