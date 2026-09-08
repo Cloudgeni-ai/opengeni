@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { analyticsPreferencesAvailable, openAnalyticsPreferences } from "@/lib/analytics-consent";
 
 const FeedbackDialog = lazy(() =>
@@ -79,26 +80,30 @@ export function RailFooter() {
 
   return (
     <div className="mt-auto border-t border-border p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-      <Suspense fallback={null}>
-        <FeedbackDialog
-          key={rail.workspaceId}
-          client={context.client}
-          workspaceId={rail.workspaceId}
-          open={feedbackOpen}
-          onOpenChange={setFeedbackOpen}
-          onSubmitted={() => toast.success("Thanks for your feedback")}
-        />
-      </Suspense>
-      <Button
-        variant="ghost"
-        size="sm"
-        aria-label="Send feedback"
-        title="Send feedback"
-        onClick={() => setFeedbackOpen(true)}
-      >
-        <FeedbackIcon className="size-4" />
-        {rail.collapsed ? null : "Send feedback"}
-      </Button>
+      {hasWorkspacePermission(context.accessContext, rail.workspaceId, "sessions:create") ? (
+        <>
+          <Suspense fallback={null}>
+            <FeedbackDialog
+              key={rail.workspaceId}
+              client={context.client}
+              workspaceId={rail.workspaceId}
+              open={feedbackOpen}
+              onOpenChange={setFeedbackOpen}
+              onSubmitted={() => toast.success("Thanks for your feedback")}
+            />
+          </Suspense>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label="Send feedback"
+            title="Send feedback"
+            onClick={() => setFeedbackOpen(true)}
+          >
+            <FeedbackIcon className="size-4" />
+            {rail.collapsed ? null : "Send feedback"}
+          </Button>
+        </>
+      ) : null}
       <div
         className={rail.collapsed ? "grid justify-items-center gap-1" : "flex items-end gap-1.5"}
       >

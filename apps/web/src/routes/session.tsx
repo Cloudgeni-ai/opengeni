@@ -2002,14 +2002,20 @@ function SessionChatPane(props: {
         </>
       )}
 
-      <Suspense fallback={null}>
-        <SessionFeedback
-          key={props.session.id}
-          client={context.client}
-          workspaceId={props.session.workspaceId}
-          sessionId={props.session.id}
-        />
-      </Suspense>
+      {hasWorkspacePermission(
+        context.accessContext,
+        props.session.workspaceId,
+        "sessions:create",
+      ) ? (
+        <Suspense fallback={null}>
+          <SessionFeedback
+            key={props.session.id}
+            client={context.client}
+            workspaceId={props.session.workspaceId}
+            sessionId={props.session.id}
+          />
+        </Suspense>
+      ) : null}
 
       {/* Live decision strip: only while the session is actually paused on
           an approval — a replayed log or a stale stream must never render
