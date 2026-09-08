@@ -295,6 +295,7 @@ export {
 import {
   joinPersistentAgentInstructionLayers,
   buildModelContextSnapshotFromRequest,
+  buildProviderRequestSnapshot,
   type PersistentAgentInstructionInspection,
   type PersistentAgentInstructionLayerDraft,
 } from "./model-context-inspector";
@@ -302,6 +303,8 @@ import {
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   withModelRequestCapture,
+  type ModelRequestCapture,
+  nextModelContextCaptureIndex,
 } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
@@ -7075,11 +7078,10 @@ function measuredModelInputFilter(
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
-): ((request: import("@openai/agents").ModelRequest) => Promise<void>) | undefined {
+): ModelRequestCapture | undefined {
   if (!onCapture) return undefined;
-  let requestIndex = 0;
-  return async (request) => {
-    requestIndex += 1;
+  const capture: ModelRequestCapture = async (request) => {
+    const requestIndex = nextModelContextCaptureIndex(agent);
     await onCapture(
       buildModelContextSnapshotFromRequest({
         request,
@@ -7091,6 +7093,18 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  capture.nextProviderRequestIndex = () => nextModelContextCaptureIndex(agent);
+  capture.onProviderRequest = async (provider, body, unavailableReason, index) => {
+    await onCapture(
+      buildProviderRequestSnapshot({
+        provider,
+        body,
+        ...(unavailableReason ? { unavailableReason } : {}),
+        requestIndex: index ?? nextModelContextCaptureIndex(agent),
+      }),
+    );
+  };
+  return capture;
 }
 
 function installNonLazyModelRequestCapture(agent: Agent<any, any>): void {
