@@ -1,6 +1,7 @@
+import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
-import { ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
+import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -1147,6 +1148,8 @@ async function admitRealtimeDelegationInTransaction(
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
+  const [policy] = await withLatestStartedSessionPolicy(db, input.workspaceId, [session]);
+  if (!policy) throw new Error("Realtime delegation session disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1179,6 +1182,9 @@ async function admitRealtimeDelegationInTransaction(
     },
     mirrorToRealtime: false,
     resources: [],
+    model: policy.model,
+    reasoningEffort: ReasoningEffort.parse(policy.reasoningEffort),
+    latencyMode: LatencyMode.parse(policy.latencyMode),
     reasoningEffortFallback: ReasoningEffort.parse(session.reasoningEffort),
     turnMetadata: {
       realtimeDelegation: { ...provenance, inputTranscript },
