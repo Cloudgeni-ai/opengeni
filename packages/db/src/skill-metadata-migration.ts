@@ -52,7 +52,7 @@ export async function stageSkillMetadataMigration(tx: postgres.TransactionSql): 
   >`
     SELECT 'installed' AS source_kind,sf.facet_id AS source_id,i.account_id,i.workspace_id,
       sf.name AS title,sf.description,
-      coalesce(jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path)
+      coalesce(jsonb_agg(jsonb_build_object('path',ff.path,'content',ff.content) ORDER BY ff.path COLLATE "C")
         FILTER (WHERE ff.id IS NOT NULL),'[]'::jsonb) AS files
     FROM capability_plugin_installations i JOIN capability_facets f ON f.plugin_version_id=i.plugin_version_id
     JOIN capability_skill_facets sf ON sf.facet_id=f.id LEFT JOIN capability_skill_files ff ON ff.skill_facet_id=sf.facet_id
