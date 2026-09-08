@@ -79,6 +79,7 @@ import { useAppContext } from "@/context";
 import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
+  applySessionArchiveProjection,
   authoritativeSessionContinuationChannels,
   compareSessionArchiveOrder,
   emptySessionContinuation,
@@ -1522,24 +1523,15 @@ export function SessionList() {
           archived,
           expectedVersion: session.archiveVersion ?? 0,
         });
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         setArchiveOverrides((current) => {
           const next = new Map(current).set(updated.id, updated);
           if (next.size > 64) next.delete(next.keys().next().value!);
           return next;
         });
         context.setSession((current) =>
-          current?.id === updated.id
-            ? {
-                ...current,
-                archived: updated.archived,
-                archivedAt: updated.archivedAt,
-                archiveVersion: updated.archiveVersion,
-                pinned: updated.pinned,
-                pinnedAt: updated.pinnedAt,
-                pinVersion: updated.pinVersion,
-                activelyWorking: updated.activelyWorking,
-                attentionVersion: updated.attentionVersion,
-              }
+          current?.id === updated.id && current.workspaceId === updated.workspaceId
+            ? applySessionArchiveProjection(current, updated)
             : current,
         );
         notifySessionListChanged({
@@ -1550,6 +1542,7 @@ export function SessionList() {
         archivedResult = updated;
         await refreshSessionPages();
       } catch (archiveError) {
+        if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
         toast.error(archived ? "Couldn't archive the chat." : "Couldn't restore the chat.", {
           description: archiveError instanceof Error ? archiveError.message : String(archiveError),
         });
