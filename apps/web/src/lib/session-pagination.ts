@@ -1,5 +1,12 @@
 import type { Session } from "@/types";
 
+/** Archive order is personal filing time, never activity or running status. */
+export function compareSessionArchiveOrder(a: Session, b: Session): number {
+  const timeA = a.archivedAt ? Date.parse(a.archivedAt) : 0;
+  const timeB = b.archivedAt ? Date.parse(b.archivedAt) : 0;
+  return timeB - timeA || b.id.localeCompare(a.id);
+}
+
 export type SessionPageIdentity = {
   key: string;
   generation: number;

@@ -279,7 +279,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 120_000);
 
-  test("loads older sessions only in the project whose end enters the viewport", async () => {
+  test("loads older sessions only when the project's pagination button is pressed", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -361,6 +361,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         .getByRole("link", { name: "Settings", exact: true })
         .boundingBox();
       await loadProjectA.scrollIntoViewIfNeeded();
+      // Scrolling through folders must not grow the rail and hide Archived.
+      await page.waitForTimeout(500);
+      expect(filteredRequests).toHaveLength(0);
+      expect(await projectARows.count()).toBe(initialProjectACount);
+      await loadProjectA.click();
       await waitFor(async () => (await projectARows.count()) > initialProjectACount, {
         timeoutMs: 30_000,
       });
@@ -1206,6 +1211,45 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     }
   }, 90_000);
 
+  test("offers a bottom-right Undo notification after archiving a session", async () => {
+    const context = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(page);
+      const target = await createSessionThroughApi(
+        page,
+        apiBaseUrl,
+        workspaceId,
+        "Archive undo target",
+      );
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${target.id}`);
+      const row = page.locator(`a[data-session-row="${target.id}"]`).locator("xpath=..");
+      await row.getByRole("button", { name: "Archive session", exact: true }).press("Enter");
+      const notification = page.locator("[data-sonner-toast]").filter({ hasText: "Chat archived" });
+      await notification.waitFor();
+      const toaster = page.locator("[data-sonner-toaster]");
+      expect(await toaster.getAttribute("data-x-position")).toBe("right");
+      expect(await toaster.getAttribute("data-y-position")).toBe("bottom");
+      const archiveResponse = await page.request.get(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`,
+      );
+      expect((await archiveResponse.json()).archived).toBe(true);
+      await notification.getByRole("button", { name: "Undo", exact: true }).click();
+      await page.getByText("Chat restored", { exact: true }).waitFor();
+      await row.getByRole("button", { name: "Archive session", exact: true }).waitFor();
+      const restored = await page.request.get(
+        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${target.id}`,
+      );
+      expect((await restored.json()).archived).toBe(false);
+    } finally {
+      await context.close();
+    }
+  }, 90_000);
+
   test("retains group rows and leaves unrelated pagination failures retryable", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
@@ -1301,6 +1345,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         { timeout: 10_000 },
       );
       await loadOlder.scrollIntoViewIfNeeded();
+      await loadOlder.click();
       const filteredFirstPage = (await (
         await filteredFirstPageResponse
       ).json()) as BrowserSessionPage;
@@ -1337,6 +1382,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
         await route.continue();
       });
       await loadOlder.scrollIntoViewIfNeeded();
+      await loadOlder.click();
       const retryOlder = todayGroup.getByRole("button", {
         name: "Retry older sessions in Today",
       });

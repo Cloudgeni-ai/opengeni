@@ -6,6 +6,7 @@ import {
   activeSessionContinuation,
   advanceSessionPageIdentity,
   applySessionArchiveProjection,
+  compareSessionArchiveOrder,
   authoritativeSessionContinuation,
   authoritativeSessionContinuationChannels,
   emptySessionContinuation,
@@ -19,6 +20,26 @@ import {
 const row = (id: string) => ({ id, workspaceId: "workspace-a" }) as Session;
 
 describe("session continuation pagination", () => {
+  test("sorts archives by filing time, ignoring activity, with deterministic ties", () => {
+    const older = {
+      ...row("older"),
+      archivedAt: "2026-09-01T12:00:00Z",
+      updatedAt: "2026-09-08T12:00:00Z",
+      status: "running",
+    } as Session;
+    const latest = {
+      ...row("latest"),
+      archivedAt: "2026-09-08T12:00:00Z",
+      updatedAt: "2026-08-01T12:00:00Z",
+      status: "idle",
+    } as Session;
+    const tied = { ...latest, id: "z-tied", archivedAt: "2026-09-08T14:00:00+02:00" } as Session;
+    expect(
+      [older, row("legacy"), latest, tied]
+        .sort(compareSessionArchiveOrder)
+        .map((session) => session.id),
+    ).toEqual(["z-tied", "latest", "older", "legacy"]);
+  });
   test("keeps cached descendants with their root across archive and restore", () => {
     const root = {
       ...row("root"),
