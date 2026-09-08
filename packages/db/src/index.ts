@@ -75741,6 +75741,15 @@ async function workspaceControlProjection(
       .limit(1);
     if (!control) throw new Error(`Workspace ${workspaceId} has no inference control`);
     return {
+      timer: control.timerId
+        ? {
+            id: control.timerId,
+            action: control.timerAction as "pause" | "resume",
+            dueAt: control.timerDueAt!.toISOString(),
+            pauseForSeconds: control.timerPauseForSeconds,
+          }
+        : null,
+      serverTime: new Date().toISOString(),
       state: control.workspaceState as "active" | "paused",
       revision: Number(control.revision),
       reason: control.reason,
@@ -76470,3 +76479,15 @@ export * from "./session-tenancy";
 export * from "./governed-learning-activation";
 export * from "./automations";
 export * from "./organization-model-providers";
+
+export {
+  setWorkspacePauseTimerInTransaction,
+  fireWorkspacePauseTimerInTransaction,
+} from "./session-control";
+
+export async function listDueWorkspacePauseTimers(db: Database, limit = 100) {
+  return await rawRows<{ workspace_id: string; timer_id: string }>(
+    db,
+    sql`select * from opengeni_private.list_due_workspace_pause_timers(${limit})`,
+  );
+}

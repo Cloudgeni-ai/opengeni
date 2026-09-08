@@ -249,3 +249,25 @@ describe("workspace control event API", () => {
     expect(countBoundSecond.headers.get("X-OpenGeni-Next-After")).toBe("2");
   });
 });
+
+test("pause timers require workspace admin even for an authenticated workspace reader", async () => {
+  const token = await signDelegatedAccessToken(SECRET, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    permissions: ["workspace:read"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  });
+  const response = await app.request(`http://x/v1/workspaces/${grant.workspaceId}/pause-timer`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      action: "set",
+      pauseInSeconds: 60,
+      clientEventId: crypto.randomUUID(),
+      expectedRevision: 0,
+    }),
+  });
+  expect(response.status).toBe(403);
+});

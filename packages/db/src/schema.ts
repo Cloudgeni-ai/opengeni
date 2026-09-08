@@ -405,6 +405,11 @@ export const workspaceInferenceControls = pgTable(
     accountId: uuid("account_id").notNull(),
     revision: bigint("revision", { mode: "number" }).notNull().default(0),
     workspaceState: text("workspace_state").notNull().default("active"),
+    timerId: uuid("timer_id"),
+    timerAction: text("timer_action"),
+    timerDueAt: timestamp("timer_due_at", { withTimezone: true }),
+    timerPauseForSeconds: integer("timer_pause_for_seconds"),
+    timerPauseRevision: bigint("timer_pause_revision", { mode: "number" }),
     workspacePauseRevision: bigint("workspace_pause_revision", {
       mode: "number",
     }),
@@ -420,6 +425,20 @@ export const workspaceInferenceControls = pgTable(
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
     }).onDelete("cascade"),
+    timerDue: index("workspace_pause_timer_due_idx")
+      .on(table.timerDueAt, table.workspaceId)
+      .where(sql`${table.timerId} is not null`),
+    timerShape: check(
+      "workspace_pause_timer_shape",
+      sql`
+      (${table.timerId} is null and ${table.timerAction} is null and ${table.timerDueAt} is null
+        and ${table.timerPauseForSeconds} is null and ${table.timerPauseRevision} is null)
+      or (${table.timerId} is not null and ${table.timerAction} is not null and ${table.timerDueAt} is not null
+        and ((${table.timerAction} = 'pause' and ${table.timerPauseRevision} is null)
+          or (${table.timerAction} = 'resume' and ${table.timerPauseRevision} is not null and ${table.timerPauseForSeconds} is null))
+        and (${table.timerPauseForSeconds} is null or ${table.timerPauseForSeconds} between 60 and 2592000))
+    `,
+    ),
     workspaceAccountIdentity: uniqueIndex("workspace_inference_controls_workspace_account_uq").on(
       table.workspaceId,
       table.accountId,
@@ -7526,7 +7545,7 @@ export const workspaceControlEvents = pgTable(
     ),
     actionValid: check(
       "workspace_control_events_action_check",
-      sql`${table.action} in ('pause', 'resume')`,
+      sql`${table.action} in ('pause', 'resume', 'timer_set', 'timer_cancelled')`,
     ),
   }),
 );

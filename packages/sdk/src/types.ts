@@ -4339,6 +4339,8 @@ export type Workspace = {
   agentInstructions: string | null;
   settings: Record<string, unknown>;
   inferenceControl: {
+    timer?: WorkspacePauseTimer | null | undefined;
+    serverTime?: string | undefined;
     state: "active" | "paused";
     revision: number;
     reason: string | null;
@@ -4963,6 +4965,20 @@ export type SessionControlResponse = {
   cancelledTurnCount: number;
 };
 
+export type WorkspacePauseTimer = {
+  id: string;
+  action: "pause" | "resume";
+  dueAt: string;
+  pauseForSeconds: number | null;
+};
+export type WorkspacePauseTimerRequest = {
+  action: "set" | "cancel";
+  pauseInSeconds?: number | undefined;
+  pauseForSeconds?: number | null | undefined;
+  clientEventId: string;
+  expectedRevision: number;
+};
+
 export type WorkspaceInferenceControlResponse = {
   receipt: SessionCommandReceipt;
   state: "active" | "paused";
@@ -4980,7 +4996,7 @@ export type WorkspaceControlEvent = {
   type: "workspace.control.changed";
   scope: "workspace" | "session";
   rootSessionId: string | null;
-  action: "pause" | "resume";
+  action: "pause" | "resume" | "timer_set" | "timer_cancelled";
   automatic: boolean;
   reason: string | null;
   actor: string;

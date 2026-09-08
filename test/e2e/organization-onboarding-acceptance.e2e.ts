@@ -224,6 +224,13 @@ async function expectNoAxeViolations(page: Page, include = "body"): Promise<void
     .include(include)
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
+  if (report.violations.length) {
+    await writeFile(
+      `${EVIDENCE_DIR}/contrast-failure.json`,
+      JSON.stringify(report.violations, null, 2),
+    );
+    await page.screenshot({ path: `${EVIDENCE_DIR}/contrast-failure.png` });
+  }
   expect(
     report.violations.map((violation) => ({
       id: violation.id,
