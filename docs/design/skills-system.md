@@ -365,12 +365,30 @@ the typed host selection uses that same effective set.
 Implementation verification in progress (September 8): the shared web editor
 and SDK/API folder routes are wired. Component tests cover metadata-first reads,
 supporting-file retention, read-only controls, and stale workspace responses.
-The desktop browser fixture covers edit, cancelled discard, save, and supporting
-file readback. Real-PostgreSQL HTTP tests have been added for partial save,
-replay, stale-head conflicts, restore, and invalid input; their execution is a
-remaining gate, not implied by the browser fixture. API-key/service installation
-compatibility, composite Pack/Plugin pending
-outcomes, and the public bundled-selection control remain integration work.
+The desktop browser fixture has passed edit, cancelled discard, save, supporting
+file readback, and overflow/error checks. HTTP lifecycle and service-install
+Learning-mode tests have passed on PostgreSQL on intermediate branch heads;
+the integrated final head still requires re-verification. The typed public
+bundled selection and composite per-Skill outcome notices are implemented.
+Composite publication ordering remains open below; passing its receipt-shape
+tests is not evidence of correct activation timing.
+
+Final-head integration gates still open: merge refreshed `origin/main`, renumber
+the unpublished Skill migration after main's occupied ordinals, finish composite
+publication ordering, add sandbox-free supporting-path inventory, and resolve
+the new web startup bundle-budget regression. Independent review also identified
+a stale library slug/folder fallback to validate and a pre-existing lowercased
+source-path identity collision; changing existing installation keys requires a
+compatibility plan, not a silent key rewrite.
+
+Frontmatter migration uses the shared YAML parser, preserves valid YAML bytes,
+and derives database descriptor columns from those files. Current legacy
+configuration is archived before conversion; archives are runtime-inaccessible
+and follow workspace deletion. Historical Pack snapshots remain exact audit
+JSON, not revalidated or normalized as new execution input. Expired legacy
+Skills must remain absent from the active index after migration. Real-PostgreSQL
+tests cover these migration boundaries; the latest assertions remain a rollout
+gate until executed on the integrated head. See `docs/skills-lifecycle.md`.
 
 The catalog now has cursor-based metadata pagination end to end. Source-removal
 receipts are surfaced by Skill, Pack, and Plugin API responses and UI messages;

@@ -11,6 +11,12 @@ import {
 } from "../src/model-context-contributions";
 
 const identity = (): string => crypto.randomUUID();
+const reviewFiles = [
+  {
+    path: "SKILL.md",
+    content: "---\nname: review\ndescription: Use for repository reviews.\n---\n# Review",
+  },
+];
 
 function policy(): ResolvedWorkspaceInstructionPolicySnapshot {
   return {
@@ -105,7 +111,7 @@ function preferences(): PreferenceRegistrySnapshot {
 }
 
 describe("Company Brain model contribution receipts", () => {
-  test("omits skill descriptors when the none backend cannot expose runtime skills", () => {
+  test("legacy sandbox-backed catalogs omit descriptors on none without a server reader", () => {
     const activations = [
       {
         source: "session" as const,
@@ -114,7 +120,7 @@ describe("Company Brain model contribution receipts", () => {
         artifact: {
           name: "review",
           description: "Use for repository reviews.",
-          files: [{ path: "SKILL.md", content: "# Review" }],
+          files: reviewFiles,
         },
       },
     ];
@@ -168,7 +174,7 @@ describe("Company Brain model contribution receipts", () => {
           artifact: {
             name: "review",
             description: "Use for repository reviews.",
-            files: [{ path: "SKILL.md", content: "# Review" }],
+            files: reviewFiles,
           },
         },
       ],
