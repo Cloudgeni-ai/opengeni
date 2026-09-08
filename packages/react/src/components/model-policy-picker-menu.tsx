@@ -106,25 +106,27 @@ export function ModelPolicyPickerMenu(props: ModelPolicyPickerProps) {
         buttons[next]?.focus();
       }}
     >
-      <div className="flex items-center gap-2 border-b border-og-border px-2 py-2">
-        <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
-        <input
-          aria-label={messages.searchLabel}
-          placeholder={messages.searchPlaceholder}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape" && event.key !== "Tab") event.stopPropagation();
-            if (event.key === "ArrowDown") {
-              event.preventDefault();
-              event.currentTarget
-                .closest('[data-testid="model-picker-menu"]')
-                ?.querySelector<HTMLButtonElement>("button:not(:disabled)")
-                ?.focus();
-            }
-          }}
-          className="h-8 min-w-0 flex-1 bg-transparent text-og-menu text-og-fg outline-hidden placeholder:text-og-fg-subtle"
-        />
+      <div className="border-b border-og-border py-1">
+        <label className="og-model-policy-search flex items-center gap-2 rounded-og-sm px-2 py-1 focus-within:outline-2 focus-within:-outline-offset-2 focus-within:outline-og-accent/40">
+          <SearchIcon className="size-4 shrink-0 text-og-fg-subtle" aria-hidden />
+          <input
+            aria-label={messages.searchLabel}
+            placeholder={messages.searchPlaceholder}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape" && event.key !== "Tab") event.stopPropagation();
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                event.currentTarget
+                  .closest('[data-testid="model-picker-menu"]')
+                  ?.querySelector<HTMLButtonElement>("button:not(:disabled)")
+                  ?.focus();
+              }
+            }}
+            className="og-model-policy-search-input h-8 min-w-0 flex-1 bg-transparent text-og-menu text-og-fg outline-hidden placeholder:text-og-fg-subtle"
+          />
+        </label>
       </div>
       {props.error ? (
         <p className="px-2 py-2 text-og-control text-og-status-failed" role="alert">

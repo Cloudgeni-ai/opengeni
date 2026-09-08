@@ -3964,6 +3964,25 @@
       box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
     }
   }
+:where(.og-root).focus-within\:outline-2,:where(.og-root) .focus-within\:outline-2 {
+    &:focus-within {
+      outline-style: var(--tw-outline-style);
+      outline-width: 2px;
+    }
+  }
+:where(.og-root).focus-within\:-outline-offset-2,:where(.og-root) .focus-within\:-outline-offset-2 {
+    &:focus-within {
+      outline-offset: calc(2px * -1);
+    }
+  }
+:where(.og-root).focus-within\:outline-og-accent\/40,:where(.og-root) .focus-within\:outline-og-accent\/40 {
+    &:focus-within {
+      outline-color: var(--og-color-accent);
+      @supports (color: color-mix(in lab, red, red)) {
+        outline-color: color-mix(in oklab, var(--og-color-accent) 40%, transparent);
+      }
+    }
+  }
 :where(.og-root).hover\:-translate-y-0\.5,:where(.og-root) .hover\:-translate-y-0\.5 {
     &:hover {
       @media (hover: hover) {
